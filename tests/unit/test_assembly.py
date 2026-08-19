@@ -5,7 +5,7 @@ import pytest
 
 from voiceclean.assembly.stitch import assemble_channel_timeline
 from voiceclean.assembly.validate import validate_assembled_timeline
-from voiceclean.audio.types import AudioBuffer
+from voiceclean.audio.types import AudioBuffer, ChannelMode
 from voiceclean.errors import OutputValidationError
 from voiceclean.segmentation.types import SpeechUnit
 
@@ -44,4 +44,52 @@ def test_validate_assembled_timeline_detects_gap() -> None:
             expected_samples=20000,
             expected_sample_rate=sr,
             units=[u0, u1],
+        )
+
+
+@pytest.mark.unit
+def test_validate_rejects_sample_count_mismatch() -> None:
+    """Invariant 1 must RAISE on a short buffer — a disabled invariant is
+    indistinguishable from a passing one until something else breaks."""
+    sr = 48000
+    n = sr
+    unit = SpeechUnit(
+        unit_id=0, channel_id=0, start_sample=0, end_sample=n,
+        context_start_sample=0, context_end_sample=n, is_speech=True,
+    )
+    short_buffer = AudioBuffer(
+        data=np.zeros((1, n - 1), dtype=np.float32),
+        sample_rate=sr,
+        channel_mode=ChannelMode.MONO,
+    )
+    with pytest.raises(OutputValidationError):
+        validate_assembled_timeline(
+            assembled_buffer=short_buffer,
+            expected_channels=1,
+            expected_samples=n,
+            expected_sample_rate=sr,
+            units=[unit],
+        )
+
+
+@pytest.mark.unit
+def test_validate_rejects_channel_and_rate_mismatch() -> None:
+    sr = 48000
+    n = sr
+    unit = SpeechUnit(
+        unit_id=0, channel_id=0, start_sample=0, end_sample=n,
+        context_start_sample=0, context_end_sample=n, is_speech=True,
+    )
+    buf = AudioBuffer(
+        data=np.zeros((1, n), dtype=np.float32), sample_rate=sr, channel_mode=ChannelMode.MONO
+    )
+    with pytest.raises(OutputValidationError):
+        validate_assembled_timeline(
+            assembled_buffer=buf, expected_channels=2, expected_samples=n,
+            expected_sample_rate=sr, units=[unit],
+        )
+    with pytest.raises(OutputValidationError):
+        validate_assembled_timeline(
+            assembled_buffer=buf, expected_channels=1, expected_samples=n,
+            expected_sample_rate=44100, units=[unit],
         )
