@@ -17,6 +17,11 @@ voiceclean process interview.wav --output interview_mastered.wav --profile produ
 voiceclean process interview.wav --output interview_studio.wav --profile studio
 ```
 
+### Batch Processing (per-file isolation, summary, non-zero exit on any failure)
+```bash
+voiceclean batch folder/*.m4a --output-dir cleaned/ --profile studio --suffix _studio --skip-existing
+```
+
 ### Master Verification
 ```bash
 voiceclean verify interview_mastered.wav --report interview_mastered.voiceclean.json

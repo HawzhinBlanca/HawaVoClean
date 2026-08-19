@@ -164,6 +164,77 @@ def cmd_process(args: argparse.Namespace) -> int:
         return int(ExitCode.PUBLICATION_FAILURE)
 
 
+_AUDIO_SUFFIXES = {".wav", ".mp4", ".m4a", ".mp3", ".aac", ".flac", ".ogg", ".mov", ".aiff"}
+
+
+def _clean_stem(path: Path) -> str:
+    """Strip stacked audio suffixes: 'Flute 09.m4a.mp4' -> 'Flute 09'."""
+    name = path.name
+    while True:
+        stem, dot, ext = name.rpartition(".")
+        if dot and f".{ext.lower()}" in _AUDIO_SUFFIXES and stem:
+            name = stem
+        else:
+            return name
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    """Process many files; one failure never aborts the rest.
+
+    Each file gets its own pipeline run, output, and audit report. The
+    summary names every failure; the exit code is non-zero if any file
+    failed, so scripts cannot mistake a partial batch for a clean one.
+    """
+    out_dir = Path(args.output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    inputs: list[Path] = []
+    for raw in args.inputs:
+        candidate = Path(raw)
+        if candidate.is_file():
+            inputs.append(candidate)
+        else:
+            print(f"[SKIP] not a file: {candidate}")
+
+    if not inputs:
+        exit_with_code(ExitCode.INVALID_USER_INPUT, "No input files to process.")
+
+    results: list[tuple[str, str]] = []
+    failed = 0
+    for i, src in enumerate(inputs, 1):
+        dest = out_dir / f"{_clean_stem(src)}{args.suffix}.wav"
+        if dest.exists() and args.skip_existing:
+            results.append((src.name, "skipped (exists)"))
+            print(f"[{i}/{len(inputs)}] SKIP {src.name} (output exists)")
+            continue
+        print(f"[{i}/{len(inputs)}] {src.name} -> {dest.name}")
+        try:
+            report = run_pipeline(
+                input_path=src,
+                output_path=dest,
+                profile=args.profile,
+                overwrite=args.overwrite or args.skip_existing,
+            )
+            summary = report.summary
+            results.append(
+                (
+                    src.name,
+                    f"ok: {summary.enhanced}/{summary.units_total} units enhanced, "
+                    f"{report.output.integrated_lufs:.1f} LUFS",
+                )
+            )
+        except Exception as e:
+            failed += 1
+            results.append((src.name, f"FAILED: {type(e).__name__}: {e}"))
+
+    print("================================================================================")
+    print(f"BATCH SUMMARY: {len(inputs) - failed}/{len(inputs)} succeeded")
+    for name, status in results:
+        print(f"  {name}: {status}")
+    print("================================================================================")
+    return int(ExitCode.SUCCESS if failed == 0 else ExitCode.PUBLICATION_FAILURE)
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify an output audio master against its immutable JSON report."""
     audio_path = Path(args.output).resolve()
@@ -443,6 +514,24 @@ def main() -> None:
         "--overwrite", action="store_true", help="Overwrite destination output if exists"
     )
     p_proc.set_defaults(func=cmd_process)
+
+    # batch
+    p_batch = subparsers.add_parser(
+        "batch", help="Process many files; failures are isolated and summarized"
+    )
+    p_batch.add_argument("inputs", nargs="+", help="Input audio files")
+    p_batch.add_argument("--output-dir", "-o", required=True, help="Directory for outputs")
+    p_batch.add_argument(
+        "--profile", "-p", choices=["production", "development", "studio"], default="production"
+    )
+    p_batch.add_argument(
+        "--suffix", default="_clean", help="Appended to each stem (default: _clean)"
+    )
+    p_batch.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
+    p_batch.add_argument(
+        "--skip-existing", action="store_true", help="Skip inputs whose output already exists"
+    )
+    p_batch.set_defaults(func=cmd_batch)
 
     # verify
     p_ver = subparsers.add_parser("verify", help="Verify output audio master against JSON report")

@@ -67,10 +67,13 @@ made.
 ## Installation
 
 ```bash
-git clone <your-remote-url> hawzhin-voiceclean
 cd hawzhin-voiceclean
-uv sync --locked
+uv sync --locked                 # base install (Wiener core, no torch)
+uv sync --locked --extra studio  # + neural studio core
 ```
+
+Third-party license texts for the vendored model weights are in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## Usage
 
@@ -78,9 +81,14 @@ uv sync --locked
 voiceclean doctor
 voiceclean process interview.wav --output interview_clean.wav --profile production
 voiceclean process interview.wav --output interview_studio.wav --profile studio
+voiceclean batch recordings/*.m4a --output-dir cleaned/ --profile studio --suffix _studio
 voiceclean verify interview_clean.wav --report interview_clean.voiceclean.json
 voiceclean audit-models
 ```
+
+`batch` isolates failures: one bad file never aborts the rest, the summary
+names every failure, and the exit code is non-zero unless every file
+succeeded.
 
 The studio profile needs the optional neural dependencies:
 
