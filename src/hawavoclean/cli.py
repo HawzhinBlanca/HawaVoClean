@@ -178,6 +178,51 @@ def _clean_stem(path: Path) -> str:
             return name
 
 
+def _run_one_isolated(
+    src: Path, dest: Path, profile: str, overwrite: bool, timeout_s: float
+) -> str:
+    """Process one file in a child process under a hard deadline.
+
+    A hung file (stuck decoder, wedged model, unresponsive disk) must never
+    take the rest of the batch with it. The child is killed at the deadline
+    and the batch moves on; the failure is recorded by name.
+    """
+    import json as _json
+    import subprocess as _sp
+    import sys as _sys
+
+    cmd = [
+        _sys.executable,
+        "-m",
+        "hawavoclean.cli",
+        "process",
+        str(src),
+        "-o",
+        str(dest),
+        "--profile",
+        profile,
+    ]
+    if overwrite:
+        cmd.append("--overwrite")
+    try:
+        proc = _sp.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except _sp.TimeoutExpired:
+        return f"FAILED: timed out after {timeout_s:.0f}s (killed; batch continued)"
+    if proc.returncode != 0:
+        tail = [ln for ln in (proc.stderr + proc.stdout).strip().splitlines() if ln.strip()]
+        return f"FAILED (exit {proc.returncode}): {tail[-1][-160:] if tail else 'no output'}"
+    report_path = dest.parent / f"{dest.stem}.hawavoclean.json"
+    try:
+        rep = _json.loads(report_path.read_text(encoding="utf-8"))
+        summ = rep["summary"]
+        return (
+            f"ok: {summ['enhanced']}/{summ['units_total']} units enhanced, "
+            f"{rep['output']['integrated_lufs']:.1f} LUFS"
+        )
+    except Exception as e:
+        return f"FAILED: published but report unreadable ({type(e).__name__})"
+
+
 def cmd_batch(args: argparse.Namespace) -> int:
     """Process many files; one failure never aborts the rest.
 
@@ -208,24 +253,12 @@ def cmd_batch(args: argparse.Namespace) -> int:
             print(f"[{i}/{len(inputs)}] SKIP {src.name} (output exists)")
             continue
         print(f"[{i}/{len(inputs)}] {src.name} -> {dest.name}")
-        try:
-            report = run_pipeline(
-                input_path=src,
-                output_path=dest,
-                profile=args.profile,
-                overwrite=args.overwrite or args.skip_existing,
-            )
-            summary = report.summary
-            results.append(
-                (
-                    src.name,
-                    f"ok: {summary.enhanced}/{summary.units_total} units enhanced, "
-                    f"{report.output.integrated_lufs:.1f} LUFS",
-                )
-            )
-        except Exception as e:
+        status = _run_one_isolated(
+            src, dest, args.profile, args.overwrite or args.skip_existing, args.per_file_timeout_s
+        )
+        if not status.startswith("ok"):
             failed += 1
-            results.append((src.name, f"FAILED: {type(e).__name__}: {e}"))
+        results.append((src.name, status))
 
     print("================================================================================")
     print(f"BATCH SUMMARY: {len(inputs) - failed}/{len(inputs)} succeeded")
@@ -530,6 +563,12 @@ def main() -> None:
     p_batch.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
     p_batch.add_argument(
         "--skip-existing", action="store_true", help="Skip inputs whose output already exists"
+    )
+    p_batch.add_argument(
+        "--per-file-timeout-s",
+        type=float,
+        default=1800.0,
+        help="Hard deadline per file; a hung file is killed and the batch continues (default 1800)",
     )
     p_batch.set_defaults(func=cmd_batch)
 

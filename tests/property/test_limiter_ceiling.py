@@ -7,6 +7,7 @@ test. The module under test must never supply its own grade.
 from typing import Any
 
 import numpy as np
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.signal import resample_poly
@@ -106,3 +107,27 @@ def test_gain_reduction_anticipates_the_peak() -> None:
     approach = g[crest - 100 : crest + 1]
     assert np.all(np.diff(approach) <= 1e-6), "gain rose while approaching the transient"
     assert lookahead > 0  # documents the fixture premise
+
+
+@pytest.mark.parametrize("rate", [8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000, 96000])
+@pytest.mark.parametrize("lookahead_ms", [0.0, 1.0, 2.5, 5.0, 7.3, 10.0])
+def test_limiter_runs_at_every_rate_and_lookahead(rate: int, lookahead_ms: float) -> None:
+    """Found by fuzzing: 11025 Hz raised 'invalid origin' (minimum_filter1d
+    origin parity) — any rate/lookahead combination must simply work."""
+    n = rate
+    x = (0.3 * np.sin(2 * np.pi * 220 * np.arange(n) / rate)).astype(np.float32)
+    x[n // 2 : n // 2 + 40] += 2.0
+    res = apply_lookahead_limiter(x[None, :], rate, ceiling_dbtp=-1.0, lookahead_ms=lookahead_ms)
+    assert res.limited_waveform.shape == (1, n)
+    assert np.all(np.isfinite(res.limited_waveform))
+    assert _independent_true_peak(res.limited_waveform[0]) <= CEILING_LINEAR
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 5, 17, 100, 239, 240, 241, 1000])
+def test_limiter_survives_tiny_inputs(n: int) -> None:
+    """Found by fuzzing: a 1-sample file crashed the slope-limited envelope
+    ('operands could not be broadcast (2,) (4,)')."""
+    x = np.full((1, n), 1.5, dtype=np.float32)
+    res = apply_lookahead_limiter(x, SR, ceiling_dbtp=-1.0)
+    assert res.limited_waveform.shape == (1, n)
+    assert float(np.max(np.abs(res.limited_waveform))) <= CEILING_LINEAR + 1e-6

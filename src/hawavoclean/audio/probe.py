@@ -28,7 +28,7 @@ def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeRes
             "-v",
             "error",
             "-show_entries",
-            "format=format_name,duration,bit_rate:stream=codec_name,sample_rate,channels,bits_per_raw_sample,duration,nb_samples",
+            "format=format_name,duration,bit_rate:stream=index,codec_type,codec_name,sample_rate,channels,bits_per_raw_sample,duration,nb_samples",
             "-of",
             "json",
             str(file_path),
@@ -40,10 +40,14 @@ def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeRes
             raise InvalidUserInputError(f"ffprobe failed to probe {file_path}: {e}") from e
 
         streams = data.get("streams", [])
-        if not streams:
-            raise InvalidUserInputError(f"No audio streams found in {file_path}")
-
-        audio_stream = streams[0]
+        audio_streams = [st for st in streams if st.get("codec_type") == "audio"]
+        if not audio_streams:
+            raise InvalidUserInputError(
+                f"No audio stream found in {file_path} ({len(streams)} non-audio stream(s) present)"
+            )
+        # First AUDIO stream — containers frequently list video first.
+        audio_stream = audio_streams[0]
+        audio_stream_index = int(audio_stream.get("index", 0))
         fmt = data.get("format", {})
 
         sample_rate = int(audio_stream.get("sample_rate", 0))
@@ -71,6 +75,7 @@ def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeRes
             samples = int(round(duration_s * sample_rate))
     else:
         # Fallback to soundfile info
+        audio_stream_index = 0
         try:
             info = sf.info(str(file_path))
             sample_rate = info.samplerate
@@ -105,4 +110,5 @@ def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeRes
         samples=samples,
         bit_depth=bit_depth,
         sha256=file_sha256,
+        audio_stream_index=audio_stream_index,
     )

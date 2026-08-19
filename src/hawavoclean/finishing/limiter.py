@@ -45,12 +45,15 @@ def _slope_limited_min_envelope(
     minimum exactly on time and ramps toward it over at most L samples.
     Computed with the shift-doubling trick in O(n log L).
     """
-    if lookahead <= 0:
+    n = len(gain)
+    if lookahead <= 0 or n == 0:
         return np.asarray(gain, dtype=np.float32)
     delta = 1.0 / float(lookahead)
     env = gain.astype(np.float64)
     shift = 1
     while shift <= lookahead:
+        if shift >= n:
+            break  # nothing left to look ahead into
         shifted = np.concatenate([env[shift:], np.full(shift, np.inf)]) + shift * delta
         env = np.minimum(env, shifted)
         shift *= 2
@@ -90,10 +93,12 @@ def apply_lookahead_limiter(
 
     # 3. Anticipating envelope: sliding minimum over the lookahead window,
     # then a slope-limited ramp so the reduction arrives smoothly and on time.
-    if lookahead_samples > 0:
-        size = lookahead_samples + 1
+    if lookahead_samples > 0 and samples > 1:
+        size = min(lookahead_samples + 1, samples)
+        # Look-AHEAD window [i, i+size-1]: origin = -(size//2) is always within
+        # scipy's valid range (-(size//2) .. (size-1)//2) for any size parity.
         windowed_min = scipy.ndimage.minimum_filter1d(
-            inst_gain, size=size, origin=size // 2, mode="nearest"
+            inst_gain, size=size, origin=-(size // 2), mode="nearest"
         )
     else:
         windowed_min = inst_gain

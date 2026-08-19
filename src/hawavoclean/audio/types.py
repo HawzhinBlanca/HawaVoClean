@@ -32,6 +32,7 @@ class AudioProbeResult:
     samples: int
     bit_depth: int | None
     sha256: str
+    audio_stream_index: int = 0
 
 
 @dataclass

@@ -100,7 +100,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 python_classes = ["Test*"]
-addopts = "-v --strict-markers"
+addopts = "-v --strict-markers -m 'not fuzz'"
 markers = [
     "unit: Quick unit tests",
     "property: Hypothesis property-based tests",
@@ -108,4 +108,5 @@ markers = [
     "golden: Golden dataset numeric / regression tests",
     "integration: End-to-end integration tests",
     "gpu: Tests requiring GPU hardware",
+    "fuzz: Adversarial-input regression gate (slow; runs the CLI per case)",
 ]
