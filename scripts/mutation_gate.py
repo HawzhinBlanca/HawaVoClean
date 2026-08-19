@@ -25,15 +25,19 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     (
         "M2: lookahead anticipation deleted (shift semantics)",
         "src/hawavoclean/finishing/limiter.py",
-        """    if lookahead_samples > 0:
-        size = lookahead_samples + 1
+        """    if lookahead_samples > 0 and samples > 1:
+        size = min(lookahead_samples + 1, samples)
+        # Look-AHEAD window [i, i+size-1]: origin = -(size//2) is always within
+        # scipy's valid range (-(size//2) .. (size-1)//2) for any size parity.
         windowed_min = scipy.ndimage.minimum_filter1d(
-            inst_gain, size=size, origin=size // 2, mode="nearest"
+            inst_gain, size=size, origin=-(size // 2), mode="nearest"
         )
     else:
         windowed_min = inst_gain
+    del peak_envelope, inst_gain  # consumed; free before the next full-size array
     anticipated = _slope_limited_min_envelope(windowed_min, lookahead_samples)""",
         """    windowed_min = inst_gain
+    del peak_envelope, inst_gain
     anticipated = windowed_min""",
     ),
     (
