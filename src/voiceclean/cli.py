@@ -267,7 +267,7 @@ def cmd_audit_models(_args: argparse.Namespace) -> int:
         print(f"Algorithm:        {lock.get('algorithm')}")
         print(f"Code license:     {lock.get('code_license')}")
 
-        # 1. Parameter hash must match the core actually implemented
+        # 1a. Parameter hash must match the core actually implemented
         actual = wiener_params_hash()
         if lock.get("params_hash") != actual:
             failures.append(
@@ -276,6 +276,18 @@ def cmd_audit_models(_args: argparse.Namespace) -> int:
             )
         else:
             print(f"Params hash:      {actual[:16]}... [VERIFIED against implementation]")
+
+        # 1b. The [params] table itself must recompute to params_hash — a
+        # decorative table that can drift from its own digest is provenance
+        # theater, which is exactly what this command exists to prevent.
+        table_hash = hash_json_canonical(dict(lock.get("params", {})))
+        if table_hash != lock.get("params_hash"):
+            failures.append(
+                "params table does not recompute to params_hash: the lockfile's "
+                "own [params] block has been edited or drifted"
+            )
+        else:
+            print("Params table:     recomputes to params_hash [VERIFIED]")
 
         # 2. License must be allowlisted
         lic = str(lock.get("code_license", ""))

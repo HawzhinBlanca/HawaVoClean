@@ -36,7 +36,7 @@ from voiceclean.guard.calibration import apply_calibrated_thresholds, load_calib
 from voiceclean.guard.protocol import SpectralProbe
 from voiceclean.guard.spectral_probe import SpectralSignatureProbe
 from voiceclean.guard.verdict import GuardVerdict
-from voiceclean.hashing import hash_bytes, hash_file
+from voiceclean.hashing import hash_bytes, hash_file, hash_json_canonical
 from voiceclean.job import JobWorkspace
 from voiceclean.journal import JournalEvent
 from voiceclean.logging import get_logger
@@ -89,6 +89,11 @@ def _load_core_lock(core_id: str) -> dict[str, Any]:
             "Core parameter drift: lockfile params_hash "
             f"{str(lock.get('params_hash'))[:16]}... does not match the "
             f"implemented core {actual_params_hash[:16]}..."
+        )
+    if hash_json_canonical(dict(lock.get("params", {}))) != actual_params_hash:
+        raise PreflightError(
+            "Core lockfile [params] table does not recompute to params_hash; "
+            "the lockfile has been hand-edited."
         )
     return lock
 

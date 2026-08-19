@@ -76,3 +76,195 @@ def test_gate_reports_failed_instead_of_raising(monkeypatch: Any, tmp_path: Path
     assert any("sample" in f.lower() for f in failing[0].get("failures", [])), (
         "the failure list must say WHICH gate failed"
     )
+
+
+def _base_report(**overrides: Any) -> VoiceCleanReport:
+    """A structurally valid report; overrides poke individual invariants."""
+    from voiceclean.report.schema import UnitDecisionRecord
+
+    defaults: dict[str, Any] = {
+        "job_id": "j",
+        "config_hash": "c" * 64,
+        "input": MediaStats(
+            path="i.wav",
+            sha256="a" * 64,
+            samples=48000,
+            sample_rate=48000,
+            channels=1,
+            duration_s=1.0,
+        ),
+        "output": MediaStats(
+            path="o.wav",
+            sha256="b" * 64,
+            samples=48000,
+            true_peak_dbtp=-1.2,
+            sample_rate=48000,
+            channels=1,
+            duration_s=1.0,
+        ),
+        "core": CoreMetadata(id="t", algorithm="t", params_hash="f" * 64),
+        "guard": GuardMetadata(id="g", probe_hash="d" * 64, calibration_id="e" * 64),
+        "environment": EnvironmentMetadata(
+            platform="t",
+            os_version="t",
+            python_version="3",
+            numpy_version="0",
+            scipy_version="0",
+            soundfile_version="0",
+        ),
+        "summary": UnitSummary(units_total=1, enhanced=1),
+        "units": [
+            UnitDecisionRecord(
+                unit_id=0,
+                channel=0,
+                start_sample=0,
+                end_sample=48000,
+                start_time_s=0.0,
+                end_time_s=1.0,
+                is_speech=True,
+                input_sha256="1" * 64,
+                output_sha256="2" * 64,
+                guard_a_verdict="PASS",
+                final_decision="enhanced",
+            )
+        ],
+    }
+    defaults.update(overrides)
+    return VoiceCleanReport(**defaults)
+
+
+def _run_gate_with(monkeypatch: Any, tmp_path: Path, report: VoiceCleanReport) -> dict[str, Any]:
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        '{"schema_version": 1, "manifest_id": "m", "split_name": "acceptance",'
+        ' "items_count": 1, "items": [{"id": "item1", "audio_path": "x.wav",'
+        ' "audio_sha256": "", "duration_s": 1.0, "speaker_id": "s", "dialect": "synthetic",'
+        ' "gender": "unknown", "environment": "synthetic", "degradation_type": "clean",'
+        ' "transcript_sorani": "-", "verified_by_human": false, "split": "acceptance"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(acceptance_mod, "run_pipeline", lambda **_kw: report)
+    result: dict[str, Any] = acceptance_mod.evaluate_acceptance_gates(
+        manifest, output_dir=tmp_path / "o"
+    )
+    return result
+
+
+def test_gate_channel_mismatch_fails(monkeypatch: Any, tmp_path: Path) -> None:
+    rep = _base_report(
+        output=MediaStats(
+            path="o.wav",
+            sha256="b" * 64,
+            samples=48000,
+            true_peak_dbtp=-1.2,
+            sample_rate=48000,
+            channels=2,
+            duration_s=1.0,
+        )
+    )
+    res = _run_gate_with(monkeypatch, tmp_path, rep)
+    assert res["release_gate_status"] == "FAILED"
+    assert any("channel" in f for f in res["results"][0]["failures"])
+
+
+def test_gate_sample_rate_mismatch_fails(monkeypatch: Any, tmp_path: Path) -> None:
+    rep = _base_report(
+        output=MediaStats(
+            path="o.wav",
+            sha256="b" * 64,
+            samples=48000,
+            true_peak_dbtp=-1.2,
+            sample_rate=44100,
+            channels=1,
+            duration_s=1.0,
+        )
+    )
+    res = _run_gate_with(monkeypatch, tmp_path, rep)
+    assert res["release_gate_status"] == "FAILED"
+
+
+def test_gate_true_peak_violation_fails(monkeypatch: Any, tmp_path: Path) -> None:
+    rep = _base_report(
+        output=MediaStats(
+            path="o.wav",
+            sha256="b" * 64,
+            samples=48000,
+            true_peak_dbtp=-0.4,
+            sample_rate=48000,
+            channels=1,
+            duration_s=1.0,
+        )
+    )
+    res = _run_gate_with(monkeypatch, tmp_path, rep)
+    assert res["release_gate_status"] == "FAILED"
+    assert any("true peak" in f for f in res["results"][0]["failures"])
+
+
+def test_gate_unverified_enhanced_unit_fails(monkeypatch: Any, tmp_path: Path) -> None:
+    from voiceclean.report.schema import UnitDecisionRecord
+
+    rep = _base_report(
+        units=[
+            UnitDecisionRecord(
+                unit_id=0,
+                channel=0,
+                start_sample=0,
+                end_sample=48000,
+                start_time_s=0.0,
+                end_time_s=1.0,
+                is_speech=True,
+                input_sha256="1" * 64,
+                output_sha256="2" * 64,
+                guard_a_verdict="UNVERIFIED",
+                final_decision="enhanced",
+            )
+        ]
+    )
+    res = _run_gate_with(monkeypatch, tmp_path, rep)
+    assert res["release_gate_status"] == "FAILED"
+    assert any("UNVERIFIED" in f for f in res["results"][0]["failures"])
+
+
+def test_gate_nothing_enhanced_fails_corpus_floor(monkeypatch: Any, tmp_path: Path) -> None:
+    from voiceclean.report.schema import UnitDecisionRecord
+
+    rep = _base_report(
+        units=[
+            UnitDecisionRecord(
+                unit_id=0,
+                channel=0,
+                start_sample=0,
+                end_sample=48000,
+                start_time_s=0.0,
+                end_time_s=1.0,
+                is_speech=True,
+                input_sha256="1" * 64,
+                output_sha256="2" * 64,
+                guard_a_verdict="REVERT",
+                final_decision="original_reverted",
+            )
+        ],
+        summary=UnitSummary(units_total=1, enhanced=0, reverted=1),
+    )
+    res = _run_gate_with(monkeypatch, tmp_path, rep)
+    assert res["release_gate_status"] == "FAILED"
+    assert res["corpus_failures"], "the did-nothing floor must trip"
+
+
+def test_gate_pipeline_exception_is_recorded_not_raised(monkeypatch: Any, tmp_path: Path) -> None:
+    def boom(**_kw: Any) -> Any:
+        raise RuntimeError("pipeline exploded")
+
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        '{"schema_version": 1, "manifest_id": "m", "split_name": "acceptance",'
+        ' "items_count": 1, "items": [{"id": "item1", "audio_path": "x.wav",'
+        ' "audio_sha256": "", "duration_s": 1.0, "speaker_id": "s", "dialect": "synthetic",'
+        ' "gender": "unknown", "environment": "synthetic", "degradation_type": "clean",'
+        ' "transcript_sorani": "-", "verified_by_human": false, "split": "acceptance"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(acceptance_mod, "run_pipeline", boom)
+    res = acceptance_mod.evaluate_acceptance_gates(manifest, output_dir=tmp_path / "o")
+    assert res["release_gate_status"] == "FAILED"
+    assert "RuntimeError" in res["results"][0]["failures"][0]
