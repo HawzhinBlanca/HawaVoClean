@@ -33,6 +33,20 @@ probe; the same content with a shifted spectrum looks different.
 4. **Acoustic signal integrity** — consonant-band retention, spectral hole,
    musical noise, and new-clipping detectors.
 
+## Guard modes
+
+- **strict_spectral** (production default): the output must stay spectrally
+  near-identical to the input. Anchor deletions/substitutions, timestamp
+  drift, and peak distribution divergence all gate the verdict. Right for
+  gentle cleanup where any spectral change is suspect.
+- **integrity** (studio profile): restoration removes noise and reverb BY
+  DESIGN, so spectral identity is not enforced. Still enforced: envelope
+  correlation and timing drift, bounded mean/peak distribution divergence,
+  spectral-hole / musical-noise / consonant-retention / clipping detectors,
+  and the output-collapse validation. Anchor statistics are recorded in the
+  report but do not gate. The mode is declared in the profile's calibration
+  artifact and visible in every report.
+
 ## Verdicts
 
 `PASS` (candidate accepted), `REVERT` (original audio used), `UNVERIFIED`

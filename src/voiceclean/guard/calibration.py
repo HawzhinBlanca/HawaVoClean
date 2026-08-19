@@ -42,6 +42,8 @@ def apply_calibrated_thresholds(
             thresh.get("min_anchor_confidence", config.min_anchor_confidence)
         ),
         max_posterior_js_div=float(thresh.get("max_posterior_js_div", config.max_posterior_js_div)),
+        max_peak_js_div=float(thresh.get("max_peak_js_div", config.max_peak_js_div)),
+        mode=config.mode,
         max_timing_drift_ms=float(thresh.get("max_timing_drift_ms", config.max_timing_drift_ms)),
         enforce_signal_integrity=config.enforce_signal_integrity,
         spectral_hole_thresh=float(thresh.get("spectral_hole_thresh", config.spectral_hole_thresh)),

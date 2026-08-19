@@ -12,6 +12,21 @@
   mismatch).
 - **License**: Proprietary / All Rights Reserved (this repository).
 
+## Studio core: `studio-dfn3-48k-v1`
+
+- **Implementation**: `voiceclean.enhancement.studio.StudioVoiceCore`
+- **Model**: DeepFilterNet3 (https://github.com/Rikorose/DeepFilterNet),
+  license MIT — weights vendored at
+  `src/voiceclean/resources/models/deepfilternet3/` and hash-locked in
+  `studio-core.lock.toml`; digests verified by `audit-models` and preflight.
+- **Dereverberation**: single-channel WPE (nara_wpe, MIT).
+- **Requires**: `uv sync --extra studio` (torch; deepfilternet's stale
+  numpy<2 pin is overridden — its runtime is verified on numpy 2 by the
+  studio test suite).
+- **Measured** (real 94.6 s recording, 2026-08-19): noise floor −49.9 →
+  −76.9 dBFS, SNR proxy +26.7 dB, signal level within 0.3 dB, reverb tail
+  −1.0 dB at 100–300 ms after offsets (single-channel WPE is modest).
+
 ## External candidates
 
 None have been evaluated. An earlier revision of this document listed

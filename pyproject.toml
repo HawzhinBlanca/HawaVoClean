@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hawzhin-voiceclean"
-version = "2.0.0"
+version = "2.1.0"
 description = "Offline dialogue audio cleanup: Wiener denoising, spectral-change guard, BS.1770 mastering"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+studio = [
+    "deepfilternet>=0.5.6",
+    "torch>=2.2.0",
+    "torchaudio>=2.2.0",
+    "nara-wpe>=0.0.9",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
@@ -28,6 +34,12 @@ dev = [
     "ruff>=0.3.0",
     "mypy>=1.9.0",
 ]
+
+[tool.uv]
+# deepfilternet 0.5.6 declares numpy<2, a stale pin: its runtime works on
+# numpy 2 (verified by the studio test suite). Override so the studio extra
+# resolves against the project's numpy>=2 stack.
+override-dependencies = ["numpy>=1.26.0"]
 
 [project.scripts]
 voiceclean = "voiceclean.cli:main"
@@ -78,6 +90,8 @@ module = [
     "pyloudnorm.*",
     "scipy.*",
     "hypothesis.*",
+    "df.*",
+    "nara_wpe.*",
 ]
 ignore_missing_imports = true
 

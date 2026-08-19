@@ -7,9 +7,14 @@
 voiceclean doctor
 ```
 
-### Production Processing
+### Production Processing (gentle, strict guard)
 ```bash
 voiceclean process interview.wav --output interview_mastered.wav --profile production
+```
+
+### Studio Restoration (neural denoise + dereverb, integrity guard)
+```bash
+voiceclean process interview.wav --output interview_studio.wav --profile studio
 ```
 
 ### Master Verification

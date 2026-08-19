@@ -12,16 +12,25 @@ EQ'd and de-essed, loudness normalized to broadcast targets, true peaks
 limited to −1.0 dBTP. Every processing decision is recorded in an audit
 report published beside the output.
 
-**What it is not.** There is no neural network and no speech recognition in
-this system. The enhancement core is a decision-directed spectral Wiener
-filter — classical DSP that can only attenuate spectral magnitude, never
-synthesize content. The fidelity guard compares *spectral signatures*
-between original and processed audio: it reliably detects that the spectrum
-changed, and it reverts processing when it does. It cannot verify
-*linguistic* content — validating that words survived processing would
-require a trained Kurdish Sorani acoustic model and a human-verified
-corpus, and this project has neither. Where that limits a guarantee, the
-guarantee is not made.
+**Two enhancement cores, honestly labelled.** The default production core
+is a decision-directed spectral Wiener filter — classical DSP, gentle,
+guarded strictly. The optional **studio profile** uses a real neural model:
+WPE dereverberation + DeepFilterNet3 (MIT-licensed, weights vendored and
+hash-locked, verified by `voiceclean audit-models`). Measured on a real
+94.6 s recording: noise floor −49.9 → −76.9 dBFS, SNR +26.7 dB, signal
+level preserved within 0.3 dB. DeepFilterNet3 is a *speech* enhancer —
+sustained musical tones may be attenuated as noise; review the flagged
+timecodes in the report for music-heavy material.
+
+**What it still is not.** There is no speech recognition in this system.
+The fidelity guard compares *spectral signatures*: in `strict_spectral`
+mode (production) it demands the output stay spectrally near-identical; in
+`integrity` mode (studio) it enforces timing, envelope, artifact, and
+collapse protections while allowing the spectral change that restoration
+is. It cannot verify *linguistic* content — that would require a trained
+Kurdish Sorani acoustic model and a human-verified corpus, and this
+project has neither. Where that limits a guarantee, the guarantee is not
+made.
 
 ## Invariants that hold (and are tested)
 
@@ -68,8 +77,15 @@ uv sync --locked
 ```bash
 voiceclean doctor
 voiceclean process interview.wav --output interview_clean.wav --profile production
+voiceclean process interview.wav --output interview_studio.wav --profile studio
 voiceclean verify interview_clean.wav --report interview_clean.voiceclean.json
 voiceclean audit-models
+```
+
+The studio profile needs the optional neural dependencies:
+
+```bash
+uv sync --extra studio
 ```
 
 Development and evaluation commands:

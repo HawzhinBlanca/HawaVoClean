@@ -79,6 +79,13 @@ class GuardConfig(BaseFrozenModel):
     guard_id: str = "spectral-guard-v1"
     probe_id: str = "spectral-signature-v1"
     calibration_file: str = "guard-calibration.json"
+    # strict_spectral: output must stay spectrally near-identical (gentle
+    #   cleanup; anchors and peak divergence enforced).
+    # integrity: output may differ spectrally (restoration removes noise and
+    #   reverb BY DESIGN); timing, envelope, artifact, and collapse
+    #   protections stay enforced, spectral identity does not.
+    mode: Literal["strict_spectral", "integrity"] = "strict_spectral"
+    max_peak_js_div: float = Field(default=0.60, ge=0.0, le=2.0)
     min_anchor_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     max_posterior_js_div: float = Field(default=0.25, ge=0.0, le=1.0)
     max_timing_drift_ms: float = Field(default=40.0, ge=5.0, le=200.0)

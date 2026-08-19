@@ -25,7 +25,7 @@ from voiceclean.audio.encode import encode_audio
 from voiceclean.audio.probe import probe_audio
 from voiceclean.audio.types import AudioBuffer, AudioProbeResult
 from voiceclean.config import VoiceCleanConfig, load_config
-from voiceclean.enhancement.production import WienerSpectralEnhancer, wiener_params_hash
+from voiceclean.enhancement.factory import resolve_core
 from voiceclean.enhancement.validate import validate_enhancer_output
 from voiceclean.enhancement.worker import IsolatedEnhancementWorker
 from voiceclean.errors import PreflightError
@@ -68,13 +68,23 @@ FINAL_DECISION_BY_VERDICT: dict[GuardVerdict, str] = {
 
 
 def _load_core_lock(core_id: str) -> dict[str, Any]:
-    """Load and verify the production core lockfile. Missing or mismatched
+    """Load and verify the configured core's lockfile. Missing or mismatched
     provenance is a hard failure, never a silent degradation."""
-    lock_path = models_dir() / "production-core.lock.toml"
+    registration = resolve_core(core_id)
+    import importlib.util
+
+    missing = [m for m in registration.requires_modules if importlib.util.find_spec(m) is None]
+    if missing:
+        raise PreflightError(
+            f"Core {core_id!r} needs optional dependencies that are not "
+            f"installed ({', '.join(missing)}). Install them with: "
+            "uv sync --extra studio"
+        )
+    lock_path = models_dir() / registration.lock_filename
     if not lock_path.exists():
         raise PreflightError(
-            f"Production core lockfile missing: {lock_path}. Refusing to run "
-            "without verifiable core provenance."
+            f"Core lockfile missing: {lock_path}. Refusing to run without "
+            "verifiable core provenance."
         )
     with open(lock_path, "rb") as f:
         lock = tomllib.load(f)
@@ -83,18 +93,31 @@ def _load_core_lock(core_id: str) -> dict[str, Any]:
         raise PreflightError(
             f"Configured core_id {core_id!r} does not match lockfile core {lock.get('core_id')!r}"
         )
-    actual_params_hash = wiener_params_hash()
+    actual_params_hash = registration.implementation_params_hash()
     if lock.get("params_hash") != actual_params_hash:
         raise PreflightError(
             "Core parameter drift: lockfile params_hash "
             f"{str(lock.get('params_hash'))[:16]}... does not match the "
             f"implemented core {actual_params_hash[:16]}..."
         )
-    if hash_json_canonical(dict(lock.get("params", {}))) != actual_params_hash:
+    # The lock's own tables must reconstruct params_hash (weights digests are
+    # part of the implementation payload when the core has weights).
+    payload: dict[str, Any] = dict(lock.get("params", {}))
+    weight_table = {str(k): str(v) for k, v in dict(lock.get("weight_sha256", {})).items()}
+    if weight_table:
+        payload["weights_sha256"] = weight_table
+    if hash_json_canonical(payload) != actual_params_hash:
         raise PreflightError(
-            "Core lockfile [params] table does not recompute to params_hash; "
+            "Core lockfile tables do not recompute to params_hash; "
             "the lockfile has been hand-edited."
         )
+    # Weights on disk must match their locked digests.
+    for rel, digest in weight_table.items():
+        weight_path = models_dir() / rel
+        if not weight_path.exists():
+            raise PreflightError(f"Locked weights file missing: {weight_path}")
+        if hash_file(weight_path) != digest:
+            raise PreflightError(f"Weights digest mismatch for {rel}")
     return lock
 
 
@@ -190,14 +213,16 @@ def run_pipeline(
     workspace.journal.append(JournalEvent.SEGMENTATION_COMPLETE, {"units_count": len(all_units)})
 
     # 6. Models: isolated worker (or in-process core) and the fidelity probe
+    core_registration = resolve_core(config.enhancement.core_id)
     if config.runtime.isolated_worker:
         worker: Any = IsolatedEnhancementWorker(
             core_id=config.enhancement.core_id,
             sample_rate=config.enhancement.model_sample_rate,
             timeout_s=config.runtime.worker_timeout_s,
+            enhancer_class=core_registration.enhancer_class,
         )
     else:
-        worker = WienerSpectralEnhancer(
+        worker = core_registration.enhancer_class(
             core_id=config.enhancement.core_id,
             sample_rate=config.enhancement.model_sample_rate,
             phase_coherent=config.enhancement.phase_coherent,

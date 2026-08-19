@@ -5,6 +5,24 @@ All notable changes to the Hawzhin VoiceClean system will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-08-19
+
+### Added — a real neural restoration core
+- `StudioVoiceCore` (`studio-dfn3-48k-v1`): WPE dereverberation +
+  DeepFilterNet3 speech enhancement. Weights vendored and hash-locked in
+  `studio-core.lock.toml`; digests verified at preflight and by
+  `audit-models`. Optional install: `uv sync --extra studio`.
+- `--profile studio`: integrity-mode guarding, neural core, same mastering
+  chain. Measured on a real recording: noise floor −27 dB, SNR +26.7 dB,
+  signal preserved within 0.3 dB.
+- Guard modes: `strict_spectral` (unchanged default) vs `integrity`
+  (timing/envelope/artifact/collapse protections without spectral-identity
+  gating). Studio thresholds measured against real guard scores; the
+  calibration artifact records the measurement provenance.
+- Core registry (`enhancement/factory.py`): every registered core carries
+  its lockfile and an implementation-hash callable; preflight and audit
+  verify weights digests and that lock tables reconstruct `params_hash`.
+
 ## [2.0.0] - 2026-08-19
 
 ### The honesty release

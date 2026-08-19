@@ -74,7 +74,8 @@ def evaluate_guard_pass(
         scores["substituted_anchors"] = anchor_res.substituted_anchors_count
         scores["anchor_drift_ms"] = anchor_res.max_timestamp_drift_ms
 
-        if not is_finishing_pass:
+        strict = config.mode == "strict_spectral"
+        if not is_finishing_pass and strict:
             if anchor_res.insufficient_anchors:
                 return (
                     GuardEvaluationResult(
@@ -93,6 +94,7 @@ def evaluate_guard_pass(
             orig_posteriors=orig_probe.frame_distributions,
             cand_posteriors=cand_probe.frame_distributions,
             max_mean_js_div=config.max_posterior_js_div,
+            max_peak_js_div=config.max_peak_js_div,
         )
         scores["mean_js_div"] = post_res.mean_js_divergence
         scores["peak_js_div"] = post_res.max_peak_js_divergence

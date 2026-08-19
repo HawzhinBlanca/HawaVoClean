@@ -38,6 +38,13 @@ class EnhancementResult:
 class Enhancer(Protocol):
     """Protocol interface for enhancement cores."""
 
+    def __init__(
+        self,
+        core_id: str = ...,
+        sample_rate: int = ...,
+        phase_coherent: bool = ...,
+    ) -> None: ...
+
     @property
     def metadata(self) -> EnhancerMetadata: ...
 

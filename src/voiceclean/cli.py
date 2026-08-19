@@ -14,7 +14,7 @@ import soundfile as sf
 from voiceclean import __version__
 from voiceclean.audio.probe import probe_audio
 from voiceclean.config import load_config
-from voiceclean.enhancement.production import wiener_params_hash
+from voiceclean.enhancement.factory import CORE_REGISTRY
 from voiceclean.errors import (
     ExitCode,
     InvalidUserInputError,
@@ -109,23 +109,24 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         print(f"[FAIL] Guard calibration missing: {calib_file}")
         all_passed = False
 
-    # 5. Production core lock — params hash must match the implemented core
-    lock_file = models_dir() / "production-core.lock.toml"
-    if lock_file.exists():
-        try:
-            with open(lock_file, "rb") as f:
-                lock = tomllib.load(f)
-            if lock.get("params_hash") != wiener_params_hash():
-                print("[FAIL] Core lock params_hash does not match the implemented core.")
+    # 5. Core locks — params hash must match each implemented core
+    for core_id, registration in CORE_REGISTRY.items():
+        lock_file = models_dir() / registration.lock_filename
+        if lock_file.exists():
+            try:
+                with open(lock_file, "rb") as f:
+                    lock = tomllib.load(f)
+                if lock.get("params_hash") != registration.implementation_params_hash():
+                    print(f"[FAIL] {core_id}: lock params_hash does not match implementation.")
+                    all_passed = False
+                else:
+                    print(f"[OK] Core lock verified: {core_id} ({lock_file.name})")
+            except Exception as e:
+                print(f"[FAIL] {core_id}: core lock unreadable: {e}")
                 all_passed = False
-            else:
-                print(f"[OK] Production core lock verified: {lock_file}")
-        except Exception as e:
-            print(f"[FAIL] Production core lock unreadable: {e}")
+        else:
+            print(f"[FAIL] {core_id}: core lock missing: {lock_file}")
             all_passed = False
-    else:
-        print(f"[FAIL] Production core lock missing: {lock_file}")
-        all_passed = False
 
     print("================================================================================")
     if all_passed:
@@ -233,12 +234,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_audit_models(_args: argparse.Namespace) -> int:
-    """Verify core provenance: params hash, license allowlist, calibration integrity.
+    """Verify provenance for every registered core: params hash, weights
+    digests, license allowlist, calibration integrity.
 
     Exits non-zero on any verification failure — an audit that cannot fail
     is not an audit.
     """
-    lock_path = models_dir() / "production-core.lock.toml"
     policy_path = models_dir() / "license-policy.toml"
     calib_path = models_dir() / "guard-calibration.json"
 
@@ -248,13 +249,6 @@ def cmd_audit_models(_args: argparse.Namespace) -> int:
     print("                      HAWZHIN VOICECLEAN - MODEL AUDIT                          ")
     print("================================================================================")
 
-    if not lock_path.exists():
-        failures.append(f"core lockfile missing: {lock_path}")
-        lock = {}
-    else:
-        with open(lock_path, "rb") as f:
-            lock = tomllib.load(f)
-
     if not policy_path.exists():
         failures.append(f"license policy missing: {policy_path}")
         allowed: list[str] = []
@@ -262,49 +256,60 @@ def cmd_audit_models(_args: argparse.Namespace) -> int:
         with open(policy_path, "rb") as f:
             allowed = list(tomllib.load(f).get("allowed_licenses", []))
 
-    if lock:
-        print(f"Production core:  {lock.get('core_id')}")
-        print(f"Algorithm:        {lock.get('algorithm')}")
-        print(f"Code license:     {lock.get('code_license')}")
+    for core_id, registration in CORE_REGISTRY.items():
+        lock_path = models_dir() / registration.lock_filename
+        print(f"Core: {core_id}")
+        if not lock_path.exists():
+            failures.append(f"{core_id}: lockfile missing: {lock_path}")
+            continue
+        with open(lock_path, "rb") as f:
+            lock = tomllib.load(f)
 
-        # 1a. Parameter hash must match the core actually implemented
-        actual = wiener_params_hash()
+        print(f"  Algorithm:      {lock.get('algorithm')}")
+        print(f"  Code license:   {lock.get('code_license')}")
+
+        # 1a. Params hash matches the implemented core
+        actual = registration.implementation_params_hash()
         if lock.get("params_hash") != actual:
             failures.append(
-                f"params_hash mismatch: lockfile {str(lock.get('params_hash'))[:16]}... "
-                f"vs implemented core {actual[:16]}..."
+                f"{core_id}: params_hash mismatch: lockfile "
+                f"{str(lock.get('params_hash'))[:16]}... vs implementation {actual[:16]}..."
             )
         else:
-            print(f"Params hash:      {actual[:16]}... [VERIFIED against implementation]")
+            print(f"  Params hash:    {actual[:16]}... [VERIFIED against implementation]")
 
-        # 1b. The [params] table itself must recompute to params_hash — a
-        # decorative table that can drift from its own digest is provenance
-        # theater, which is exactly what this command exists to prevent.
-        table_hash = hash_json_canonical(dict(lock.get("params", {})))
-        if table_hash != lock.get("params_hash"):
+        # 1b. The lock's own tables must reconstruct params_hash
+        payload: dict[str, object] = dict(lock.get("params", {}))
+        weight_table = {str(k): str(v) for k, v in dict(lock.get("weight_sha256", {})).items()}
+        if weight_table:
+            payload["weights_sha256"] = weight_table
+        if hash_json_canonical(payload) != lock.get("params_hash"):
             failures.append(
-                "params table does not recompute to params_hash: the lockfile's "
-                "own [params] block has been edited or drifted"
+                f"{core_id}: lock tables do not recompute to params_hash "
+                "(the lockfile has been hand-edited)"
             )
         else:
-            print("Params table:     recomputes to params_hash [VERIFIED]")
+            print("  Lock tables:    recompute to params_hash [VERIFIED]")
 
-        # 2. License must be allowlisted
-        lic = str(lock.get("code_license", ""))
-        if allowed and lic not in allowed:
-            failures.append(f"license {lic!r} is not in the allowlist {allowed}")
-        elif allowed:
-            print(f"License check:    {lic!r} allowlisted [VERIFIED]")
+        # 2. Licenses must be allowlisted
+        for key in ("code_license", "model_license", "wpe_license"):
+            lic = lock.get(key)
+            if lic is None:
+                continue
+            if allowed and str(lic) not in allowed:
+                failures.append(f"{core_id}: {key} {lic!r} is not in the allowlist {allowed}")
+            elif allowed:
+                print(f"  License check:  {key}={lic!r} allowlisted [VERIFIED]")
 
-        # 3. Any weight digest table must resolve (none exist for DSP cores,
-        # but a future neural core lands here and gets verified)
-        weight_table: dict[str, str] = lock.get("weight_sha256", {}) or {}
+        # 3. Weights digests must resolve against the files on disk
         for fname, digest in weight_table.items():
             candidate = models_dir() / str(fname)
             if not candidate.exists():
-                failures.append(f"declared weights file missing: {fname}")
+                failures.append(f"{core_id}: declared weights file missing: {fname}")
             elif hash_file(candidate) != digest:
-                failures.append(f"weights digest mismatch for {fname}")
+                failures.append(f"{core_id}: weights digest mismatch for {fname}")
+            else:
+                print(f"  Weights:        {fname} [VERIFIED]")
 
     # 4. Calibration artifact integrity
     if calib_path.exists():
@@ -432,7 +437,7 @@ def main() -> None:
     p_proc.add_argument("--output", "-o", required=True, help="Path to output mastered WAV")
     p_proc.add_argument("--config", "-c", help="Path to custom TOML configuration")
     p_proc.add_argument(
-        "--profile", "-p", choices=["production", "development"], default="production"
+        "--profile", "-p", choices=["production", "development", "studio"], default="production"
     )
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"

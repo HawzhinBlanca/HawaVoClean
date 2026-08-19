@@ -153,7 +153,6 @@ def test_chaos_garbage_model_output_fails_closed_end_to_end(
 ) -> None:
     """NaN / wrong-length / silent enhancer output must never reach the master."""
     monkeypatch.setattr(pipeline_mod, "IsolatedEnhancementWorker", _GarbageEnhancer)
-    monkeypatch.setattr(pipeline_mod, "WienerSpectralEnhancer", _GarbageEnhancer)
 
     out = tmp_path / "garbage_guarded.wav"
     report = run_pipeline(
