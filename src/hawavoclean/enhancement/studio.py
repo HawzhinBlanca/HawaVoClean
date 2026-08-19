@@ -40,6 +40,16 @@ STUDIO_PARAMS: dict[str, float | int | bool | str] = {
     "wpe_delay": 3,
     "wpe_iterations": 3,
     "atten_lim_db": 0,  # 0 = unlimited noise attenuation
+    # Decay-gated late-reverb suppression after DFN3 (see finishing/dereverb.py).
+    # Setting chosen 2026-08-19 on a real recording as the strongest that
+    # clears the spectral-hole guard on EVERY unit (worst 0.085 < 0.10):
+    # phrase tails -5.6 dB @50 ms / -7.5 dB @100 ms, voice tonality unchanged.
+    # Hotter settings (rt60 0.5 / floor -15) scored 0.14 and the continuity
+    # rule then cascaded the whole take back to original.
+    "tail_suppress": True,
+    "tail_rt60_s": 0.4,
+    "tail_floor_db": -10.0,
+    "tail_onset_protect_db": 3.0,
 }
 
 
@@ -194,6 +204,17 @@ class StudioVoiceCore(Enhancer):
                 atten_lim_db=atten if atten > 0 else None,
             )
         enhanced_48k = np.asarray(out.squeeze(0).numpy(), dtype=np.float32)
+
+        if bool(STUDIO_PARAMS["tail_suppress"]):
+            from hawavoclean.finishing.dereverb import suppress_late_reverb
+
+            enhanced_48k = suppress_late_reverb(
+                enhanced_48k,
+                self._sample_rate,
+                rt60_s=float(STUDIO_PARAMS["tail_rt60_s"]),
+                floor_db=float(STUDIO_PARAMS["tail_floor_db"]),
+                onset_protect_db=float(STUDIO_PARAMS["tail_onset_protect_db"]),
+            )
 
         enhanced_out = resample_audio(
             enhanced_48k, self._sample_rate, sample_rate, target_samples=orig_len

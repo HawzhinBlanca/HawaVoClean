@@ -5,6 +5,33 @@ All notable changes to the HawaVoClean system will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-08-19
+
+### Added — decay-gated late-reverb suppression (studio core v1.1.0)
+User feedback: "the reverb is still there". Measured on the real recording:
+single-channel WPE (taps 10) cut the post-phrase tail only 1.6 dB; pushing
+WPE harder (taps >= 40) collapsed the VOICE broadband by 7-8 dB and the
+guard correctly refused it. A different tool was needed.
+
+- `finishing/dereverb.py`: Lebart/Habets late-reverb estimate subtracted
+  only inside decays — frames more than 6 dB below their recent (look-back)
+  peak — scaled by decay depth; the voice itself (within 6 dB of its local
+  peak) is untouched by construction. Runs after DeepFilterNet3 in the
+  studio core. Params hash-locked in `studio-core.lock.toml` (v1.1.0).
+- Measured on Flute 09 vs original: room tail -6.2 dB @50 ms, -9.8 dB
+  @100 ms after each phrase; voice tonality within ±0.3 dB in every band;
+  all 5 units clear the spectral-hole guard with margin (0.05-0.08 < 0.10).
+- Setting chosen as the strongest that clears the guard on EVERY unit:
+  hotter settings scored 0.14 and the continuity rule cascaded the whole
+  take back to original (correct behaviour; wrong setting).
+- Found and fixed during development: the decay gate used a look-AHEAD
+  maximum (wrong sign, copied from the limiter), so it never engaged on
+  smooth decays; and a 1.5 dB voice-protect band dimmed dry speech 1.7 dB
+  (now 6 dB, swept on synthetic dry/wet speech). Regression tests pin both.
+- Scope, stated honestly: sustained content BETWEEN phrases on this
+  recording (a held instrument tone, spectral flatness 0.02, 29% of the
+  file, ±17 Hz waver = played content) is not reverb and is not removed.
+
 ## [3.1.1] - 2026-08-19
 
 ### Fixed — finishing EQ was re-voicing every recording thin and bright

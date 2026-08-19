@@ -6,8 +6,8 @@
 
 schema_version = 2
 core_id = "studio-dfn3-48k-v1"
-version = "1.0.0"
-algorithm = "single-channel WPE dereverberation + DeepFilterNet3 neural speech enhancement (vendored weights)"
+version = "1.1.0"
+algorithm = "single-channel WPE dereverberation + DeepFilterNet3 neural speech enhancement (vendored weights) + decay-gated late-reverb suppression"
 implementation = "hawavoclean.enhancement.studio.StudioVoiceCore"
 code_license = "Proprietary / All Rights Reserved"
 model_upstream = "https://github.com/Rikorose/DeepFilterNet"
@@ -16,7 +16,7 @@ wpe_upstream = "https://github.com/fgnt/nara_wpe"
 wpe_license = "MIT"
 expected_sample_rates = [48000]
 phase_coherent = false
-params_hash = "07a8b90c5e43a17ca8c114a8d3648fe72d493f55c7c00103dea880e3084c1bd1"
+params_hash = "f20eb492ca9d39bc099382efa94f755f1157012a7efdadb165e5fca31859b1ac"
 
 [params]
 model = "DeepFilterNet3"
@@ -28,6 +28,10 @@ wpe_taps = 10
 wpe_delay = 3
 wpe_iterations = 3
 atten_lim_db = 0
+tail_suppress = true
+tail_rt60_s = 0.4
+tail_floor_db = -10.0
+tail_onset_protect_db = 3.0
 
 [weight_sha256]
 "deepfilternet3/config.ini" = "415eb925d44990d938fb739f514aa3662c1ec0ea836cff044fa1291b82cb4290"
