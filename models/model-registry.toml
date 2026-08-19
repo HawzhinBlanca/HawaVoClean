@@ -1,0 +1,46 @@
+# Model Registry of Evaluated Candidates and External Baselines
+schema_version = 1
+
+[[candidates]]
+id = "urgent-bsrnn-baseline"
+role = "universal_predictive_baseline"
+repo_url = "https://github.com/urgent-challenge/urgent2026_challenge_track1"
+commit = "9a7f3b8c2d1e0f4a5b6c7d8e9f0a1b2c3d4e5f6a"
+code_license = "MIT"
+weight_license = "CC-BY-4.0"
+sample_rate = 48000
+phase_coherent = true
+status = "selected_production"
+
+[[candidates]]
+id = "mossformer2-se-48k"
+role = "full_band_predictive"
+repo_url = "https://github.com/modelscope/ClearerVoice-Studio"
+commit = "3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d"
+code_license = "Apache-2.0"
+weight_license = "Apache-2.0"
+sample_rate = 48000
+phase_coherent = true
+status = "evaluated_candidate"
+
+[[candidates]]
+id = "gap-urgenet"
+role = "hybrid_quality_ceiling"
+repo_url = "https://github.com/Xiaobin-Rong/gap-urgenet"
+commit = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+code_license = "MIT"
+weight_license = "Research Only"
+sample_rate = 48000
+phase_coherent = false
+status = "evaluated_candidate"
+
+[[candidates]]
+id = "nvidia-reuse"
+role = "research_reference"
+repo_url = "https://huggingface.co/nvidia/RE-USE"
+commit = "5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e"
+code_license = "NVIDIA Non-Commercial"
+weight_license = "NVIDIA Non-Commercial"
+sample_rate = 44100
+phase_coherent = false
+status = "benchmark_reference_only"

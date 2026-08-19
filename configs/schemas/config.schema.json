@@ -1,0 +1,488 @@
+{
+  "$defs": {
+    "AlignmentConfig": {
+      "additionalProperties": false,
+      "description": "Delay and phase alignment configuration.",
+      "properties": {
+        "max_delay_ms": {
+          "default": 50.0,
+          "maximum": 250.0,
+          "minimum": 0.0,
+          "title": "Max Delay Ms",
+          "type": "number"
+        },
+        "min_coherence": {
+          "default": 0.7,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Coherence",
+          "type": "number"
+        },
+        "fractional_delay": {
+          "default": true,
+          "title": "Fractional Delay",
+          "type": "boolean"
+        }
+      },
+      "title": "AlignmentConfig",
+      "type": "object"
+    },
+    "EnhancementConfig": {
+      "additionalProperties": false,
+      "description": "Neural enhancer configuration.",
+      "properties": {
+        "core_id": {
+          "default": "urgent-bsrnn-baseline",
+          "title": "Core Id",
+          "type": "string"
+        },
+        "model_sample_rate": {
+          "default": 48000,
+          "maximum": 48000,
+          "minimum": 8000,
+          "title": "Model Sample Rate",
+          "type": "integer"
+        },
+        "phase_coherent": {
+          "default": true,
+          "title": "Phase Coherent",
+          "type": "boolean"
+        },
+        "warmup_cycles": {
+          "default": 1,
+          "maximum": 10,
+          "minimum": 0,
+          "title": "Warmup Cycles",
+          "type": "integer"
+        }
+      },
+      "title": "EnhancementConfig",
+      "type": "object"
+    },
+    "FinishingConfig": {
+      "additionalProperties": false,
+      "description": "Deterministic local finishing chain settings.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "preset": {
+          "default": "gentle",
+          "enum": [
+            "gentle",
+            "minimal",
+            "bypass"
+          ],
+          "title": "Preset",
+          "type": "string"
+        },
+        "dc_subsonic_cutoff_hz": {
+          "default": 20.0,
+          "maximum": 50.0,
+          "minimum": 10.0,
+          "title": "Dc Subsonic Cutoff Hz",
+          "type": "number"
+        },
+        "dehum_50_60hz": {
+          "default": true,
+          "title": "Dehum 50 60Hz",
+          "type": "boolean"
+        },
+        "declick": {
+          "default": true,
+          "title": "Declick",
+          "type": "boolean"
+        },
+        "plosive_attenuation": {
+          "default": true,
+          "title": "Plosive Attenuation",
+          "type": "boolean"
+        },
+        "dynamic_eq": {
+          "default": true,
+          "title": "Dynamic Eq",
+          "type": "boolean"
+        },
+        "deess_band": {
+          "default": true,
+          "title": "Deess Band",
+          "type": "boolean"
+        },
+        "max_deess_gr_db": {
+          "default": 4.0,
+          "maximum": 12.0,
+          "minimum": 0.0,
+          "title": "Max Deess Gr Db",
+          "type": "number"
+        },
+        "level_rider": {
+          "default": true,
+          "title": "Level Rider",
+          "type": "boolean"
+        },
+        "max_compression_gr_db": {
+          "default": 3.0,
+          "maximum": 12.0,
+          "minimum": 0.0,
+          "title": "Max Compression Gr Db",
+          "type": "number"
+        }
+      },
+      "title": "FinishingConfig",
+      "type": "object"
+    },
+    "GuardConfig": {
+      "additionalProperties": false,
+      "description": "Hawzhin Sorani Fidelity Guard parameters.",
+      "properties": {
+        "guard_id": {
+          "default": "hawzhin-ctc",
+          "title": "Guard Id",
+          "type": "string"
+        },
+        "asr_model_id": {
+          "default": "hawzhin-sorani-asr-v1",
+          "title": "Asr Model Id",
+          "type": "string"
+        },
+        "calibration_file": {
+          "default": "models/guard-calibration.json",
+          "title": "Calibration File",
+          "type": "string"
+        },
+        "min_anchor_confidence": {
+          "default": 0.75,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Anchor Confidence",
+          "type": "number"
+        },
+        "max_posterior_js_div": {
+          "default": 0.25,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Max Posterior Js Div",
+          "type": "number"
+        },
+        "max_timing_drift_ms": {
+          "default": 40.0,
+          "maximum": 200.0,
+          "minimum": 5.0,
+          "title": "Max Timing Drift Ms",
+          "type": "number"
+        },
+        "enforce_signal_integrity": {
+          "default": true,
+          "title": "Enforce Signal Integrity",
+          "type": "boolean"
+        },
+        "spectral_hole_thresh": {
+          "default": 0.15,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Spectral Hole Thresh",
+          "type": "number"
+        },
+        "musical_noise_thresh": {
+          "default": 0.2,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Musical Noise Thresh",
+          "type": "number"
+        },
+        "min_hf_preservation_ratio": {
+          "default": 0.6,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Hf Preservation Ratio",
+          "type": "number"
+        }
+      },
+      "title": "GuardConfig",
+      "type": "object"
+    },
+    "InputConfig": {
+      "additionalProperties": false,
+      "description": "Input validation and channel handling.",
+      "properties": {
+        "max_sample_rate": {
+          "default": 48000,
+          "maximum": 48000,
+          "title": "Max Sample Rate",
+          "type": "integer"
+        },
+        "supported_sample_rates": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Supported Sample Rates",
+          "type": "array"
+        },
+        "channel_mode": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "mono",
+            "dual_mono_same",
+            "split_speakers",
+            "ambiguous_stereo"
+          ],
+          "title": "Channel Mode",
+          "type": "string"
+        },
+        "output_bit_depth": {
+          "default": "pcm24",
+          "enum": [
+            "pcm24",
+            "float32"
+          ],
+          "title": "Output Bit Depth",
+          "type": "string"
+        }
+      },
+      "title": "InputConfig",
+      "type": "object"
+    },
+    "LoudnessConfig": {
+      "additionalProperties": false,
+      "description": "ITU-R BS.1770-4 loudness and peak limiting.",
+      "properties": {
+        "target_lufs_stereo": {
+          "default": -16.0,
+          "maximum": -10.0,
+          "minimum": -30.0,
+          "title": "Target Lufs Stereo",
+          "type": "number"
+        },
+        "target_lufs_mono": {
+          "default": -19.0,
+          "maximum": -10.0,
+          "minimum": -30.0,
+          "title": "Target Lufs Mono",
+          "type": "number"
+        },
+        "true_peak_ceiling_dbtp": {
+          "default": -1.0,
+          "maximum": 0.0,
+          "minimum": -6.0,
+          "title": "True Peak Ceiling Dbtp",
+          "type": "number"
+        },
+        "max_limiter_reduction_db": {
+          "default": 2.5,
+          "maximum": 10.0,
+          "minimum": 0.5,
+          "title": "Max Limiter Reduction Db",
+          "type": "number"
+        },
+        "dither": {
+          "default": true,
+          "title": "Dither",
+          "type": "boolean"
+        }
+      },
+      "title": "LoudnessConfig",
+      "type": "object"
+    },
+    "PolicyConfig": {
+      "additionalProperties": false,
+      "description": "Enhancement selection and continuity policy.",
+      "properties": {
+        "strength_ladder": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Strength Ladder",
+          "type": "array"
+        },
+        "clean_audio_bypass": {
+          "default": false,
+          "title": "Clean Audio Bypass",
+          "type": "boolean"
+        },
+        "clean_bypass_snr_db": {
+          "default": 35.0,
+          "maximum": 60.0,
+          "minimum": 20.0,
+          "title": "Clean Bypass Snr Db",
+          "type": "number"
+        },
+        "enforce_continuity": {
+          "default": true,
+          "title": "Enforce Continuity",
+          "type": "boolean"
+        }
+      },
+      "title": "PolicyConfig",
+      "type": "object"
+    },
+    "ReportingConfig": {
+      "additionalProperties": false,
+      "description": "Audit report generation parameters.",
+      "properties": {
+        "schema_version": {
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "include_review_timecodes": {
+          "default": true,
+          "title": "Include Review Timecodes",
+          "type": "boolean"
+        },
+        "privacy_mode": {
+          "default": true,
+          "title": "Privacy Mode",
+          "type": "boolean"
+        }
+      },
+      "title": "ReportingConfig",
+      "type": "object"
+    },
+    "RuntimeConfig": {
+      "additionalProperties": false,
+      "description": "Runtime execution settings.",
+      "properties": {
+        "device": {
+          "default": "auto",
+          "enum": [
+            "auto",
+            "cuda",
+            "cpu"
+          ],
+          "title": "Device",
+          "type": "string"
+        },
+        "isolated_worker": {
+          "default": true,
+          "title": "Isolated Worker",
+          "type": "boolean"
+        },
+        "worker_timeout_s": {
+          "default": 120.0,
+          "maximum": 600.0,
+          "minimum": 5.0,
+          "title": "Worker Timeout S",
+          "type": "number"
+        },
+        "worker_memory_limit_mb": {
+          "default": 8192,
+          "minimum": 1024,
+          "title": "Worker Memory Limit Mb",
+          "type": "integer"
+        },
+        "development": {
+          "default": false,
+          "title": "Development",
+          "type": "boolean"
+        },
+        "num_threads": {
+          "default": 1,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Num Threads",
+          "type": "integer"
+        }
+      },
+      "title": "RuntimeConfig",
+      "type": "object"
+    },
+    "SegmentationConfig": {
+      "additionalProperties": false,
+      "description": "Utterance grouping and VAD.",
+      "properties": {
+        "vad_mode": {
+          "default": "energy",
+          "enum": [
+            "silero",
+            "energy"
+          ],
+          "title": "Vad Mode",
+          "type": "string"
+        },
+        "min_speech_ms": {
+          "default": 150,
+          "maximum": 1000,
+          "minimum": 50,
+          "title": "Min Speech Ms",
+          "type": "integer"
+        },
+        "target_speech_group_s": {
+          "default": 16.0,
+          "maximum": 30.0,
+          "minimum": 5.0,
+          "title": "Target Speech Group S",
+          "type": "number"
+        },
+        "hard_max_group_s": {
+          "default": 30.0,
+          "maximum": 60.0,
+          "minimum": 10.0,
+          "title": "Hard Max Group S",
+          "type": "number"
+        },
+        "pause_merge_threshold_ms": {
+          "default": 250,
+          "maximum": 1000,
+          "minimum": 50,
+          "title": "Pause Merge Threshold Ms",
+          "type": "integer"
+        },
+        "context_duration_s": {
+          "default": 1.0,
+          "maximum": 5.0,
+          "minimum": 0.2,
+          "title": "Context Duration S",
+          "type": "number"
+        },
+        "min_boundary_non_speech_ms": {
+          "default": 200,
+          "maximum": 1000,
+          "minimum": 50,
+          "title": "Min Boundary Non Speech Ms",
+          "type": "integer"
+        }
+      },
+      "title": "SegmentationConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Master configuration root model.",
+  "properties": {
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig"
+    },
+    "input": {
+      "$ref": "#/$defs/InputConfig"
+    },
+    "segmentation": {
+      "$ref": "#/$defs/SegmentationConfig"
+    },
+    "enhancement": {
+      "$ref": "#/$defs/EnhancementConfig"
+    },
+    "alignment": {
+      "$ref": "#/$defs/AlignmentConfig"
+    },
+    "guard": {
+      "$ref": "#/$defs/GuardConfig"
+    },
+    "policy": {
+      "$ref": "#/$defs/PolicyConfig"
+    },
+    "finishing": {
+      "$ref": "#/$defs/FinishingConfig"
+    },
+    "loudness": {
+      "$ref": "#/$defs/LoudnessConfig"
+    },
+    "reporting": {
+      "$ref": "#/$defs/ReportingConfig"
+    }
+  },
+  "title": "VoiceCleanConfig",
+  "type": "object"
+}

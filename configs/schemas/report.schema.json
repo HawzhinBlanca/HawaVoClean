@@ -1,0 +1,535 @@
+{
+  "$defs": {
+    "CoreMetadata": {
+      "additionalProperties": false,
+      "description": "Neural enhancement model identification and lock hashes.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "commit": {
+          "title": "Commit",
+          "type": "string"
+        },
+        "weight_sha256": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Weight Sha256",
+          "type": "object"
+        },
+        "phase_coherent": {
+          "default": true,
+          "title": "Phase Coherent",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "commit"
+      ],
+      "title": "CoreMetadata",
+      "type": "object"
+    },
+    "EnvironmentMetadata": {
+      "additionalProperties": false,
+      "description": "Hardware and runtime stack metadata for audit repeatability.",
+      "properties": {
+        "platform": {
+          "title": "Platform",
+          "type": "string"
+        },
+        "os_version": {
+          "title": "Os Version",
+          "type": "string"
+        },
+        "python_version": {
+          "title": "Python Version",
+          "type": "string"
+        },
+        "torch_version": {
+          "title": "Torch Version",
+          "type": "string"
+        },
+        "cuda_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cuda Version"
+        },
+        "gpu_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gpu Name"
+        },
+        "driver_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Driver Version"
+        },
+        "cpu_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cpu Model"
+        }
+      },
+      "required": [
+        "platform",
+        "os_version",
+        "python_version",
+        "torch_version"
+      ],
+      "title": "EnvironmentMetadata",
+      "type": "object"
+    },
+    "GuardMetadata": {
+      "additionalProperties": false,
+      "description": "Guard identification and calibration artifact hashes.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "model_sha256": {
+          "title": "Model Sha256",
+          "type": "string"
+        },
+        "calibration_id": {
+          "title": "Calibration Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "model_sha256",
+        "calibration_id"
+      ],
+      "title": "GuardMetadata",
+      "type": "object"
+    },
+    "MediaStats": {
+      "additionalProperties": false,
+      "description": "File metadata and audio statistics.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "sample_rate": {
+          "title": "Sample Rate",
+          "type": "integer"
+        },
+        "channels": {
+          "title": "Channels",
+          "type": "integer"
+        },
+        "samples": {
+          "title": "Samples",
+          "type": "integer"
+        },
+        "duration_s": {
+          "title": "Duration S",
+          "type": "number"
+        },
+        "integrated_lufs": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Integrated Lufs"
+        },
+        "true_peak_dbtp": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "True Peak Dbtp"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "sample_rate",
+        "channels",
+        "samples",
+        "duration_s"
+      ],
+      "title": "MediaStats",
+      "type": "object"
+    },
+    "ReviewTimecode": {
+      "additionalProperties": false,
+      "description": "Timecode flagged for human listening review.",
+      "properties": {
+        "unit_id": {
+          "title": "Unit Id",
+          "type": "integer"
+        },
+        "start_time_s": {
+          "title": "Start Time S",
+          "type": "number"
+        },
+        "end_time_s": {
+          "title": "End Time S",
+          "type": "number"
+        },
+        "channel": {
+          "title": "Channel",
+          "type": "integer"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "REVERT",
+            "UNVERIFIED",
+            "ERROR",
+            "NO_SPEECH"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit_id",
+        "start_time_s",
+        "end_time_s",
+        "channel",
+        "verdict",
+        "reason"
+      ],
+      "title": "ReviewTimecode",
+      "type": "object"
+    },
+    "UnitDecisionRecord": {
+      "additionalProperties": false,
+      "description": "Full forensic audit trail for a single speech unit.",
+      "properties": {
+        "unit_id": {
+          "title": "Unit Id",
+          "type": "integer"
+        },
+        "channel": {
+          "title": "Channel",
+          "type": "integer"
+        },
+        "start_sample": {
+          "title": "Start Sample",
+          "type": "integer"
+        },
+        "end_sample": {
+          "title": "End Sample",
+          "type": "integer"
+        },
+        "start_time_s": {
+          "title": "Start Time S",
+          "type": "number"
+        },
+        "end_time_s": {
+          "title": "End Time S",
+          "type": "number"
+        },
+        "is_speech": {
+          "title": "Is Speech",
+          "type": "boolean"
+        },
+        "input_sha256": {
+          "title": "Input Sha256",
+          "type": "string"
+        },
+        "candidate_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Candidate Sha256"
+        },
+        "output_sha256": {
+          "default": "",
+          "title": "Output Sha256",
+          "type": "string"
+        },
+        "guard_a_verdict": {
+          "enum": [
+            "PASS",
+            "REVERT",
+            "UNVERIFIED",
+            "ERROR",
+            "NO_SPEECH"
+          ],
+          "title": "Guard A Verdict",
+          "type": "string"
+        },
+        "guard_a_scores": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Guard A Scores",
+          "type": "object"
+        },
+        "guard_b_verdict": {
+          "anyOf": [
+            {
+              "enum": [
+                "PASS",
+                "REVERT",
+                "UNVERIFIED",
+                "ERROR",
+                "NO_SPEECH"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Guard B Verdict"
+        },
+        "guard_b_scores": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Guard B Scores",
+          "type": "object"
+        },
+        "chosen_strength": {
+          "default": 0.0,
+          "title": "Chosen Strength",
+          "type": "number"
+        },
+        "finish_preset_applied": {
+          "default": "bypass",
+          "enum": [
+            "gentle",
+            "minimal",
+            "bypass"
+          ],
+          "title": "Finish Preset Applied",
+          "type": "string"
+        },
+        "finish_actions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Finish Actions",
+          "type": "array"
+        },
+        "final_decision": {
+          "enum": [
+            "enhanced",
+            "original_reverted",
+            "original_unverified",
+            "original_error",
+            "original_no_speech"
+          ],
+          "title": "Final Decision",
+          "type": "string"
+        },
+        "decision_reason": {
+          "default": "",
+          "title": "Decision Reason",
+          "type": "string"
+        },
+        "runtime_ms": {
+          "default": 0.0,
+          "title": "Runtime Ms",
+          "type": "number"
+        }
+      },
+      "required": [
+        "unit_id",
+        "channel",
+        "start_sample",
+        "end_sample",
+        "start_time_s",
+        "end_time_s",
+        "is_speech",
+        "input_sha256",
+        "guard_a_verdict",
+        "final_decision"
+      ],
+      "title": "UnitDecisionRecord",
+      "type": "object"
+    },
+    "UnitSummary": {
+      "additionalProperties": false,
+      "description": "Aggregate statistics of all processed units.",
+      "properties": {
+        "units_total": {
+          "default": 0,
+          "title": "Units Total",
+          "type": "integer"
+        },
+        "enhanced": {
+          "default": 0,
+          "title": "Enhanced",
+          "type": "integer"
+        },
+        "reverted": {
+          "default": 0,
+          "title": "Reverted",
+          "type": "integer"
+        },
+        "unverified": {
+          "default": 0,
+          "title": "Unverified",
+          "type": "integer"
+        },
+        "error_passthrough": {
+          "default": 0,
+          "title": "Error Passthrough",
+          "type": "integer"
+        },
+        "no_speech": {
+          "default": 0,
+          "title": "No Speech",
+          "type": "integer"
+        },
+        "finish_applied": {
+          "default": 0,
+          "title": "Finish Applied",
+          "type": "integer"
+        },
+        "finish_bypassed": {
+          "default": 0,
+          "title": "Finish Bypassed",
+          "type": "integer"
+        }
+      },
+      "title": "UnitSummary",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Master immutable JSON audit report format as defined in BLUEPRINT.md section 18.1.",
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "job_id": {
+      "title": "Job Id",
+      "type": "string"
+    },
+    "config_hash": {
+      "title": "Config Hash",
+      "type": "string"
+    },
+    "input": {
+      "$ref": "#/$defs/MediaStats"
+    },
+    "output": {
+      "$ref": "#/$defs/MediaStats"
+    },
+    "core": {
+      "$ref": "#/$defs/CoreMetadata"
+    },
+    "guard": {
+      "$ref": "#/$defs/GuardMetadata"
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentMetadata"
+    },
+    "summary": {
+      "$ref": "#/$defs/UnitSummary"
+    },
+    "review_timecodes": {
+      "items": {
+        "$ref": "#/$defs/ReviewTimecode"
+      },
+      "title": "Review Timecodes",
+      "type": "array"
+    },
+    "units": {
+      "items": {
+        "$ref": "#/$defs/UnitDecisionRecord"
+      },
+      "title": "Units",
+      "type": "array"
+    }
+  },
+  "required": [
+    "job_id",
+    "config_hash",
+    "input",
+    "output",
+    "core",
+    "guard",
+    "environment",
+    "summary"
+  ],
+  "title": "VoiceCleanReport",
+  "type": "object"
+}

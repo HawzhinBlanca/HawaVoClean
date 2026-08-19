@@ -1,0 +1,79 @@
+# Hawzhin VoiceClean v1 - Development Configuration
+# Schema Version 1
+
+[runtime]
+device = "auto"
+isolated_worker = false
+worker_timeout_s = 300.0
+worker_memory_limit_mb = 16384
+development = true
+num_threads = 2
+
+[input]
+max_sample_rate = 48000
+supported_sample_rates = [8000, 16000, 22050, 24000, 32000, 44100, 48000]
+channel_mode = "auto"
+output_bit_depth = "float32"
+
+[segmentation]
+vad_mode = "energy"
+min_speech_ms = 100
+target_speech_group_s = 12.0
+hard_max_group_s = 30.0
+pause_merge_threshold_ms = 250
+context_duration_s = 1.0
+min_boundary_non_speech_ms = 200
+
+[enhancement]
+core_id = "urgent-bsrnn-baseline"
+model_sample_rate = 48000
+phase_coherent = true
+warmup_cycles = 0
+
+[alignment]
+max_delay_ms = 50.0
+min_coherence = 0.60
+fractional_delay = true
+
+[guard]
+guard_id = "hawzhin-ctc"
+asr_model_id = "hawzhin-sorani-asr-v1"
+calibration_file = "models/guard-calibration.json"
+min_anchor_confidence = 0.70
+max_posterior_js_div = 0.30
+max_timing_drift_ms = 50.0
+enforce_signal_integrity = true
+spectral_hole_thresh = 0.20
+musical_noise_thresh = 0.25
+min_hf_preservation_ratio = 0.50
+
+[policy]
+strength_ladder = [1.0, 0.75, 0.50, 0.25]
+clean_audio_bypass = false
+clean_bypass_snr_db = 35.0
+enforce_continuity = true
+
+[finishing]
+enabled = true
+preset = "gentle"
+dc_subsonic_cutoff_hz = 20.0
+dehum_50_60hz = true
+declick = true
+plosive_attenuation = true
+dynamic_eq = true
+deess_band = true
+max_deess_gr_db = 6.0
+level_rider = true
+max_compression_gr_db = 4.0
+
+[loudness]
+target_lufs_stereo = -16.0
+target_lufs_mono = -19.0
+true_peak_ceiling_dbtp = -1.0
+max_limiter_reduction_db = 3.0
+dither = false
+
+[reporting]
+schema_version = 1
+include_review_timecodes = true
+privacy_mode = false

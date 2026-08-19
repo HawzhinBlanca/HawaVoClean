@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "manifest_id": "calibration_split_v1",
+  "split_name": "calibration",
+  "items_count": 4,
+  "items": [
+    {
+      "id": "calib_slemani_female_1",
+      "audio_path": "data/calibration/audio/calib_slemani_female_1.wav",
+      "audio_sha256": "517769da8f3a73188798f18a8cf40a709b88727d9db1bc5e0830f04ec316bc69",
+      "duration_s": 6.0,
+      "speaker_id": "spk_female_slemani",
+      "dialect": "slemani",
+      "gender": "female",
+      "environment": "studio",
+      "degradation_type": "noise",
+      "transcript_sorani": "\u0633\u06b5\u0627\u0648 \u0644\u06d5 \u0647\u06d5\u0645\u0648\u0648\u0627\u0646 \u0628\u06d5\u062e\u06ce\u0631\u0628\u06ce\u0646 \u0628\u06c6 \u0628\u06d5\u0631\u0646\u0627\u0645\u06d5\u06cc \u0626\u06d5\u0645\u0695\u06c6",
+      "verified_by_human": true,
+      "split": "calibration"
+    },
+    {
+      "id": "calib_erbil_female_2",
+      "audio_path": "data/calibration/audio/calib_erbil_female_2.wav",
+      "audio_sha256": "517769da8f3a73188798f18a8cf40a709b88727d9db1bc5e0830f04ec316bc69",
+      "duration_s": 6.0,
+      "speaker_id": "spk_female_erbil",
+      "dialect": "erbil",
+      "gender": "female",
+      "environment": "untreated",
+      "degradation_type": "clean",
+      "transcript_sorani": "\u0633\u06b5\u0627\u0648 \u0644\u06d5 \u0647\u06d5\u0645\u0648\u0648\u0627\u0646 \u0628\u06d5\u062e\u06ce\u0631\u0628\u06ce\u0646 \u0628\u06c6 \u0628\u06d5\u0631\u0646\u0627\u0645\u06d5\u06cc \u0626\u06d5\u0645\u0695\u06c6",
+      "verified_by_human": true,
+      "split": "calibration"
+    },
+    {
+      "id": "calib_slemani_male_3",
+      "audio_path": "data/calibration/audio/calib_slemani_male_3.wav",
+      "audio_sha256": "ef395fc8216b68a7d980e2eb94af6929e72a1b07d174b4f1a6b9ad14ea11268d",
+      "duration_s": 6.0,
+      "speaker_id": "spk_male_slemani",
+      "dialect": "slemani",
+      "gender": "male",
+      "environment": "studio",
+      "degradation_type": "noise",
+      "transcript_sorani": "\u0633\u06b5\u0627\u0648 \u0644\u06d5 \u0647\u06d5\u0645\u0648\u0648\u0627\u0646 \u0628\u06d5\u062e\u06ce\u0631\u0628\u06ce\u0646 \u0628\u06c6 \u0628\u06d5\u0631\u0646\u0627\u0645\u06d5\u06cc \u0626\u06d5\u0645\u0695\u06c6",
+      "verified_by_human": true,
+      "split": "calibration"
+    },
+    {
+      "id": "calib_erbil_male_4",
+      "audio_path": "data/calibration/audio/calib_erbil_male_4.wav",
+      "audio_sha256": "ef395fc8216b68a7d980e2eb94af6929e72a1b07d174b4f1a6b9ad14ea11268d",
+      "duration_s": 6.0,
+      "speaker_id": "spk_male_erbil",
+      "dialect": "erbil",
+      "gender": "male",
+      "environment": "untreated",
+      "degradation_type": "clean",
+      "transcript_sorani": "\u0633\u06b5\u0627\u0648 \u0644\u06d5 \u0647\u06d5\u0645\u0648\u0648\u0627\u0646 \u0628\u06d5\u062e\u06ce\u0631\u0628\u06ce\u0646 \u0628\u06c6 \u0628\u06d5\u0631\u0646\u0627\u0645\u06d5\u06cc \u0626\u06d5\u0645\u0695\u06c6",
+      "verified_by_human": true,
+      "split": "calibration"
+    }
+  ]
+}

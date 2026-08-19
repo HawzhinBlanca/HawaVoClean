@@ -1,0 +1,125 @@
+{
+  "$defs": {
+    "CorpusItem": {
+      "additionalProperties": false,
+      "description": "Metadata schema for dataset manifests in calibration, benchmark, and acceptance sets.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "audio_path": {
+          "title": "Audio Path",
+          "type": "string"
+        },
+        "audio_sha256": {
+          "title": "Audio Sha256",
+          "type": "string"
+        },
+        "duration_s": {
+          "title": "Duration S",
+          "type": "number"
+        },
+        "speaker_id": {
+          "title": "Speaker Id",
+          "type": "string"
+        },
+        "dialect": {
+          "title": "Dialect",
+          "type": "string"
+        },
+        "gender": {
+          "enum": [
+            "male",
+            "female",
+            "unknown"
+          ],
+          "title": "Gender",
+          "type": "string"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "degradation_type": {
+          "title": "Degradation Type",
+          "type": "string"
+        },
+        "transcript_sorani": {
+          "title": "Transcript Sorani",
+          "type": "string"
+        },
+        "verified_by_human": {
+          "default": true,
+          "title": "Verified By Human",
+          "type": "boolean"
+        },
+        "split": {
+          "enum": [
+            "calibration",
+            "development",
+            "acceptance",
+            "corruption"
+          ],
+          "title": "Split",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "audio_path",
+        "audio_sha256",
+        "duration_s",
+        "speaker_id",
+        "dialect",
+        "gender",
+        "environment",
+        "degradation_type",
+        "transcript_sorani",
+        "split"
+      ],
+      "title": "CorpusItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Collection manifest for dataset splits.",
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "manifest_id": {
+      "title": "Manifest Id",
+      "type": "string"
+    },
+    "split_name": {
+      "title": "Split Name",
+      "type": "string"
+    },
+    "items_count": {
+      "title": "Items Count",
+      "type": "integer"
+    },
+    "manifest_sha256": {
+      "default": "",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/CorpusItem"
+      },
+      "title": "Items",
+      "type": "array"
+    }
+  },
+  "required": [
+    "manifest_id",
+    "split_name",
+    "items_count"
+  ],
+  "title": "CorpusManifest",
+  "type": "object"
+}
