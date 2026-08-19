@@ -6,6 +6,7 @@ response deadlines only.
 """
 
 import multiprocessing as mp
+import os
 import queue
 from typing import Any
 
@@ -35,6 +36,28 @@ def _worker_process_entry(
         return
 
     resp_queue.put({"type": "READY"})
+
+    # Parent-death watchdog on its own thread: a parent killed by
+    # SIGTERM/SIGKILL never runs its finally: blocks and daemon=True only
+    # covers normal interpreter exit, so the child must notice on its own —
+    # even mid-inference. Liveness is checked with kill(ppid, 0), which is
+    # reliable across platforms (getppid() can keep the old value after
+    # reparenting on some systems).
+    import threading
+
+    parent_pid = os.getppid()
+
+    def _watch_parent() -> None:
+        while True:
+            try:
+                os.kill(parent_pid, 0)
+            except (ProcessLookupError, PermissionError):
+                os._exit(0)
+            if os.getppid() != parent_pid:
+                os._exit(0)
+            threading.Event().wait(0.5)
+
+    threading.Thread(target=_watch_parent, daemon=True).start()
 
     while True:
         try:

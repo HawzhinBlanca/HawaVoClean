@@ -1,6 +1,7 @@
 """Command-Line Interface for HawaVoClean v1."""
 
 import argparse
+import contextlib
 import shutil
 import sys
 import tomllib
@@ -515,9 +516,27 @@ def cmd_blind_abx(args: argparse.Namespace) -> int:
     return int(ExitCode.SUCCESS)
 
 
+def _install_signal_handlers() -> None:
+    """Make SIGTERM unwind the stack like SIGINT does.
+
+    A bare SIGTERM kills the process without running finally: blocks, which
+    would orphan the isolated worker subprocess and skip workspace cleanup.
+    Raising KeyboardInterrupt lets every cleanup path run; the exit code
+    stays conventional (130).
+    """
+    import signal
+
+    def _raise(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    with contextlib.suppress(Exception):
+        signal.signal(signal.SIGTERM, _raise)
+
+
 def main() -> None:
     """CLI main entry point."""
     setup_logging()
+    _install_signal_handlers()
     parser = argparse.ArgumentParser(
         prog="hawavoclean",
         description=(
@@ -650,7 +669,11 @@ def main() -> None:
     p_abx.set_defaults(func=cmd_blind_abx)
 
     args = parser.parse_args()
-    code = args.func(args)
+    try:
+        code = args.func(args)
+    except KeyboardInterrupt:
+        sys.stderr.write("\nInterrupted.\n")
+        sys.exit(130)
     sys.exit(code)
 
 
