@@ -1,0 +1,8 @@
+# Electron dev dependency for the standalone shell
+com.hawavoclean.resolve/node_modules/
+
+# Generated at assembly/install time (never committed)
+com.hawavoclean.resolve/engine.json
+com.hawavoclean.resolve/WorkflowIntegration.node
+com.hawavoclean.resolve/index.html
+com.hawavoclean.resolve/assets/

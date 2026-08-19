@@ -1,0 +1,588 @@
+"""FastAPI application for the HawaVoClean engine bridge.
+
+``create_app(token, ui_dir)`` builds the app; ``run_server(...)`` binds a
+loopback socket, prints the single ``{"event":"ready",...}`` line to stdout
+and serves with uvicorn. Routes, shapes and rules: ``docs/ui-contract.md``.
+"""
+
+import asyncio
+import contextlib
+import hmac
+import ipaddress
+import json
+import logging
+import mimetypes
+import os
+import socket
+import sys
+import threading
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
+from typing import Any, Literal
+
+from fastapi import FastAPI, File, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
+from starlette.datastructures import Headers, QueryParams
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+from hawavoclean import __version__
+from hawavoclean.cli import _clean_stem
+from hawavoclean.errors import HawaVoCleanError, InvalidUserInputError
+from hawavoclean.logging import get_logger
+from hawavoclean.paths import work_root
+from hawavoclean.server.analysis import DEFAULT_BUCKETS, MAX_BUCKETS, analyze_audio
+from hawavoclean.server.jobs import TERMINAL_STATES, JobManager
+from hawavoclean.server.policy import PathPolicyError, resolve_client_path
+
+logger = get_logger("server")
+
+PROFILES: tuple[str, ...] = ("studio", "production")
+_OUTPUT_SUFFIX = {"studio": "_studio", "production": "_clean", "development": "_dev"}
+_AUDIO_MIME = {
+    ".wav": "audio/wav",
+    ".wave": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".mp4": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".flac": "audio/flac",
+    ".aac": "audio/aac",
+    ".mov": "video/quicktime",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".aiff": "audio/aiff",
+    ".aif": "audio/aiff",
+    ".webm": "audio/webm",
+}
+_STREAM_CHUNK = 256 * 1024
+SSE_MIN_INTERVAL_S = 0.05
+SSE_PING_INTERVAL_S = 15.0
+SHUTDOWN_DELAY_S = 0.2
+
+_HTTP_CODES = {
+    400: "bad_request",
+    401: "unauthorized",
+    403: "forbidden",
+    404: "not_found",
+    405: "method_not_allowed",
+    409: "conflict",
+    413: "payload_too_large",
+    416: "range_not_satisfiable",
+    422: "bad_request",
+    500: "internal_error",
+    503: "unavailable",
+}
+
+
+class ApiError(Exception):
+    """An endpoint-level error with the contract JSON shape."""
+
+    def __init__(
+        self, status: int, code: str, message: str, headers: dict[str, str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.headers = headers
+
+
+def error_response(
+    status: int, code: str, message: str, headers: dict[str, str] | None = None
+) -> JSONResponse:
+    return JSONResponse({"error": code, "message": message}, status_code=status, headers=headers)
+
+
+class TokenAuthMiddleware:
+    """Every ``/api/*`` request must carry the token: header ``X-Hawa-Token``
+    or query ``token`` (for ``EventSource`` and ``<audio src>``)."""
+
+    def __init__(self, app: ASGIApp, token: str) -> None:
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not str(scope.get("path", "")).startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+        supplied = Headers(scope=scope).get("x-hawa-token")
+        if supplied is None:
+            supplied = QueryParams(scope.get("query_string", b"")).get("token")
+        if not supplied or not hmac.compare_digest(
+            supplied.encode("utf-8"), self.token.encode("utf-8")
+        ):
+            response = error_response(401, "unauthorized", "missing or invalid X-Hawa-Token")
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+class AnalyzeRequest(BaseModel):
+    path: str
+    buckets: int = Field(default=DEFAULT_BUCKETS, ge=1, le=MAX_BUCKETS)
+
+
+class JobRequest(BaseModel):
+    input_path: str
+    profile: Literal["studio", "production", "development"]
+    output_path: str | None = None
+    overwrite: bool = False
+
+
+def default_output_path(input_path: Path, profile: str) -> Path:
+    """``<dir>/<stem>_studio.wav`` / ``<stem>_clean.wav`` with stacked audio
+    suffixes stripped (``Flute 09.m4a.mp4`` -> ``Flute 09``)."""
+    suffix = _OUTPUT_SUFFIX.get(profile, "_clean")
+    return input_path.parent / f"{_clean_stem(input_path)}{suffix}.wav"
+
+
+def content_type_for(path: Path) -> str:
+    mime = _AUDIO_MIME.get(path.suffix.lower())
+    if mime is None:
+        guessed, _ = mimetypes.guess_type(path.name)
+        mime = guessed or "application/octet-stream"
+    return mime
+
+
+def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
+    """Parse a single-range ``bytes=`` header into an inclusive ``(start, end)``.
+
+    Returns None when there is no usable Range header (serve the whole file);
+    raises :class:`ApiError` 416 for a syntactically valid but unsatisfiable
+    range."""
+    if not header:
+        return None
+    unit, _, spec = header.strip().partition("=")
+    if unit.strip().lower() != "bytes" or not spec:
+        return None
+    first = spec.split(",", 1)[0].strip()
+    start_s, dash, end_s = first.partition("-")
+    if not dash:
+        return None
+    unsatisfiable = {"Content-Range": f"bytes */{size}"}
+    try:
+        if start_s == "":
+            # suffix range: last N bytes
+            suffix = int(end_s)
+            if suffix <= 0:
+                raise ApiError(
+                    416, "range_not_satisfiable", "empty suffix range", headers=unsatisfiable
+                )
+            start = max(0, size - suffix)
+            end = size - 1
+        else:
+            start = int(start_s)
+            if end_s:
+                end = int(end_s)
+                if end < start:
+                    # Invalid byte-range-spec (explicit end before start):
+                    # ignore the whole header (RFC 9110 sec. 14.1.1).
+                    return None
+            else:
+                end = size - 1
+    except ValueError:
+        return None
+    if start >= size or start < 0:
+        # A 416 must carry Content-Range: bytes */<size>; Chromium's media
+        # stack uses it to recover the resource length when seeking.
+        raise ApiError(
+            416, "range_not_satisfiable", f"range {header!r} not satisfiable", headers=unsatisfiable
+        )
+    return start, min(end, size - 1)
+
+
+def _file_chunks(path: Path, start: int, end: int) -> Iterator[bytes]:
+    remaining = end - start + 1
+    with open(path, "rb") as f:
+        f.seek(start)
+        while remaining > 0:
+            chunk = f.read(min(_STREAM_CHUNK, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def ranged_file_response(
+    path: Path, range_header: str | None, *, head_only: bool = False
+) -> Response:
+    """200 (whole file) or 206 (partial) with ``Accept-Ranges``/``Content-Range``.
+    ``head_only`` answers a HEAD request: same status and headers, no body."""
+    size = path.stat().st_size
+    media_type = content_type_for(path)
+    rng = parse_range(range_header, size) if size > 0 else None
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
+    if rng is None:
+        status, start, end = 200, 0, size - 1
+        headers["Content-Length"] = str(size)
+    else:
+        status, (start, end) = 206, rng
+        headers["Content-Length"] = str(end - start + 1)
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    if head_only:
+        return Response(status_code=status, media_type=media_type, headers=headers)
+    body = _file_chunks(path, start, end) if size > 0 else iter(())
+    return StreamingResponse(body, status_code=status, media_type=media_type, headers=headers)
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+def create_app(
+    token: str,
+    ui_dir: Path | None = None,
+    *,
+    job_manager: JobManager | None = None,
+    on_shutdown: Callable[[], None] | None = None,
+) -> FastAPI:
+    """Build the engine app. ``on_shutdown`` runs (in a thread) shortly after
+    ``POST /api/shutdown`` has been answered; when omitted the process hard-exits."""
+    if not token:
+        raise ValueError("token must be non-empty")
+    manager = job_manager if job_manager is not None else JobManager()
+
+    def _hard_exit() -> None:  # pragma: no cover - process exit
+        os._exit(0)
+
+    shutdown_hook: Callable[[], None] = on_shutdown or _hard_exit
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        yield
+        await asyncio.to_thread(manager.shutdown)
+
+    app = FastAPI(title="HawaVoClean engine", version=__version__, lifespan=lifespan)
+    app.state.job_manager = manager
+    app.state.token = token
+    app.state.ui_dir = ui_dir
+
+    # Middleware: the last one added is outermost, so CORS wraps auth and
+    # browser preflights (which carry no token) are answered before auth.
+    app.add_middleware(TokenAuthMiddleware, token=token)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["X-Hawa-Token", "Content-Type", "Range"],
+        expose_headers=["Content-Range", "Accept-Ranges", "Content-Length"],
+    )
+
+    # --- error shape ---------------------------------------------------------
+    @app.exception_handler(ApiError)
+    async def _api_error(_req: Request, exc: ApiError) -> JSONResponse:
+        return error_response(exc.status, exc.code, exc.message, exc.headers)
+
+    @app.exception_handler(PathPolicyError)
+    async def _policy_error(_req: Request, exc: PathPolicyError) -> JSONResponse:
+        return error_response(exc.status, exc.code, exc.message)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(_req: Request, exc: StarletteHTTPException) -> JSONResponse:
+        detail = exc.detail
+        if isinstance(detail, dict) and "error" in detail:
+            return JSONResponse(detail, status_code=exc.status_code)
+        return error_response(
+            exc.status_code, _HTTP_CODES.get(exc.status_code, "http_error"), str(detail)
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_req: Request, exc: RequestValidationError) -> JSONResponse:
+        parts = []
+        for err in exc.errors():
+            loc = ".".join(str(x) for x in err.get("loc", ()) if x != "body")
+            parts.append(f"{loc}: {err.get('msg', 'invalid')}")
+        return error_response(400, "bad_request", "; ".join(parts) or "invalid request")
+
+    @app.exception_handler(HawaVoCleanError)
+    async def _engine_error(_req: Request, exc: HawaVoCleanError) -> JSONResponse:
+        status = 400 if isinstance(exc, InvalidUserInputError) else 500
+        return error_response(status, exc.exit_code.name.lower(), exc.message)
+
+    @app.exception_handler(Exception)
+    async def _unhandled(_req: Request, exc: Exception) -> JSONResponse:
+        logger.error(f"Unhandled error in engine API: {exc}", exc_info=True)
+        return error_response(500, "internal_error", f"{type(exc).__name__}: {exc}")
+
+    # --- routes ---------------------------------------------------------------
+    @app.get("/api/health")
+    async def health() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "version": __version__,
+            "profiles": list(PROFILES),
+            "engine_pid": os.getpid(),
+        }
+
+    @app.post("/api/analyze")
+    async def analyze(req: AnalyzeRequest) -> dict[str, Any]:
+        path = resolve_client_path(req.path, must_exist=True)
+        return await asyncio.to_thread(analyze_audio, path, req.buckets)
+
+    @app.post("/api/jobs", status_code=202)
+    async def create_job(req: JobRequest) -> dict[str, Any]:
+        input_path = resolve_client_path(req.input_path, must_exist=True)
+        if req.output_path:
+            output_path = resolve_client_path(req.output_path)
+        else:
+            output_path = default_output_path(input_path, req.profile)
+        if output_path.suffix.lower() != ".wav":
+            raise ApiError(400, "bad_request", "output_path must end in .wav")
+        try:
+            snap = manager.submit(
+                input_path=input_path,
+                output_path=output_path,
+                profile=req.profile,
+                overwrite=req.overwrite,
+            )
+        except RuntimeError as e:
+            raise ApiError(503, "unavailable", str(e)) from e
+        return {
+            "job_id": snap["job_id"],
+            "output_path": snap["output_path"],
+            "report_path": snap["report_path"],
+        }
+
+    @app.get("/api/jobs/{job_id}")
+    async def job_status(job_id: str) -> dict[str, Any]:
+        snap = manager.get_status(job_id)
+        if snap is None:
+            raise ApiError(404, "not_found", f"unknown job: {job_id}")
+        return snap
+
+    @app.get("/api/jobs/{job_id}/events")
+    async def job_events(job_id: str) -> StreamingResponse:
+        if manager.get_status(job_id) is None:
+            raise ApiError(404, "not_found", f"unknown job: {job_id}")
+        loop = asyncio.get_running_loop()
+
+        async def stream() -> AsyncIterator[str]:
+            # Subscribe inside the generator: a connection aborted before the
+            # body ever starts would otherwise leak the subscription (its
+            # finally block only runs once the generator has started).
+            queue = manager.subscribe(job_id)
+            if queue is None:  # pragma: no cover - table entries are never removed
+                yield _sse("end", {})
+                return
+            try:
+                snap = manager.get_status(job_id)
+                if snap is None:  # pragma: no cover - table entries are never removed
+                    yield _sse("end", {})
+                    return
+                yield _sse("status", snap)
+                last_sent = loop.time()
+                last_seq = int(snap["seq"])
+                while snap["state"] not in TERMINAL_STATES:
+                    try:
+                        snap = await asyncio.wait_for(queue.get(), timeout=SSE_PING_INTERVAL_S)
+                    except TimeoutError:
+                        yield ": ping\n\n"
+                        continue
+                    # Coalesce: snapshots are complete states, so only the
+                    # newest one matters. Throttle to >= 50 ms between sends.
+                    while not queue.empty():
+                        snap = queue.get_nowait()
+                    wait = SSE_MIN_INTERVAL_S - (loop.time() - last_sent)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                        while not queue.empty():
+                            snap = queue.get_nowait()
+                    if int(snap["seq"]) <= last_seq:
+                        continue  # queued before our initial snapshot: stale
+                    yield _sse("status", snap)
+                    last_sent = loop.time()
+                    last_seq = int(snap["seq"])
+                yield _sse("end", {})
+            finally:
+                manager.unsubscribe(job_id, queue)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    async def cancel_job(job_id: str) -> dict[str, Any]:
+        if not manager.cancel(job_id):
+            raise ApiError(404, "not_found", f"unknown job: {job_id}")
+        return {"ok": True}
+
+    @app.api_route("/api/audio", methods=["GET", "HEAD"])
+    async def audio(request: Request, path: str = "") -> Response:
+        resolved = resolve_client_path(path, must_exist=True)
+        return ranged_file_response(
+            resolved, request.headers.get("range"), head_only=request.method == "HEAD"
+        )
+
+    @app.post("/api/upload")
+    async def upload(file: UploadFile = File(...)) -> dict[str, str]:  # noqa: B008
+        name = Path(file.filename or "").name or "upload.bin"
+        if name in (".", ".."):  # Path("..").name == "..": would target the directory itself
+            name = "upload.bin"
+        dest_dir = work_root() / "uploads" / uuid.uuid4().hex
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / name
+        with open(dest, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        await file.close()
+        return {"path": str(dest)}
+
+    async def _shutdown_later() -> None:
+        await asyncio.sleep(SHUTDOWN_DELAY_S)
+        await asyncio.to_thread(shutdown_hook)
+
+    @app.post("/api/shutdown")
+    async def shutdown() -> Response:
+        return JSONResponse({"ok": True}, background=BackgroundTask(_shutdown_later))
+
+    @app.get("/api/{rest:path}")
+    @app.post("/api/{rest:path}")
+    async def _unknown_api(rest: str) -> Response:
+        raise ApiError(404, "not_found", f"no such endpoint: /api/{rest}")
+
+    if ui_dir is not None and (ui_dir / "index.html").is_file():
+        app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+    else:
+        if ui_dir is not None:
+            logger.warning(f"--ui-dir {ui_dir} has no index.html; serving API only")
+
+        @app.get("/{rest:path}")
+        async def _no_ui(rest: str) -> Response:
+            raise ApiError(404, "not_found", f"no UI bundle is being served (/{rest})")
+
+    return app
+
+
+def _validate_loopback(host: str) -> str:
+    """The engine binds loopback only. Returns the numeric host to bind."""
+    if host in ("localhost", ""):
+        return "127.0.0.1"
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError as e:
+        raise InvalidUserInputError(
+            f"--host must be a loopback address (127.0.0.1), got {host!r}"
+        ) from e
+    if not addr.is_loopback or addr.version != 4:
+        raise InvalidUserInputError(
+            f"--host must be an IPv4 loopback address (127.0.0.1), got {host!r}"
+        )
+    return str(addr)
+
+
+def bind_loopback_socket(host: str, port: int) -> socket.socket:
+    """Bind + listen on ``host:port`` (port 0 = OS-assigned) and return the socket."""
+    bind_host = _validate_loopback(host)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((bind_host, port))
+    sock.listen(128)
+    return sock
+
+
+def _schedule_hard_exit(delay_s: float) -> None:
+    """Backstop for ``POST /api/shutdown``: the contract promises exit within
+    1 s even if a client holds an SSE stream open through uvicorn's graceful
+    shutdown."""
+    timer = threading.Timer(delay_s, os._exit, args=(0,))
+    timer.daemon = True
+    timer.start()
+
+
+def _redirect_stdout_to_stderr() -> None:
+    """After the ready line, stdout belongs to nobody: point fd 1 at stderr so
+    a stray print from any library lands where the logs go."""
+    with contextlib.suppress(OSError, ValueError):
+        sys.stdout.flush()
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+
+
+def _configure_uvicorn_logging() -> None:
+    """uvicorn's own loggers: stderr only (its default config sends access
+    logs to stdout, which would corrupt the ready-line protocol)."""
+    uv_handler = logging.StreamHandler(sys.stderr)
+    uv_handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s")
+    )
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uv_logger = logging.getLogger(name)
+        uv_logger.handlers.clear()
+        uv_logger.addHandler(uv_handler)
+        uv_logger.setLevel(logging.INFO)
+        uv_logger.propagate = False
+
+
+def run_server(host: str, port: int, token: str, ui_dir: Path | None = None) -> int:
+    """Serve until ``POST /api/shutdown`` or SIGINT/SIGTERM. Prints the ready
+    line on stdout once the socket is listening; everything after that goes
+    to stderr (stdout is re-pointed at stderr so no library can pollute it)."""
+    import uvicorn
+
+    if not token:
+        raise InvalidUserInputError("--token must be non-empty")
+    if ui_dir is not None and not (ui_dir / "index.html").is_file():
+        raise InvalidUserInputError(f"--ui-dir has no index.html: {ui_dir}")
+
+    sock = bind_loopback_socket(host, port)
+    actual_port = int(sock.getsockname()[1])
+    _configure_uvicorn_logging()
+
+    manager = JobManager()
+    server_box: dict[str, Any] = {}
+
+    def request_shutdown() -> None:
+        _schedule_hard_exit(0.7)
+        manager.shutdown(grace_s=0.3)
+        server = server_box.get("server")
+        if server is not None:
+            server.should_exit = True
+
+    app = create_app(token, ui_dir, job_manager=manager, on_shutdown=request_shutdown)
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=actual_port,
+        log_config=None,
+        access_log=False,
+        lifespan="on",
+        timeout_graceful_shutdown=1,
+    )
+    server = uvicorn.Server(config)
+    server_box["server"] = server
+
+    ready = {"event": "ready", "port": actual_port, "pid": os.getpid(), "version": __version__}
+    sys.stdout.write(json.dumps(ready, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+    _redirect_stdout_to_stderr()
+    logger.info(f"HawaVoClean engine {__version__} listening on http://{host}:{actual_port}")
+
+    server.run(sockets=[sock])
+    manager.shutdown(grace_s=0.3)
+    return 0
+
+
+__all__ = [
+    "ApiError",
+    "JobManager",
+    "bind_loopback_socket",
+    "create_app",
+    "parse_range",
+    "ranged_file_response",
+    "run_server",
+]

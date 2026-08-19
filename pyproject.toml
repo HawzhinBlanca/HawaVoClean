@@ -33,6 +33,12 @@ dev = [
     "hypothesis>=6.98.0",
     "ruff>=0.3.0",
     "mypy>=1.9.0",
+    "httpx2>=2.0",
+]
+ui = [
+    "fastapi>=0.115",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30",
 ]
 
 [tool.uv]

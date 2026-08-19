@@ -5,6 +5,63 @@ All notable changes to the HawaVoClean system will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — engine bridge for the first UI screen (`docs/ui-contract.md`)
+- `hawavoclean serve --port 0 --token TOKEN [--ui-dir DIR]`: a loopback-only
+  FastAPI/uvicorn server (`hawavoclean/server/`). Binds 127.0.0.1 only (any
+  other `--host` is refused), requires the token on every `/api/*` request
+  (header `X-Hawa-Token` or `?token=`), prints exactly one
+  `{"event":"ready","port":…,"pid":…,"version":…}` line on stdout once it is
+  listening, and then re-points stdout at stderr so nothing else can ever
+  appear there. Routes: `GET /api/health`, `POST /api/analyze` (waveform
+  min/max/RMS buckets, sine-calibrated 1/12-octave long-term spectrum,
+  BS.1770 loudness, noise floor), `POST /api/jobs` + `GET /api/jobs/{id}` +
+  `GET /api/jobs/{id}/events` (SSE, ≥50 ms throttle, `: ping` keep-alive) +
+  `POST /api/jobs/{id}/cancel`, Range-capable `GET /api/audio`,
+  `POST /api/upload`, `POST /api/shutdown` (answers, then exits within 1 s),
+  optional static UI mount at `/`. Every error is `{"error","message"}` JSON.
+  Client paths must resolve under home, `/Volumes` or the work dir (403
+  otherwise): the engine never reads arbitrary files for a web page.
+- `hawavoclean/server/jobs.py`: child-process job manager. Each job is
+  `python -m hawavoclean.cli process IN -o OUT --profile P [--overwrite]
+  --progress-json` (the batch command's isolation pattern), one at a time,
+  FIFO queue, stdout JSON lines → status snapshots, stderr tail → failure
+  message, cancel = SIGTERM then SIGKILL after 5 s, asyncio-friendly
+  subscriptions for SSE. `JobStatus` carries two additive fields beyond the
+  contract: `created_at` and a monotonically increasing `seq`.
+- `hawavoclean process --progress-json`: one JSON object per line on stdout
+  (`progress` events, then `done` or `error`; logs stay on stderr). The
+  real stdout is kept on a private descriptor and fd 1 is pointed at stderr
+  for the rest of the run, so a library banner or the inherited enhancement
+  worker cannot corrupt the stream.
+- `run_pipeline(..., on_progress=)` with `hawavoclean/progress.py`
+  (`ProgressEvent`, `ProgressCallback`): preflight 0.02, decode 0.05,
+  segment 0.08, enhance/guard 0.08→0.80 linearly over units (one `enhance`
+  before and one `guard` after every unit, `NO_SPEECH` units included),
+  finish 0.80/0.95, publish 0.98. Callback exceptions are logged and
+  swallowed; the pipeline never fails because of a progress sink.
+- Python extra `ui = [fastapi, uvicorn, python-multipart]`; `httpx2` added to
+  `dev` for the FastAPI test client. Tests: `tests/unit/test_server_*.py`,
+  `tests/unit/test_progress_*.py` (≈80 tests, ~12 s; new modules ≥98 %
+  branch coverage).
+
+### Fixed — engine bridge review pass
+- `GET /api/audio` 416 responses now carry `Content-Range: bytes */<size>`
+  (RFC 9110; Chromium's media stack reads it to recover the resource length
+  when seeking), and a reversed explicit range (`bytes=5-2`) is treated as
+  an invalid spec — header ignored, whole file served — instead of a 416.
+- `/api/analyze` spectrum: 1/12-octave bands narrower than the FFT main
+  lobe (below ~400 Hz at 48 kHz) widen their integration window to it, so
+  the contract calibration rule (full-scale sine at a band centre ≈ 0 dB)
+  now holds at every band; a 40 Hz sine previously read ≈ −6 dB.
+- `POST /api/upload` with a bare `..`/`.` filename no longer targets the
+  upload directory itself (saved as `upload.bin`).
+- SSE subscriptions are registered inside the response generator, so a
+  connection aborted before the body starts can no longer leak a subscriber.
+- Job failure mapping tolerates a stderr drain thread kept alive past the
+  child by an orphaned grandchild (no more `deque mutated during iteration`).
+
 ## [3.2.0] - 2026-08-19
 
 ### Added — decay-gated late-reverb suppression (studio core v1.1.0)

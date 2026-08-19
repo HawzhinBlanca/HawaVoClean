@@ -50,6 +50,18 @@ from hawavoclean.logging import get_logger
 from hawavoclean.paths import models_dir, profile_config_path, resolve_calibration_file
 from hawavoclean.policy.continuity import enforce_source_continuity
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
+from hawavoclean.progress import (
+    PROGRESS_DECODE,
+    PROGRESS_FINISH_END,
+    PROGRESS_FINISH_START,
+    PROGRESS_PREFLIGHT,
+    PROGRESS_PUBLISH,
+    PROGRESS_SEGMENT,
+    ProgressCallback,
+    ProgressEvent,
+    emit_progress,
+    unit_progress,
+)
 from hawavoclean.report.schema import (
     CoreMetadata,
     EnvironmentMetadata,
@@ -173,8 +185,13 @@ def run_pipeline(
     profile: str = "production",
     overwrite: bool = False,
     probe_override: SpectralProbe | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> HawaVoCleanReport:
-    """Execute the complete end-to-end HawaVoClean pipeline."""
+    """Execute the complete end-to-end HawaVoClean pipeline.
+
+    ``on_progress`` (optional) receives a :class:`ProgressEvent` at every
+    stage boundary; exceptions it raises are logged and ignored.
+    """
     in_path = Path(input_path).resolve()
     out_path = Path(output_path).resolve()
 
@@ -232,6 +249,10 @@ def run_pipeline(
     )
     workspace.check_disk_space(media.samples * media.channels * 12, destination=out_path.parent)
     workspace.journal.append(JournalEvent.PREFLIGHT_PASSED)
+    emit_progress(
+        on_progress,
+        ProgressEvent("preflight", PROGRESS_PREFLIGHT, "Preflight checks passed"),
+    )
 
     try:
         return _run_after_preflight(
@@ -245,6 +266,7 @@ def run_pipeline(
             out_path,
             overwrite,
             probe_override,
+            on_progress,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
@@ -264,6 +286,7 @@ def _run_after_preflight(
     out_path: Path,
     overwrite: bool,
     probe_override: SpectralProbe | None,
+    on_progress: ProgressCallback | None = None,
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
     # 4. Decode and classify channels
@@ -285,6 +308,15 @@ def _run_after_preflight(
     audio_buf.channel_mode = channel_mode
     logger.info(f"Channel classification: {channel_mode}")
     workspace.journal.append(JournalEvent.AUDIO_DECODED, {"channel_mode": str(channel_mode)})
+    emit_progress(
+        on_progress,
+        ProgressEvent(
+            "decode",
+            PROGRESS_DECODE,
+            f"Decoded {audio_buf.duration_s:.1f} s @ {audio_buf.sample_rate / 1000.0:g} kHz, "
+            f"{audio_buf.channels} ch",
+        ),
+    )
 
     channels_to_process, duplicate_to_stereo = handle_channel_layout(audio_buf, channel_mode)
 
@@ -307,6 +339,15 @@ def _run_after_preflight(
         f"{len(channels_to_process)} processing channel(s)."
     )
     workspace.journal.append(JournalEvent.SEGMENTATION_COMPLETE, {"units_count": len(all_units)})
+    emit_progress(
+        on_progress,
+        ProgressEvent(
+            "segment",
+            PROGRESS_SEGMENT,
+            f"{len(all_units)} unit{'' if len(all_units) == 1 else 's'}",
+        ),
+    )
+    units_total = len(all_units)
 
     # 6. Models: isolated worker (or in-process core) and the fidelity probe
     core_registration = resolve_core(config.enhancement.core_id)
@@ -337,7 +378,7 @@ def _run_after_preflight(
     orig_core_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
     try:
-        for u in all_units:
+        for unit_no, u in enumerate(all_units, 1):
             ch_wave = channels_to_process[u.channel_id]
             core_orig = ch_wave[u.start_sample : u.end_sample]
             orig_core_waveforms.append(core_orig)
@@ -356,8 +397,28 @@ def _run_after_preflight(
                 )
                 cand_hashes.append(None)
                 unit_runtimes.append((time.perf_counter() - t_unit_start) * 1000.0)
+                emit_progress(
+                    on_progress,
+                    ProgressEvent(
+                        "guard",
+                        unit_progress(unit_no, units_total, done=True),
+                        f"Unit {unit_no}/{units_total}: NO_SPEECH",
+                        unit_index=unit_no,
+                        unit_total=units_total,
+                    ),
+                )
                 continue
 
+            emit_progress(
+                on_progress,
+                ProgressEvent(
+                    "enhance",
+                    unit_progress(unit_no, units_total, done=False),
+                    f"Enhancing unit {unit_no}/{units_total}",
+                    unit_index=unit_no,
+                    unit_total=units_total,
+                ),
+            )
             context_wave = ch_wave[u.context_start_sample : u.context_end_sample]
 
             enh_core: np.ndarray[Any, np.dtype[np.float32]] | None = None
@@ -397,6 +458,17 @@ def _run_after_preflight(
             decisions.append(pol_dec)
             cand_hashes.append(cand_sha256)
             unit_runtimes.append((time.perf_counter() - t_unit_start) * 1000.0)
+            verdict_label = "ENHANCED" if pol_dec.is_enhanced else pol_dec.guard_verdict.name
+            emit_progress(
+                on_progress,
+                ProgressEvent(
+                    "guard",
+                    unit_progress(unit_no, units_total, done=True),
+                    f"Unit {unit_no}/{units_total}: {verdict_label}",
+                    unit_index=unit_no,
+                    unit_total=units_total,
+                ),
+            )
 
         # 8. Source continuity — BEFORE records are built and units finished,
         # so a continuity revert is what gets finished, recorded, and stitched.
@@ -409,6 +481,10 @@ def _run_after_preflight(
             decisions = adjusted
 
         # 9. Finishing (Guard B) on surviving enhanced units, then records
+        emit_progress(
+            on_progress,
+            ProgressEvent("finish", PROGRESS_FINISH_START, "Finishing: EQ/limiter/loudness"),
+        )
         unit_decision_records: list[UnitDecisionRecord] = []
         final_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
@@ -570,6 +646,16 @@ def _run_after_preflight(
         seed_context=workspace.job_id,
     )
 
+    emit_progress(
+        on_progress,
+        ProgressEvent(
+            "finish",
+            PROGRESS_FINISH_END,
+            f"Mastered to {final_loudness.integrated_lufs:.1f} LUFS, "
+            f"{final_loudness.true_peak_dbtp:.1f} dBTP",
+        ),
+    )
+
     # 13. Audit report
     enhanced_cnt = sum(1 for r in unit_decision_records if r.final_decision == "enhanced")
     continuity_cnt = sum(
@@ -669,6 +755,7 @@ def _run_after_preflight(
     txt_str = generate_human_summary(report)
 
     # 14. Atomic publication, then workspace cleanup
+    emit_progress(on_progress, ProgressEvent("publish", PROGRESS_PUBLISH, "Publishing master"))
     dest_audio, dest_json, dest_txt = workspace.publish_atomically(
         temp_audio_path=tmp_out,
         destination_audio_path=out_path,

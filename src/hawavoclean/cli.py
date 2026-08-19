@@ -2,11 +2,13 @@
 
 import argparse
 import contextlib
+import json
+import os
 import shutil
 import sys
 import tomllib
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import numpy as np
 import scipy
@@ -29,6 +31,7 @@ from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.logging import get_logger, setup_logging
 from hawavoclean.paths import models_dir, profile_config_path
 from hawavoclean.pipeline import run_pipeline
+from hawavoclean.progress import ProgressEvent
 from hawavoclean.report.writer import load_json_report
 
 logger = get_logger("cli")
@@ -137,8 +140,54 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return int(ExitCode.PREFLIGHT_FAILURE)
 
 
+class _JsonLineSink:
+    """``--progress-json``: one JSON object per line on the ORIGINAL stdout.
+
+    The real stdout is duplicated to a private descriptor for the JSON
+    stream, and fd 1 is then pointed at stderr. Anything else that writes to
+    stdout afterwards — a stray ``print``, a library banner, the spawned
+    enhancement worker (which inherits fd 1) — lands on stderr, so the JSON
+    stream is never corrupted.
+    """
+
+    def __init__(self) -> None:
+        sys.stdout.flush()
+        self._stdout_fd = sys.stdout.fileno()
+        json_fd = os.dup(self._stdout_fd)
+        os.dup2(sys.stderr.fileno(), self._stdout_fd)
+        self._out = os.fdopen(json_fd, "w", encoding="utf-8", buffering=1)
+
+    def emit(self, obj: dict[str, Any]) -> None:
+        try:
+            self._out.write(json.dumps(obj, separators=(",", ":")) + "\n")
+            self._out.flush()
+        except OSError as e:  # reader went away: keep processing, log once
+            logger.warning(f"progress stream closed: {e}")
+
+    def close(self) -> None:
+        """Flush the stream and hand fd 1 back to the original stdout."""
+        with contextlib.suppress(OSError, ValueError):
+            self._out.flush()
+            os.dup2(self._out.fileno(), self._stdout_fd)
+            self._out.close()
+
+
 def cmd_process(args: argparse.Namespace) -> int:
     """Process an audio file through the HawaVoClean pipeline."""
+    sink = _JsonLineSink() if getattr(args, "progress_json", False) else None
+
+    def fail(code: ExitCode, prefix: str, e: BaseException) -> int:
+        logger.error(f"{prefix}: {e}")
+        if sink is not None:
+            sink.emit({"event": "error", "code": code.name, "message": str(e)})
+        return int(code)
+
+    on_progress = None
+    if sink is not None:
+
+        def on_progress(event: ProgressEvent) -> None:
+            sink.emit(event.to_dict())
+
     try:
         run_pipeline(
             input_path=args.input,
@@ -146,23 +195,41 @@ def cmd_process(args: argparse.Namespace) -> int:
             config_path=args.config,
             profile=args.profile,
             overwrite=args.overwrite,
+            on_progress=on_progress,
         )
+        if sink is not None:
+            out_path = Path(args.output).resolve()
+            sink.emit(
+                {
+                    "event": "done",
+                    "progress": 1.0,
+                    "output_path": str(out_path),
+                    "report_path": str(out_path.parent / f"{out_path.stem}.hawavoclean.json"),
+                }
+            )
         return int(ExitCode.SUCCESS)
     except PreflightError as e:
-        logger.error(f"Preflight failure: {e}")
-        return int(ExitCode.PREFLIGHT_FAILURE)
+        return fail(ExitCode.PREFLIGHT_FAILURE, "Preflight failure", e)
     except InvalidUserInputError as e:
-        logger.error(f"Invalid user input: {e}")
-        return int(ExitCode.INVALID_USER_INPUT)
+        return fail(ExitCode.INVALID_USER_INPUT, "Invalid user input", e)
     except PublicationError as e:
-        logger.error(f"Publication failure: {e}")
-        return int(ExitCode.PUBLICATION_FAILURE)
+        return fail(ExitCode.PUBLICATION_FAILURE, "Publication failure", e)
     except HawaVoCleanError as e:
-        logger.error(f"Processing error: {e}")
-        return int(e.exit_code)
+        return fail(e.exit_code, "Processing error", e)
     except Exception as e:
         logger.error(f"Unhandled error: {e}", exc_info=True)
+        if sink is not None:
+            sink.emit(
+                {
+                    "event": "error",
+                    "code": ExitCode.PUBLICATION_FAILURE.name,
+                    "message": f"{type(e).__name__}: {e}",
+                }
+            )
         return int(ExitCode.PUBLICATION_FAILURE)
+    finally:
+        if sink is not None:
+            sink.close()
 
 
 _AUDIO_SUFFIXES = {".wav", ".mp4", ".m4a", ".mp3", ".aac", ".flac", ".ogg", ".mov", ".aiff"}
@@ -533,6 +600,19 @@ def cmd_blind_abx(args: argparse.Namespace) -> int:
     return int(ExitCode.SUCCESS)
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Run the loopback HTTP engine bridge for the UI (docs/ui-contract.md)."""
+    try:
+        from hawavoclean.server.app import run_server
+    except ImportError as e:
+        exit_with_code(
+            ExitCode.PREFLIGHT_FAILURE,
+            f"The engine server needs the 'ui' extra ({e}). Install it with: uv sync --extra ui",
+        )
+    ui_dir = Path(args.ui_dir).resolve() if args.ui_dir else None
+    return run_server(host=args.host, port=int(args.port), token=args.token, ui_dir=ui_dir)
+
+
 def _install_signal_handlers() -> None:
     """Make SIGTERM unwind the stack like SIGINT does.
 
@@ -582,6 +662,11 @@ def main() -> None:
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"
     )
+    p_proc.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="Emit one JSON progress object per line on stdout (logs stay on stderr)",
+    )
     p_proc.set_defaults(func=cmd_process)
 
     # batch
@@ -607,6 +692,18 @@ def main() -> None:
         help="Hard deadline per file; a hung file is killed and the batch continues (default 1800)",
     )
     p_batch.set_defaults(func=cmd_batch)
+
+    # serve
+    p_serve = subparsers.add_parser(
+        "serve", help="Run the loopback HTTP engine bridge used by the HawaVoClean UI"
+    )
+    p_serve.add_argument("--host", default="127.0.0.1", help="Loopback address (default 127.0.0.1)")
+    p_serve.add_argument("--port", type=int, default=0, help="TCP port; 0 = OS-assigned (default)")
+    p_serve.add_argument(
+        "--token", required=True, help="Shared secret every /api request must carry"
+    )
+    p_serve.add_argument("--ui-dir", help="Directory with index.html + assets/ to serve at /")
+    p_serve.set_defaults(func=cmd_serve)
 
     # verify
     p_ver = subparsers.add_parser("verify", help="Verify output audio master against JSON report")

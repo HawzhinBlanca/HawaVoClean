@@ -1,0 +1,5 @@
+{
+  "command": ["/Users/hawzhin/HawaVoClean/.venv/bin/hawavoclean", "serve"],
+  "cwd": "/Users/hawzhin/HawaVoClean",
+  "env": {}
+}
