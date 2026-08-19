@@ -69,3 +69,40 @@ def test_limiter_enforces_ceiling_without_flat_tops(
         run = run + 1 if flag else 0
         max_run = max(max_run, run)
     assert max_run < 3, f"hard-clip signature: {max_run} consecutive samples pinned at ceiling"
+
+
+def test_gain_reduction_anticipates_the_peak() -> None:
+    """Reduction must be underway BEFORE the transient arrives (lookahead),
+    and must reach its minimum by the peak — not after it.
+
+    Without the anticipating envelope, the ceiling could still be met by a
+    crude global trim; this pins the mechanism, not just the outcome.
+    """
+    lookahead_ms = 5.0
+    lookahead = int(SR * lookahead_ms / 1000.0)
+    n = SR
+    p = n // 2
+    x = 0.1 * np.sin(2 * np.pi * 220 * np.arange(n) / SR)
+    x[p : p + 60] += 2.0 * np.hanning(60)  # one isolated transient, ~7 dB over
+    x = x.astype(np.float32)[None, :]
+
+    res = apply_lookahead_limiter(x, SR, ceiling_dbtp=CEILING_DBTP, lookahead_ms=lookahead_ms)
+    g = res.gain_envelope
+    assert g.size == n, "limiter must expose its gain envelope"
+
+    crest = p + 30  # the Hanning transient crests 30 samples after its onset
+
+    # 1. On time: the gain minimum is reached AT or BEFORE the crest, never
+    # after it (a shifted — rather than windowed-min — gain arrives late).
+    g_min = float(np.min(g))
+    assert float(np.min(g[: crest + 1])) <= g_min * 1.001, (
+        "gain reached its minimum only after the transient crest"
+    )
+    # 2. Anticipation: reduction is well underway before the crest arrives.
+    assert g[crest - 60] < 0.9, (
+        f"no anticipation: gain 60 samples before the crest is {g[crest - 60]:.4f}"
+    )
+    # 3. Monotone non-increasing while approaching the crest.
+    approach = g[crest - 100 : crest + 1]
+    assert np.all(np.diff(approach) <= 1e-6), "gain rose while approaching the transient"
+    assert lookahead > 0  # documents the fixture premise
