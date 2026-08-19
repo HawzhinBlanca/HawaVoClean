@@ -55,7 +55,7 @@ max_posterior_js_div = 0.30
 max_peak_js_div = 0.90
 max_timing_drift_ms = 75.0
 enforce_signal_integrity = true
-spectral_hole_thresh = 0.25
+spectral_hole_thresh = 0.10
 musical_noise_thresh = 0.30
 min_hf_preservation_ratio = 0.50
 

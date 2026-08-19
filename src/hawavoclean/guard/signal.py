@@ -98,11 +98,28 @@ def check_signal_integrity(
     else:
         cons_ratio = 1.0
 
-    # 4. Spectral hole detector (detecting localized zeroed-out subbands in candidate)
-    # Check ratio of energy drop across frequency bins
-    bin_ratio = (stft_cand + 1e-6) / (stft_orig + 1e-6)
-    spectral_holes = np.mean(bin_ratio < 0.05, axis=1)  # frames with >95% energy wiped in bins
-    spectral_hole_score = float(np.mean(spectral_holes))
+    # 4. Spectral hole detector: a band wiped out of the SIGNAL.
+    # Evaluate only active frames (original frame energy within 20 dB of the
+    # unit's loud reference) and only bins that carried real energy in the
+    # original (within 40 dB of that frame's peak). A lowered noise floor in
+    # the gaps between phrases is denoising, not a hole — counting it was a
+    # measured false-reject on clean restoration output. The score is the
+    # mean fraction of signal bins wiped per active frame, so a missing band
+    # registers proportionally to its share of the signal.
+    frame_energy = np.sqrt(np.mean(stft_orig**2, axis=1) + 1e-12)
+    loud_ref = float(np.percentile(frame_energy, 90))
+    active = frame_energy >= loud_ref * 10 ** (-20 / 20)
+    if np.any(active):
+        act_orig = stft_orig[active]
+        act_cand = stft_cand[active]
+        frame_peak = np.max(act_orig, axis=1, keepdims=True) + 1e-9
+        signal_bins = act_orig >= frame_peak * 10 ** (-40 / 20)
+        bin_ratio = (act_cand + 1e-6) / (act_orig + 1e-6)
+        wiped = (bin_ratio < 0.05) & signal_bins
+        per_frame = np.sum(wiped, axis=1) / np.maximum(np.sum(signal_bins, axis=1), 1)
+        spectral_hole_score = float(np.mean(per_frame))
+    else:
+        spectral_hole_score = 0.0
     if spectral_hole_score > spectral_hole_thresh:
         reasons.append(
             f"Spectral hole artifact detected: score {spectral_hole_score:.3f} > threshold {spectral_hole_thresh:.3f}"

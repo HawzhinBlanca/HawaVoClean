@@ -90,7 +90,7 @@ class GuardConfig(BaseFrozenModel):
     max_posterior_js_div: float = Field(default=0.25, ge=0.0, le=1.0)
     max_timing_drift_ms: float = Field(default=40.0, ge=5.0, le=200.0)
     enforce_signal_integrity: bool = True
-    spectral_hole_thresh: float = Field(default=0.15, ge=0.0, le=1.0)
+    spectral_hole_thresh: float = Field(default=0.10, ge=0.0, le=1.0)
     musical_noise_thresh: float = Field(default=0.20, ge=0.0, le=1.0)
     min_hf_preservation_ratio: float = Field(default=0.60, ge=0.0, le=1.0)
 

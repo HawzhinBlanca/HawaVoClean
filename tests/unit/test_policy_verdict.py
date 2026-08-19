@@ -49,9 +49,10 @@ def test_policy_enhancer_error_fails_closed() -> None:
 @pytest.mark.unit
 def test_enforce_continuity_reverts_cut_speech() -> None:
     orig = np.zeros(1000, dtype=np.float32)
-    # Unit 0 is reverted (original), Unit 1 is enhanced with forced boundary
-    u0 = SpeechUnit(0, 0, 0, 1000, 0, 1000, is_speech=True, forced_boundary=False)
-    u1 = SpeechUnit(1, 0, 1000, 2000, 1000, 2000, is_speech=True, forced_boundary=True)
+    # Unit 0 is reverted (original) and its END is a forced mid-speech cut;
+    # Unit 1, right across that cut, is enhanced -> timbre seam -> revert.
+    u0 = SpeechUnit(0, 0, 0, 1000, 0, 1000, is_speech=True, forced_boundary=True)
+    u1 = SpeechUnit(1, 0, 1000, 2000, 1000, 2000, is_speech=True, forced_boundary=False)
 
     d0 = UnitPolicyDecision(orig.copy(), False, 0.0, GuardVerdict.REVERT)
     d1 = UnitPolicyDecision(orig.copy() + 0.1, True, 1.0, GuardVerdict.PASS)

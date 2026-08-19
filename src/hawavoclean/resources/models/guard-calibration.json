@@ -1,15 +1,15 @@
 {
   "schema_version": 2,
-  "calibration_id": "feb4a90fc7237d36c9790d211506973ae00ceab63fb356d968b0eb7911826326",
+  "calibration_id": "2be7b34688153c61baaeb7b57291e68ebf745bced025f36283959e7e1c0a7682",
   "guard_id": "spectral-guard-v1",
   "probe_id": "spectral-signature-v1",
   "provenance": "Engineering defaults. These thresholds were chosen by inspection, not fitted to any corpus. Run 'hawavoclean calibrate' against a labelled corpus to measure real accept/revert rates; a measured artifact carries a 'metrics' block with a 'measured' provenance record.",
   "thresholds": {
-    "min_anchor_confidence": 0.50,
+    "min_anchor_confidence": 0.5,
     "max_posterior_js_div": 0.25,
     "max_timing_drift_ms": 75.0,
-    "spectral_hole_thresh": 0.15,
-    "musical_noise_thresh": 0.20,
-    "min_hf_preservation_ratio": 0.60
+    "spectral_hole_thresh": 0.1,
+    "musical_noise_thresh": 0.2,
+    "min_hf_preservation_ratio": 0.6
   }
 }

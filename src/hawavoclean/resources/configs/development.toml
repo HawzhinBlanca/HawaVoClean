@@ -43,7 +43,7 @@ min_anchor_confidence = 0.70
 max_posterior_js_div = 0.30
 max_timing_drift_ms = 50.0
 enforce_signal_integrity = true
-spectral_hole_thresh = 0.20
+spectral_hole_thresh = 0.10
 musical_noise_thresh = 0.25
 min_hf_preservation_ratio = 0.50
 

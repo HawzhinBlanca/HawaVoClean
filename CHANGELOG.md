@@ -5,6 +5,22 @@ All notable changes to the HawaVoClean system will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.1] - 2026-08-19
+
+### Fixed — guard precision, found by a DJI field recording
+- Spectral-hole detector scored a lowered noise floor in the GAPS between
+  phrases as "holes" (measured 0.66 on a clean denoise), rejecting good
+  restoration. It now evaluates only active frames and only bins that
+  carried signal in the original; the score is the fraction of signal bins
+  wiped. Thresholds rescaled to 0.10 (all profiles); calibration artifacts
+  re-derived. Red-first tests: a clean floor drop scores ~0; a real 1–3 kHz
+  wipe inside the signal is still caught.
+- Continuity rule fired on the wrong side: `forced_boundary` marks the cut
+  at a unit's END, but the rule also reverted for a reverted LEFT neighbour
+  across a natural pause. It now fires only across an actual forced cut
+  (enhanced audio meeting original across a mid-speech split). The
+  pre-existing test that encoded the old behaviour was corrected.
+
 ## [3.0.0] - 2026-08-19
 
 ### Renamed — HawaVoClean (formerly Hawzhin VoiceClean)

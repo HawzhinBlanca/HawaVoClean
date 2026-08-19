@@ -1,16 +1,16 @@
 {
   "schema_version": 2,
-  "calibration_id": "5ec67c33400c8175778d1275cae30ea15d8282c8f09d1d3532074425980da903",
+  "calibration_id": "74dd2731f0bb33fb3b668410f4ee3dffc2b6e670e9d8a50a84d55317dab1da0d",
   "guard_id": "spectral-guard-v1",
   "probe_id": "spectral-signature-v1",
-  "provenance": "Studio-profile thresholds, chosen 2026-08-19 against measured guard scores on a real recording processed by the studio core (StudioVoiceCore/DFN3): good restoration output measured mean_js 0.13-0.14, peak_js 0.63-0.68, envelope_correlation 0.99, consonant_retention 0.90-0.92, spectral_hole 0.02, musical_noise 0.07-0.08. Bounds are set roughly 2x the measured good-output values. The studio profile runs the guard in 'integrity' mode: spectral identity is NOT enforced (restoration changes the spectrum by design); timing, envelope, artifact, and collapse protections remain enforced.",
+  "provenance": "Studio-profile thresholds, chosen 2026-08-19 against measured guard scores on a real recording processed by the studio core (StudioVoiceCore/DFN3): good restoration output measured mean_js 0.13-0.14, peak_js 0.63-0.68, envelope_correlation 0.99, consonant_retention 0.90-0.92, spectral_hole 0.02, musical_noise 0.07-0.08. Bounds are set roughly 2x the measured good-output values. The studio profile runs the guard in 'integrity' mode: spectral identity is NOT enforced (restoration changes the spectrum by design); timing, envelope, artifact, and collapse protections remain enforced. 2026-08-19 revision: spectral_hole_thresh rescaled to 0.10 after the detector was changed to score only active frames and signal bins (measured false-reject on a DJI field recording: clean denoise scored 0.66 under the old all-frames metric, 0.00 under the new one).",
   "thresholds": {
-    "min_anchor_confidence": 0.50,
-    "max_posterior_js_div": 0.30,
-    "max_peak_js_div": 0.90,
+    "min_anchor_confidence": 0.5,
+    "max_posterior_js_div": 0.3,
+    "max_peak_js_div": 0.9,
     "max_timing_drift_ms": 75.0,
-    "spectral_hole_thresh": 0.25,
-    "musical_noise_thresh": 0.30,
-    "min_hf_preservation_ratio": 0.50
+    "spectral_hole_thresh": 0.1,
+    "musical_noise_thresh": 0.3,
+    "min_hf_preservation_ratio": 0.5
   }
 }

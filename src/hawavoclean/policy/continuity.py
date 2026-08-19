@@ -27,37 +27,39 @@ def enforce_source_continuity(
     def _same_channel(a: int, b: int) -> bool:
         return units[a].channel_id == units[b].channel_id
 
-    for i in range(num_units):
-        curr_unit = units[i]
-        curr_dec = adjusted_decisions[i]
+    # forced_boundary marks the cut at a unit's END (speech was split there).
+    # The boundary between unit i and i+1 is a forced cut iff units[i] carries
+    # the flag. Continuity is only at stake across such cuts: an enhanced unit
+    # meeting original audio across a forced cut is an audible timbre seam
+    # inside continuous speech. A natural pause boundary is never a seam.
+    def _forced_cut_between(left: int, right: int) -> bool:
+        return units[left].forced_boundary and _same_channel(left, right)
 
+    for i in range(num_units):
+        curr_dec = adjusted_decisions[i]
         if not curr_dec.is_enhanced:
             continue
 
-        # If current unit had a forced boundary (i.e. cut through speech)
-        if curr_unit.forced_boundary:
-            # Neighbours must lie on the SAME channel: the flat unit list
-            # concatenates channels, and units on different channels are
-            # never adjacent in time.
-            left_reverted = (
-                i > 0 and _same_channel(i, i - 1) and not adjusted_decisions[i - 1].is_enhanced
-            )
-            right_reverted = (
-                i < num_units - 1
-                and _same_channel(i, i + 1)
-                and not adjusted_decisions[i + 1].is_enhanced
-            )
+        seam = False
+        # Cut at this unit's end, original audio on the right
+        if i < num_units - 1 and _forced_cut_between(i, i + 1):
+            seam = not adjusted_decisions[i + 1].is_enhanced
+        # Cut at the previous unit's end, original audio on the left
+        if not seam and i > 0 and _forced_cut_between(i - 1, i):
+            seam = not adjusted_decisions[i - 1].is_enhanced
 
-            if left_reverted or right_reverted:
-                # Revert current unit to original to maintain smooth speech continuity
-                orig_wave = orig_core_waveforms[i]
-                adjusted_decisions[i] = UnitPolicyDecision(
-                    selected_waveform=orig_wave.copy(),
-                    is_enhanced=False,
-                    chosen_strength=0.0,
-                    guard_verdict=curr_dec.guard_verdict,
-                    guard_scores=curr_dec.guard_scores,
-                    decision_reason="Reverted by continuity rule: adjacent forced boundary connected to original audio.",
-                )
+        if seam:
+            orig_wave = orig_core_waveforms[i]
+            adjusted_decisions[i] = UnitPolicyDecision(
+                selected_waveform=orig_wave.copy(),
+                is_enhanced=False,
+                chosen_strength=0.0,
+                guard_verdict=curr_dec.guard_verdict,
+                guard_scores=curr_dec.guard_scores,
+                decision_reason=(
+                    "Reverted by continuity rule: forced mid-speech cut would seam "
+                    "enhanced audio against original audio."
+                ),
+            )
 
     return adjusted_decisions
