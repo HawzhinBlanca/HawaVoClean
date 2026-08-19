@@ -64,19 +64,42 @@ def detect_defects(
     fft_mag = np.mean(stft_mags, axis=0)
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
 
-    # 50Hz and 60Hz hum detection
-    hum_50_idx = np.argmin(np.abs(freqs - 50.0))
-    hum_60_idx = np.argmin(np.abs(freqs - 60.0))
-    mean_low_energy = float(np.mean(fft_mag[(freqs >= 30) & (freqs <= 100)])) + 1e-9
-
+    # 50/60 Hz mains hum: a dedicated long FFT on the low band. With the
+    # 2048-point analysis above there are only ~3 bins between 30-100 Hz at
+    # 48 kHz, so "hum bin > 4x the mean of the band" was mathematically
+    # impossible and de-hum never ran on real inputs. Here: 16384-point
+    # (~2.9 Hz bins at 48 kHz) and the hum bin is compared against the
+    # MEDIAN of the 30-150 Hz band EXCLUDING its own neighbourhood.
     has_hum = False
     hum_freq = 0.0
-    if fft_mag[hum_50_idx] > 4.0 * mean_low_energy:
-        has_hum = True
-        hum_freq = 50.0
-    elif fft_mag[hum_60_idx] > 4.0 * mean_low_energy:
-        has_hum = True
-        hum_freq = 60.0
+    n_hum_fft = 16384
+    if len(waveform) >= n_hum_fft:
+        hum_frames = max(1, min(16, (len(waveform) - n_hum_fft) // (n_hum_fft // 2) + 1))
+        hum_win = np.hanning(n_hum_fft)
+        hum_mag = np.zeros(n_hum_fft // 2 + 1, dtype=np.float64)
+        for i in range(hum_frames):
+            start = i * (n_hum_fft // 2)
+            hum_mag += np.abs(
+                np.fft.rfft(waveform[start : start + n_hum_fft] * hum_win, n=n_hum_fft)
+            )
+        hum_mag /= hum_frames
+        hum_freqs = np.fft.rfftfreq(n_hum_fft, d=1.0 / sample_rate)
+        band = (hum_freqs >= 30.0) & (hum_freqs <= 150.0)
+        best_ratio = 0.0
+        for target in (50.0, 60.0):
+            idx = int(np.argmin(np.abs(hum_freqs - target)))
+            lo = max(0, idx - 2)
+            hi = min(len(hum_mag), idx + 3)
+            peak = float(np.max(hum_mag[lo:hi]))
+            neighbourhood = np.zeros_like(band)
+            neighbourhood[lo:hi] = True
+            ref_bins = band & ~neighbourhood
+            floor = float(np.median(hum_mag[ref_bins])) + 1e-9 if np.any(ref_bins) else 1e-9
+            ratio = peak / floor
+            if ratio > 8.0 and ratio > best_ratio:
+                best_ratio = ratio
+                has_hum = True
+                hum_freq = float(hum_freqs[lo + int(np.argmax(hum_mag[lo:hi]))])
 
     # 3. Click / Transient spike detection
     diff = np.abs(np.diff(waveform))
@@ -96,12 +119,17 @@ def detect_defects(
     e_pres = float(np.mean(fft_mag[pres_bins])) + 1e-9
     mud_imbalance_db = float(20.0 * np.log10(e_mud / e_pres))
 
-    # 6. Sibilance (5kHz - 10kHz vs overall mid band)
+    # 6. Sibilance (5kHz - 10kHz vs overall mid band); at low sample rates
+    # the sibilance band may lie above Nyquist — then there is no sibilance
+    # to measure, not a NaN.
     sib_bins = (freqs >= 5000) & (freqs <= 10000)
     mid_bins = (freqs >= 1000) & (freqs <= 4000)
-    e_sib = float(np.mean(fft_mag[sib_bins])) + 1e-9
-    e_mid = float(np.mean(fft_mag[mid_bins])) + 1e-9
-    sib_ratio = float(e_sib / e_mid)
+    if np.any(sib_bins) and np.any(mid_bins):
+        e_sib = float(np.mean(fft_mag[sib_bins])) + 1e-9
+        e_mid = float(np.mean(fft_mag[mid_bins])) + 1e-9
+        sib_ratio = float(e_sib / e_mid)
+    else:
+        sib_ratio = 0.0
     has_harsh_sibilance = sib_ratio > 1.8
 
     return DefectDetectionReport(

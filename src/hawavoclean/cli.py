@@ -245,6 +245,23 @@ def cmd_batch(args: argparse.Namespace) -> int:
     if not inputs:
         exit_with_code(ExitCode.INVALID_USER_INPUT, "No input files to process.")
 
+    # Two inputs that clean to the same stem ('a.wav' and 'a.m4a') would
+    # silently overwrite (or silently skip) each other. Refuse up front.
+    dest_to_srcs: dict[Path, list[Path]] = {}
+    for src in inputs:
+        dest_to_srcs.setdefault(out_dir / f"{_clean_stem(src)}{args.suffix}.wav", []).append(src)
+    collisions = {d: srcs for d, srcs in dest_to_srcs.items() if len(srcs) > 1}
+    if collisions:
+        lines = [
+            f"  {d.name}  <-  {', '.join(x.name for x in srcs)}" for d, srcs in collisions.items()
+        ]
+        exit_with_code(
+            ExitCode.INVALID_USER_INPUT,
+            "Output name collision: these inputs would write the same file:\n"
+            + "\n".join(lines)
+            + "\nRename the inputs or run them in separate batches.",
+        )
+
     results: list[tuple[str, str]] = []
     failed = 0
     for i, src in enumerate(inputs, 1):
@@ -674,6 +691,11 @@ def main() -> None:
     except KeyboardInterrupt:
         sys.stderr.write("\nInterrupted.\n")
         sys.exit(130)
+    except HawaVoCleanError as e:
+        # Every subcommand maps known failures to their documented exit code —
+        # not just `process`. No tracebacks for user-facing errors.
+        logger.error(str(e))
+        sys.exit(int(e.exit_code))
     sys.exit(code)
 
 

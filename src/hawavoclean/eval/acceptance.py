@@ -118,6 +118,8 @@ def evaluate_acceptance_gates(
                 f"{MIN_ENHANCED_SPEECH_FRACTION:.0%} floor; the tool did essentially nothing"
             )
 
+    if total_items == 0:
+        corpus_failures.append("manifest contains no items; an empty gate proves nothing")
     status = "PASSED" if (passed_items == total_items and not corpus_failures) else "FAILED"
     return {
         "manifest_sha256": manifest.manifest_sha256,

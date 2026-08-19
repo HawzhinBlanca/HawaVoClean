@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 
 from hawavoclean.audio.types import AudioBuffer, ChannelMode
-from hawavoclean.errors import AmbiguousStereoError
+from hawavoclean.errors import AmbiguousStereoError, InvalidUserInputError
 
 
 def classify_channels(
@@ -15,9 +15,26 @@ def classify_channels(
     """Classify channel relationship or validate explicit user configuration."""
     if declared_mode != "auto":
         try:
-            return ChannelMode(declared_mode)
+            mode = ChannelMode(declared_mode)
         except ValueError as e:
             raise ValueError(f"Unknown channel_mode '{declared_mode}'") from e
+        # A declared mode that contradicts the file fails HERE, not after the
+        # whole pipeline has run ('Assembled output channels 1 != 2').
+        if mode == ChannelMode.MONO and buffer.channels != 1:
+            raise InvalidUserInputError(
+                f"channel_mode 'mono' declared but the file has {buffer.channels} channels; "
+                "use 'dual_mono_same' (identical channels) or 'split_speakers'"
+            )
+        if mode in (ChannelMode.DUAL_MONO_SAME, ChannelMode.SPLIT_SPEAKERS) and buffer.channels < 2:
+            raise InvalidUserInputError(
+                f"channel_mode '{declared_mode}' declared but the file is mono"
+            )
+        if mode == ChannelMode.AMBIGUOUS_STEREO:
+            raise InvalidUserInputError(
+                "channel_mode 'ambiguous_stereo' is a classification result, not a declaration; "
+                "declare 'dual_mono_same' or 'split_speakers'"
+            )
+        return mode
 
     channels = buffer.channels
     if channels == 1:
@@ -58,7 +75,8 @@ def classify_channels(
             f"Input stereo channels exhibit correlation={correlation:.3f} and level_ratio={level_ratio:.2f}. "
             "Auto-classification returned 'ambiguous_stereo'. "
             "To prevent phase/spatial corruption, declare channel_mode in config explicitly: "
-            "'mono', 'dual_mono_same', or 'split_speakers'."
+            "'dual_mono_same' (channels carry the same signal) or 'split_speakers' "
+            "(one speaker per channel)."
         )
 
     raise AmbiguousStereoError(

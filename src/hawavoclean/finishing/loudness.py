@@ -23,13 +23,26 @@ def measure_loudness_and_peaks(
     """Measure integrated LUFS, loudness range, sample peak, and oversampled true peak."""
     channels, samples = waveform.shape
     if samples < sample_rate * 0.4:
-        # File is too short for standard gating (<400ms)
-        sample_peak = float(np.max(np.abs(waveform)))
+        # Too short for BS.1770 gating (<400 ms). Use the ungated mean-square
+        # loudness (-0.691 + 10 log10 of channel-summed mean square), which
+        # is what the gated measure converges to for short steady content —
+        # NOT the sample peak, which sat ~9 dB higher and produced a gain
+        # jump at the 400 ms boundary. True peak is still oversampled.
+        from hawavoclean.finishing.truepeak import true_peak_linear
+
+        sample_peak = float(np.max(np.abs(waveform))) if samples else 0.0
         sp_db = float(20.0 * np.log10(sample_peak + 1e-9))
+        if sample_peak < 1e-4:
+            return LoudnessMeasurement(
+                integrated_lufs=-70.0, sample_peak_dbfs=sp_db, true_peak_dbtp=sp_db
+            )
+        mean_sq = float(np.sum(np.mean(waveform.astype(np.float64) ** 2, axis=1)))
+        ungated_lufs = float(-0.691 + 10.0 * np.log10(mean_sq + 1e-20))
+        tp = true_peak_linear(waveform, factor=4)
         return LoudnessMeasurement(
-            integrated_lufs=-70.0 if sample_peak < 1e-4 else sp_db,
+            integrated_lufs=ungated_lufs,
             sample_peak_dbfs=sp_db,
-            true_peak_dbtp=sp_db,
+            true_peak_dbtp=float(20.0 * np.log10(tp + 1e-9)),
         )
 
     # Transpose for pyloudnorm (samples, channels)
@@ -48,12 +61,10 @@ def measure_loudness_and_peaks(
     sample_peak = float(np.max(np.abs(waveform)))
     sample_peak_dbfs = float(20.0 * np.log10(sample_peak + 1e-9))
 
-    # 3. 4x Oversampled True Peak calculation
-    # Resample 4x to capture inter-sample peaks
-    from scipy.signal import resample_poly
+    # 3. 4x oversampled true peak, computed chunk-wise (memory-bounded)
+    from hawavoclean.finishing.truepeak import true_peak_linear
 
-    oversampled = resample_poly(waveform, up=4, down=1, axis=-1)
-    true_peak = float(np.max(np.abs(oversampled)))
+    true_peak = true_peak_linear(waveform, factor=4)
     true_peak_dbtp = float(20.0 * np.log10(true_peak + 1e-9))
 
     return LoudnessMeasurement(

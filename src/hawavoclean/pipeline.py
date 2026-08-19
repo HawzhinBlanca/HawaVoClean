@@ -5,6 +5,7 @@ report always describes the run that produced it. The scratch workspace is
 removed on success and survives only a genuine crash, for forensics.
 """
 
+import os
 import platform
 import time
 import tomllib
@@ -28,7 +29,13 @@ from hawavoclean.config import HawaVoCleanConfig, load_config
 from hawavoclean.enhancement.factory import resolve_core
 from hawavoclean.enhancement.validate import validate_enhancer_output
 from hawavoclean.enhancement.worker import IsolatedEnhancementWorker
-from hawavoclean.errors import PreflightError
+from hawavoclean.errors import (
+    CalibrationError,
+    ConfigError,
+    HawaVoCleanError,
+    PreflightError,
+    PublicationError,
+)
 from hawavoclean.finishing.limiter import apply_lookahead_limiter
 from hawavoclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
 from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
@@ -65,6 +72,43 @@ FINAL_DECISION_BY_VERDICT: dict[GuardVerdict, str] = {
     GuardVerdict.ERROR: "original_error",
     GuardVerdict.REVERT: "original_reverted",
 }
+
+
+def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> None:
+    """Refuse destinations that would destroy the source or cannot be written,
+    BEFORE decoding a single sample.
+
+    - output == input (or a report sidecar == input) would overwrite the
+      source: the one thing this tool promises never to do.
+    - an existing destination without --overwrite is refused here, not after
+      minutes of processing.
+    - an unwritable destination directory is refused here, cleanly.
+    """
+    sidecars = (
+        out_path,
+        out_path.parent / f"{out_path.stem}.hawavoclean.json",
+        out_path.parent / f"{out_path.stem}.hawavoclean.txt",
+    )
+    for candidate in sidecars:
+        if candidate == in_path:
+            raise PublicationError(
+                f"Refusing to write output over the input: {in_path}. "
+                "Choose a different output path."
+            )
+    if not overwrite and any(c.exists() for c in sidecars):
+        raise PublicationError(
+            f"Destination output file already exists and overwrite=False: {out_path} "
+            "(pass --overwrite to replace it)"
+        )
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        probe_file = out_path.parent / f".hawavoclean-writable-{os.getpid()}"
+        probe_file.write_bytes(b"")
+        probe_file.unlink()
+    except OSError as e:
+        raise PublicationError(
+            f"Destination directory is not writable: {out_path.parent} ({e})"
+        ) from e
 
 
 def _load_core_lock(core_id: str) -> dict[str, Any]:
@@ -135,6 +179,7 @@ def run_pipeline(
     out_path = Path(output_path).resolve()
 
     logger.info(f"Starting HawaVoClean pipeline on {in_path} -> {out_path} [profile={profile}]")
+    _preflight_destination(in_path, out_path, overwrite)
 
     # 1. Configuration, calibration, and core provenance preflight
     is_prod = profile == "production"
@@ -144,9 +189,27 @@ def run_pipeline(
 
     calib_path = resolve_calibration_file(config.guard.calibration_file)
     calib_data = load_calibration_artifact(calib_path)
+    if hash_json_canonical(calib_data["thresholds"]) != calib_data.get("calibration_id"):
+        raise CalibrationError(
+            f"Guard calibration artifact {calib_path} has been edited: calibration_id "
+            "does not recompute from its thresholds. Refusing to run with a tampered guard."
+        )
     active_guard_cfg = apply_calibrated_thresholds(config.guard, calib_data)
 
     core_lock = _load_core_lock(config.enhancement.core_id)
+    if bool(core_lock.get("phase_coherent", True)) != config.enhancement.phase_coherent:
+        raise ConfigError(
+            f"enhancement.phase_coherent = {config.enhancement.phase_coherent} but core "
+            f"{config.enhancement.core_id!r} is "
+            f"{'phase-coherent' if core_lock.get('phase_coherent', True) else 'NOT phase-coherent'}; "
+            "the report would misstate the core and the policy would blend residuals incorrectly."
+        )
+    expected_rates = [int(r) for r in core_lock.get("expected_sample_rates", [])]
+    if expected_rates and config.enhancement.model_sample_rate not in expected_rates:
+        raise ConfigError(
+            f"enhancement.model_sample_rate = {config.enhancement.model_sample_rate} but core "
+            f"{config.enhancement.core_id!r} runs at {expected_rates}"
+        )
 
     # 2. Probe media
     media = probe_audio(in_path, max_sample_rate=config.input.max_sample_rate)
@@ -170,6 +233,39 @@ def run_pipeline(
     workspace.check_disk_space(media.samples * media.channels * 12, destination=out_path.parent)
     workspace.journal.append(JournalEvent.PREFLIGHT_PASSED)
 
+    try:
+        return _run_after_preflight(
+            config,
+            active_guard_cfg,
+            calib_data,
+            core_lock,
+            media,
+            workspace,
+            in_path,
+            out_path,
+            overwrite,
+            probe_override,
+        )
+    except HawaVoCleanError:
+        # Known, reported failures (bad input, refused destination, ...) must
+        # not leak a scratch workspace; a genuine crash keeps it for forensics.
+        workspace.cleanup()
+        raise
+
+
+def _run_after_preflight(
+    config: HawaVoCleanConfig,
+    active_guard_cfg: Any,
+    calib_data: dict[str, Any],
+    core_lock: dict[str, Any],
+    media: AudioProbeResult,
+    workspace: JobWorkspace,
+    in_path: Path,
+    out_path: Path,
+    overwrite: bool,
+    probe_override: SpectralProbe | None,
+) -> HawaVoCleanReport:
+    """Everything after preflight; split out so the caller can scope cleanup."""
     # 4. Decode and classify channels
     audio_buf = decode_audio(media, timeout_s=config.runtime.worker_timeout_s)
     if media.samples != audio_buf.samples:
@@ -220,6 +316,7 @@ def run_pipeline(
             sample_rate=config.enhancement.model_sample_rate,
             timeout_s=config.runtime.worker_timeout_s,
             enhancer_class=core_registration.enhancer_class,
+            phase_coherent=config.enhancement.phase_coherent,
         )
     else:
         worker = core_registration.enhancer_class(

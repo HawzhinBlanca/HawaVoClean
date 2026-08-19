@@ -39,7 +39,9 @@ def assemble_channel_timeline(
         # the correction is a decaying offset, not duplicated content.
         if i > 0 and crossfade_samples > 0:
             prev_unit = units[i - 1]
-            if prev_unit.end_sample == start and not unit.forced_boundary and start > 0:
+            # forced_boundary marks the cut at a unit's END: the joint at
+            # `start` is a forced mid-speech cut iff PREV_unit carries the flag.
+            if prev_unit.end_sample == start and not prev_unit.forced_boundary and start > 0:
                 fade_n = min(
                     crossfade_samples,
                     core_len // 4,

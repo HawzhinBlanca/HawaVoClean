@@ -54,8 +54,30 @@ def evaluate_guard_pass(
             cached_orig_probe or probe.infer(orig_waveform, sample_rate),
         )
 
+    # Step 0: structural sanity — these are not judgement calls, they are
+    # hard failures. Every later check compares nan > thresh == False, so a
+    # non-finite candidate would otherwise FAIL OPEN straight to PASS.
+    if len(cand_waveform) == 0 or len(cand_waveform) != len(orig_waveform):
+        return (
+            GuardEvaluationResult(
+                verdict=GuardVerdict.REVERT,
+                scores={"cand_len": len(cand_waveform), "orig_len": len(orig_waveform)},
+                reasons=[f"Candidate length {len(cand_waveform)} != original {len(orig_waveform)}"],
+            ),
+            cached_orig_probe or probe.infer(orig_waveform, sample_rate),
+        )
+    if not np.all(np.isfinite(cand_waveform)):
+        return (
+            GuardEvaluationResult(
+                verdict=GuardVerdict.REVERT,
+                scores={"non_finite_samples": int(np.sum(~np.isfinite(cand_waveform)))},
+                reasons=["Candidate contains NaN/Inf samples"],
+            ),
+            cached_orig_probe or probe.infer(orig_waveform, sample_rate),
+        )
+
     try:
-        # Step 1: ASR inference
+        # Step 1: Probe inference
         orig_probe = cached_orig_probe or probe.infer(orig_waveform, sample_rate)
         cand_probe = probe.infer(cand_waveform, sample_rate)
 
@@ -113,7 +135,7 @@ def evaluate_guard_pass(
         scores["timing_drift_ms"] = timing_res.max_drift_ms
 
         if not timing_res.passed:
-            reasons.extend(timing_res.failure_reasons)
+            reasons.extend(timing_res.failure_reasons or ["Timing integrity check failed"])
 
         # Step 5: Acoustic Signal integrity
         if config.enforce_signal_integrity:

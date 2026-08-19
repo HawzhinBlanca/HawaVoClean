@@ -16,6 +16,7 @@ import scipy.ndimage
 import scipy.signal
 
 from hawavoclean.errors import OutputValidationError
+from hawavoclean.finishing.truepeak import oversampled_peak_envelope, true_peak_linear
 
 
 @dataclass(frozen=True)
@@ -31,9 +32,8 @@ class LimiterResult:
 
 
 def _true_peak_8x(waveform: np.ndarray[Any, np.dtype[np.float32]]) -> float:
-    """8x oversampled true peak in float64 across all channels."""
-    over = scipy.signal.resample_poly(waveform.astype(np.float64), up=8, down=1, axis=-1)
-    return float(np.max(np.abs(over)))
+    """8x oversampled true peak across all channels, memory-bounded."""
+    return true_peak_linear(waveform, factor=8)
 
 
 def _slope_limited_min_envelope(
@@ -48,16 +48,22 @@ def _slope_limited_min_envelope(
     n = len(gain)
     if lookahead <= 0 or n == 0:
         return np.asarray(gain, dtype=np.float32)
-    delta = 1.0 / float(lookahead)
-    env = gain.astype(np.float64)
+    delta = np.float32(1.0 / float(lookahead))
+    # In-place float32 doubling: each step needs one scratch array of the
+    # same size (not two), and no float64 promotion — memory stays at
+    # ~2 arrays of n float32 instead of ~4 arrays of n float64.
+    env = np.array(gain, dtype=np.float32, copy=True)
+    scratch = np.empty_like(env)
     shift = 1
     while shift <= lookahead:
         if shift >= n:
             break  # nothing left to look ahead into
-        shifted = np.concatenate([env[shift:], np.full(shift, np.inf)]) + shift * delta
-        env = np.minimum(env, shifted)
+        np.add(env[shift:], np.float32(shift) * delta, out=scratch[: n - shift])
+        scratch[n - shift :] = np.inf
+        np.minimum(env, scratch, out=env)
         shift *= 2
-    return np.asarray(np.minimum(env, 1.0), dtype=np.float32)
+    np.minimum(env, np.float32(1.0), out=env)
+    return env
 
 
 def apply_lookahead_limiter(
@@ -76,15 +82,8 @@ def apply_lookahead_limiter(
     lookahead_samples = int(round(sample_rate * (lookahead_ms / 1000.0)))
     release_coeff = float(np.exp(-1.0 / (sample_rate * (release_ms / 1000.0))))
 
-    # 1. 4x oversampled peak envelope, folded back to one value per sample.
-    oversampled = scipy.signal.resample_poly(waveform, up=4, down=1, axis=-1)
-    max_env_4x = np.max(np.abs(oversampled), axis=0)
-    pad_rem = (4 - (len(max_env_4x) % 4)) % 4
-    if pad_rem > 0:
-        max_env_4x = np.pad(max_env_4x, (0, pad_rem), mode="constant")
-    peak_envelope = np.max(max_env_4x.reshape(-1, 4), axis=1)[:samples]
-    if len(peak_envelope) < samples:
-        peak_envelope = np.pad(peak_envelope, (0, samples - len(peak_envelope)), mode="edge")
+    # 1. 4x oversampled peak envelope, one value per sample, chunk-wise.
+    peak_envelope = oversampled_peak_envelope(waveform, factor=4)
 
     # 2. Required instantaneous gain per sample.
     inst_gain = np.ones(samples, dtype=np.float32)
@@ -102,27 +101,30 @@ def apply_lookahead_limiter(
         )
     else:
         windowed_min = inst_gain
+    del peak_envelope, inst_gain  # consumed; free before the next full-size array
     anticipated = _slope_limited_min_envelope(windowed_min, lookahead_samples)
+    del windowed_min
 
     # 4. Asymmetric smoothing: instantaneous attack (already ramped by the
     # envelope), one-pole release. The smoothed gain never exceeds the
     # anticipated envelope, so every sample stays within its required gain.
-    smooth_gain = np.ones(samples, dtype=np.float32)
+    # Smoothing is done IN PLACE on `anticipated` (it becomes smooth_gain).
+    smooth_gain = anticipated
     current_g = 1.0
     for i in range(samples):
-        target = float(anticipated[i])
+        target = float(smooth_gain[i])
         current_g = target if target < current_g else target + release_coeff * (current_g - target)
         smooth_gain[i] = current_g
 
-    limited = (waveform * smooth_gain).astype(np.float32)
+    limited = np.multiply(waveform, smooth_gain, dtype=np.float32)
 
     # 5. Verified ceiling: inter-sample peaks can still exceed the envelope
     # estimate marginally; a single transparent trim closes the gap. No clip.
     tp = _true_peak_8x(limited)
     if tp > ceiling_linear:
-        trim = (ceiling_linear / tp) * (1.0 - 1e-6)
-        limited = (limited * trim).astype(np.float32)
-        smooth_gain = (smooth_gain * trim).astype(np.float32)
+        trim = np.float32((ceiling_linear / tp) * (1.0 - 1e-6))
+        np.multiply(limited, trim, out=limited)
+        np.multiply(smooth_gain, trim, out=smooth_gain)
         tp = _true_peak_8x(limited)
     if tp > ceiling_linear:
         raise OutputValidationError(

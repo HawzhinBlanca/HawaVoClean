@@ -51,20 +51,39 @@ def estimate_gcc_phat_delay(
     cc = np.fft.fftshift(cc)
 
     mid = len(cc) // 2
-    max_lag_samples = int(round(sample_rate * (max_delay_ms / 1000.0)))
+    # The search window can never exceed the half-spectrum, or the slice
+    # start goes negative and Python's clamping returns garbage lags.
+    max_lag_samples = min(int(round(sample_rate * (max_delay_ms / 1000.0))), mid)
     search_region = cc[mid - max_lag_samples : mid + max_lag_samples + 1]
 
     peak_idx = int(np.argmax(search_region))
     peak_val = float(search_region[peak_idx])
-    int_lag = peak_idx - max_lag_samples
 
-    # Parabolic sub-sample fractional interpolation
+    # A flat cross-correlation (silent candidate or original) has no peak;
+    # argmax returns index 0 (= -max_lag) which is not a measurement.
+    if peak_val < 1e-6 or not np.isfinite(peak_val):
+        return DelayAlignmentResult(
+            delay_samples=0.0,
+            delay_ms=0.0,
+            correlation_peak=0.0,
+            aligned_candidate=cand.copy(),
+            passed=True,
+        )
+
+    # cc = irfft(X1 * conj(X2)) peaks at lag k where cand[i] ~ orig[i - k]?
+    # No: for cand[i] = orig[i - d] (candidate LAGS by d) the peak sits at
+    # -d in fftshift coordinates. So delay (positive = candidate lags) is
+    # the NEGATED peak position. Getting this sign wrong doubles the delay
+    # instead of removing it.
+    int_lag = -(peak_idx - max_lag_samples)
+
+    # Parabolic sub-sample interpolation, in the same (negated) frame
     if 0 < peak_idx < len(search_region) - 1:
         alpha = float(search_region[peak_idx - 1])
         beta = float(search_region[peak_idx])
         gamma = float(search_region[peak_idx + 1])
         denom = 2.0 * (2.0 * beta - alpha - gamma)
-        frac_offset = (alpha - gamma) / denom if abs(denom) > 1e-6 else 0.0
+        frac_offset = -((alpha - gamma) / denom) if abs(denom) > 1e-6 else 0.0
     else:
         frac_offset = 0.0
 

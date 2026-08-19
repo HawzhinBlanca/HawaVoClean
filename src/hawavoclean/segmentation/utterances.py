@@ -24,7 +24,10 @@ def find_lowest_energy_zero_crossing(
         return min(total_len, max(0, target_sample))
 
     region = waveform[start_search:end_search]
-    zero_crossings = np.where(np.diff(np.signbit(region)))[0] + start_search
+    # Crossings of the LOCAL MEAN: with a DC offset a quiet pause never
+    # crosses zero and the cut would land inside a word instead.
+    region_ac = region - float(np.mean(region))
+    zero_crossings = np.where(np.diff(np.signbit(region_ac)))[0] + start_search
 
     if len(zero_crossings) == 0:
         # Fallback to sample with absolute minimum amplitude
@@ -186,13 +189,15 @@ def build_speech_units(
                     speech_intervals[i] = SpeechInterval(cut_point, iv.end_sample)
                     break
 
-        # Check if there is non-speech buffer after group_end before next speech interval
+        # Absorb a little trailing silence into the speech unit so the cut
+        # lands in a pause — but CAP it. Half of an arbitrarily long gap glued
+        # onto a unit produced 300 s "speech" units that blew past
+        # hard_max_group_s; the remainder becomes its own non-speech unit.
         if not forced and i < num_intervals:
             next_start = speech_intervals[i].start_sample
             gap = next_start - group_end
             if gap > 0:
-                # Split the silence in the middle
-                group_end = group_end + (gap // 2)
+                group_end = group_end + min(gap // 2, context_samples)
 
         end_sample = min(total_samples, group_end)
         if end_sample <= current_start:

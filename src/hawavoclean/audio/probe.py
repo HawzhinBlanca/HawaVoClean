@@ -11,6 +11,34 @@ from hawavoclean.audio.types import AudioProbeResult
 from hawavoclean.errors import InvalidUserInputError, PreflightError
 from hawavoclean.hashing import hash_file
 
+MIN_SUPPORTED_SAMPLE_RATE = 8000
+
+
+def _count_samples_by_decoding(file_path: Path, have_ffmpeg: bool) -> int:
+    """Decode to a null sink and count output samples (for duration-less containers)."""
+    ffmpeg_bin = shutil.which("ffmpeg") if have_ffmpeg else None
+    if not ffmpeg_bin:
+        return 0
+    cmd = [
+        ffmpeg_bin,
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        str(file_path),
+        "-vn",
+        "-f",
+        "s16le",
+        "-ac",
+        "1",
+        "pipe:1",
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=300, stdin=subprocess.DEVNULL)
+    except Exception:
+        return 0
+    return len(res.stdout) // 2
+
 
 def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeResult:
     """Probe an audio file safely and extract structured metadata."""
@@ -90,11 +118,24 @@ def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeRes
                 f"Neither ffprobe nor soundfile could read {file_path}: {e}"
             ) from e
 
-    if sample_rate <= 0 or channels <= 0 or samples <= 0:
+    if sample_rate <= 0 or channels <= 0:
         raise InvalidUserInputError(
-            f"Invalid audio stream in {file_path}: rate={sample_rate}, channels={channels}, samples={samples}"
+            f"Invalid audio stream in {file_path}: rate={sample_rate}, channels={channels}"
         )
+    if samples <= 0:
+        # Streamed containers (WebM/Matroska from MediaRecorder, OBS, live
+        # captures) carry no duration. Count the samples with a null decode
+        # rather than rejecting a perfectly decodable file.
+        samples = _count_samples_by_decoding(file_path, ffprobe_bin is not None)
+        if samples <= 0:
+            raise InvalidUserInputError(f"Audio stream in {file_path} has no decodable samples")
+        duration_s = samples / sample_rate
 
+    if sample_rate < MIN_SUPPORTED_SAMPLE_RATE:
+        raise InvalidUserInputError(
+            f"Input sample rate {sample_rate} Hz is below the minimum supported "
+            f"{MIN_SUPPORTED_SAMPLE_RATE} Hz."
+        )
     if sample_rate > max_sample_rate:
         raise InvalidUserInputError(
             f"Input sample rate {sample_rate} Hz exceeds maximum supported {max_sample_rate} Hz. Ultrasonic rates are rejected in V1."

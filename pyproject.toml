@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hawavoclean"
-version = "3.0.1"
+version = "3.1.0"
 description = "Offline dialogue audio cleanup: Wiener denoising, spectral-change guard, BS.1770 mastering"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -109,4 +109,5 @@ markers = [
     "integration: End-to-end integration tests",
     "gpu: Tests requiring GPU hardware",
     "fuzz: Adversarial-input regression gate (slow; runs the CLI per case)",
+    "slow: Long-running resource tests",
 ]

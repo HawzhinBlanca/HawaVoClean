@@ -5,6 +5,67 @@ All notable changes to the HawaVoClean system will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-08-19
+
+### Fixed — 36 bugs from an adversarial hunt (fuzz harness + 3 parallel reviews)
+
+Every fix landed red-test-first; every repro is a permanent regression test.
+A 42-input adversarial fuzz gate (`pytest -m fuzz`) now runs the real CLI.
+
+**Would have hurt users directly**
+- `process X -o X` silently destroyed the source; refused at preflight now,
+  including report-sidecar collisions. Destination existence and writability
+  are checked BEFORE decoding; no workspace leaks on user-error paths.
+- A keypress during ffmpeg decode truncated the file and published a
+  half-length master as success (ffmpeg inherited the terminal). `-nostdin`
+  + `stdin=DEVNULL`.
+- MP4 with a video stream first was rejected as "rate=0, channels=0"
+  (probe read streams[0]). First AUDIO stream selected; decode pins it.
+- Batch: no per-file deadline (a hung file hung the batch) — each file runs
+  in a child with a hard timeout; stem collisions (`a.wav` + `a.m4a`)
+  silently overwrote — refused up front.
+- Interrupts: SIGTERM/SIGKILL of the parent orphaned the worker child
+  (holding the model); child now runs a parent-death watchdog; SIGTERM
+  unwinds cleanly (exit 130); no partial outputs ever.
+- Mastering peaked at 5.5 GB RSS on an 8-minute file (full-file 8x float64
+  oversampling) — chunked true-peak, in-place envelope: 895 MB.
+- Worker: interpreter HUNG at exit after a child died mid-request (queue
+  feeder thread blocked) — queues released on kill; a dead child is now
+  noticed in <1 s instead of after the full timeout.
+- Limiter crashed at 11025 Hz and other rate/lookahead parities, and on
+  1-sample input.
+
+**Guard / DSP correctness**
+- GCC-PHAT delay sign was inverted: alignment DOUBLED the delay. Fixed; flat
+  correlation and oversized search windows handled.
+- Guard failed OPEN on NaN candidates and on empty candidates (unit became
+  silence). Fail closed.
+- Clipping check rejected any peak-normalised input; musical-noise score
+  rejected identical candidates. Both now relative to the original.
+- 50/60 Hz hum detection was mathematically impossible at 22.05-48 kHz (3
+  FFT bins in the band); dedicated 16384-point check — de-hum now actually
+  runs.
+- Spectral-hole detector false-rejected clean denoises (scored the lowered
+  floor between phrases); continuity rule fired on the wrong side and did
+  not cascade; stitch declick keyed off the wrong unit's flag.
+- Short (<400 ms) files: sample peak used as LUFS (9 dB gain jump at the
+  boundary); ungated mean-square estimate now.
+- VAD: DC offset made pauses "speech" and forced cuts land inside words;
+  one transient hid quiet speech (threshold anchored to the max frame).
+  DC-removed frames, 98th-percentile anchor, local-mean zero crossings.
+- Segmentation glued half of arbitrarily long silence gaps onto speech
+  units (300 s "speech"); capped to the context window.
+- Declared channel_mode never validated against the file (failed after full
+  processing); streamed WebM with no duration rejected; <8 kHz rates
+  crashed; dual-mono output lost L/R bit-identity to per-channel dither.
+
+**Honesty / operations**
+- Pipeline now verifies calibration-artifact integrity (not just audit).
+- `verify` honours the CONFIGURED true-peak ceiling; eval gate fails on an
+  empty manifest; eval/benchmark/calibrate exit with documented codes.
+- `phase_coherent` / `model_sample_rate` validated against the core at
+  preflight (config error, exit 2) and passed through to the worker.
+
 ## [3.0.1] - 2026-08-19
 
 ### Fixed — guard precision, found by a DJI field recording

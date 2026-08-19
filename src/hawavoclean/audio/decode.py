@@ -22,6 +22,7 @@ def decode_audio(
     if ffmpeg_bin:
         cmd = [
             ffmpeg_bin,
+            "-nostdin",  # never read the terminal: a stray 'q' aborted decodes silently
             "-v",
             "error",
             "-i",
@@ -45,6 +46,7 @@ def decode_audio(
                 capture_output=True,
                 check=True,
                 timeout=timeout_s,
+                stdin=subprocess.DEVNULL,
             )
             raw_bytes = res.stdout
         except subprocess.TimeoutExpired as e:

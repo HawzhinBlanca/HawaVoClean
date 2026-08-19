@@ -49,10 +49,22 @@ def encode_audio(
 
     # Transpose to (samples, channels) for soundfile
     out_channels: list[np.ndarray] = []
+    # Channels that carry the SAME signal (dual-mono) must get the same
+    # dither so the output stays bit-identical L/R; distinct channels get
+    # decorrelated dither as before.
+    seed_for_channel: list[str] = []
+    for ch_idx in range(channels):
+        same_as = next(
+            (j for j in range(ch_idx) if np.array_equal(buffer.data[j], buffer.data[ch_idx])),
+            None,
+        )
+        seed_for_channel.append(
+            seed_for_channel[same_as] if same_as is not None else f"{seed_context}:ch_{ch_idx}"
+        )
     for ch_idx in range(channels):
         ch = data[ch_idx]
         if output_bit_depth == "pcm24" and dither:
-            ch_seed = f"{seed_context}:ch_{ch_idx}"
+            ch_seed = seed_for_channel[ch_idx]
             ch = apply_tpdf_dither(ch, ch_seed, target_bits=24)
         out_channels.append(ch)
 

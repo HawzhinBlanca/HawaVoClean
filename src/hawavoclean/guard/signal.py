@@ -50,8 +50,10 @@ def check_signal_integrity(
     w_orig = orig_waveform[:n_samples]
     w_cand = cand_waveform[:n_samples]
 
-    # 1. Clipping detection
-    clipping_samples = int(np.sum(np.abs(w_cand) >= 1.0))
+    # 1. NEWLY introduced clipping: samples at/over full scale in the
+    # candidate where the original was below it. An already peak-normalised
+    # input that the candidate preserves is not a clipping artifact.
+    clipping_samples = int(np.sum((np.abs(w_cand) >= 1.0) & (np.abs(w_orig) < 1.0)))
     if clipping_samples > max_allowed_clipping_samples:
         reasons.append(
             f"Newly introduced hard clipping detected ({clipping_samples} samples >= 1.0)"
@@ -125,11 +127,15 @@ def check_signal_integrity(
             f"Spectral hole artifact detected: score {spectral_hole_score:.3f} > threshold {spectral_hole_thresh:.3f}"
         )
 
-    # 5. Musical noise detector (isolated peak variance in candidate spectrogram)
-    spectral_flatness_cand = np.exp(np.mean(np.log(stft_cand + 1e-9), axis=1)) / (
-        np.mean(stft_cand, axis=1) + 1e-9
-    )
-    musical_noise_score = float(np.std(spectral_flatness_cand))
+    # 5. Musical noise detector: NEW isolated-peak variance introduced by the
+    # candidate, i.e. flatness variance beyond what the original already had.
+    # (Tonal bursts separated by pauses have high flatness variance on their
+    # own; an identical candidate must score zero.)
+    def _flatness_std(mag: np.ndarray[Any, Any]) -> float:
+        flat = np.exp(np.mean(np.log(mag + 1e-9), axis=1)) / (np.mean(mag, axis=1) + 1e-9)
+        return float(np.std(flat))
+
+    musical_noise_score = max(0.0, _flatness_std(stft_cand) - _flatness_std(stft_orig))
     if musical_noise_score > musical_noise_thresh:
         reasons.append(
             f"Musical noise / isolated spectral spikes detected: score {musical_noise_score:.3f} > threshold {musical_noise_thresh:.3f}"

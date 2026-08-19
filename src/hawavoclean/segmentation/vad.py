@@ -30,13 +30,17 @@ def detect_speech_energy(
             return [SpeechInterval(0, len(waveform))]
         return []
 
-    # Compute short-term frame energy (RMS in dB)
+    # Short-term frame energy on the DC-REMOVED signal: a small DC offset
+    # (mic/preamp bias, -50 dBFS) otherwise lifts every silent frame above
+    # the threshold and turns whole pauses into "speech".
+    hop_size = max(1, hop_size)
     num_frames = max(1, (len(waveform) - frame_size) // hop_size + 1)
     frame_rms = np.zeros(num_frames, dtype=np.float32)
 
     for i in range(num_frames):
         start = i * hop_size
         chunk = waveform[start : start + frame_size]
+        chunk = chunk - np.mean(chunk)
         frame_rms[i] = np.sqrt(np.mean(chunk**2) + 1e-12)
 
     max_rms = float(np.max(frame_rms))
@@ -44,7 +48,11 @@ def detect_speech_energy(
         # Essentially digital silence
         return []
 
-    threshold = max(max_rms * (10.0 ** (energy_threshold_rel_db / 20.0)), 1e-4)
+    # Anchor the relative threshold to a ROBUST loud level (98th percentile),
+    # not the single loudest frame: one click/clap/dropout spike would
+    # otherwise hide quiet speech entirely ("no speech" -> nothing enhanced).
+    loud_ref = float(np.percentile(frame_rms, 98))
+    threshold = max(loud_ref * (10.0 ** (energy_threshold_rel_db / 20.0)), 1e-4)
     is_speech_frame = frame_rms >= threshold
 
     # Extract raw contiguous speech intervals
