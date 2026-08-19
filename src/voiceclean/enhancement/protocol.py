@@ -1,4 +1,9 @@
-"""Protocol and data models for neural audio enhancement cores."""
+"""Protocol and data models for deterministic enhancement cores.
+
+VoiceClean v1 ships no learned models. Every core is classical DSP with
+explicit parameters; provenance is the parameter set itself, hashed
+canonically, never a weights digest.
+"""
 
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -12,10 +17,10 @@ class EnhancerMetadata:
 
     core_id: str
     version: str
+    algorithm: str
     sample_rate: int
     phase_coherent: bool
-    commit: str = ""
-    weights_sha256: str = ""
+    params_hash: str = ""
 
 
 @dataclass
@@ -27,12 +32,11 @@ class EnhancementResult:
     model_runtime_ms: float
     input_samples: int
     output_samples: int
-    peak_vram_bytes: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
 class Enhancer(Protocol):
-    """Protocol interface for frozen neural enhancement cores as defined in BLUEPRINT.md section 11.1."""
+    """Protocol interface for enhancement cores."""
 
     @property
     def metadata(self) -> EnhancerMetadata: ...

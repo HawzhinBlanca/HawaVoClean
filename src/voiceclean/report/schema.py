@@ -25,19 +25,23 @@ class MediaStats(ReportBaseModel):
 
 
 class CoreMetadata(ReportBaseModel):
-    """Neural enhancement model identification and lock hashes."""
+    """Enhancement core identification. The core is deterministic DSP; its
+    provenance is its parameter set, hashed canonically."""
 
     id: str
-    commit: str
-    weight_sha256: dict[str, str] = Field(default_factory=dict)
+    algorithm: str
+    params_hash: str
     phase_coherent: bool = True
 
 
 class GuardMetadata(ReportBaseModel):
-    """Guard identification and calibration artifact hashes."""
+    """Guard identification and calibration artifact hashes.
+
+    The guard compares spectral signatures; it does not verify linguistic
+    content."""
 
     id: str
-    model_sha256: str
+    probe_hash: str
     calibration_id: str
 
 
@@ -47,10 +51,9 @@ class EnvironmentMetadata(ReportBaseModel):
     platform: str
     os_version: str
     python_version: str
-    torch_version: str
-    cuda_version: str | None = None
-    gpu_name: str | None = None
-    driver_version: str | None = None
+    numpy_version: str
+    scipy_version: str
+    soundfile_version: str
     cpu_model: str | None = None
 
 
@@ -62,6 +65,7 @@ class UnitSummary(ReportBaseModel):
     reverted: int = 0
     unverified: int = 0
     error_passthrough: int = 0
+    continuity_reverted: int = 0
     no_speech: int = 0
     finish_applied: int = 0
     finish_bypassed: int = 0
@@ -90,7 +94,7 @@ class UnitDecisionRecord(ReportBaseModel):
     is_speech: bool
     input_sha256: str
     candidate_sha256: str | None = None
-    output_sha256: str = ""
+    output_sha256: str
     guard_a_verdict: str
     guard_a_scores: dict[str, float | str | bool] = Field(default_factory=dict)
     guard_b_verdict: str | None = None
@@ -132,7 +136,7 @@ class CorpusItem(ReportBaseModel):
     environment: str  # "studio", "untreated", "street", "fan_noise", "reverb"
     degradation_type: str  # "clean", "noise", "reverb", "clipping", "codec", "consonant_cut", etc.
     transcript_sorani: str
-    verified_by_human: bool = True
+    verified_by_human: bool = False
     split: Literal["calibration", "development", "acceptance", "corruption"]
 
 

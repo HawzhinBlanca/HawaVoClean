@@ -53,9 +53,9 @@ class SegmentationConfig(BaseFrozenModel):
 
 
 class EnhancementConfig(BaseFrozenModel):
-    """Neural enhancer configuration."""
+    """Enhancement core configuration (deterministic DSP core)."""
 
-    core_id: str = "urgent-bsrnn-baseline"
+    core_id: str = "wiener-dd-48k-v1"
     model_sample_rate: int = Field(default=48000, ge=8000, le=48000)
     phase_coherent: bool = True
     warmup_cycles: int = Field(default=1, ge=0, le=10)
@@ -70,11 +70,15 @@ class AlignmentConfig(BaseFrozenModel):
 
 
 class GuardConfig(BaseFrozenModel):
-    """Hawzhin Sorani Fidelity Guard parameters."""
+    """Spectral fidelity guard parameters.
 
-    guard_id: str = "hawzhin-ctc"
-    asr_model_id: str = "hawzhin-sorani-asr-v1"
-    calibration_file: str = "models/guard-calibration.json"
+    The guard compares spectral signatures; it does not verify linguistic
+    content. See voiceclean.guard.spectral_probe.
+    """
+
+    guard_id: str = "spectral-guard-v1"
+    probe_id: str = "spectral-signature-v1"
+    calibration_file: str = "guard-calibration.json"
     min_anchor_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     max_posterior_js_div: float = Field(default=0.25, ge=0.0, le=1.0)
     max_timing_drift_ms: float = Field(default=40.0, ge=5.0, le=200.0)
@@ -134,7 +138,6 @@ class ReportingConfig(BaseFrozenModel):
 
     schema_version: int = 1
     include_review_timecodes: bool = True
-    privacy_mode: bool = True  # Omit plain-text transcripts by default
 
 
 class VoiceCleanConfig(BaseFrozenModel):

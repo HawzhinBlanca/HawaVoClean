@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from voiceclean.config import GuardConfig, PolicyConfig
-from voiceclean.guard.hawzhin_ctc import FakeSoraniASR
+from voiceclean.guard.spectral_probe import FixedProbe
 from voiceclean.guard.verdict import GuardVerdict
 from voiceclean.policy.continuity import enforce_source_continuity
 from voiceclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
@@ -14,13 +14,13 @@ from voiceclean.segmentation.types import SpeechUnit
 @pytest.mark.unit
 def test_policy_non_speech_passthrough() -> None:
     wave = np.zeros(1000, dtype=np.float32)
-    asr = FakeSoraniASR()
+    asr = FixedProbe()
     dec, _ = evaluate_unit_policy(
         orig_core_waveform=wave,
         enh_core_waveform=None,
         sample_rate=48000,
         is_speech=False,
-        asr_engine=asr,
+        probe=asr,
         guard_config=GuardConfig(),
         policy_config=PolicyConfig(),
     )
@@ -31,13 +31,13 @@ def test_policy_non_speech_passthrough() -> None:
 @pytest.mark.unit
 def test_policy_enhancer_error_fails_closed() -> None:
     wave = 0.5 * np.ones(1000, dtype=np.float32)
-    asr = FakeSoraniASR()
+    asr = FixedProbe()
     dec, _ = evaluate_unit_policy(
         orig_core_waveform=wave,
         enh_core_waveform=None,  # Enhancer failed
         sample_rate=48000,
         is_speech=True,
-        asr_engine=asr,
+        probe=asr,
         guard_config=GuardConfig(),
         policy_config=PolicyConfig(),
     )

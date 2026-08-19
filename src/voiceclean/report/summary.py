@@ -36,7 +36,8 @@ def generate_human_summary(report: VoiceCleanReport) -> str:
         else "True Peak:            N/A",
         "",
         "--- RUNTIME MODELS & CALIBRATION ---",
-        f"Enhancement Core:     {report.core.id} (commit {report.core.commit[:8]})",
+        f"Enhancement Core:     {report.core.id} ({report.core.algorithm})",
+        f"Core Params Hash:     {report.core.params_hash[:16]}...",
         f"Phase Coherent:       {report.core.phase_coherent}",
         f"Fidelity Guard:       {report.guard.id}",
         f"Calibration ID:       {report.guard.calibration_id[:16]}...",
@@ -47,6 +48,7 @@ def generate_human_summary(report: VoiceCleanReport) -> str:
         f"  - Reverted to Orig: {report.summary.reverted} ({report.summary.reverted / max(1, report.summary.units_total) * 100:.1f}%)",
         f"  - Unverified:       {report.summary.unverified}",
         f"  - Error Fallbacks:  {report.summary.error_passthrough}",
+        f"  - Continuity Revert: {report.summary.continuity_reverted}",
         f"  - Non-Speech:       {report.summary.no_speech}",
         f"  - Finish Applied:   {report.summary.finish_applied}",
         f"  - Finish Bypassed:  {report.summary.finish_bypassed}",
@@ -66,7 +68,9 @@ def generate_human_summary(report: VoiceCleanReport) -> str:
         [
             "",
             "================================================================================",
-            "Linguistic Preservation Invariant: Zero tolerated substitutions/deletions.",
+            "Guard scope: the fidelity guard detects SPECTRAL change between the",
+            "original and processed audio. It does not verify linguistic content;",
+            "flagged timecodes above are where processing was rejected or unverifiable.",
             "================================================================================",
         ]
     )

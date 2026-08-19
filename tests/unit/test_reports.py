@@ -40,13 +40,17 @@ def test_report_serialization_and_summary() -> None:
             true_peak_dbtp=-1.0,
             integrated_lufs=-16.0,
         ),
-        core=CoreMetadata(id="urgent-bsrnn", commit="abc", phase_coherent=True),
-        guard=GuardMetadata(id="hawzhin-guard", model_sha256="123", calibration_id="cal_1"),
+        core=CoreMetadata(
+            id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="a" * 64
+        ),
+        guard=GuardMetadata(id="spectral-guard", probe_hash="1" * 64, calibration_id="cal_1"),
         environment=EnvironmentMetadata(
             platform="darwin",
             os_version="14.0",
             python_version="3.13.0",
-            torch_version="2.2.0",
+            numpy_version="2.0.0",
+            scipy_version="1.14.0",
+            soundfile_version="0.13.0",
         ),
         summary=UnitSummary(
             units_total=1,

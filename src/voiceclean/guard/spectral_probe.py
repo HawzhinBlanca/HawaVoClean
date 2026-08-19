@@ -1,17 +1,34 @@
-"""Hawzhin Sorani CTC acoustic model implementation and ASR adapter."""
+"""Spectral signature probe: deterministic spectral-change detection.
+
+WHAT THIS IS: a comparator primitive. It reduces audio to a per-frame
+distribution over an arbitrary symbol alphabet, driven purely by the shape
+of the low-frequency spectrum (the first 80 linear FFT bins at 16 kHz,
+roughly 0-2.5 kHz — no mel warping is applied). Two renderings of the same
+audio produce similar signatures; a rendering whose spectrum changed
+produces a diverging one.
+
+WHAT THIS IS NOT: a speech recognizer. There is no acoustic model, no
+learned mapping from audio to phonemes, and no transcription. The symbol
+alphabet reuses Kurdish Sorani orthography purely as a stable set of glyphs
+(kept because a future trained Sorani model would target the same
+vocabulary); the symbols DO NOT correspond to recognized phonemes, and the
+emitted signature is NOT a transcript. This probe can detect that the
+spectrum changed; it cannot detect a word substitution.
+"""
 
 from typing import Any
 
 import numpy as np
 
 from voiceclean.audio.resample import resample_audio
-from voiceclean.guard.protocol import ASRResult, SoraniASR, TokenInfo
+from voiceclean.guard.protocol import ProbeResult, SpectralProbe, TokenInfo
 from voiceclean.guard.sorani_normalize import normalize_sorani_text
 from voiceclean.hashing import hash_bytes
 
-# Sorani Kurdish phonetic character vocabulary for CTC decoding
+# Symbol alphabet for signature emission. Sorani glyphs are used as opaque
+# symbols only — see the module docstring.
 SORANI_VOCAB: list[str] = [
-    "<blank>",  # 0: CTC blank
+    "<blank>",  # 0: silence / no dominant spectral state
     " ",  # 1: space
     "ئ",
     "ا",
@@ -52,33 +69,33 @@ SORANI_VOCAB: list[str] = [
 VOCAB_TO_ID: dict[str, int] = {char: idx for idx, char in enumerate(SORANI_VOCAB)}
 
 
-class HawzhinSoraniASR(SoraniASR):
-    """Production Sorani CTC ASR adapter for Hawzhin VoiceClean Guard."""
+class SpectralSignatureProbe(SpectralProbe):
+    """Deterministic spectral-shape signature probe."""
 
     def __init__(
         self,
-        model_id: str = "hawzhin-sorani-asr-v1",
+        probe_id: str = "spectral-signature-v1",
         target_sr: int = 16000,
         frame_step_ms: float = 20.0,
     ) -> None:
-        self._model_id = model_id
+        self._probe_id = probe_id
         self._target_sr = target_sr
         self._frame_step_ms = frame_step_ms
-        self._model_hash = hash_bytes(f"{model_id}:{target_sr}:{len(SORANI_VOCAB)}".encode())
+        self._probe_hash = hash_bytes(f"{probe_id}:{target_sr}:{len(SORANI_VOCAB)}".encode())
 
     @property
-    def model_id(self) -> str:
-        return self._model_id
+    def probe_id(self) -> str:
+        return self._probe_id
 
     @property
-    def model_hash(self) -> str:
-        return self._model_hash
+    def probe_hash(self) -> str:
+        return self._probe_hash
 
-    def _compute_filterbank_features(
+    def _compute_spectral_features(
         self,
         waveform: np.ndarray[Any, np.dtype[np.float32]],
     ) -> np.ndarray[Any, np.dtype[np.float32]]:
-        """Compute short-term spectral features (80 log-mel filterbanks)."""
+        """Short-term log spectral features: the first 80 linear FFT bins."""
         sr = self._target_sr
         n_fft = 512
         hop_length = int(round(sr * (self._frame_step_ms / 1000.0)))
@@ -96,48 +113,49 @@ class HawzhinSoraniASR(SoraniASR):
             fft_mag = np.abs(np.fft.rfft(chunk, n=n_fft))
             stft[i] = fft_mag
 
-        # Mel filter matrix
-        n_mels = 80
-        mel_energies = np.log1p(stft[:, :n_mels])
-        return mel_energies.astype(np.float32)
+        # First 80 linear bins (0 to ~2.5 kHz at 16 kHz), log-compressed.
+        n_bins = 80
+        return np.log1p(stft[:, :n_bins]).astype(np.float32)
 
     def infer(
         self,
         waveform: np.ndarray[Any, np.dtype[np.float32]],
         sample_rate: int,
-    ) -> ASRResult:
-        """Run acoustic feature extraction and CTC posterior generation."""
+    ) -> ProbeResult:
+        """Compute the per-frame spectral symbol distribution and signature."""
         if len(waveform) == 0:
-            return ASRResult(
-                raw_transcript="",
-                normalized_transcript="",
-                model_id=self.model_id,
-                model_hash=self.model_hash,
+            return ProbeResult(
+                raw_signature="",
+                normalized_signature="",
+                probe_id=self.probe_id,
+                probe_hash=self.probe_hash,
             )
 
-        # Resample to model sample rate (16kHz)
+        # Resample to the probe's internal rate (16kHz)
         audio_16k = resample_audio(waveform, sample_rate, self._target_sr)
-        features = self._compute_filterbank_features(audio_16k)
-        # Apply temporal smoothing across frames (40ms window) for stable phoneme detection
+        features = self._compute_spectral_features(audio_16k)
+        # Temporal smoothing (40ms) to stabilize the frame states
         import scipy.ndimage
+
         smooth_features = scipy.ndimage.gaussian_filter1d(features, sigma=2.0, axis=0)
         num_frames = len(smooth_features)
 
         vocab_size = len(SORANI_VOCAB)
-        posteriors = np.zeros((num_frames, vocab_size), dtype=np.float32)
+        distributions = np.zeros((num_frames, vocab_size), dtype=np.float32)
 
-        # Baseline acoustic estimation: map spectral envelope to phonetic likelihoods
+        # Map spectral shape to a symbol distribution: each symbol slot reads
+        # one normalized frequency bin. This is an arbitrary but deterministic
+        # assignment — it makes signatures comparable, not meaningful.
         for i in range(num_frames):
             frame_feat = smooth_features[i]
             frame_energy = float(np.sum(frame_feat))
 
             if frame_energy < 0.1:
-                # Silence -> High blank posterior
-                posteriors[i, 0] = 0.95
-                posteriors[i, 1:] = 0.05 / (vocab_size - 1)
+                # Near-silence: dominant blank state
+                distributions[i, 0] = 0.95
+                distributions[i, 1:] = 0.05 / (vocab_size - 1)
             else:
-                # Voice activity -> derive phoneme distribution from spectral centroid/harmonics
-                posteriors[i, 0] = 0.15  # blank probability
+                distributions[i, 0] = 0.15  # blank share
                 feat_min = float(np.min(frame_feat))
                 feat_ptp = float(np.ptp(frame_feat)) + 1e-6
                 norm_feat = (frame_feat - feat_min) / feat_ptp
@@ -149,13 +167,13 @@ class HawzhinSoraniASR(SoraniASR):
 
                 exp_logits = np.exp(char_logits - np.max(char_logits))
                 char_probs = (exp_logits / np.sum(exp_logits)) * 0.85
-                posteriors[i, 1:] = char_probs
+                distributions[i, 1:] = char_probs
 
         # Frame timestamps
         frame_times = np.arange(num_frames, dtype=np.float32) * (self._frame_step_ms / 1000.0)
 
-        # Greedy CTC decoding
-        best_indices = np.argmax(posteriors, axis=1)
+        # Collapse repeated frame states into sustained tokens (>=40ms)
+        best_indices = np.argmax(distributions, axis=1)
         tokens: list[TokenInfo] = []
         raw_chars: list[str] = []
 
@@ -165,10 +183,10 @@ class HawzhinSoraniASR(SoraniASR):
 
         for f_idx, idx in enumerate(best_indices):
             t_s = float(frame_times[f_idx])
-            prob = float(posteriors[f_idx, idx])
+            prob = float(distributions[f_idx, idx])
 
             if idx != prev_idx:
-                if prev_idx != 0 and len(token_confidences) >= 2:  # Sustained phoneme (>=40ms)
+                if prev_idx != 0 and len(token_confidences) >= 2:  # sustained state (>=40ms)
                     char_str = SORANI_VOCAB[prev_idx]
                     token_conf = float(np.max(token_confidences)) if token_confidences else 0.8
                     tokens.append(
@@ -203,51 +221,51 @@ class HawzhinSoraniASR(SoraniASR):
             )
             raw_chars.append(char_str)
 
-        raw_transcript = "".join(raw_chars)
-        norm_audit = normalize_sorani_text(raw_transcript)
+        raw_signature = "".join(raw_chars)
+        norm_audit = normalize_sorani_text(raw_signature)
         mean_conf = float(np.mean([t.confidence for t in tokens])) if tokens else 1.0
 
-        return ASRResult(
-            raw_transcript=raw_transcript,
-            normalized_transcript=norm_audit.normalized,
+        return ProbeResult(
+            raw_signature=raw_signature,
+            normalized_signature=norm_audit.normalized,
             tokens=tokens,
-            frame_posteriors=posteriors,
+            frame_distributions=distributions,
             frame_timestamps=frame_times,
             mean_confidence=mean_conf,
-            model_id=self.model_id,
-            model_hash=self.model_hash,
+            probe_id=self.probe_id,
+            probe_hash=self.probe_hash,
         )
 
 
-class FakeSoraniASR(SoraniASR):
-    """Deterministic Mock ASR for testing without external models."""
+class FixedProbe(SpectralProbe):
+    """Deterministic fixture probe emitting a constant signature, for tests."""
 
     def __init__(
         self,
-        fixed_transcript: str = "سڵاو لە هەمووان ئەمە تاقیکردنەوەیە",
+        fixed_signature: str = "سڵاو لە هەمووان ئەمە تاقیکردنەوەیە",
         confidence: float = 0.95,
-        model_id: str = "fake-sorani-asr",
+        probe_id: str = "fixed-probe",
     ) -> None:
-        self._transcript = fixed_transcript
+        self._signature = fixed_signature
         self._confidence = confidence
-        self._model_id = model_id
-        self._model_hash = hash_bytes(f"fake:{fixed_transcript}".encode())
+        self._probe_id = probe_id
+        self._probe_hash = hash_bytes(f"fixed:{fixed_signature}".encode())
 
     @property
-    def model_id(self) -> str:
-        return self._model_id
+    def probe_id(self) -> str:
+        return self._probe_id
 
     @property
-    def model_hash(self) -> str:
-        return self._model_hash
+    def probe_hash(self) -> str:
+        return self._probe_hash
 
     def infer(
         self,
         waveform: np.ndarray[Any, np.dtype[np.float32]],
         sample_rate: int,
-    ) -> ASRResult:
+    ) -> ProbeResult:
         dur = len(waveform) / sample_rate
-        norm = normalize_sorani_text(self._transcript)
+        norm = normalize_sorani_text(self._signature)
         words = norm.normalized.split()
 
         tokens: list[TokenInfo] = []
@@ -265,18 +283,18 @@ class FakeSoraniASR(SoraniASR):
                 )
 
         num_frames = max(1, int(dur * 50))
-        posteriors = (
+        distributions = (
             np.ones((num_frames, len(SORANI_VOCAB)), dtype=np.float32) / len(SORANI_VOCAB)
         ).astype(np.float32)
         timestamps = np.linspace(0.0, dur, num_frames, dtype=np.float32)
 
-        return ASRResult(
-            raw_transcript=self._transcript,
-            normalized_transcript=norm.normalized,
+        return ProbeResult(
+            raw_signature=self._signature,
+            normalized_signature=norm.normalized,
             tokens=tokens,
-            frame_posteriors=posteriors,
+            frame_distributions=distributions,
             frame_timestamps=timestamps,
             mean_confidence=self._confidence,
-            model_id=self.model_id,
-            model_hash=self.model_hash,
+            probe_id=self.probe_id,
+            probe_hash=self.probe_hash,
         )

@@ -19,7 +19,7 @@ from voiceclean.cli import (
     cmd_verify,
 )
 from voiceclean.errors import ExitCode
-from voiceclean.guard.hawzhin_ctc import FakeSoraniASR
+from voiceclean.guard.spectral_probe import FixedProbe
 from voiceclean.pipeline import run_pipeline
 
 
@@ -54,7 +54,7 @@ def test_cli_verify_success() -> None:
             output_path=tmp / "out.wav",
             profile="development",
             overwrite=True,
-            asr_override=FakeSoraniASR(),
+            probe_override=FixedProbe(),
         )
 
         args = argparse.Namespace(
@@ -88,7 +88,8 @@ def test_cli_calibrate_command() -> None:
         args = argparse.Namespace(
             manifest="data/calibration/manifest.json",
             output=str(tmp / "guard-calib-test.json"),
-            fake_asr=True,
+            corruption_profile="standard",
+            fixed_probe=True,
         )
         ret = cmd_calibrate(args)
         assert ret == int(ExitCode.SUCCESS)

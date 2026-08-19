@@ -8,7 +8,7 @@ import numpy as np
 
 from voiceclean.config import GuardConfig
 from voiceclean.guard.posterior import compare_ctc_posteriors
-from voiceclean.guard.protocol import ASRResult, SoraniASR
+from voiceclean.guard.protocol import ProbeResult, SpectralProbe
 from voiceclean.guard.signal import check_signal_integrity
 from voiceclean.guard.timing import check_timing_integrity
 from voiceclean.guard.token_anchor import compare_token_anchors
@@ -38,11 +38,11 @@ def evaluate_guard_pass(
     cand_waveform: np.ndarray[Any, np.dtype[np.float32]],
     sample_rate: int,
     is_speech: bool,
-    asr_engine: SoraniASR,
+    probe: SpectralProbe,
     config: GuardConfig,
-    cached_orig_asr: ASRResult | None = None,
+    cached_orig_probe: ProbeResult | None = None,
     is_finishing_pass: bool = False,
-) -> tuple[GuardEvaluationResult, ASRResult]:
+) -> tuple[GuardEvaluationResult, ProbeResult]:
     """Run full Hawzhin Sorani Fidelity Guard comparison."""
     if not is_speech:
         return (
@@ -51,21 +51,21 @@ def evaluate_guard_pass(
                 scores={"is_speech": False},
                 reasons=["Unit is non-speech; guard pass bypassed."],
             ),
-            cached_orig_asr or asr_engine.infer(orig_waveform, sample_rate),
+            cached_orig_probe or probe.infer(orig_waveform, sample_rate),
         )
 
     try:
         # Step 1: ASR inference
-        orig_asr = cached_orig_asr or asr_engine.infer(orig_waveform, sample_rate)
-        cand_asr = asr_engine.infer(cand_waveform, sample_rate)
+        orig_probe = cached_orig_probe or probe.infer(orig_waveform, sample_rate)
+        cand_probe = probe.infer(cand_waveform, sample_rate)
 
         scores: dict[str, float | str | bool] = {}
         reasons: list[str] = []
 
         # Step 2: High-confidence token anchor comparison
         anchor_res = compare_token_anchors(
-            orig_tokens=orig_asr.tokens,
-            cand_tokens=cand_asr.tokens,
+            orig_tokens=orig_probe.tokens,
+            cand_tokens=cand_probe.tokens,
             min_anchor_confidence=config.min_anchor_confidence,
             max_timestamp_drift_ms=config.max_timing_drift_ms,
         )
@@ -82,7 +82,7 @@ def evaluate_guard_pass(
                         scores=scores,
                         reasons=anchor_res.failure_reasons,
                     ),
-                    orig_asr,
+                    orig_probe,
                 )
 
             if not anchor_res.passed:
@@ -90,8 +90,8 @@ def evaluate_guard_pass(
 
         # Step 3: CTC posterior JS divergence
         post_res = compare_ctc_posteriors(
-            orig_posteriors=orig_asr.frame_posteriors,
-            cand_posteriors=cand_asr.frame_posteriors,
+            orig_posteriors=orig_probe.frame_distributions,
+            cand_posteriors=cand_probe.frame_distributions,
             max_mean_js_div=config.max_posterior_js_div,
         )
         scores["mean_js_div"] = post_res.mean_js_divergence
@@ -134,7 +134,7 @@ def evaluate_guard_pass(
         verdict = GuardVerdict.PASS if len(reasons) == 0 else GuardVerdict.REVERT
         return (
             GuardEvaluationResult(verdict=verdict, scores=scores, reasons=reasons),
-            orig_asr,
+            orig_probe,
         )
 
     except Exception as e:
@@ -144,5 +144,5 @@ def evaluate_guard_pass(
                 scores={"error": str(e)},
                 reasons=[f"Guard evaluation execution failed with exception: {e}"],
             ),
-            cached_orig_asr or ASRResult("", ""),
+            cached_orig_probe or ProbeResult("", ""),
         )

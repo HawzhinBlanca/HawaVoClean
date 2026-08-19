@@ -1,4 +1,11 @@
-"""Authoritative production neural enhancement core implementation."""
+"""Production enhancement core: decision-directed spectral Wiener filtering.
+
+This is classical DSP, not a neural network. It attenuates steady-state
+noise by per-bin Wiener gains driven by decision-directed a priori SNR
+tracking (Ephraim-Malah / McAulay-Malpass), preserving the original phase
+exactly. It cannot synthesize, substitute, or hallucinate content — it can
+only attenuate spectral magnitude, bounded below by a gain floor.
+"""
 
 import time
 from typing import Any
@@ -7,15 +14,29 @@ import numpy as np
 
 from voiceclean.audio.resample import resample_audio
 from voiceclean.enhancement.protocol import EnhancementResult, Enhancer, EnhancerMetadata
-from voiceclean.hashing import hash_bytes
+from voiceclean.hashing import hash_json_canonical
+
+WIENER_PARAMS: dict[str, float | int] = {
+    "n_fft": 2048,
+    "hop": 512,
+    "noise_percentile": 15,
+    "dd_alpha": 0.95,
+    "gain_floor": 0.05,
+    "internal_sample_rate": 48000,
+}
 
 
-class ProductionEnhancerCore(Enhancer):
-    """Production frozen enhancement core implementing phase-coherent dialogue restoration."""
+def wiener_params_hash() -> str:
+    """Canonical hash of the algorithm parameters — the core's real provenance."""
+    return hash_json_canonical(WIENER_PARAMS)
+
+
+class WienerSpectralEnhancer(Enhancer):
+    """Frozen decision-directed Wiener spectral-subtraction core."""
 
     def __init__(
         self,
-        core_id: str = "urgent-bsrnn-baseline",
+        core_id: str = "wiener-dd-48k-v1",
         sample_rate: int = 48000,
         phase_coherent: bool = True,
     ) -> None:
@@ -25,10 +46,10 @@ class ProductionEnhancerCore(Enhancer):
         self._metadata = EnhancerMetadata(
             core_id=core_id,
             version="1.0.0",
+            algorithm="decision-directed spectral Wiener filter (Ephraim-Malah SNR tracking)",
             sample_rate=sample_rate,
             phase_coherent=phase_coherent,
-            commit="9a7f3b8c2d1e0f4a5b6c7d8e9f0a1b2c3d4e5f6a",
-            weights_sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            params_hash=wiener_params_hash(),
         )
 
     @property
@@ -45,7 +66,7 @@ class ProductionEnhancerCore(Enhancer):
         waveform: np.ndarray[Any, np.dtype[np.float32]],
         sample_rate: int,
     ) -> EnhancementResult:
-        """Run speech enhancement inference on audio waveform."""
+        """Run Wiener spectral filtering on an audio waveform."""
         t_start = time.perf_counter()
         orig_len = len(waveform)
 
@@ -58,12 +79,12 @@ class ProductionEnhancerCore(Enhancer):
                 output_samples=0,
             )
 
-        # 1. Resample to model internal rate (48kHz)
+        # 1. Resample to the core's internal rate (48kHz)
         audio_48k = resample_audio(waveform, sample_rate, self._sample_rate)
 
-        # 2. Decision-Directed Spectral Wiener Filtering with Phase Coherence
-        n_fft = 2048
-        hop = 512
+        # 2. Decision-directed spectral Wiener filtering with exact phase preservation
+        n_fft = int(WIENER_PARAMS["n_fft"])
+        hop = int(WIENER_PARAMS["hop"])
         win = np.hanning(n_fft)
 
         num_frames = max(1, int(np.ceil((len(audio_48k) - n_fft) / hop)) + 1)
@@ -80,11 +101,12 @@ class ProductionEnhancerCore(Enhancer):
         phase = np.angle(stft)
         power = mag**2
 
-        # Noise power estimation (15th percentile across time frames)
-        noise_power = np.percentile(power, 15, axis=0) + 1e-10
+        # Noise power estimate: low percentile across time frames per bin
+        noise_power = np.percentile(power, int(WIENER_PARAMS["noise_percentile"]), axis=0) + 1e-10
 
-        # Decision-Directed a priori SNR tracking (Ephraim-Malah / McAulay-Malpass)
-        alpha = 0.95
+        # Decision-directed a priori SNR tracking (Ephraim-Malah / McAulay-Malpass)
+        alpha = float(WIENER_PARAMS["dd_alpha"])
+        gain_floor = float(WIENER_PARAMS["gain_floor"])
         gain = np.zeros_like(power)
         prev_enh_power = power[0].copy()
 
@@ -97,13 +119,13 @@ class ProductionEnhancerCore(Enhancer):
                     post_snr - 1.0, 0.0
                 )
 
-            # Wiener gain with musical noise suppression floor
+            # Wiener gain with musical-noise suppression floor
             g = prior_snr / (prior_snr + 1.0)
-            g = np.clip(g, 0.05, 1.0)
+            g = np.clip(g, gain_floor, 1.0)
             gain[i] = g
             prev_enh_power = (mag[i] * g) ** 2
 
-        # Reconstruct complex STFT preserving exact original phase for phase coherence
+        # Reconstruct complex STFT preserving the exact original phase
         enhanced_stft = (mag * gain) * np.exp(1j * phase)
 
         # Overlap-add ISTFT
@@ -120,7 +142,7 @@ class ProductionEnhancerCore(Enhancer):
         enhanced_48k[valid_idx] /= win_sum[valid_idx]
         enhanced_48k = enhanced_48k[: len(audio_48k)]
 
-        # 3. Resample back to original sample rate and match exact length
+        # 3. Resample back to the original rate and match exact length
         enhanced_out = resample_audio(
             enhanced_48k, self._sample_rate, sample_rate, target_samples=orig_len
         )
@@ -133,7 +155,6 @@ class ProductionEnhancerCore(Enhancer):
             model_runtime_ms=t_elapsed_ms,
             input_samples=orig_len,
             output_samples=len(enhanced_out),
-            peak_vram_bytes=0,
             warnings=[],
         )
 
@@ -146,10 +167,10 @@ class NoOpEnhancer(Enhancer):
         self._metadata = EnhancerMetadata(
             core_id="noop-enhancer",
             version="1.0.0",
+            algorithm="identity passthrough",
             sample_rate=sample_rate,
             phase_coherent=True,
-            commit="0000000000000000000000000000000000000000",
-            weights_sha256=hash_bytes(b"noop"),
+            params_hash=hash_json_canonical({"algorithm": "noop"}),
         )
 
     @property

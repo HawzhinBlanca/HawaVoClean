@@ -1,4 +1,9 @@
-"""Isolated subprocess enhancement worker with crash recovery and heartbeat monitoring."""
+"""Isolated subprocess enhancement worker with deadline enforcement and crash recovery.
+
+The parent enforces a hard timeout on every request and restarts the worker
+on crash or hang. There is no heartbeat protocol: liveness is inferred from
+response deadlines only.
+"""
 
 import multiprocessing as mp
 import queue
@@ -6,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from voiceclean.enhancement.production import ProductionEnhancerCore
+from voiceclean.enhancement.production import WienerSpectralEnhancer
 from voiceclean.enhancement.protocol import EnhancementResult, Enhancer
 from voiceclean.errors import WorkerCrashError, WorkerTimeoutError
 
@@ -63,10 +68,10 @@ class IsolatedEnhancementWorker:
 
     def __init__(
         self,
-        core_id: str = "urgent-bsrnn-baseline",
+        core_id: str = "wiener-dd-48k-v1",
         sample_rate: int = 48000,
         timeout_s: float = 120.0,
-        enhancer_class: type[Enhancer] = ProductionEnhancerCore,
+        enhancer_class: type[Enhancer] = WienerSpectralEnhancer,
     ) -> None:
         self.core_id = core_id
         self.sample_rate = sample_rate

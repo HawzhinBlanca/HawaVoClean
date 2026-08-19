@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from eval.corpus import load_corpus_manifest
+from voiceclean.eval.corpus import load_corpus_manifest
 from voiceclean.hashing import hash_bytes
 
 

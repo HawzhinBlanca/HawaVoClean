@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from voiceclean.errors import AmbiguousStereoError
-from voiceclean.guard.hawzhin_ctc import FakeSoraniASR
+from voiceclean.guard.spectral_probe import FixedProbe
 from voiceclean.pipeline import run_pipeline
 
 
@@ -39,7 +39,7 @@ def test_chaos_interrupted_job_resumes_cleanly() -> None:
             output_path=out_file1,
             profile="development",
             overwrite=True,
-            asr_override=FakeSoraniASR(),
+            probe_override=FixedProbe(),
         )
 
         assert report1.output.samples == report1.input.samples

@@ -3,15 +3,18 @@
 import argparse
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 from typing import NoReturn
 
+import numpy as np
+import scipy
 import soundfile as sf
-import torch
 
 from voiceclean import __version__
 from voiceclean.audio.probe import probe_audio
 from voiceclean.config import load_config
+from voiceclean.enhancement.production import wiener_params_hash
 from voiceclean.errors import (
     ExitCode,
     InvalidUserInputError,
@@ -21,8 +24,9 @@ from voiceclean.errors import (
 )
 from voiceclean.finishing.loudness import measure_loudness_and_peaks
 from voiceclean.guard.calibration import load_calibration_artifact
-from voiceclean.hashing import hash_file
+from voiceclean.hashing import hash_file, hash_json_canonical
 from voiceclean.logging import get_logger, setup_logging
+from voiceclean.paths import models_dir, profile_config_path, resolve_calibration_file
 from voiceclean.pipeline import run_pipeline
 from voiceclean.report.writer import load_json_report
 
@@ -47,19 +51,15 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
     all_passed = True
 
-    # 1. Python runtime
+    # 1. Python runtime and numeric stack
     py_ver = sys.version.split()[0]
     print(f"[OK] Python version: {py_ver}")
-
-    # 2. PyTorch & Acceleration
-    torch_ver = torch.__version__
-    cuda_avail = torch.cuda.is_available()
-    device_name = torch.cuda.get_device_name(0) if cuda_avail else "CPU (Correctness fallback)"
     print(
-        f"[OK] PyTorch version: {torch_ver} (CUDA available: {cuda_avail}, Device: {device_name})"
+        f"[OK] Numeric stack: numpy {np.__version__}, scipy {scipy.__version__}, "
+        f"soundfile {sf.__version__}"
     )
 
-    # 3. FFmpeg and FFprobe binaries
+    # 2. FFmpeg and FFprobe binaries
     ffmpeg_path = shutil.which("ffmpeg")
     ffprobe_path = shutil.which("ffprobe")
     if ffmpeg_path:
@@ -72,8 +72,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     else:
         print("[WARN] FFprobe binary not found in PATH; falling back to soundfile.")
 
-    # 4. Configuration files
-    prod_cfg = Path("configs/production.toml")
+    # 3. Configuration files (packaged resources, CWD-independent)
+    prod_cfg = profile_config_path("production")
     if prod_cfg.exists():
         try:
             load_config(prod_cfg, is_production=True)
@@ -85,14 +85,23 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         print(f"[FAIL] Production config missing: {prod_cfg}")
         all_passed = False
 
-    # 5. Calibration Artifact
-    calib_file = Path("models/guard-calibration.json")
+    # 4. Guard calibration artifact — including integrity recompute
+    calib_file = models_dir() / "guard-calibration.json"
     if calib_file.exists():
         try:
             data = load_calibration_artifact(calib_file)
-            print(
-                f"[OK] Guard calibration valid: {calib_file} (ID: {data['calibration_id'][:12]}...)"
-            )
+            expected_id = hash_json_canonical(data["thresholds"])
+            if data["calibration_id"] != expected_id:
+                print(
+                    f"[FAIL] Guard calibration integrity: calibration_id does not "
+                    f"recompute from thresholds ({calib_file})"
+                )
+                all_passed = False
+            else:
+                print(
+                    f"[OK] Guard calibration valid: {calib_file} "
+                    f"(ID: {data['calibration_id'][:12]}...)"
+                )
         except Exception as e:
             print(f"[FAIL] Guard calibration invalid: {e}")
             all_passed = False
@@ -100,29 +109,30 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         print(f"[FAIL] Guard calibration missing: {calib_file}")
         all_passed = False
 
-    # 6. Production Core Lock
-    lock_file = Path("models/production-core.lock.toml")
+    # 5. Production core lock — params hash must match the implemented core
+    lock_file = models_dir() / "production-core.lock.toml"
     if lock_file.exists():
-        print(f"[OK] Production core lock present: {lock_file}")
+        try:
+            with open(lock_file, "rb") as f:
+                lock = tomllib.load(f)
+            if lock.get("params_hash") != wiener_params_hash():
+                print("[FAIL] Core lock params_hash does not match the implemented core.")
+                all_passed = False
+            else:
+                print(f"[OK] Production core lock verified: {lock_file}")
+        except Exception as e:
+            print(f"[FAIL] Production core lock unreadable: {e}")
+            all_passed = False
     else:
         print(f"[FAIL] Production core lock missing: {lock_file}")
         all_passed = False
 
-    # 7. Model Registry
-    reg_file = Path("models/model-registry.toml")
-    if reg_file.exists():
-        print(f"[OK] Model registry present: {reg_file}")
-    else:
-        print(f"[FAIL] Model registry missing: {reg_file}")
-        all_passed = False
-
     print("================================================================================")
     if all_passed:
-        print("Doctor status: ALL CHECKS PASSED. Ready for production processing.")
+        print("Doctor status: ALL CHECKS PASSED. Ready for processing.")
         return int(ExitCode.SUCCESS)
-    else:
-        print("Doctor status: PREFLIGHT FAILED. Address errors above before running in production.")
-        return int(ExitCode.PREFLIGHT_FAILURE)
+    print("Doctor status: PREFLIGHT FAILED. Address errors above before processing.")
+    return int(ExitCode.PREFLIGHT_FAILURE)
 
 
 def cmd_process(args: argparse.Namespace) -> int:
@@ -174,49 +184,49 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if actual_sha256 != report.output.sha256:
         exit_with_code(
             ExitCode.PUBLICATION_FAILURE,
-            f"Checksum mismatch for {audio_path}: expected {report.output.sha256}, got {actual_sha256}",
+            f"Checksum mismatch for {audio_path}: expected {report.output.sha256}, "
+            f"got {actual_sha256}",
         )
 
     # Check sample structure
     try:
-        probe = probe_audio(audio_path)
+        media = probe_audio(audio_path)
     except Exception as e:
         exit_with_code(ExitCode.PUBLICATION_FAILURE, f"Cannot probe verified audio: {e}")
 
-    if probe.samples != report.output.samples:
+    if media.samples != report.output.samples:
         exit_with_code(
             ExitCode.PUBLICATION_FAILURE,
-            f"Sample count mismatch: expected {report.output.samples}, got {probe.samples}",
+            f"Sample count mismatch: expected {report.output.samples}, got {media.samples}",
         )
 
-    if probe.sample_rate != report.output.sample_rate:
+    if media.sample_rate != report.output.sample_rate:
         exit_with_code(
             ExitCode.PUBLICATION_FAILURE,
-            f"Sample rate mismatch: expected {report.output.sample_rate}, got {probe.sample_rate}",
+            f"Sample rate mismatch: expected {report.output.sample_rate}, "
+            f"got {media.sample_rate}",
         )
 
-    if probe.channels != report.output.channels:
+    if media.channels != report.output.channels:
         exit_with_code(
             ExitCode.PUBLICATION_FAILURE,
-            f"Channels mismatch: expected {report.output.channels}, got {probe.channels}",
+            f"Channels mismatch: expected {report.output.channels}, got {media.channels}",
         )
 
-    # Check loudness and peak bounds
+    # Check loudness and peak bounds against the -1.0 dBTP ceiling
     data, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
     loudness = measure_loudness_and_peaks(data.T, sr)
 
-    if (
-        report.output.true_peak_dbtp is not None and loudness.true_peak_dbtp > -0.9
-    ):  # ceiling is -1.0 dBTP with 0.1dB tolerance
+    if report.output.true_peak_dbtp is not None and loudness.true_peak_dbtp > -1.0:
         exit_with_code(
             ExitCode.PUBLICATION_FAILURE,
-            f"True peak {loudness.true_peak_dbtp:.2f} dBTP exceeds safety ceiling -1.0 dBTP",
+            f"True peak {loudness.true_peak_dbtp:.3f} dBTP exceeds ceiling -1.0 dBTP",
         )
 
     print("================================================================================")
     print(f"VERIFICATION PASSED: {audio_path}")
     print(f"  SHA-256:             {actual_sha256}")
-    print(f"  Samples:             {probe.samples:,}")
+    print(f"  Samples:             {media.samples:,}")
     print(f"  Integrated Loudness: {loudness.integrated_lufs:.1f} LUFS")
     print(f"  True Peak:           {loudness.true_peak_dbtp:.1f} dBTP")
     print("================================================================================")
@@ -224,86 +234,157 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_audit_models(_args: argparse.Namespace) -> int:
-    """Audit all registered models and lockfiles for license and hash compliance."""
-    import tomllib
+    """Verify core provenance: params hash, license allowlist, calibration integrity.
 
-    reg_path = Path("models/model-registry.toml")
-    lock_path = Path("models/production-core.lock.toml")
+    Exits non-zero on any verification failure — an audit that cannot fail
+    is not an audit.
+    """
+    lock_path = models_dir() / "production-core.lock.toml"
+    policy_path = models_dir() / "license-policy.toml"
+    calib_path = models_dir() / "guard-calibration.json"
 
-    if not reg_path.exists() or not lock_path.exists():
-        exit_with_code(ExitCode.PREFLIGHT_FAILURE, "Model registry or lockfile missing.")
-
-    with open(reg_path, "rb") as f:
-        registry = tomllib.load(f)
-    with open(lock_path, "rb") as f:
-        lock = tomllib.load(f)
+    failures: list[str] = []
 
     print("================================================================================")
     print("                      HAWZHIN VOICECLEAN - MODEL AUDIT                          ")
     print("================================================================================")
-    print(f"Authoritative Production Core: {lock['core_id']}")
-    print(f"Repository:                    {lock['repo_url']} (commit {lock['commit'][:8]})")
-    print(f"Code License:                  {lock['code_license']}")
-    print(f"Weights License:               {lock['weight_license']}")
-    print(f"Phase Coherent:                {lock['phase_coherent']}")
-    print("")
-    print("Registered Benchmark Candidates:")
-    for cand in registry.get("candidates", []):
-        print(
-            f"  - [{cand['id']}] ({cand['role']}) status={cand['status']} license={cand['code_license']}"
-        )
+
+    if not lock_path.exists():
+        failures.append(f"core lockfile missing: {lock_path}")
+        lock = {}
+    else:
+        with open(lock_path, "rb") as f:
+            lock = tomllib.load(f)
+
+    if not policy_path.exists():
+        failures.append(f"license policy missing: {policy_path}")
+        allowed: list[str] = []
+    else:
+        with open(policy_path, "rb") as f:
+            allowed = list(tomllib.load(f).get("allowed_licenses", []))
+
+    if lock:
+        print(f"Production core:  {lock.get('core_id')}")
+        print(f"Algorithm:        {lock.get('algorithm')}")
+        print(f"Code license:     {lock.get('code_license')}")
+
+        # 1. Parameter hash must match the core actually implemented
+        actual = wiener_params_hash()
+        if lock.get("params_hash") != actual:
+            failures.append(
+                f"params_hash mismatch: lockfile {str(lock.get('params_hash'))[:16]}... "
+                f"vs implemented core {actual[:16]}..."
+            )
+        else:
+            print(f"Params hash:      {actual[:16]}... [VERIFIED against implementation]")
+
+        # 2. License must be allowlisted
+        lic = str(lock.get("code_license", ""))
+        if allowed and lic not in allowed:
+            failures.append(f"license {lic!r} is not in the allowlist {allowed}")
+        elif allowed:
+            print(f"License check:    {lic!r} allowlisted [VERIFIED]")
+
+        # 3. Any weight digest table must resolve (none exist for DSP cores,
+        # but a future neural core lands here and gets verified)
+        for fname, digest in dict(lock.get("weight_sha256", {})).items():
+            candidate = models_dir() / str(fname)
+            if not candidate.exists():
+                failures.append(f"declared weights file missing: {fname}")
+            elif hash_file(candidate) != digest:
+                failures.append(f"weights digest mismatch for {fname}")
+
+    # 4. Calibration artifact integrity
+    if calib_path.exists():
+        try:
+            calib = load_calibration_artifact(calib_path)
+            if calib["calibration_id"] != hash_json_canonical(calib["thresholds"]):
+                failures.append("calibration_id does not recompute from thresholds")
+            else:
+                print(f"Calibration:      {calib['calibration_id'][:16]}... [VERIFIED]")
+        except Exception as e:
+            failures.append(f"calibration artifact unreadable: {e}")
+    else:
+        failures.append(f"calibration artifact missing: {calib_path}")
 
     print("================================================================================")
+    if failures:
+        for fmsg in failures:
+            print(f"[FAIL] {fmsg}")
+        print("Audit status: FAILED")
+        return int(ExitCode.PREFLIGHT_FAILURE)
+    print("Audit status: ALL PROVENANCE CHECKS VERIFIED")
     return int(ExitCode.SUCCESS)
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
-    """Fit Guard thresholds from a calibration corpus manifest."""
-    from eval.calibrate import run_calibration
+    """Measure guard accept/revert rates over a calibration corpus."""
+    from voiceclean.eval.calibrate import run_calibration
 
-    print(f"Calibrating Guard thresholds using manifest: {args.manifest}")
+    print(f"Measuring guard rates over manifest: {args.manifest}")
     res = run_calibration(
         manifest_path=args.manifest,
         output_calibration_path=args.output,
-        use_fake_asr=args.fake_asr,
+        corruption_profile=args.corruption_profile,
+        use_fixed_probe=args.fixed_probe,
     )
-    print(f"Calibration completed successfully. Artifact written to: {args.output}")
-    print(f"  Calibration ID: {res['calibration_id']}")
-    print(f"  False Accept Rate: {res['metrics']['calibration_false_accept_rate']:.4f}")
+    m = res["measured"]
+    print(f"Calibration measured and written to: {args.output}")
+    print(f"  Corpus items:        {m['item_count']}")
+    print(
+        f"  False accept rate:   {res['metrics']['calibration_false_accept_rate']:.4f} "
+        f"({m['corrupted_accepted']}/{m['corrupted_evaluations']} corrupted accepted)"
+    )
+    print(
+        f"  False revert rate:   {res['metrics']['calibration_false_revert_rate']:.4f} "
+        f"({m['benign_rejected']}/{m['benign_evaluations']} benign rejected)"
+    )
     return int(ExitCode.SUCCESS)
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    """Run automated acceptance evaluation gates on an acceptance dataset."""
-    from eval.acceptance import evaluate_acceptance_gates
+    """Run automated acceptance gates on an acceptance dataset."""
+    from voiceclean.eval.acceptance import evaluate_acceptance_gates
 
     print(f"Evaluating acceptance gates against manifest: {args.manifest}")
     res = evaluate_acceptance_gates(
         manifest_path=args.manifest,
         output_dir=args.output_dir,
     )
-    passed = res.get("release_gate_status") == "PASSED"
-    print(f"Acceptance Evaluation Outcome: {'PASSED' if passed else 'FAILED'}")
+    passed = res["release_gate_status"] == "PASSED"
+    print(f"Acceptance Evaluation Outcome: {res['release_gate_status']}")
     print(f"  Passed Items: {res['passed_items']} / {res['total_items']}")
+    print(
+        f"  Enhanced speech units: {res['speech_units_enhanced']} / {res['speech_units_total']}"
+    )
+    for item in res["results"]:
+        if not item["passed"]:
+            for f in item["failures"]:
+                print(f"  [FAIL] {item['id']}: {f}")
+    for f in res["corpus_failures"]:
+        print(f"  [FAIL] corpus: {f}")
     return int(ExitCode.SUCCESS if passed else ExitCode.PUBLICATION_FAILURE)
 
 
 def cmd_benchmark(args: argparse.Namespace) -> int:
-    """Execute candidate models benchmark matrix."""
-    from research.benchmark import run_benchmark
+    """Execute the measured benchmark over a corpus."""
+    from voiceclean.research.benchmark import run_benchmark
 
-    print(f"Running candidate benchmark against manifest: {args.manifest}")
-    _res = run_benchmark(
+    print(f"Running benchmark against manifest: {args.manifest}")
+    res = run_benchmark(
         manifest_path=args.manifest,
         output_report_path=args.output,
     )
-    print(f"Benchmark completed. Report written to: {args.output}")
+    m = res["measured"]
+    print(f"Benchmark complete. Report written to: {args.output}")
+    print(f"  Units enhanced: {m['units_enhanced']} / {m['units_total']}")
+    print(f"  Real-time factor: {m['real_time_factor']:.3f}")
     return int(ExitCode.SUCCESS)
 
 
 def cmd_blind_abx(args: argparse.Namespace) -> int:
     """Generate randomized blind listening test trial sheet."""
-    from eval.blind_abx import generate_blind_trial_manifest
+    from voiceclean.eval.blind_abx import generate_blind_trial_manifest
 
     print(f"Generating Blind ABX Listening Trial Sheet from manifest: {args.manifest}")
     out = generate_blind_trial_manifest(
@@ -317,15 +398,13 @@ def cmd_blind_abx(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """CLI main entry point."""
-    # Add cwd to path for eval/ and research/ lazy imports
-    cwd = str(Path.cwd())
-    if cwd not in sys.path:
-        sys.path.insert(0, cwd)
-
     setup_logging()
     parser = argparse.ArgumentParser(
         prog="voiceclean",
-        description="Hawzhin VoiceClean - Kurdish Sorani Dialogue Audio Enhancement & Linguistic Fidelity System",
+        description=(
+            "Hawzhin VoiceClean - dialogue audio cleanup (Wiener spectral denoising, "
+            "spectral-change guarded finishing, BS.1770 mastering)"
+        ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
@@ -358,13 +437,13 @@ def main() -> None:
 
     # audit-models
     p_audit = subparsers.add_parser(
-        "audit-models", help="Audit model registry and license compliance"
+        "audit-models", help="Verify core provenance, license allowlist, calibration integrity"
     )
     p_audit.set_defaults(func=cmd_audit_models)
 
     # calibrate
     p_calib = subparsers.add_parser(
-        "calibrate", help="Fit Guard safety thresholds on a corpus manifest"
+        "calibrate", help="Measure guard accept/revert rates over a corpus manifest"
     )
     p_calib.add_argument(
         "--manifest", "-m", default="data/calibration/manifest.json", help="Path to corpus manifest"
@@ -372,11 +451,17 @@ def main() -> None:
     p_calib.add_argument(
         "--output",
         "-o",
-        default="models/guard-calibration.json",
+        default="guard-calibration.measured.json",
         help="Destination calibration JSON",
     )
     p_calib.add_argument(
-        "--fake-asr", action="store_true", help="Use lightweight FakeSoraniASR for unit calibration"
+        "--corruption-profile",
+        choices=["mild", "standard", "severe"],
+        default="standard",
+        help="Corruption operator suite to measure against",
+    )
+    p_calib.add_argument(
+        "--fixed-probe", action="store_true", help="Use the deterministic FixedProbe (tests only)"
     )
     p_calib.set_defaults(func=cmd_calibrate)
 
@@ -393,12 +478,12 @@ def main() -> None:
     p_eval.set_defaults(func=cmd_eval)
 
     # benchmark
-    p_bench = subparsers.add_parser("benchmark", help="Run candidate multi-model benchmark matrix")
+    p_bench = subparsers.add_parser("benchmark", help="Run the measured pipeline benchmark")
     p_bench.add_argument(
         "--manifest", "-m", default="data/acceptance/manifest.json", help="Path to corpus manifest"
     )
     p_bench.add_argument(
-        "--output", "-o", default="research/benchmark_results.json", help="Output report JSON"
+        "--output", "-o", default="benchmark_results.json", help="Output report JSON"
     )
     p_bench.set_defaults(func=cmd_benchmark)
 
@@ -416,7 +501,7 @@ def main() -> None:
     p_abx.add_argument(
         "--output",
         "-o",
-        default="eval/blind_abx_session.json",
+        default="blind_abx_session.json",
         help="Destination trial sheet JSON",
     )
     p_abx.set_defaults(func=cmd_blind_abx)

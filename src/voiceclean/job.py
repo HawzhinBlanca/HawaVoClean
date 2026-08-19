@@ -1,21 +1,27 @@
-"""Job workspace lifecycle, unit caching, and atomic publication."""
+"""Job workspace lifecycle and atomic output publication.
+
+The workspace is scratch space for exactly one run: it is created under
+``voiceclean.paths.work_root()``, holds the journal and staging files, and
+is removed on successful publication. There is no resume cache — a repeated
+run recomputes every unit, so the audit report always describes the run
+that produced it. On a crash the workspace survives for forensics only.
+"""
 
 import json
 import os
 import shutil
+import tempfile
 from pathlib import Path
-from typing import Any
-
-import numpy as np
 
 from voiceclean.config import VoiceCleanConfig
 from voiceclean.errors import PreflightError, PublicationError
 from voiceclean.hashing import compute_job_id
 from voiceclean.journal import JobJournal
+from voiceclean.paths import work_root
 
 
 class JobWorkspace:
-    """Manages private directory structure, unit cache, and atomic output publication."""
+    """Manages the private scratch directory, journal, and atomic publication."""
 
     def __init__(
         self,
@@ -44,12 +50,14 @@ class JobWorkspace:
         )
 
         if base_work_dir is None:
-            base_work_dir = Path(".voiceclean-work")
+            base_work_dir = work_root()
 
-        self.root = (base_work_dir / self.job_id).resolve()
-        self.units_dir = self.root / "units"
-        self.cache_dir = self.root / "cache"
-        self.reports_dir = self.root / "reports"
+        # A fresh scratch directory per run: the job_id names the job, the
+        # unique suffix guarantees no state is shared between runs.
+        base_work_dir.mkdir(parents=True, exist_ok=True)
+        self.root = Path(
+            tempfile.mkdtemp(prefix=f"{self.job_id}-", dir=base_work_dir)
+        ).resolve()
         self.journal_path = self.root / "journal.jsonl"
         self.job_meta_path = self.root / "job.json"
 
@@ -57,65 +65,40 @@ class JobWorkspace:
         self.journal = JobJournal(self.journal_path)
 
     def _init_workspace(self) -> None:
-        """Create directories with restricted permissions (0o700)."""
-        self.root.mkdir(parents=True, exist_ok=True)
+        """Restrict permissions and record job metadata."""
         import contextlib
 
         with contextlib.suppress(Exception):
             self.root.chmod(0o700)
 
-        self.units_dir.mkdir(exist_ok=True)
-        self.cache_dir.mkdir(exist_ok=True)
-        self.reports_dir.mkdir(exist_ok=True)
+        meta = {
+            "job_id": self.job_id,
+            "input_path": str(self.input_path),
+            "input_sha256": self.input_sha256,
+            "config_hash": self.config_hash,
+            "core_id": self.core_id,
+            "guard_id": self.guard_id,
+            "tool_version": self.tool_version,
+        }
+        with open(self.job_meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
 
-        if not self.job_meta_path.exists():
-            meta = {
-                "job_id": self.job_id,
-                "input_path": str(self.input_path),
-                "input_sha256": self.input_sha256,
-                "config_hash": self.config_hash,
-                "core_id": self.core_id,
-                "guard_id": self.guard_id,
-                "tool_version": self.tool_version,
-            }
-            with open(self.job_meta_path, "w", encoding="utf-8") as f:
-                json.dump(meta, f, indent=2)
-
-    def check_disk_space(self, required_bytes: int) -> None:
-        """Verify sufficient free disk space before processing."""
-        stat = shutil.disk_usage(self.root)
+    def check_disk_space(self, required_bytes: int, destination: Path | None = None) -> None:
+        """Verify sufficient free space in the workspace and at the destination."""
         safety_margin = 500 * 1024 * 1024  # 500 MB safety buffer
-        if stat.free < (required_bytes + safety_margin):
-            raise PreflightError(
-                f"Insufficient disk space in {self.root}: available {stat.free / (1024 * 1024):.1f} MB, "
-                f"required {(required_bytes + safety_margin) / (1024 * 1024):.1f} MB"
-            )
-
-    def save_unit_result(
-        self,
-        unit_id: int,
-        channel_id: int,
-        waveform: np.ndarray[Any, np.dtype[np.float32]],
-    ) -> Path:
-        """Persist committed unit waveform to private units directory."""
-        unit_file = self.units_dir / f"unit_{unit_id:06d}_ch{channel_id}.npy"
-        np.save(unit_file, waveform.astype(np.float32))
-        return unit_file
-
-    def load_unit_result(
-        self,
-        unit_id: int,
-        channel_id: int,
-    ) -> np.ndarray[Any, np.dtype[np.float32]] | None:
-        """Load cached unit waveform if exists."""
-        unit_file = self.units_dir / f"unit_{unit_id:06d}_ch{channel_id}.npy"
-        if unit_file.exists():
-            try:
-                arr = np.load(unit_file)
-                return np.ascontiguousarray(arr, dtype=np.float32)
-            except Exception:
-                return None
-        return None
+        targets = [self.root]
+        if destination is not None:
+            dest_dir = destination if destination.is_dir() else destination.parent
+            if dest_dir.exists():
+                targets.append(dest_dir)
+        for target in targets:
+            stat = shutil.disk_usage(target)
+            if stat.free < (required_bytes + safety_margin):
+                raise PreflightError(
+                    f"Insufficient disk space at {target}: available "
+                    f"{stat.free / (1024 * 1024):.1f} MB, required "
+                    f"{(required_bytes + safety_margin) / (1024 * 1024):.1f} MB"
+                )
 
     def publish_atomically(
         self,
@@ -125,7 +108,13 @@ class JobWorkspace:
         txt_summary_str: str,
         overwrite: bool = False,
     ) -> tuple[Path, Path, Path]:
-        """Atomically publish output audio, JSON report, and TXT summary."""
+        """Atomically publish output audio, JSON report, and TXT summary.
+
+        All three artifacts are staged in a temporary directory ON THE
+        DESTINATION FILESYSTEM, so the final renames are always intra-device
+        (no EXDEV) and effectively atomic. If any rename fails, the ones that
+        already happened are rolled back and nothing partial is left behind.
+        """
         dest_audio = Path(destination_audio_path).resolve()
         dest_audio.parent.mkdir(parents=True, exist_ok=True)
 
@@ -140,32 +129,43 @@ class JobWorkspace:
         if not temp_audio_path.exists():
             raise PublicationError(f"Temporary candidate audio file missing: {temp_audio_path}")
 
-        # Write reports to workspace staging first
-        tmp_json = self.reports_dir / "report.json.tmp"
-        tmp_txt = self.reports_dir / "report.txt.tmp"
-
-        with open(tmp_json, "w", encoding="utf-8") as f:
-            f.write(json_report_str)
-            f.flush()
-            os.fsync(f.fileno())
-
-        with open(tmp_txt, "w", encoding="utf-8") as f:
-            f.write(txt_summary_str)
-            f.flush()
-            os.fsync(f.fileno())
-
-        # Atomic replacements
+        staging = Path(tempfile.mkdtemp(prefix=".voiceclean-publish-", dir=dest_audio.parent))
         try:
-            os.replace(temp_audio_path, dest_audio)
-            os.replace(tmp_json, dest_json)
-            os.replace(tmp_txt, dest_txt)
-        except Exception as e:
-            raise PublicationError(f"Atomic file publish failed: {e}") from e
+            staged_audio = staging / dest_audio.name
+            staged_json = staging / dest_json.name
+            staged_txt = staging / dest_txt.name
+
+            shutil.copyfile(temp_audio_path, staged_audio)
+            for staged, content in ((staged_json, json_report_str), (staged_txt, txt_summary_str)):
+                with open(staged, "w", encoding="utf-8") as f:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+            renamed: list[tuple[Path, Path]] = []
+            try:
+                for staged, dest in (
+                    (staged_audio, dest_audio),
+                    (staged_json, dest_json),
+                    (staged_txt, dest_txt),
+                ):
+                    os.replace(staged, dest)
+                    renamed.append((staged, dest))
+            except Exception as e:
+                # Roll back the artifacts that already landed.
+                for _, dest in renamed:
+                    import contextlib
+
+                    with contextlib.suppress(Exception):
+                        dest.unlink()
+                raise PublicationError(f"Atomic file publish failed: {e}") from e
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
         return dest_audio, dest_json, dest_txt
 
     def cleanup(self) -> None:
-        """Remove workspace on clean completion if requested."""
+        """Remove the scratch workspace. Called on successful completion."""
         import contextlib
 
         with contextlib.suppress(Exception):

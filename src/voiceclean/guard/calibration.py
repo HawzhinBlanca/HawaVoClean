@@ -36,7 +36,7 @@ def apply_calibrated_thresholds(
     thresh = calibration_data.get("thresholds", {})
     return GuardConfig(
         guard_id=str(calibration_data.get("guard_id", config.guard_id)),
-        asr_model_id=str(calibration_data.get("asr_model_id", config.asr_model_id)),
+        probe_id=str(calibration_data.get("probe_id", config.probe_id)),
         calibration_file=config.calibration_file,
         min_anchor_confidence=float(
             thresh.get("min_anchor_confidence", config.min_anchor_confidence)

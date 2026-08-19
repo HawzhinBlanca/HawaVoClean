@@ -1,9 +1,18 @@
-# Hawzhin VoiceClean - Model Artifacts & Registry
+# Model Artifacts
 
-This directory contains the production model lockfile, the registered candidate models catalog, and the signed/calibrated guard thresholds.
+Runtime artifacts moved into the package: `src/voiceclean/resources/models/`
+(overridable via `VOICECLEAN_MODEL_DIR`). This directory intentionally holds
+no artifacts.
 
-## Files
+Status, honestly stated:
 
-- `production-core.lock.toml`: The authoritative, immutable lockfile for the frozen neural enhancement core used in production runtime.
-- `model-registry.toml`: Registry of all benchmarked candidates and external baselines.
-- `guard-calibration.json`: Hash-locked thresholds and parameters fitted during the calibration phase on the calibration dataset.
+- The production enhancement core is deterministic DSP (a decision-directed
+  Wiener filter). It has no weights. Its provenance is its parameter set,
+  hashed in `production-core.lock.toml`.
+- **No external neural models have been evaluated.** A previous revision of
+  this directory contained a registry of "evaluated" candidates with
+  fabricated commit hashes and license claims; it was removed rather than
+  corrected, because none of the evaluations had happened.
+- The guard calibration artifact carries engineering-default thresholds and
+  says so. Measured metrics only appear after a real `voiceclean calibrate`
+  run, with measurement provenance attached.

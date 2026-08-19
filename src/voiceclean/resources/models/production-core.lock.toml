@@ -1,0 +1,25 @@
+# Production Enhancement Core Lock
+#
+# VoiceClean v1 ships exactly one enhancement core, and it is deterministic
+# DSP — not a neural network. Its provenance is its parameter set, hashed
+# canonically below. There are no weights, so there are no weight digests.
+# `voiceclean audit-models` verifies params_hash against the instantiated
+# core at runtime.
+
+schema_version = 2
+core_id = "wiener-dd-48k-v1"
+version = "1.0.0"
+algorithm = "decision-directed spectral Wiener filter (Ephraim-Malah SNR tracking)"
+implementation = "voiceclean.enhancement.production.WienerSpectralEnhancer"
+code_license = "Proprietary / All Rights Reserved"
+expected_sample_rates = [48000]
+phase_coherent = true
+params_hash = "e4eab6048ccbd3fcde5729385c5f72dfa1e87bce786f182c3962d30419960c64"
+
+[params]
+n_fft = 2048
+hop = 512
+noise_percentile = 15
+dd_alpha = 0.95
+gain_floor = 0.05
+internal_sample_rate = 48000

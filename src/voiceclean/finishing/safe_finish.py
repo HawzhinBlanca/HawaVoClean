@@ -15,7 +15,7 @@ from voiceclean.finishing.repair import (
     remove_electrical_hum,
     repair_transient_clicks,
 )
-from voiceclean.guard.protocol import ASRResult, SoraniASR
+from voiceclean.guard.protocol import ProbeResult, SpectralProbe
 from voiceclean.guard.verdict import (
     GuardVerdict,
     evaluate_guard_pass,
@@ -93,11 +93,11 @@ def safe_finish_speech_unit(
     pre_finish_waveform: np.ndarray[Any, np.dtype[np.float32]],
     sample_rate: int,
     is_speech: bool,
-    asr_engine: SoraniASR,
+    probe: SpectralProbe,
     finishing_config: FinishingConfig,
     guard_config: GuardConfig,
-    cached_pre_finish_asr: ASRResult | None = None,
-) -> tuple[SafeFinishResult, ASRResult]:
+    cached_pre_finish_probe: ProbeResult | None = None,
+) -> tuple[SafeFinishResult, ProbeResult]:
     """Execute safe finishing ladder guarded by Guard B."""
     if not finishing_config.enabled or not is_speech or finishing_config.preset == "bypass":
         return (
@@ -107,10 +107,10 @@ def safe_finish_speech_unit(
                 guard_b_verdict=GuardVerdict.NO_SPEECH if not is_speech else GuardVerdict.PASS,
                 actions_taken=[],
             ),
-            cached_pre_finish_asr or asr_engine.infer(pre_finish_waveform, sample_rate),
+            cached_pre_finish_probe or probe.infer(pre_finish_waveform, sample_rate),
         )
 
-    ref_asr = cached_pre_finish_asr or asr_engine.infer(pre_finish_waveform, sample_rate)
+    ref_probe = cached_pre_finish_probe or probe.infer(pre_finish_waveform, sample_rate)
 
     # Step 1: Try Gentle preset
     gentle_wave, gentle_actions = apply_finishing_stages(
@@ -121,9 +121,9 @@ def safe_finish_speech_unit(
         cand_waveform=gentle_wave,
         sample_rate=sample_rate,
         is_speech=True,
-        asr_engine=asr_engine,
+        probe=probe,
         config=guard_config,
-        cached_orig_asr=ref_asr,
+        cached_orig_probe=ref_probe,
         is_finishing_pass=True,
     )
 
@@ -136,7 +136,7 @@ def safe_finish_speech_unit(
                 guard_b_scores=guard_b_gentle.scores,
                 actions_taken=gentle_actions,
             ),
-            ref_asr,
+            ref_probe,
         )
 
     # Step 2: Try Minimal preset
@@ -148,9 +148,9 @@ def safe_finish_speech_unit(
         cand_waveform=min_wave,
         sample_rate=sample_rate,
         is_speech=True,
-        asr_engine=asr_engine,
+        probe=probe,
         config=guard_config,
-        cached_orig_asr=ref_asr,
+        cached_orig_probe=ref_probe,
         is_finishing_pass=True,
     )
 
@@ -163,7 +163,7 @@ def safe_finish_speech_unit(
                 guard_b_scores=guard_b_min.scores,
                 actions_taken=min_actions,
             ),
-            ref_asr,
+            ref_probe,
         )
 
     # Step 3: Ladder exhausted -> Bypass finishing entirely
@@ -172,8 +172,8 @@ def safe_finish_speech_unit(
             finished_waveform=pre_finish_waveform.copy(),
             preset_applied="bypass",
             guard_b_verdict=GuardVerdict.REVERT,
-            guard_b_scores=guard_b_gentle.scores,
+            guard_b_scores=guard_b_min.scores,
             actions_taken=["bypassed_after_guard_b_rejection"],
         ),
-        ref_asr,
+        ref_probe,
     )

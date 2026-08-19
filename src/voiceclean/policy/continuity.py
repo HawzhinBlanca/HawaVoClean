@@ -24,6 +24,9 @@ def enforce_source_continuity(
     adjusted_decisions = list(decisions)
     num_units = len(units)
 
+    def _same_channel(a: int, b: int) -> bool:
+        return units[a].channel_id == units[b].channel_id
+
     for i in range(num_units):
         curr_unit = units[i]
         curr_dec = adjusted_decisions[i]
@@ -33,10 +36,17 @@ def enforce_source_continuity(
 
         # If current unit had a forced boundary (i.e. cut through speech)
         if curr_unit.forced_boundary:
-            # Check left neighbor
-            left_reverted = i > 0 and not adjusted_decisions[i - 1].is_enhanced
-            # Check right neighbor
-            right_reverted = i < num_units - 1 and not adjusted_decisions[i + 1].is_enhanced
+            # Neighbours must lie on the SAME channel: the flat unit list
+            # concatenates channels, and units on different channels are
+            # never adjacent in time.
+            left_reverted = (
+                i > 0 and _same_channel(i, i - 1) and not adjusted_decisions[i - 1].is_enhanced
+            )
+            right_reverted = (
+                i < num_units - 1
+                and _same_channel(i, i + 1)
+                and not adjusted_decisions[i + 1].is_enhanced
+            )
 
             if left_reverted or right_reverted:
                 # Revert current unit to original to maintain smooth speech continuity

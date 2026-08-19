@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from voiceclean.guard.hawzhin_ctc import FakeSoraniASR
+from voiceclean.guard.spectral_probe import FixedProbe
 from voiceclean.pipeline import run_pipeline
 
 
@@ -21,7 +21,7 @@ def test_pipeline_development_profile() -> None:
             output_path=out_path,
             profile="development",
             overwrite=True,
-            asr_override=FakeSoraniASR(),
+            probe_override=FixedProbe(),
         )
 
         assert rep.summary.units_total >= 1

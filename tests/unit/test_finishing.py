@@ -11,7 +11,7 @@ from voiceclean.finishing.repair import (
     repair_transient_clicks,
 )
 from voiceclean.finishing.safe_finish import safe_finish_speech_unit
-from voiceclean.guard.hawzhin_ctc import FakeSoraniASR
+from voiceclean.guard.spectral_probe import FixedProbe
 from voiceclean.guard.verdict import GuardVerdict
 
 
@@ -63,7 +63,7 @@ def test_safe_finish_speech_unit_gentle_pass() -> None:
         + 0.2 * np.sin(2 * np.pi * 1000 * t)
         + 0.1 * np.sin(2 * np.pi * 3000 * t)
     ).astype(np.float32)
-    asr = FakeSoraniASR()
+    asr = FixedProbe()
     fin_cfg = FinishingConfig(enabled=True, preset="gentle")
     grd_cfg = GuardConfig()
 
@@ -71,7 +71,7 @@ def test_safe_finish_speech_unit_gentle_pass() -> None:
         wave,
         sr,
         is_speech=True,
-        asr_engine=asr,
+        probe=asr,
         finishing_config=fin_cfg,
         guard_config=grd_cfg,
     )

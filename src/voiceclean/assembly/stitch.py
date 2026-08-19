@@ -4,7 +4,6 @@ from typing import Any
 
 import numpy as np
 
-from voiceclean.assembly.overlap import compute_equal_power_crossfade
 from voiceclean.segmentation.types import SpeechUnit
 
 
@@ -33,27 +32,23 @@ def assemble_channel_timeline(
         elif len(wave) > core_len:
             wave = wave[:core_len]
 
-        # Check if crossfade with previous unit is warranted
+        timeline[start:end] = wave
+
+        # Boundary declick: diffuse any step discontinuity at the joint into
+        # the head of this unit. Every source sample is rendered exactly once;
+        # the correction is a decaying offset, not duplicated content.
         if i > 0 and crossfade_samples > 0:
             prev_unit = units[i - 1]
-            # Crossfade if both units meet at exact boundary inside non-speech
-            if prev_unit.end_sample == start and not unit.forced_boundary:
+            if prev_unit.end_sample == start and not unit.forced_boundary and start > 0:
                 fade_n = min(
                     crossfade_samples,
                     core_len // 4,
                     (prev_unit.end_sample - prev_unit.start_sample) // 4,
-                    start,  # prevent negative overlap_start
                 )
                 if fade_n > 0:
-                    fade_out, fade_in = compute_equal_power_crossfade(fade_n)
-                    overlap_start = start - fade_n
-                    # Apply crossfade in overlap region
-                    timeline[overlap_start:start] = (
-                        timeline[overlap_start:start] * fade_out + wave[:fade_n] * fade_in
-                    )
-                    timeline[start:end] = wave
-                    continue
-
-        timeline[start:end] = wave
+                    step = float(timeline[start - 1]) - float(wave[0])
+                    if abs(step) > 1e-9:
+                        ramp = np.linspace(1.0, 0.0, fade_n, endpoint=False, dtype=np.float32)
+                        timeline[start : start + fade_n] += step * ramp
 
     return np.ascontiguousarray(timeline, dtype=np.float32)

@@ -1,12 +1,19 @@
-"""Master processing pipeline orchestrating decoding, segmentation, isolated worker enhancement, guards, finishing, loudness, and atomic publication."""
+"""Master processing pipeline: decode, segment, enhance, guard, finish, master, publish.
+
+Every run recomputes every unit — there is no resume cache, so the audit
+report always describes the run that produced it. The scratch workspace is
+removed on success and survives only a genuine crash, for forensics.
+"""
 
 import platform
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import torch
+import scipy
+import soundfile
 
 from voiceclean import __version__
 from voiceclean.alignment.delay import estimate_gcc_phat_delay
@@ -18,20 +25,22 @@ from voiceclean.audio.encode import encode_audio
 from voiceclean.audio.probe import probe_audio
 from voiceclean.audio.types import AudioBuffer, AudioProbeResult
 from voiceclean.config import VoiceCleanConfig, load_config
-from voiceclean.enhancement.production import ProductionEnhancerCore
+from voiceclean.enhancement.production import WienerSpectralEnhancer, wiener_params_hash
 from voiceclean.enhancement.validate import validate_enhancer_output
 from voiceclean.enhancement.worker import IsolatedEnhancementWorker
+from voiceclean.errors import PreflightError
 from voiceclean.finishing.limiter import apply_lookahead_limiter
 from voiceclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
 from voiceclean.finishing.safe_finish import safe_finish_speech_unit
 from voiceclean.guard.calibration import apply_calibrated_thresholds, load_calibration_artifact
-from voiceclean.guard.hawzhin_ctc import HawzhinSoraniASR
-from voiceclean.guard.protocol import SoraniASR
+from voiceclean.guard.protocol import SpectralProbe
+from voiceclean.guard.spectral_probe import SpectralSignatureProbe
 from voiceclean.guard.verdict import GuardVerdict
 from voiceclean.hashing import hash_bytes, hash_file
 from voiceclean.job import JobWorkspace
 from voiceclean.journal import JournalEvent
 from voiceclean.logging import get_logger
+from voiceclean.paths import models_dir, profile_config_path, resolve_calibration_file
 from voiceclean.policy.continuity import enforce_source_continuity
 from voiceclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from voiceclean.report.schema import (
@@ -51,6 +60,39 @@ from voiceclean.segmentation.utterances import build_speech_units
 
 logger = get_logger("pipeline")
 
+FINAL_DECISION_BY_VERDICT: dict[GuardVerdict, str] = {
+    GuardVerdict.UNVERIFIED: "original_unverified",
+    GuardVerdict.ERROR: "original_error",
+    GuardVerdict.REVERT: "original_reverted",
+}
+
+
+def _load_core_lock(core_id: str) -> dict[str, Any]:
+    """Load and verify the production core lockfile. Missing or mismatched
+    provenance is a hard failure, never a silent degradation."""
+    lock_path = models_dir() / "production-core.lock.toml"
+    if not lock_path.exists():
+        raise PreflightError(
+            f"Production core lockfile missing: {lock_path}. Refusing to run "
+            "without verifiable core provenance."
+        )
+    with open(lock_path, "rb") as f:
+        lock = tomllib.load(f)
+
+    if lock.get("core_id") != core_id:
+        raise PreflightError(
+            f"Configured core_id {core_id!r} does not match lockfile core "
+            f"{lock.get('core_id')!r}"
+        )
+    actual_params_hash = wiener_params_hash()
+    if lock.get("params_hash") != actual_params_hash:
+        raise PreflightError(
+            "Core parameter drift: lockfile params_hash "
+            f"{str(lock.get('params_hash'))[:16]}... does not match the "
+            f"implemented core {actual_params_hash[:16]}..."
+        )
+    return lock
+
 
 def run_pipeline(
     input_path: Path | str,
@@ -59,45 +101,37 @@ def run_pipeline(
     config_path: Path | str | None = None,
     profile: str = "production",
     overwrite: bool = False,
-    asr_override: SoraniASR | None = None,
+    probe_override: SpectralProbe | None = None,
 ) -> VoiceCleanReport:
-    """Execute complete end-to-end Hawzhin VoiceClean pipeline."""
+    """Execute the complete end-to-end VoiceClean pipeline."""
     in_path = Path(input_path).resolve()
     out_path = Path(output_path).resolve()
 
     logger.info(f"Starting VoiceClean pipeline on {in_path} -> {out_path} [profile={profile}]")
 
-    # 1. Configuration & Calibration Preflight
+    # 1. Configuration, calibration, and core provenance preflight
     is_prod = profile == "production"
     if config is None:
-        cfg_file = config_path or (
-            "configs/production.toml" if is_prod else "configs/development.toml"
-        )
+        cfg_file = Path(config_path) if config_path is not None else profile_config_path(profile)
         config = load_config(cfg_file, is_production=is_prod)
 
-    # Load and lock calibration thresholds
-    calib_data = load_calibration_artifact(config.guard.calibration_file)
+    calib_path = resolve_calibration_file(config.guard.calibration_file)
+    calib_data = load_calibration_artifact(calib_path)
     active_guard_cfg = apply_calibrated_thresholds(config.guard, calib_data)
 
-    # Load production core lock for provenance metadata
-    import tomllib
-    lock_path = Path("models/production-core.lock.toml")
-    if lock_path.exists():
-        with open(lock_path, "rb") as f:
-            core_lock_data = tomllib.load(f)
-    else:
-        core_lock_data = {}
+    core_lock = _load_core_lock(config.enhancement.core_id)
 
-    # 2. Probe Media
-    probe = probe_audio(in_path, max_sample_rate=config.input.max_sample_rate)
+    # 2. Probe media
+    media = probe_audio(in_path, max_sample_rate=config.input.max_sample_rate)
     logger.info(
-        f"Probed media: {probe.sample_rate}Hz, {probe.channels}ch, {probe.samples:,} samples ({probe.duration_s:.2f}s)"
+        f"Probed media: {media.sample_rate}Hz, {media.channels}ch, "
+        f"{media.samples:,} samples ({media.duration_s:.2f}s)"
     )
 
-    # 3. Initialize Workspace & Journal
+    # 3. Workspace and journal
     workspace = JobWorkspace(
         input_path=in_path,
-        input_sha256=probe.sha256,
+        input_sha256=media.sha256,
         config=config,
         core_id=config.enhancement.core_id,
         guard_id=active_guard_cfg.guard_id,
@@ -106,35 +140,32 @@ def run_pipeline(
     workspace.journal.append(
         JournalEvent.JOB_STARTED, {"input": str(in_path), "job_id": workspace.job_id}
     )
-
-    # Check disk space (estimate 4 bytes * samples * channels * 3)
-    workspace.check_disk_space(probe.samples * probe.channels * 12)
+    workspace.check_disk_space(media.samples * media.channels * 12, destination=out_path.parent)
     workspace.journal.append(JournalEvent.PREFLIGHT_PASSED)
 
-    # 4. Safe Decode & Channel Classification
-    audio_buf = decode_audio(probe, timeout_s=config.runtime.worker_timeout_s)
-    # Sync probe with exact decoded stream sample count if container estimate differed
-    if probe.samples != audio_buf.samples:
-        probe = AudioProbeResult(
-            path=probe.path,
-            format_name=probe.format_name,
-            codec_name=probe.codec_name,
-            sample_rate=probe.sample_rate,
-            channels=probe.channels,
+    # 4. Decode and classify channels
+    audio_buf = decode_audio(media, timeout_s=config.runtime.worker_timeout_s)
+    if media.samples != audio_buf.samples:
+        # Sync with the exact decoded stream length if the container estimate differed
+        media = AudioProbeResult(
+            path=media.path,
+            format_name=media.format_name,
+            codec_name=media.codec_name,
+            sample_rate=media.sample_rate,
+            channels=media.channels,
             duration_s=audio_buf.duration_s,
             samples=audio_buf.samples,
-            bit_depth=probe.bit_depth,
-            sha256=probe.sha256,
+            bit_depth=media.bit_depth,
+            sha256=media.sha256,
         )
     channel_mode = classify_channels(audio_buf, declared_mode=config.input.channel_mode)
     audio_buf.channel_mode = channel_mode
     logger.info(f"Channel classification: {channel_mode}")
     workspace.journal.append(JournalEvent.AUDIO_DECODED, {"channel_mode": str(channel_mode)})
 
-    # Determine processing channels
     channels_to_process, duplicate_to_stereo = handle_channel_layout(audio_buf, channel_mode)
 
-    # 5. Segmentation into SpeechUnits
+    # 5. Segmentation
     all_units: list[SpeechUnit] = []
     unit_id_offset = 0
     for ch_idx, ch_wave in enumerate(channels_to_process):
@@ -149,11 +180,12 @@ def run_pipeline(
         unit_id_offset += len(ch_units)
 
     logger.info(
-        f"Generated {len(all_units)} speech units across {len(channels_to_process)} processing channel(s)."
+        f"Generated {len(all_units)} speech units across "
+        f"{len(channels_to_process)} processing channel(s)."
     )
     workspace.journal.append(JournalEvent.SEGMENTATION_COMPLETE, {"units_count": len(all_units)})
 
-    # 6. Instantiate Models (Worker & ASR Guard)
+    # 6. Models: isolated worker (or in-process core) and the fidelity probe
     if config.runtime.isolated_worker:
         worker: Any = IsolatedEnhancementWorker(
             core_id=config.enhancement.core_id,
@@ -161,109 +193,57 @@ def run_pipeline(
             timeout_s=config.runtime.worker_timeout_s,
         )
     else:
-        worker = ProductionEnhancerCore(
+        worker = WienerSpectralEnhancer(
             core_id=config.enhancement.core_id,
             sample_rate=config.enhancement.model_sample_rate,
             phase_coherent=config.enhancement.phase_coherent,
         )
 
-    asr_engine: SoraniASR = asr_override or HawzhinSoraniASR(
-        model_id=active_guard_cfg.asr_model_id,
+    probe: SpectralProbe = probe_override or SpectralSignatureProbe(
+        probe_id=active_guard_cfg.probe_id,
         target_sr=16000,
     )
 
-    # 7. Unit Processing Loop
-    committed_units = workspace.journal.get_committed_units()
-    unit_decisions: dict[int, UnitPolicyDecision] = {}
-    unit_decision_records: list[UnitDecisionRecord] = []
-    orig_core_waveforms: dict[int, np.ndarray] = {}
+    # 7. Guard-A decisions for every unit (finishing comes after continuity)
+    decisions: list[UnitPolicyDecision] = []
+    cand_hashes: list[str | None] = []
+    unit_runtimes: list[float] = []
+    orig_core_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
     try:
         for u in all_units:
             ch_wave = channels_to_process[u.channel_id]
             core_orig = ch_wave[u.start_sample : u.end_sample]
-            orig_core_waveforms[u.unit_id] = core_orig
+            orig_core_waveforms.append(core_orig)
 
             t_unit_start = time.perf_counter()
 
-            # Check if unit already committed in journal
-            if u.unit_id in committed_units:
-                cached_wave = workspace.load_unit_result(u.unit_id, u.channel_id)
-                if cached_wave is not None:
-                    unit_decisions[u.unit_id] = UnitPolicyDecision(
-                        selected_waveform=cached_wave,
-                        is_enhanced=True,
-                        chosen_strength=1.0,
-                        guard_verdict=GuardVerdict.PASS,
-                        decision_reason="Loaded from committed resume cache.",
-                    )
-                    unit_decision_records.append(
-                        UnitDecisionRecord(
-                            unit_id=u.unit_id,
-                            channel=u.channel_id,
-                            start_sample=u.start_sample,
-                            end_sample=u.end_sample,
-                            start_time_s=float(u.start_sample / audio_buf.sample_rate),
-                            end_time_s=float(u.end_sample / audio_buf.sample_rate),
-                            is_speech=u.is_speech,
-                            input_sha256=u.input_sha256,
-                            guard_a_verdict=GuardVerdict.PASS,
-                            final_decision="enhanced",
-                            decision_reason="Resumed from workspace cache.",
-                        )
-                    )
-                    continue
-
             if not u.is_speech:
-                # Non-speech unit: passthrough original audio
-                dec = UnitPolicyDecision(
-                    selected_waveform=core_orig.copy(),
-                    is_enhanced=False,
-                    chosen_strength=0.0,
-                    guard_verdict=GuardVerdict.NO_SPEECH,
-                    decision_reason="Non-speech unit passthrough.",
-                )
-                unit_decisions[u.unit_id] = dec
-                workspace.save_unit_result(u.unit_id, u.channel_id, dec.selected_waveform)
-                workspace.journal.append(
-                    JournalEvent.UNIT_COMMITTED, {"unit_id": u.unit_id, "is_speech": False}
-                )
-
-                unit_decision_records.append(
-                    UnitDecisionRecord(
-                        unit_id=u.unit_id,
-                        channel=u.channel_id,
-                        start_sample=u.start_sample,
-                        end_sample=u.end_sample,
-                        start_time_s=float(u.start_sample / audio_buf.sample_rate),
-                        end_time_s=float(u.end_sample / audio_buf.sample_rate),
-                        is_speech=False,
-                        input_sha256=u.input_sha256,
-                        output_sha256=u.input_sha256,
-                        guard_a_verdict=GuardVerdict.NO_SPEECH,
-                        final_decision="original_no_speech",
-                        decision_reason="Non-speech unit.",
+                decisions.append(
+                    UnitPolicyDecision(
+                        selected_waveform=core_orig.copy(),
+                        is_enhanced=False,
+                        chosen_strength=0.0,
+                        guard_verdict=GuardVerdict.NO_SPEECH,
+                        decision_reason="Non-speech unit passthrough.",
                     )
                 )
+                cand_hashes.append(None)
+                unit_runtimes.append((time.perf_counter() - t_unit_start) * 1000.0)
                 continue
 
-            # Speech Unit Processing: Extract context audio
             context_wave = ch_wave[u.context_start_sample : u.context_end_sample]
 
-            # Neural Enhancement Inference
-            enh_core: np.ndarray | None = None
+            enh_core: np.ndarray[Any, np.dtype[np.float32]] | None = None
             cand_sha256: str | None = None
             try:
                 enh_res = worker.enhance(context_wave, audio_buf.sample_rate)
-                # Trim context back to core length
                 left_ctx = u.left_context_samples
                 core_len = u.core_length_samples
                 enh_trimmed = enh_res.waveform[left_ctx : left_ctx + core_len]
 
-                # Immediate output validation
                 valid, reason = validate_enhancer_output(core_orig, enh_trimmed, is_speech=True)
                 if valid:
-                    # Delay Alignment
                     delay_res = estimate_gcc_phat_delay(
                         core_orig,
                         enh_trimmed,
@@ -274,36 +254,54 @@ def run_pipeline(
                     cand_sha256 = hash_bytes(enh_core.tobytes())
                 else:
                     logger.warning(f"Unit {u.unit_id} output validation failed: {reason}")
-                    enh_core = None
             except Exception as e:
                 logger.warning(f"Enhancement worker failed for unit {u.unit_id}: {e}")
                 enh_core = None
 
-            # Policy Decision (Guard A)
-            pol_dec, orig_asr = evaluate_unit_policy(
+            pol_dec, _ = evaluate_unit_policy(
                 orig_core_waveform=core_orig,
                 enh_core_waveform=enh_core,
                 sample_rate=audio_buf.sample_rate,
                 is_speech=True,
-                asr_engine=asr_engine,
+                probe=probe,
                 guard_config=active_guard_cfg,
                 policy_config=config.policy,
                 phase_coherent=config.enhancement.phase_coherent,
             )
+            decisions.append(pol_dec)
+            cand_hashes.append(cand_sha256)
+            unit_runtimes.append((time.perf_counter() - t_unit_start) * 1000.0)
 
-            final_wave = pol_dec.selected_waveform
+        # 8. Source continuity — BEFORE records are built and units finished,
+        # so a continuity revert is what gets finished, recorded, and stitched.
+        continuity_reverted_ids: set[int] = set()
+        if config.policy.enforce_continuity:
+            adjusted = enforce_source_continuity(all_units, decisions, orig_core_waveforms)
+            for u, before, after in zip(all_units, decisions, adjusted, strict=True):
+                if before.is_enhanced and not after.is_enhanced:
+                    continuity_reverted_ids.add(u.unit_id)
+            decisions = adjusted
+
+        # 9. Finishing (Guard B) on surviving enhanced units, then records
+        unit_decision_records: list[UnitDecisionRecord] = []
+        final_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+
+        for idx, u in enumerate(all_units):
+            dec = decisions[idx]
+            t_finish_start = time.perf_counter()
+
+            final_wave = dec.selected_waveform
             finish_preset = "bypass"
             finish_actions: list[str] = []
             guard_b_verdict: GuardVerdict | None = None
             guard_b_scores: dict[str, Any] = {}
 
-            # If accepted by Guard A, run Safe Finishing (Guard B)
-            if pol_dec.is_enhanced and config.finishing.enabled:
+            if u.is_speech and dec.is_enhanced and config.finishing.enabled:
                 finish_res, _ = safe_finish_speech_unit(
-                    pre_finish_waveform=pol_dec.selected_waveform,
+                    pre_finish_waveform=dec.selected_waveform,
                     sample_rate=audio_buf.sample_rate,
                     is_speech=True,
-                    asr_engine=asr_engine,
+                    probe=probe,
                     finishing_config=config.finishing,
                     guard_config=active_guard_cfg,
                 )
@@ -313,36 +311,22 @@ def run_pipeline(
                 guard_b_verdict = finish_res.guard_b_verdict
                 guard_b_scores = finish_res.guard_b_scores
 
-            # Commit unit
-            unit_decisions[u.unit_id] = UnitPolicyDecision(
-                selected_waveform=final_wave,
-                is_enhanced=pol_dec.is_enhanced,
-                chosen_strength=pol_dec.chosen_strength,
-                guard_verdict=pol_dec.guard_verdict,
-                guard_scores=pol_dec.guard_scores,
-                decision_reason=pol_dec.decision_reason,
-            )
-
-            workspace.save_unit_result(u.unit_id, u.channel_id, final_wave)
+            final_waveforms.append(final_wave)
             workspace.journal.append(
-                JournalEvent.UNIT_COMMITTED, {"unit_id": u.unit_id, "enhanced": pol_dec.is_enhanced}
+                JournalEvent.UNIT_COMMITTED,
+                {"unit_id": u.unit_id, "enhanced": dec.is_enhanced},
             )
 
-            t_elapsed_unit = (time.perf_counter() - t_unit_start) * 1000.0
+            if not u.is_speech:
+                final_cat = "original_no_speech"
+            elif u.unit_id in continuity_reverted_ids:
+                final_cat = "original_continuity"
+            elif dec.is_enhanced:
+                final_cat = "enhanced"
+            else:
+                final_cat = FINAL_DECISION_BY_VERDICT.get(dec.guard_verdict, "original_reverted")
 
-            final_cat = (
-                "enhanced"
-                if pol_dec.is_enhanced
-                else (
-                    "original_unverified"
-                    if pol_dec.guard_verdict == GuardVerdict.UNVERIFIED
-                    else (
-                        "original_error"
-                        if pol_dec.guard_verdict == GuardVerdict.ERROR
-                        else "original_reverted"
-                    )
-                )
-            )
+            runtime_ms = unit_runtimes[idx] + (time.perf_counter() - t_finish_start) * 1000.0
 
             unit_decision_records.append(
                 UnitDecisionRecord(
@@ -352,20 +336,20 @@ def run_pipeline(
                     end_sample=u.end_sample,
                     start_time_s=float(u.start_sample / audio_buf.sample_rate),
                     end_time_s=float(u.end_sample / audio_buf.sample_rate),
-                    is_speech=True,
-                    input_sha256=u.input_sha256,
-                    candidate_sha256=cand_sha256,
-                    output_sha256="",
-                    guard_a_verdict=pol_dec.guard_verdict,
-                    guard_a_scores=pol_dec.guard_scores,
+                    is_speech=u.is_speech,
+                    input_sha256=u.input_sha256 or hash_bytes(orig_core_waveforms[idx].tobytes()),
+                    candidate_sha256=cand_hashes[idx],
+                    output_sha256=hash_bytes(final_wave.astype(np.float32).tobytes()),
+                    guard_a_verdict=dec.guard_verdict,
+                    guard_a_scores=dec.guard_scores,
                     guard_b_verdict=guard_b_verdict,
                     guard_b_scores=guard_b_scores,
-                    chosen_strength=pol_dec.chosen_strength,
+                    chosen_strength=dec.chosen_strength,
                     finish_preset_applied=finish_preset,
                     finish_actions=finish_actions,
                     final_decision=final_cat,
-                    decision_reason=pol_dec.decision_reason,
-                    runtime_ms=t_elapsed_unit,
+                    decision_reason=dec.decision_reason,
+                    runtime_ms=runtime_ms,
                 )
             )
 
@@ -373,23 +357,16 @@ def run_pipeline(
         if hasattr(worker, "close"):
             worker.close()
 
-    # 8. Enforce Source Continuity
-    if config.policy.enforce_continuity:
-        decisions_list = [unit_decisions[u.unit_id] for u in all_units]
-        orig_waves_list = [orig_core_waveforms[u.unit_id] for u in all_units]
-        adjusted = enforce_source_continuity(all_units, decisions_list, orig_waves_list)
-        for u, dec in zip(all_units, adjusted):
-            unit_decisions[u.unit_id] = dec
-
-    # 9. Assembly
-    assembled_channels: list[np.ndarray] = []
+    # 10. Assembly
+    assembled_channels: list[np.ndarray[Any, np.dtype[np.float32]]] = []
     for ch_idx in range(len(channels_to_process)):
-        ch_units = [u for u in all_units if u.channel_id == ch_idx]
-        ch_dec_waves = [unit_decisions[uid].selected_waveform for uid in (u.unit_id for u in ch_units)]
+        ch_pairs = [
+            (u, final_waveforms[i]) for i, u in enumerate(all_units) if u.channel_id == ch_idx
+        ]
         ch_timeline = assemble_channel_timeline(
-            units=ch_units,
-            unit_waveforms=ch_dec_waves,
-            total_samples=probe.samples,
+            units=[p[0] for p in ch_pairs],
+            unit_waveforms=[p[1] for p in ch_pairs],
+            total_samples=media.samples,
             sample_rate=audio_buf.sample_rate,
         )
         assembled_channels.append(ch_timeline)
@@ -404,23 +381,22 @@ def run_pipeline(
         channel_mode=channel_mode,
     )
 
-    # Validate postconditions
     validate_assembled_timeline(
         assembled_buffer=assembled_buffer,
-        expected_channels=probe.channels,
-        expected_samples=probe.samples,
-        expected_sample_rate=probe.sample_rate,
+        expected_channels=media.channels,
+        expected_samples=media.samples,
+        expected_sample_rate=media.sample_rate,
         units=all_units,
     )
     workspace.journal.append(JournalEvent.ASSEMBLY_COMPLETE)
 
-    # 10. Global Loudness Normalization & True-Peak Limiting
+    # 11. Loudness normalization and true-peak limiting
     initial_loudness = measure_loudness_and_peaks(
         assembled_buffer.data, assembled_buffer.sample_rate
     )
     target_lufs = (
         config.loudness.target_lufs_stereo
-        if probe.channels > 1
+        if media.channels > 1
         else config.loudness.target_lufs_mono
     )
 
@@ -432,30 +408,33 @@ def run_pipeline(
         max_limiter_reduction_db=config.loudness.max_limiter_reduction_db,
     )
 
-    # Apply static gain
     gain_linear = 10.0 ** (static_gain_db / 20.0)
     gained_data = assembled_buffer.data * gain_linear
 
-    # Apply lookahead true-peak limiter
     limited_res = apply_lookahead_limiter(
         waveform=gained_data,
         sample_rate=assembled_buffer.sample_rate,
         ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
     )
+    if limited_res.max_gain_reduction_db > config.loudness.max_limiter_reduction_db:
+        logger.warning(
+            f"Limiter reduced peaks by {limited_res.max_gain_reduction_db:.2f} dB, "
+            f"beyond the static-gain headroom budget of "
+            f"{config.loudness.max_limiter_reduction_db:.2f} dB — transient-heavy material."
+        )
     mastered_buffer = AudioBuffer(
         data=limited_res.limited_waveform,
         sample_rate=assembled_buffer.sample_rate,
         channel_mode=channel_mode,
     )
 
-    # Final measurement
     final_loudness = measure_loudness_and_peaks(mastered_buffer.data, mastered_buffer.sample_rate)
     workspace.journal.append(
         JournalEvent.FINAL_VALIDATION_PASSED,
         {"lufs": final_loudness.integrated_lufs, "dbtp": final_loudness.true_peak_dbtp},
     )
 
-    # 11. Write Master WAV to Workspace Temp File
+    # 12. Encode master into the workspace
     tmp_out = workspace.root / "candidate-output.wav.tmp"
     encode_audio(
         buffer=mastered_buffer,
@@ -465,13 +444,19 @@ def run_pipeline(
         seed_context=workspace.job_id,
     )
 
-    # 12. Build Audit Report & Summaries
-    all_decisions = unit_decisions.values()
-    enhanced_cnt = sum(1 for d in all_decisions if d.is_enhanced)
-    reverted_cnt = sum(1 for d in all_decisions if d.guard_verdict == GuardVerdict.REVERT)
-    unverified_cnt = sum(1 for d in all_decisions if d.guard_verdict == GuardVerdict.UNVERIFIED)
-    error_cnt = sum(1 for d in all_decisions if d.guard_verdict == GuardVerdict.ERROR)
-    no_speech_cnt = sum(1 for d in all_decisions if d.guard_verdict == GuardVerdict.NO_SPEECH)
+    # 13. Audit report
+    enhanced_cnt = sum(1 for r in unit_decision_records if r.final_decision == "enhanced")
+    continuity_cnt = sum(
+        1 for r in unit_decision_records if r.final_decision == "original_continuity"
+    )
+    reverted_cnt = sum(1 for r in unit_decision_records if r.final_decision == "original_reverted")
+    unverified_cnt = sum(
+        1 for r in unit_decision_records if r.final_decision == "original_unverified"
+    )
+    error_cnt = sum(1 for r in unit_decision_records if r.final_decision == "original_error")
+    no_speech_cnt = sum(
+        1 for r in unit_decision_records if r.final_decision == "original_no_speech"
+    )
     finish_app_cnt = sum(
         1 for r in unit_decision_records if r.finish_preset_applied in ("gentle", "minimal")
     )
@@ -501,11 +486,11 @@ def run_pipeline(
         config_hash=workspace.config_hash,
         input=MediaStats(
             path=str(in_path),
-            sha256=probe.sha256,
-            sample_rate=probe.sample_rate,
-            channels=probe.channels,
-            samples=probe.samples,
-            duration_s=probe.duration_s,
+            sha256=media.sha256,
+            sample_rate=media.sample_rate,
+            channels=media.channels,
+            samples=media.samples,
+            duration_s=media.duration_s,
             integrated_lufs=initial_loudness.integrated_lufs,
             true_peak_dbtp=initial_loudness.true_peak_dbtp,
         ),
@@ -521,22 +506,22 @@ def run_pipeline(
         ),
         core=CoreMetadata(
             id=config.enhancement.core_id,
-            commit=str(core_lock_data.get("commit", "unknown")),
-            weight_sha256={str(k): str(v) for k, v in core_lock_data.get("weight_sha256", {}).items()},
+            algorithm=str(core_lock["algorithm"]),
+            params_hash=str(core_lock["params_hash"]),
             phase_coherent=config.enhancement.phase_coherent,
         ),
         guard=GuardMetadata(
             id=active_guard_cfg.guard_id,
-            model_sha256="hawzhin_guard_sha256",
-            calibration_id=str(calib_data.get("calibration_id", "calib_001")),
+            probe_hash=probe.probe_hash,
+            calibration_id=str(calib_data["calibration_id"]),
         ),
         environment=EnvironmentMetadata(
             platform=platform.platform(),
             os_version=platform.version(),
             python_version=platform.python_version(),
-            torch_version=torch.__version__,
-            cuda_version=torch.version.cuda if torch.cuda.is_available() else None,
-            gpu_name=torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            numpy_version=np.__version__,
+            scipy_version=scipy.__version__,
+            soundfile_version=soundfile.__version__,
             cpu_model=platform.processor(),
         ),
         summary=UnitSummary(
@@ -545,6 +530,7 @@ def run_pipeline(
             reverted=reverted_cnt,
             unverified=unverified_cnt,
             error_passthrough=error_cnt,
+            continuity_reverted=continuity_cnt,
             no_speech=no_speech_cnt,
             finish_applied=finish_app_cnt,
             finish_bypassed=finish_byp_cnt,
@@ -556,7 +542,7 @@ def run_pipeline(
     json_str = serialize_json_report(report)
     txt_str = generate_human_summary(report)
 
-    # 13. Atomic Publication
+    # 14. Atomic publication, then workspace cleanup
     dest_audio, dest_json, dest_txt = workspace.publish_atomically(
         temp_audio_path=tmp_out,
         destination_audio_path=out_path,
@@ -570,6 +556,7 @@ def run_pipeline(
         {"audio": str(dest_audio), "json": str(dest_json), "txt": str(dest_txt)},
     )
     workspace.journal.append(JournalEvent.JOB_COMPLETE)
+    workspace.cleanup()
 
     logger.info(f"Pipeline finished successfully! Published master to {dest_audio}")
     return report
