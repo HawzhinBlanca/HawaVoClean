@@ -37,7 +37,13 @@ from hawavoclean.cli import _clean_stem
 from hawavoclean.errors import HawaVoCleanError, InvalidUserInputError
 from hawavoclean.logging import get_logger
 from hawavoclean.paths import work_root
-from hawavoclean.server.analysis import DEFAULT_BUCKETS, MAX_BUCKETS, analyze_audio
+from hawavoclean.server.analysis import (
+    DEFAULT_BUCKETS,
+    MAX_BUCKETS,
+    PeaksWindowError,
+    analyze_audio,
+    compute_peaks_window,
+)
 from hawavoclean.server.jobs import TERMINAL_STATES, JobManager
 from hawavoclean.server.policy import PathPolicyError, resolve_client_path
 
@@ -126,6 +132,17 @@ class TokenAuthMiddleware:
 
 class AnalyzeRequest(BaseModel):
     path: str
+    buckets: int = Field(default=DEFAULT_BUCKETS, ge=1, le=MAX_BUCKETS)
+
+
+class PeaksRequest(BaseModel):
+    """``POST /api/peaks`` (contract addendum 1). Non-finite bounds are refused
+    here rather than downstream: ``json.loads`` happily accepts ``NaN`` and
+    ``Infinity`` literals, and a NaN window would silently decode nothing."""
+
+    path: str
+    start_s: float = Field(ge=0.0, allow_inf_nan=False)
+    end_s: float = Field(gt=0.0, allow_inf_nan=False)
     buckets: int = Field(default=DEFAULT_BUCKETS, ge=1, le=MAX_BUCKETS)
 
 
@@ -325,6 +342,16 @@ def create_app(
     async def analyze(req: AnalyzeRequest) -> dict[str, Any]:
         path = resolve_client_path(req.path, must_exist=True)
         return await asyncio.to_thread(analyze_audio, path, req.buckets)
+
+    @app.post("/api/peaks")
+    async def peaks(req: PeaksRequest) -> dict[str, Any]:
+        path = resolve_client_path(req.path, must_exist=True)
+        try:
+            return await asyncio.to_thread(
+                compute_peaks_window, path, req.start_s, req.end_s, req.buckets
+            )
+        except PeaksWindowError as e:
+            raise ApiError(400, "bad_request", str(e)) from e
 
     @app.post("/api/jobs", status_code=202)
     async def create_job(req: JobRequest) -> dict[str, Any]:

@@ -1,0 +1,199 @@
+/* Zoom/pan chrome for the waveform display: canvas time ruler, zoom readout,
+   overview scrubber, and the view-linked verdict segments.
+   Kept beside the renderer it belongs to so the panel styles in app.css stay
+   the domain of the layout pass. */
+
+/* ---------------------------------------------------------------- time ruler */
+.ruler {
+  cursor: grab;
+  touch-action: none;
+}
+
+.ruler.panning {
+  cursor: grabbing;
+}
+
+.ruler-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ------------------------------------------------------------- zoom readout */
+.wave-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wave-zoom .range {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.wave-zoom .mag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--fg-3);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  font-variant-numeric: tabular-nums;
+}
+
+.wave-zoom .mag.deep {
+  color: var(--cyan-2);
+  background: rgba(57, 208, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(57, 208, 255, 0.22);
+}
+
+.wave-fit {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: var(--ls-caps);
+  color: var(--fg-3);
+  padding: 2px 7px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--metal-2);
+  box-shadow: var(--shadow-raised);
+  cursor: pointer;
+  transition:
+    color var(--dur) var(--ease-out),
+    filter var(--dur) var(--ease-out);
+}
+
+.wave-fit:hover:not(:disabled) {
+  color: var(--fg);
+  filter: brightness(1.18);
+}
+
+.wave-fit:active:not(:disabled) {
+  box-shadow: var(--shadow-pressed);
+}
+
+.wave-fit:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.wave-fit:focus-visible {
+  outline: 1px solid var(--cyan);
+  outline-offset: 1px;
+}
+
+/* ---------------------------------------------------------- overview scrubber */
+.wave-overview {
+  position: relative;
+  height: 26px;
+  border-radius: var(--r-sm);
+  background: var(--display-2);
+  box-shadow: var(--shadow-display);
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.wave-overview.dragging {
+  cursor: grabbing;
+}
+
+.wave-overview-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.wave-overview-win {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 3px;
+  border-radius: 2px;
+  background: rgba(57, 208, 255, 0.12);
+  box-shadow:
+    inset 0 0 0 1px rgba(57, 208, 255, 0.5),
+    0 0 10px rgba(57, 208, 255, 0.25);
+  cursor: grab;
+  will-change: left, width;
+}
+
+.wave-overview.dragging .wave-overview-win {
+  cursor: grabbing;
+}
+
+.wave-overview-win.full {
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+}
+
+.wave-overview-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: var(--fs-xs);
+  color: var(--fg-4);
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wave-overview-win {
+    box-shadow: inset 0 0 0 1px rgba(57, 208, 255, 0.5);
+  }
+}
+
+/* ------------------------------------------- verdict segments, view-anchored */
+/* The track carries the visible window (--vs start, --vd span, seconds) and
+   each segment its own times, so a zoom is one custom-property write on the
+   track instead of a React render of every segment. */
+.verdict-track {
+  --vs: 0;
+  --vd: 1;
+}
+
+.verdict-track > .verdict-seg {
+  left: calc((var(--t0) - var(--vs)) / var(--vd) * 100%);
+  width: max(2px, calc((var(--t1) - var(--t0)) / var(--vd) * 100% - 1px));
+}
+
+/* A time-axis-linked element has to share the axis: the track spans exactly the
+   waveform's box, with the label and legend lifted onto their own header row
+   instead of eating into the timeline. */
+.wave-body .verdict {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  grid-template-areas:
+    'head legend'
+    'track track';
+  column-gap: 12px;
+  row-gap: 6px;
+}
+
+.wave-body .verdict .label {
+  grid-area: head;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wave-body .verdict-track {
+  grid-area: track;
+}
+
+.wave-body .verdict-legend {
+  grid-area: legend;
+  align-self: center;
+}

@@ -4,8 +4,8 @@
 // playhead messages and this worker redraws on its own animation frame.
 
 import { createFbo, createProgram, deleteFbo, hexToRgb, type Fbo } from './glutil';
-import { timeTicks } from './ticks';
-import type { WaveKind, WaveMsg, WaveOutMsg } from './waveformProtocol';
+import { timeTicksIn } from './ticks';
+import type { WaveKind, WaveMsg, WaveOutMsg, WaveSlot } from './waveformProtocol';
 
 const ctxSelf = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -123,7 +123,14 @@ interface WaveData {
   min: Float32Array;
   max: Float32Array;
   rms: Float32Array | null;
-  duration: number;
+  /** Seconds this envelope covers. */
+  start: number;
+  end: number;
+}
+
+interface KindData {
+  base: WaveData | null;
+  detail: WaveData | null;
 }
 
 interface Strip {
@@ -171,13 +178,17 @@ let solidBuf: WebGLBuffer;
 let glowA: Fbo | null = null;
 let glowB: Fbo | null = null;
 
-const data: Record<WaveKind, WaveData | null> = { original: null, cleaned: null };
+const data: Record<WaveKind, KindData> = {
+  original: { base: null, detail: null },
+  cleaned: { base: null, detail: null },
+};
 const geom: Record<WaveKind, KindGeom> = {
   original: { peaks: null, rms: null },
   cleaned: { peaks: null, rms: null },
 };
 let geomDirty = true;
-let viewDuration = 0;
+let viewStart = 0;
+let viewEnd = 0;
 let playhead = 0;
 let playheadVisible = false;
 let hoverX: number | null = null;
@@ -284,12 +295,19 @@ function resize(w: number, h: number, ratio: number): void {
 /**
  * Build a filled strip (triangle strip) for per-column [top,bottom] envelope.
  * Returns interleaved [x, y, amp] per vertex; two vertices per column.
+ *
+ * The buckets in `lo`/`hi` cover [dataStart, dataEnd] seconds; the strip covers
+ * the visible window [vStart, vEnd]. Columns outside the data collapse to the
+ * centre line, so a detail window that no longer covers the view simply reads
+ * as empty rather than as garbage.
  */
 function buildEnvelopeStrip(
   lo: Float32Array,
   hi: Float32Array,
-  dataDuration: number,
-  view: number,
+  dataStart: number,
+  dataEnd: number,
+  vStart: number,
+  vEnd: number,
   width: number,
   height: number,
   gain: number,
@@ -299,16 +317,17 @@ function buildEnvelopeStrip(
   const out = new Float32Array(cols * 2 * 3);
   const centerY = height / 2;
   const halfH = (height / 2) * (1 - MARGIN_FRAC * 2) * gain;
-  const bucketsPerS = n / Math.max(1e-9, dataDuration);
+  const span = Math.max(1e-12, vEnd - vStart);
+  const bucketsPerS = n / Math.max(1e-12, dataEnd - dataStart);
   let o = 0;
   for (let x = 0; x < cols; x++) {
-    const t0 = (x / cols) * view;
-    const t1 = ((x + 1) / cols) * view;
-    const b0 = t0 * bucketsPerS;
-    const b1 = t1 * bucketsPerS;
+    const t0 = vStart + (x / cols) * span;
+    const t1 = vStart + ((x + 1) / cols) * span;
+    const b0 = (t0 - dataStart) * bucketsPerS;
+    const b1 = (t1 - dataStart) * bucketsPerS;
     let vmin = 0;
     let vmax = 0;
-    if (b0 >= n) {
+    if (b0 >= n || b1 <= 0) {
       vmin = 0;
       vmax = 0;
     } else if (b1 - b0 >= 1) {
@@ -362,24 +381,39 @@ function uploadStrip(verts: Float32Array, prev: Strip | null): Strip {
   return { buf, count: verts.length / 3 };
 }
 
+const COVER_EPS = 1e-4;
+
+/**
+ * Pick the envelope to draw for a deck: the windowed detail whenever it still
+ * covers the visible range, otherwise the whole-file base. This is what makes
+ * a zoom feel instant — the base redraw lands on the same frame as the wheel
+ * event and the finer detail swaps in when the fetch returns.
+ */
+function pickSource(kind: WaveKind): WaveData | null {
+  const d = data[kind];
+  const det = d.detail;
+  if (det && det.start <= viewStart + COVER_EPS && det.end >= viewEnd - COVER_EPS) return det;
+  return d.base;
+}
+
 function rebuildGeometry(): void {
   if (!gl) return;
   for (const kind of ['original', 'cleaned'] as const) {
-    const d = data[kind];
+    const d = pickSource(kind);
     const g = geom[kind];
-    if (!d || viewDuration <= 0) {
+    if (!d || viewEnd - viewStart <= 0) {
       if (g.peaks) gl.deleteBuffer(g.peaks.buf);
       if (g.rms) gl.deleteBuffer(g.rms.buf);
       g.peaks = null;
       g.rms = null;
       continue;
     }
-    const peaks = buildEnvelopeStrip(d.min, d.max, d.duration, viewDuration, W, H, 1);
+    const peaks = buildEnvelopeStrip(d.min, d.max, d.start, d.end, viewStart, viewEnd, W, H, 1);
     g.peaks = uploadStrip(peaks, g.peaks);
     if (d.rms) {
       const neg = new Float32Array(d.rms.length);
       for (let i = 0; i < neg.length; i++) neg[i] = -(d.rms[i] ?? 0);
-      const rms = buildEnvelopeStrip(neg, d.rms, d.duration, viewDuration, W, H, 1);
+      const rms = buildEnvelopeStrip(neg, d.rms, d.start, d.end, viewStart, viewEnd, W, H, 1);
       g.rms = uploadStrip(rms, g.rms);
     } else if (g.rms) {
       gl.deleteBuffer(g.rms.buf);
@@ -453,7 +487,8 @@ function vline(xDev: number, widthDev: number, y0: number, y1: number): void {
 }
 
 function timeToX(t: number): number {
-  return viewDuration > 0 ? (t / viewDuration) * W : 0;
+  const span = viewEnd - viewStart;
+  return span > 0 ? ((t - viewStart) / span) * W : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +517,7 @@ function render(): void {
 
   // 2. grid lines (ticks + unit bounds + highlight)
   solidBegin();
-  const ticks = timeTicks(viewDuration, cssW, 72);
+  const ticks = timeTicksIn(viewStart, viewEnd, cssW, 72);
   for (const tk of ticks) {
     if (!tk.major) vline(timeToX(tk.time), 1, 0, H);
   }
@@ -497,6 +532,7 @@ function render(): void {
     solidBegin();
     for (let i = 0; i < unitBounds.length; i++) {
       const t = unitBounds[i] ?? 0;
+      if (t < viewStart || t > viewEnd) continue;
       // Flush in batches: the scratch holds ~340 rects and long clips can
       // have far more unit boundaries than that.
       if (solidScratchLen + 12 > solidScratch.length) solidFlush(0.6, 0.75, 0.95, 0.09);
@@ -505,13 +541,15 @@ function render(): void {
     solidFlush(0.6, 0.75, 0.95, 0.09);
   }
 
-  if (highlight) {
+  if (highlight && highlight.end > viewStart && highlight.start < viewEnd) {
+    const hx0 = Math.max(0, timeToX(highlight.start));
+    const hx1 = Math.min(W, timeToX(highlight.end));
     solidBegin();
-    solidRect(timeToX(highlight.start), 0, timeToX(highlight.end), H);
+    solidRect(hx0, 0, hx1, H);
     solidFlush(1, 1, 1, 0.05);
     solidBegin();
-    vline(timeToX(highlight.start), 1, 0, H);
-    vline(timeToX(highlight.end), 1, 0, H);
+    if (highlight.start >= viewStart) vline(timeToX(highlight.start), 1, 0, H);
+    if (highlight.end <= viewEnd) vline(timeToX(highlight.end), 1, 0, H);
     solidFlush(1, 1, 1, 0.16);
   }
 
@@ -595,7 +633,7 @@ function render(): void {
   }
 
   // 7. playhead
-  if (playheadVisible && viewDuration > 0) {
+  if (playheadVisible && viewEnd > viewStart && playhead >= viewStart && playhead <= viewEnd) {
     const x = timeToX(playhead);
     solidBegin();
     vline(x, 5 * dpr, 0, H);
@@ -626,24 +664,37 @@ ctxSelf.onmessage = (ev: MessageEvent<WaveMsg>) => {
       case 'resize':
         resize(msg.width, msg.height, msg.dpr);
         break;
-      case 'data':
-        data[msg.kind] = { min: msg.min, max: msg.max, rms: msg.rms, duration: msg.duration };
-        if (msg.kind === 'original' || viewDuration <= 0) viewDuration = msg.duration;
-        geomDirty = true;
-        scheduleRender();
-        break;
-      case 'clear':
-        data[msg.kind] = null;
-        if (msg.kind === 'original') {
-          viewDuration = data.cleaned?.duration ?? 0;
+      case 'data': {
+        const slot: WaveSlot = msg.slot;
+        data[msg.kind][slot] = {
+          min: msg.min,
+          max: msg.max,
+          rms: msg.rms,
+          start: msg.start,
+          end: msg.end,
+        };
+        // First base envelope with no view yet: show the whole thing.
+        if (slot === 'base' && viewEnd - viewStart <= 0) {
+          viewStart = msg.start;
+          viewEnd = msg.end;
         }
         geomDirty = true;
         scheduleRender();
         break;
-      case 'duration':
-        viewDuration = msg.duration;
+      }
+      case 'clear':
+        if (msg.slot) data[msg.kind][msg.slot] = null;
+        else data[msg.kind] = { base: null, detail: null };
         geomDirty = true;
         scheduleRender();
+        break;
+      case 'view':
+        if (viewStart !== msg.start || viewEnd !== msg.end) {
+          viewStart = msg.start;
+          viewEnd = msg.end;
+          geomDirty = true;
+          scheduleRender();
+        }
         break;
       case 'playhead':
         if (playhead !== msg.time || playheadVisible !== msg.visible) {

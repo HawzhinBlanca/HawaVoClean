@@ -46,6 +46,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/unit/test_progress_*.py` (≈80 tests, ~12 s; new modules ≥98 %
   branch coverage).
 
+### Added — `POST /api/peaks`: windowed waveform peaks (ui-contract addendum 1)
+- New route for the waveform's zoom/pan re-query (goal box E3, and E1 in
+  part). Request `{"path", "start_s", "end_s", "buckets"}`, response
+  `PeaksWindow`: mono-mix `peaks.min`/`peaks.max`/`rms_db` per bucket over
+  the requested span only, plus `samples_per_bucket` so a client knows when
+  it has reached one sample per bucket and cannot zoom further. `end_s` is
+  clamped to the duration, `buckets` (1..8000, default 1200) is clamped down
+  to the sample count so every bucket still covers ≥ 1 sample. Path policy,
+  auth and error shape are identical to `/api/analyze`: 400 `bad_request`
+  for a start at/after the end of the file, an empty or reversed window, a
+  negative or non-finite bound (`NaN`/`Infinity` are valid JSON to
+  `json.loads`, so the model rejects them explicitly) or an out-of-range
+  bucket count; 403/404 for the path.
+- `hawavoclean.audio.decode.decode_audio_window(probe, start_s, end_s)`:
+  decodes a span, not a file. ffmpeg gets `-ss` **before** `-i` (input seek)
+  plus `-t`; the soundfile fallback reads a frame range. `decode_audio` is
+  untouched. Measured: a 5 s window out of a 3-hour, 2.07 GB recording costs
+  **+4.8 MB peak RSS** and 27 ms warm (812 ms cold, all of it the probe's
+  whole-file SHA-256), against ~2 GB for a full decode.
+- Two seek traps the windowed decode has to defuse, both found by testing a
+  window against a full decode of the same file: the first frame after a
+  seek into a lossy stream has no MDCT overlap partner (a quarter-second
+  pre-roll is decoded and discarded), and an explicit `-ss 0` hands back an
+  mp4's encoder-priming samples that a plain decode trims (so the head of a
+  file is not seeked at all). Each was worth 0.3–0.7 full scale of error.
+- A window longer than 4 Mi samples (87 s at 48 kHz — far longer than
+  anything on screen) is bucketed by streaming reduction instead of one
+  decode: peak RSS for bucketing a whole file is then constant in its
+  length. Asking for a 3-hour file as one window measured 8.5 GB before and
+  155 MB after.
+- The last 8 probes are cached by path + mtime + size: probing SHA-256s the
+  whole file, which is noise next to a full decode but was the entire cost
+  of serving a window (0.8 s per gesture on a 2 GB file, now 27 ms).
+- Tests: `tests/unit/test_server_peaks.py`, `tests/unit/test_decode_window.py`
+  (86 tests). The load-bearing ones assert a window's buckets equal a
+  full-file analysis of the same span — including windows aligned to no
+  bucket boundary — that the chunked reduction is numerically identical to
+  the single decode, and that at `samples_per_bucket == 1` the response *is*
+  the raw samples. The contract's memory rule is proved, not assumed: a
+  generated 30-minute/346 MB file is served from a fresh subprocess whose
+  peak RSS is measured (+5.7 MB for a 5 s window, +154 MB for the whole file
+  as one window) and then deleted.
+
 ### Fixed — engine bridge review pass
 - `GET /api/audio` 416 responses now carry `Content-Range: bytes */<size>`
   (RFC 9110; Chromium's media stack reads it to recover the resource length

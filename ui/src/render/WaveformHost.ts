@@ -1,7 +1,7 @@
 // Main-thread side of the waveform renderer: owns the Worker, transfers the
 // OffscreenCanvas, and exposes imperative setters. No React here.
 
-import type { WaveKind, WaveMsg, WaveOutMsg } from './waveformProtocol';
+import type { WaveKind, WaveMsg, WaveOutMsg, WaveSlot } from './waveformProtocol';
 
 export interface WaveformHostOptions {
   onReady?: (webgl2: boolean) => void;
@@ -77,20 +77,32 @@ export class WaveformHost {
     else this.worker.postMessage(msg);
   }
 
+  /**
+   * Hand the worker an envelope. `start`/`end` are the seconds the buckets
+   * cover: the whole file for `base`, the visible window for `detail`.
+   * The typed arrays are transferred, so pass copies of anything cached.
+   */
   setData(
     kind: WaveKind,
+    slot: WaveSlot,
     min: Float32Array,
     max: Float32Array,
     rms: Float32Array | null,
-    duration: number,
+    start: number,
+    end: number,
   ): void {
     const transfer: Transferable[] = [min.buffer, max.buffer];
     if (rms) transfer.push(rms.buffer);
-    this.post({ type: 'data', kind, min, max, rms, duration }, transfer);
+    this.post({ type: 'data', kind, slot, min, max, rms, start, end }, transfer);
   }
 
-  clear(kind: WaveKind): void {
-    this.post({ type: 'clear', kind });
+  clear(kind: WaveKind, slot?: WaveSlot): void {
+    this.post(slot ? { type: 'clear', kind, slot } : { type: 'clear', kind });
+  }
+
+  /** Visible time window in seconds — the only horizontal mapping the worker uses. */
+  setView(start: number, end: number): void {
+    this.post({ type: 'view', start, end });
   }
 
   setPlayhead(time: number, visible: boolean): void {

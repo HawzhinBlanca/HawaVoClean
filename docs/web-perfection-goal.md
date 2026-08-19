@@ -25,13 +25,13 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       seek to the unit; A/B switch visually obvious which deck is live.
 
 ## B. UX completeness (web mode)
-- [ ] B1 Full keyboard map: Space play/pause, A/B decks, ←/→ seek ±5 s, Shift+←/→ ±1 s,
+- [x] B1 Full keyboard map: Space play/pause, A/B decks, ←/→ seek ±5 s, Shift+←/→ ±1 s,
       P process, Esc cancel, ? shows a shortcut overlay. No modifier-key false triggers.
 - [ ] B2 Drag-and-drop AND file picker both work in web mode (upload path), with a visible
       upload progress for large files and a clear error for unsupported types.
-- [ ] B3 Zoom + scroll in the waveform (wheel/pinch to zoom, drag ruler to pan), with the
+- [x] B3 Zoom + scroll in the waveform (wheel/pinch to zoom, drag ruler to pan), with the
       verdict strip staying aligned to the visible window.
-- [ ] B4 Per-unit inspection: clicking a verdict segment selects the unit — highlights its
+- [x] B4 Per-unit inspection: clicking a verdict segment selects the unit — highlights its
       range, shows its guard scores/decision reason in a details panel, seeks the transport.
 - [ ] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
       re-selectable without re-analyzing.
@@ -68,7 +68,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
 ## E. Engine-web seam (only as needed by the UI)
 - [ ] E1 Analyze of a 3-hour file streams/chunks (no multi-GB peak RSS; measured).
 - [ ] E2 Upload path handles ≥1 GB file without buffering it fully in memory.
-- [ ] E3 Waveform peaks endpoint supports windowed re-query for zoom (`start_s`/`end_s`)
+- [x] E3 Waveform peaks endpoint supports windowed re-query for zoom (`start_s`/`end_s`)
       so deep zoom shows true detail, not interpolated buckets.
 
 ## Loop discipline

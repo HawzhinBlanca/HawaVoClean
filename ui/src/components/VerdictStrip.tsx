@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { classifyDecision, decisionLabel, type UnitDecisionRecord, type VerdictClass } from '../api/types';
 import { formatTime } from '../render/ticks';
+import { waveView } from '../render/viewWindow';
+import { selectUnit, unitKey } from '../state/selection';
 import { useStore } from '../state/store';
 
 const SCORE_KEYS: Array<[string, string]> = [
@@ -35,15 +37,39 @@ interface Hover {
   y: number;
 }
 
+/** Per-segment custom properties; the track supplies --vs/--vd. */
+type SegStyle = CSSProperties & { '--t0': number; '--t1': number };
+
 export function VerdictStrip() {
   const report = useStore((s) => s.report);
   const duration = useStore((s) => s.duration);
   const setHighlight = useStore((s) => s.setHighlight);
+  const selected = useStore((s) => s.selectedUnit);
   const [hover, setHover] = useState<Hover | null>(null);
   const tipRef = useRef<HTMLDivElement | null>(null);
+  const trackRef = useRef<HTMLDivElement | null>(null);
 
   const units = report?.units ?? [];
-  const total = duration > 0 ? duration : (units.length ? (units[units.length - 1]?.end_time_s ?? 0) : 0);
+  const total = duration > 0 ? duration : units.length ? (units[units.length - 1]?.end_time_s ?? 0) : 0;
+
+  // The strip is a time-axis-linked element: it must show exactly the window
+  // the waveform shows. Segments carry their own times as custom properties
+  // and CSS places them against the track's window, so a zoom or pan is one
+  // DOM write here — no React render, no per-frame work.
+  const syncWindow = useCallback(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    const dur = waveView.duration;
+    const start = dur > 0 ? waveView.start_s : 0;
+    const span = dur > 0 ? waveView.span : total;
+    el.style.setProperty('--vs', String(start));
+    el.style.setProperty('--vd', String(span > 0 ? span : 1));
+  }, [total]);
+
+  useLayoutEffect(() => {
+    syncWindow();
+    return waveView.subscribe(syncWindow);
+  }, [syncWindow]);
 
   const onEnter = useCallback(
     (u: UnitDecisionRecord, e: MouseEvent) => {
@@ -57,7 +83,9 @@ export function VerdictStrip() {
   }, []);
   const onLeave = useCallback(() => {
     setHover(null);
-    setHighlight(null);
+    // Hover only borrows the highlight; the selection keeps it.
+    const sel = useStore.getState().selectedUnit;
+    setHighlight(sel ? { start: sel.start_time_s, end: sel.end_time_s } : null);
   }, [setHighlight]);
 
   useEffect(() => {
@@ -89,19 +117,31 @@ export function VerdictStrip() {
           {units.length ? `${units.length} units · ${enhanced} enhanced` : '—'}
         </span>
       </div>
-      <div className="verdict-track" onMouseLeave={onLeave}>
+      <div className="verdict-track" ref={trackRef} onMouseLeave={onLeave}>
         {units.length && total > 0 ? (
           units.map((u) => {
             const cls = classifyDecision(u.final_decision);
-            const left = (u.start_time_s / total) * 100;
-            const w = Math.max(0.15, ((u.end_time_s - u.start_time_s) / total) * 100);
+            const style: SegStyle = { '--t0': u.start_time_s, '--t1': u.end_time_s };
+            const isSel = selected ? unitKey(selected) === unitKey(u) : false;
             return (
-              <div
+              <button
+                type="button"
+                // Hundreds of units must not become hundreds of tab stops:
+                // the keyboard path to a unit is `[` / `]` (see App).
+                tabIndex={-1}
                 key={`${u.channel}-${u.unit_id}`}
-                className={`verdict-seg ${cls}${hover?.unit === u ? ' hot' : ''}`}
-                style={{ left: `${left}%`, width: `calc(${w}% - 1px)` }}
+                className={`verdict-seg ${cls}${hover?.unit === u ? ' hot' : ''}${isSel ? ' sel' : ''}`}
+                style={style}
+                aria-label={`Unit ${u.unit_id}, channel ${u.channel}, ${decisionLabel(u.final_decision)}`}
+                aria-pressed={isSel}
                 onMouseEnter={(e) => onEnter(u, e)}
                 onMouseMove={onMove}
+                onClick={(e) => {
+                  // Keep the keyboard on the transport: a segment is a click
+                  // target, not a focus stop (Space must still play/pause).
+                  e.currentTarget.blur();
+                  selectUnit(u);
+                }}
               />
             );
           })

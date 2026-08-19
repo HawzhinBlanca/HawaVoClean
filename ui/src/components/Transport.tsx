@@ -35,24 +35,8 @@ export function Transport() {
   }, [setPlaying]);
 
   const hasAudio = Boolean(original);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (e.code === 'Space') {
-        e.preventDefault();
-        if (hasAudio) togglePlay();
-      } else if (e.key === 'a' || e.key === 'A') {
-        setAb('original');
-      } else if (e.key === 'b' || e.key === 'B') {
-        if (cleaned) setAb('cleaned');
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [hasAudio, cleaned]);
+  // Key bindings live in one map (App.useKeyboardMap) so Space/A/B cannot be
+  // claimed twice; this component only draws the transport.
 
   return (
     <div className="transport">

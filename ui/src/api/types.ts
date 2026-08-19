@@ -21,6 +21,32 @@ export interface AudioAnalysis {
   noise_floor_db: number | null;
 }
 
+/**
+ * `POST /api/peaks` — windowed waveform (docs/ui-contract.md, Addendum 1).
+ * Same semantics as the `/api/analyze` waveform fields, computed over
+ * [start_s, end_s] only, so deep zoom shows real detail instead of
+ * interpolated whole-file buckets.
+ */
+export interface PeaksRequest {
+  path: string;
+  start_s: number;
+  end_s: number;
+  buckets?: number;
+}
+
+export interface PeaksWindow {
+  path: string;
+  start_s: number;
+  end_s: number;
+  sample_rate: number;
+  channels: number;
+  duration_s: number;
+  /** 1 means one sample per bucket — there is no more detail to fetch. */
+  samples_per_bucket: number;
+  peaks: { min: number[]; max: number[] };
+  rms_db: number[];
+}
+
 export type Profile = 'studio' | 'production';
 
 export interface CreateJobRequest {

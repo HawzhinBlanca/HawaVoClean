@@ -7,6 +7,7 @@ import type {
   Profile,
   UnitDecisionRecord,
 } from '../api/types';
+import { waveView, type ViewWindow } from '../render/viewWindow';
 import type { HawaHost } from '../bridge/types';
 
 export type EngineStatus = 'connecting' | 'ready' | 'offline';
@@ -55,8 +56,24 @@ export interface AppState {
   currentTime: number;
   duration: number;
 
+  /**
+   * Visible waveform window in seconds. Mirror of the imperative
+   * `waveView` controller (render/viewWindow.ts), refreshed on a trailing
+   * timer — zoom/pan themselves never re-render React.
+   */
+  view: ViewWindow;
+
   hoverUnit: HoverUnit | null;
   highlightRange: { start: number; end: number } | null;
+
+  /**
+   * The unit picked in the verdict strip. Selection is a property of the
+   * report, not of the deck, so it survives A/B switching and playback; only
+   * a new report or a new source clears it.
+   */
+  selectedUnit: UnitDecisionRecord | null;
+  /** Keyboard-map overlay (`?`). */
+  shortcutsOpen: boolean;
 
   statusLine: string;
   error: string | null;
@@ -77,8 +94,12 @@ export interface AppState {
   setPlaying(v: boolean): void;
   setTime(t: number): void;
   setDuration(d: number): void;
+  setView(start: number, end: number): void;
+  resetView(): void;
   setHoverUnit(h: HoverUnit | null): void;
   setHighlight(r: { start: number; end: number } | null): void;
+  setSelectedUnit(u: UnitDecisionRecord | null): void;
+  setShortcutsOpen(v: boolean): void;
   setStatus(line: string): void;
   setError(msg: string | null): void;
   setDragOver(v: boolean): void;
@@ -106,8 +127,13 @@ export const useStore = create<AppState>((set) => ({
   currentTime: 0,
   duration: 0,
 
+  view: { start: 0, end: 0 },
+
   hoverUnit: null,
   highlightRange: null,
+
+  selectedUnit: null,
+  shortcutsOpen: false,
 
   statusLine: 'Connecting to engine',
   error: null,
@@ -124,13 +150,32 @@ export const useStore = create<AppState>((set) => ({
   setJob: (job) => set({ job }),
   patchJob: (patch) =>
     set((s) => (s.job ? { job: { ...s.job, ...patch } } : {})),
-  setReport: (report) => set({ report }),
+  // A new report invalidates any selection made against the previous one.
+  setReport: (report) => set({ report, selectedUnit: null, highlightRange: null }),
   setAbMode: (abMode) => set({ abMode }),
   setPlaying: (playing) => set({ playing }),
   setTime: (currentTime) => set({ currentTime }),
   setDuration: (duration) => set({ duration }),
+  setView: (start, end) => {
+    waveView.set(start, end);
+    set({ view: waveView.view });
+  },
+  resetView: () => {
+    waveView.reset();
+    set({ view: waveView.view });
+  },
   setHoverUnit: (hoverUnit) => set({ hoverUnit }),
   setHighlight: (highlightRange) => set({ highlightRange }),
+  // Selecting a unit is what lights its range in the waveform; hovering only
+  // borrows the highlight and hands it back on leave.
+  setSelectedUnit: (selectedUnit) =>
+    set({
+      selectedUnit,
+      highlightRange: selectedUnit
+        ? { start: selectedUnit.start_time_s, end: selectedUnit.end_time_s }
+        : null,
+    }),
+  setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setStatus: (statusLine) => set({ statusLine }),
   setError: (error) => set({ error }),
   setDragOver: (dragOver) => set({ dragOver }),
@@ -147,9 +192,25 @@ export const useStore = create<AppState>((set) => ({
       duration: 0,
       hoverUnit: null,
       highlightRange: null,
+      selectedUnit: null,
       error: null,
+      view: { start: 0, end: 0 },
     }),
 }));
+
+// Keep the store's `view` in step with the imperative controller without
+// re-rendering on every wheel event: one trailing update per burst.
+const VIEW_MIRROR_MS = 120;
+let viewMirrorTimer: number | null = null;
+waveView.subscribe(() => {
+  if (viewMirrorTimer !== null) return;
+  viewMirrorTimer = setTimeout(() => {
+    viewMirrorTimer = null;
+    const cur = useStore.getState().view;
+    const next = waveView.view;
+    if (cur.start !== next.start || cur.end !== next.end) useStore.setState({ view: next });
+  }, VIEW_MIRROR_MS) as unknown as number;
+});
 
 /** Transient read for render loops (no subscription). */
 export const getState = (): AppState => useStore.getState();

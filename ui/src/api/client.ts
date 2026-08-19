@@ -5,6 +5,7 @@ import type {
   CreateJobResponse,
   HealthResponse,
   JobStatus,
+  PeaksWindow,
 } from './types';
 
 export interface Endpoint {
@@ -72,6 +73,24 @@ export class EngineClient {
     return this.json<AudioAnalysis>(
       '/api/analyze',
       { method: 'POST', body: JSON.stringify({ path, buckets }) },
+      signal,
+    );
+  }
+
+  /** Windowed peaks for the visible zoom range (docs/ui-contract.md, Addendum 1). */
+  peaks(
+    path: string,
+    startS: number,
+    endS: number,
+    buckets: number,
+    signal?: AbortSignal,
+  ): Promise<PeaksWindow> {
+    return this.json<PeaksWindow>(
+      '/api/peaks',
+      {
+        method: 'POST',
+        body: JSON.stringify({ path, start_s: startS, end_s: endS, buckets }),
+      },
       signal,
     );
   }

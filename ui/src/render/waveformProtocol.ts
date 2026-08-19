@@ -2,6 +2,15 @@
 
 export type WaveKind = 'original' | 'cleaned';
 
+/**
+ * `base` is the whole-file envelope from `POST /api/analyze` (always present
+ * once a clip is analyzed); `detail` is a windowed envelope from
+ * `POST /api/peaks` covering exactly the visible range at display resolution.
+ * The worker draws `detail` whenever it still covers the view, else `base`, so
+ * a view change always redraws immediately from data already in hand.
+ */
+export type WaveSlot = 'base' | 'detail';
+
 export interface WaveInitMsg {
   type: 'init';
   canvas: OffscreenCanvas;
@@ -18,14 +27,18 @@ export interface WaveResizeMsg {
 export interface WaveDataMsg {
   type: 'data';
   kind: WaveKind;
+  slot: WaveSlot;
   min: Float32Array;
   max: Float32Array;
   rms: Float32Array | null; // linear amplitude 0..1 (already converted from dB)
-  duration: number;
+  /** Time span the buckets cover, in seconds. */
+  start: number;
+  end: number;
 }
 export interface WaveClearMsg {
   type: 'clear';
   kind: WaveKind;
+  slot?: WaveSlot; // omitted = clear both slots
 }
 export interface WavePlayheadMsg {
   type: 'playhead';
@@ -48,9 +61,11 @@ export interface WaveFocusMsg {
   type: 'focus';
   kind: WaveKind;
 }
-export interface WaveDurationMsg {
-  type: 'duration';
-  duration: number;
+/** Visible time window (seconds). Drives every horizontal mapping. */
+export interface WaveViewMsg {
+  type: 'view';
+  start: number;
+  end: number;
 }
 
 export type WaveMsg =
@@ -63,7 +78,7 @@ export type WaveMsg =
   | WaveHighlightMsg
   | WaveUnitsMsg
   | WaveFocusMsg
-  | WaveDurationMsg;
+  | WaveViewMsg;
 
 export interface WaveReadyMsg {
   type: 'ready';
