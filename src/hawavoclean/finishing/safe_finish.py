@@ -61,19 +61,26 @@ def apply_finishing_stages(
         if repaired > 0:
             actions.append(f"clicks_repaired(count={repaired})")
 
-    # 4. EQ adjustment
-    if config.dynamic_eq and abs(defects.mud_imbalance_db) > 2.0:
-        mud_cut = -3.0 if intensity == "gentle" else -1.5
-        pres_boost = 2.5 if intensity == "gentle" else 1.25
-        air_boost = 1.5 if intensity == "gentle" else 0.75
-        current = apply_speech_eq(
-            current,
-            sample_rate,
-            mud_cut_db=mud_cut,
-            presence_boost_db=pres_boost,
-            air_shelf_db=air_boost,
+    # 4. EQ adjustment — ONLY when low-mids are in genuine excess of a normal
+    # voice, and scaled to the excess (capped). No blanket presence/air boost:
+    # the earlier unconditional +2.5 dB at 3-6 kHz plus a -3 dB low-mid cut
+    # re-voiced every recording thin and bright.
+    if config.dynamic_eq and defects.has_mud:
+        from hawavoclean.finishing.detect import (
+            NORMAL_VOICE_MUD_REFERENCE_DB,
         )
-        actions.append("parametric_speech_eq")
+
+        excess = defects.mud_imbalance_db - NORMAL_VOICE_MUD_REFERENCE_DB
+        # Take back a third of the excess, gently. The filter's band gain
+        # lands ~1.5x its nominal setting in the 250-500 Hz measure, so the
+        # nominal cap of 2 dB keeps the audible cut under ~3 dB.
+        cut = -min(2.0, max(0.5, excess / 3.0))
+        if intensity == "minimal":
+            cut *= 0.5
+        current = apply_speech_eq(
+            current, sample_rate, mud_cut_db=cut, presence_boost_db=0.0, air_shelf_db=0.0
+        )
+        actions.append(f"low_mid_trim({cut:+.1f}dB, excess={excess:+.1f}dB)")
 
     # 5. De-essing
     if config.deess_band and defects.has_harsh_sibilance:

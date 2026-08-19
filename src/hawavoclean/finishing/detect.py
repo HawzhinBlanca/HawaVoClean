@@ -5,6 +5,14 @@ from typing import Any
 
 import numpy as np
 
+# Low-mid (250-500 Hz) vs presence (2-5 kHz) level ratio of a normal voice,
+# and how far above it counts as a defect worth correcting. Measured
+# 2026-08-19 on four real recordings: +30.7, +41.2, +10.8 dB and a +43.9 dB
+# fixture; the reference sits at the upper-middle so only genuine boom
+# (proximity effect, resonant room) exceeds it.
+NORMAL_VOICE_MUD_REFERENCE_DB = 36.0
+MUD_EXCESS_THRESHOLD_DB = 6.0
+
 
 @dataclass(frozen=True)
 class DefectDetectionReport:
@@ -17,6 +25,7 @@ class DefectDetectionReport:
     click_count: int
     has_plosives: bool
     mud_imbalance_db: float
+    has_mud: bool
     has_harsh_sibilance: bool
     sibilance_ratio: float
 
@@ -36,6 +45,7 @@ def detect_defects(
             click_count=0,
             has_plosives=False,
             mud_imbalance_db=0.0,
+            has_mud=False,
             has_harsh_sibilance=False,
             sibilance_ratio=1.0,
         )
@@ -117,7 +127,12 @@ def detect_defects(
     pres_bins = (freqs >= 2000) & (freqs <= 5000)
     e_mud = float(np.mean(fft_mag[mud_bins])) + 1e-9
     e_pres = float(np.mean(fft_mag[pres_bins])) + 1e-9
+    # Natural speech carries FAR more energy at 250-500 Hz than at 2-5 kHz —
+    # measured on real recordings: +11 to +41 dB, median ~+30 dB. "Mud" is
+    # EXCESS over that, not the mere presence of low-mids. The old +2 dB
+    # threshold flagged every real voice and thinned it.
     mud_imbalance_db = float(20.0 * np.log10(e_mud / e_pres))
+    has_mud = mud_imbalance_db > NORMAL_VOICE_MUD_REFERENCE_DB + MUD_EXCESS_THRESHOLD_DB
 
     # 6. Sibilance (5kHz - 10kHz vs overall mid band); at low sample rates
     # the sibilance band may lie above Nyquist — then there is no sibilance
@@ -140,6 +155,7 @@ def detect_defects(
         click_count=click_count,
         has_plosives=has_plosives,
         mud_imbalance_db=mud_imbalance_db,
+        has_mud=has_mud,
         has_harsh_sibilance=has_harsh_sibilance,
         sibilance_ratio=sib_ratio,
     )

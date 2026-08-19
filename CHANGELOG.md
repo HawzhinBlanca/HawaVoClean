@@ -5,6 +5,26 @@ All notable changes to the HawaVoClean system will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-08-19
+
+### Fixed — finishing EQ was re-voicing every recording thin and bright
+Found by ear ("harsh, treble, bass removed") and confirmed by measurement
+on dialogue frames: low-mids -5.7 dB, bass -2.2 dB, presence +2.7 dB vs the
+original. DeepFilterNet3 was tonally flat (±0.4 dB); the cause was the
+finishing chain's `parametric_speech_eq`. Its "mud" detector used a +2 dB
+low-mid/presence threshold that fired on 100% of real voices (measured
++11 to +41 dB — natural speech simply carries that much more low-mid
+energy), then applied a -3 dB low-mid cut and +2.5 dB presence boost to
+every unit.
+- Mud is now EXCESS over a measured normal-voice reference (+36 dB) by more
+  than 6 dB; the correction scales with the excess, caps at ~3 dB audible,
+  and the blanket presence/air boost is gone.
+- After the fix, Flute 09 dialogue bands sit within ±0.2 dB of the original
+  (sub-bass -0.8 from the deliberate 75 Hz rumble filter).
+- New permanent gate: finishing and the full pipeline must be tonally
+  transparent (±1.5 dB per band) on a natural-voice spectrum; a genuine
+  +12 dB boom is still corrected, gently.
+
 ## [3.1.0] - 2026-08-19
 
 ### Fixed — 36 bugs from an adversarial hunt (fuzz harness + 3 parallel reviews)
