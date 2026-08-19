@@ -26,7 +26,7 @@ from voiceclean.finishing.loudness import measure_loudness_and_peaks
 from voiceclean.guard.calibration import load_calibration_artifact
 from voiceclean.hashing import hash_file, hash_json_canonical
 from voiceclean.logging import get_logger, setup_logging
-from voiceclean.paths import models_dir, profile_config_path, resolve_calibration_file
+from voiceclean.paths import models_dir, profile_config_path
 from voiceclean.pipeline import run_pipeline
 from voiceclean.report.writer import load_json_report
 
@@ -203,8 +203,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if media.sample_rate != report.output.sample_rate:
         exit_with_code(
             ExitCode.PUBLICATION_FAILURE,
-            f"Sample rate mismatch: expected {report.output.sample_rate}, "
-            f"got {media.sample_rate}",
+            f"Sample rate mismatch: expected {report.output.sample_rate}, got {media.sample_rate}",
         )
 
     if media.channels != report.output.channels:
@@ -287,7 +286,8 @@ def cmd_audit_models(_args: argparse.Namespace) -> int:
 
         # 3. Any weight digest table must resolve (none exist for DSP cores,
         # but a future neural core lands here and gets verified)
-        for fname, digest in dict(lock.get("weight_sha256", {})).items():
+        weight_table: dict[str, str] = lock.get("weight_sha256", {}) or {}
+        for fname, digest in weight_table.items():
             candidate = models_dir() / str(fname)
             if not candidate.exists():
                 failures.append(f"declared weights file missing: {fname}")
@@ -354,9 +354,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     passed = res["release_gate_status"] == "PASSED"
     print(f"Acceptance Evaluation Outcome: {res['release_gate_status']}")
     print(f"  Passed Items: {res['passed_items']} / {res['total_items']}")
-    print(
-        f"  Enhanced speech units: {res['speech_units_enhanced']} / {res['speech_units_total']}"
-    )
+    print(f"  Enhanced speech units: {res['speech_units_enhanced']} / {res['speech_units_total']}")
     for item in res["results"]:
         if not item["passed"]:
             for f in item["failures"]:

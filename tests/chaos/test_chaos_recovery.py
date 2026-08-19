@@ -30,9 +30,12 @@ FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"
 class _SuicidalEnhancer:
     """Worker-side enhancer that SIGKILLs its own process on first enhance."""
 
-    def __init__(self, core_id: str = "x", sample_rate: int = 48000) -> None:
+    def __init__(self, _core_id: str = "x", sample_rate: int = 48000) -> None:
         self._meta = EnhancerMetadata(
-            core_id="suicidal", version="0", algorithm="crash", sample_rate=sample_rate,
+            core_id="suicidal",
+            version="0",
+            algorithm="crash",
+            sample_rate=sample_rate,
             phase_coherent=True,
         )
 
@@ -43,7 +46,7 @@ class _SuicidalEnhancer:
     def warmup(self) -> None:
         pass
 
-    def enhance(self, waveform: Any, sample_rate: int) -> EnhancementResult:
+    def enhance(self, _waveform: Any, _sample_rate: int) -> EnhancementResult:
         os.kill(os.getpid(), signal.SIGKILL)
         raise RuntimeError("unreachable")
 
@@ -51,9 +54,12 @@ class _SuicidalEnhancer:
 class _HangingEnhancer:
     """Worker-side enhancer that sleeps far beyond the deadline."""
 
-    def __init__(self, core_id: str = "x", sample_rate: int = 48000) -> None:
+    def __init__(self, _core_id: str = "x", sample_rate: int = 48000) -> None:
         self._meta = EnhancerMetadata(
-            core_id="hanging", version="0", algorithm="hang", sample_rate=sample_rate,
+            core_id="hanging",
+            version="0",
+            algorithm="hang",
+            sample_rate=sample_rate,
             phase_coherent=True,
         )
 
@@ -64,7 +70,7 @@ class _HangingEnhancer:
     def warmup(self) -> None:
         pass
 
-    def enhance(self, waveform: Any, sample_rate: int) -> EnhancementResult:
+    def enhance(self, _waveform: Any, _sample_rate: int) -> EnhancementResult:
         time.sleep(3600.0)
         raise RuntimeError("unreachable")
 
@@ -72,9 +78,12 @@ class _HangingEnhancer:
 class _GarbageEnhancer:
     """In-process enhancer returning NaN, wrong-length, then silent output."""
 
-    def __init__(self, core_id: str = "x", sample_rate: int = 48000, **_: Any) -> None:
+    def __init__(self, _core_id: str = "x", sample_rate: int = 48000, **_: Any) -> None:
         self._meta = EnhancerMetadata(
-            core_id="garbage", version="0", algorithm="garbage", sample_rate=sample_rate,
+            core_id="garbage",
+            version="0",
+            algorithm="garbage",
+            sample_rate=sample_rate,
             phase_coherent=True,
         )
         self._call = 0
@@ -99,8 +108,11 @@ class _GarbageEnhancer:
         else:
             out = np.zeros(n, dtype=np.float32)
         return EnhancementResult(
-            waveform=out, sample_rate=sample_rate, model_runtime_ms=0.1,
-            input_samples=n, output_samples=len(out),
+            waveform=out,
+            sample_rate=sample_rate,
+            model_runtime_ms=0.1,
+            input_samples=n,
+            output_samples=len(out),
         )
 
 
@@ -108,7 +120,8 @@ class _GarbageEnhancer:
 def test_chaos_worker_killed_mid_unit_fails_closed() -> None:
     """A SIGKILLed worker subprocess must surface as a WorkerError, not hang."""
     worker = IsolatedEnhancementWorker(
-        timeout_s=5.0, enhancer_class=_SuicidalEnhancer  # type: ignore[arg-type]
+        timeout_s=5.0,
+        enhancer_class=_SuicidalEnhancer,
     )
     try:
         with pytest.raises(WorkerError):
@@ -121,7 +134,8 @@ def test_chaos_worker_killed_mid_unit_fails_closed() -> None:
 def test_chaos_worker_hang_hits_deadline_and_fails_closed() -> None:
     """A hung worker must be reaped at the deadline, not waited on forever."""
     worker = IsolatedEnhancementWorker(
-        timeout_s=3.0, enhancer_class=_HangingEnhancer  # type: ignore[arg-type]
+        timeout_s=3.0,
+        enhancer_class=_HangingEnhancer,
     )
     try:
         t0 = time.perf_counter()

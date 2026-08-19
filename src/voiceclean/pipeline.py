@@ -81,8 +81,7 @@ def _load_core_lock(core_id: str) -> dict[str, Any]:
 
     if lock.get("core_id") != core_id:
         raise PreflightError(
-            f"Configured core_id {core_id!r} does not match lockfile core "
-            f"{lock.get('core_id')!r}"
+            f"Configured core_id {core_id!r} does not match lockfile core {lock.get('core_id')!r}"
         )
     actual_params_hash = wiener_params_hash()
     if lock.get("params_hash") != actual_params_hash:

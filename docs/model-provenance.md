@@ -1,16 +1,22 @@
 # Model Provenance & Licensing Register
 
-## Frozen Production Core: `urgent-bsrnn-baseline`
+## Production core: `wiener-dd-48k-v1`
 
-- **Repository**: https://github.com/urgent-challenge/urgent2026_challenge_track1
-- **Commit**: `9a7f3b8c2d1e0f4a5b6c7d8e9f0a1b2c3d4e5f6a`
-- **Code License**: MIT
-- **Weight License**: CC-BY-4.0
-- **Weight SHA-256**: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
-- **Phase Coherence**: Verified coherent (linear residual blending enabled).
+- **Implementation**: `voiceclean.enhancement.production.WienerSpectralEnhancer`
+- **Algorithm**: decision-directed spectral Wiener filter (Ephraim–Malah
+  a-priori SNR tracking), exact phase preservation.
+- **Weights**: none — this is deterministic DSP. Provenance is the
+  parameter set, hash-locked in
+  `src/voiceclean/resources/models/production-core.lock.toml` and verified
+  against the implementation by `voiceclean audit-models` (non-zero exit on
+  mismatch).
+- **License**: Proprietary / All Rights Reserved (this repository).
 
-## Evaluated Candidates
+## External candidates
 
-1. `mossformer2-se-48k`: Apache-2.0 (Code & Weights). Verified eligible.
-2. `gap-urgenet`: Research Only. Disqualified due to Sorani phonetic substitution risk.
-3. `nvidia-reuse`: Non-commercial. Benchmark reference only.
+None have been evaluated. An earlier revision of this document listed
+"evaluated" and "disqualified" external models with commit hashes and
+license verdicts; none of those evaluations had occurred and the entries
+were fabricated. They were removed rather than corrected. When a candidate
+is genuinely benchmarked (`voiceclean benchmark` over a labelled corpus),
+it earns an entry here with its measured numbers and verifiable digests.

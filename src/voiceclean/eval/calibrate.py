@@ -45,9 +45,9 @@ CORRUPTION_PROFILES: dict[str, list[Any]] = {
         lambda w, sr: corrupt_dropout(w, sr, start_time_s=1.0, duration_ms=150.0),
     ],
     "mild": [
-        lambda w, sr: (w * 0.97).astype(np.float32),  # -0.26 dB gain
+        lambda w, _sr: (w * 0.97).astype(np.float32),  # -0.26 dB gain
         lambda w, sr: corrupt_dropout(w, sr, start_time_s=1.0, duration_ms=8.0),
-        lambda w, sr: (w + 0.0005 * np.random.default_rng(0).standard_normal(len(w))).astype(
+        lambda w, _sr: (w + 0.0005 * np.random.default_rng(0).standard_normal(len(w))).astype(
             np.float32
         ),
     ],
@@ -55,8 +55,8 @@ CORRUPTION_PROFILES: dict[str, list[Any]] = {
 
 # Benign renderings the guard should accept (false reverts counted here).
 BENIGN_RENDERINGS: list[Any] = [
-    lambda w, sr: w.copy(),  # identity
-    lambda w, sr: (w * 0.995).astype(np.float32),  # negligible gain change
+    lambda w, _sr: w.copy(),  # identity
+    lambda w, _sr: (w * 0.995).astype(np.float32),  # negligible gain change
 ]
 
 
@@ -64,9 +64,7 @@ def _same_length(orig: np.ndarray, cand: np.ndarray) -> np.ndarray:
     """Match candidate length to the original (guard compares same spans)."""
     if len(cand) >= len(orig):
         return np.ascontiguousarray(cand[: len(orig)], dtype=np.float32)
-    return np.ascontiguousarray(
-        np.pad(cand, (0, len(orig) - len(cand))), dtype=np.float32
-    )
+    return np.ascontiguousarray(np.pad(cand, (0, len(orig) - len(cand))), dtype=np.float32)
 
 
 def run_calibration(

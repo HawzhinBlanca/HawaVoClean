@@ -82,9 +82,9 @@ def test_gain_reduction_anticipates_the_peak() -> None:
     lookahead = int(SR * lookahead_ms / 1000.0)
     n = SR
     p = n // 2
-    x = 0.1 * np.sin(2 * np.pi * 220 * np.arange(n) / SR)
-    x[p : p + 60] += 2.0 * np.hanning(60)  # one isolated transient, ~7 dB over
-    x = x.astype(np.float32)[None, :]
+    base = 0.1 * np.sin(2 * np.pi * 220 * np.arange(n) / SR)
+    base[p : p + 60] += 2.0 * np.hanning(60)  # one isolated transient, ~7 dB over
+    x = base.astype(np.float32)[None, :]
 
     res = apply_lookahead_limiter(x, SR, ceiling_dbtp=CEILING_DBTP, lookahead_ms=lookahead_ms)
     g = res.gain_envelope

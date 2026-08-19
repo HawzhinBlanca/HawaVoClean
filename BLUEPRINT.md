@@ -1,3 +1,11 @@
+> **STATUS: HISTORICAL DESIGN DOCUMENT — DOES NOT DESCRIBE THE IMPLEMENTED SYSTEM.**
+> This blueprint specifies an aspirational system with a neural enhancement
+> core and a trained Kurdish Sorani ASR fidelity guard. Neither exists in
+> this codebase: the shipped core is a classical Wiener filter and the guard
+> is a spectral-change detector. See README.md for what is actually
+> implemented, and CHANGELOG.md (2.0.0) for how the gap was disclosed.
+> Retained as the Track-B design reference only.
+
 # HAWZHIN VOICECLEAN — Master Implementation Blueprint v2.0
 
 **Audience:** autonomous AI coding agent with repository, shell, GPU, and test access  

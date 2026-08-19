@@ -19,8 +19,8 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     (
         "M1: limiter ceiling raised 0.5 dB",
         "src/voiceclean/finishing/limiter.py",
-        'ceiling_linear = float(10.0 ** (ceiling_dbtp / 20.0))',
-        'ceiling_linear = float(10.0 ** ((ceiling_dbtp + 0.5) / 20.0))',
+        "ceiling_linear = float(10.0 ** (ceiling_dbtp / 20.0))",
+        "ceiling_linear = float(10.0 ** ((ceiling_dbtp + 0.5) / 20.0))",
     ),
     (
         "M2: lookahead anticipation deleted (shift semantics)",
@@ -101,8 +101,8 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     (
         "M8: ambiguous stereo silently classified dual-mono",
         "src/voiceclean/audio/channels.py",
-        None,  # filled dynamically below
-        None,
+        "",  # filled dynamically below
+        "",
     ),
     (
         "M9: report and summary never staged (audio published alone)",
@@ -138,8 +138,8 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     (
         "M11: encoder drops the final sample",
         "src/voiceclean/audio/encode.py",
-        None,  # filled dynamically below
-        None,
+        "",  # filled dynamically below
+        "",
     ),
     (
         "M12: mono loudness target off by 6 dB",
@@ -153,12 +153,12 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
 def fill_dynamic_mutations() -> None:
     channels = (REPO / "src/voiceclean/audio/channels.py").read_text()
     # Find the ambiguous branch and neutralize it
-    if 'raise AmbiguousStereoError(' in channels:
+    if "raise AmbiguousStereoError(" in channels:
         MUTATIONS[7] = (
             MUTATIONS[7][0],
             "src/voiceclean/audio/channels.py",
             "raise AmbiguousStereoError(",
-            'return ChannelMode.DUAL_MONO_SAME\n        raise AmbiguousStereoError(',
+            "return ChannelMode.DUAL_MONO_SAME\n        raise AmbiguousStereoError(",
         )
     MUTATIONS[10] = (
         MUTATIONS[10][0],
@@ -193,9 +193,7 @@ def run_suite() -> tuple[bool, str]:
 
 
 def git_clean() -> bool:
-    proc = subprocess.run(
-        ["git", "diff", "--stat"], capture_output=True, text=True, cwd=REPO
-    )
+    proc = subprocess.run(["git", "diff", "--stat"], capture_output=True, text=True, cwd=REPO)
     return proc.stdout.strip() == ""
 
 

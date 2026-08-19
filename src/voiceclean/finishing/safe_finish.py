@@ -67,7 +67,11 @@ def apply_finishing_stages(
         pres_boost = 2.5 if intensity == "gentle" else 1.25
         air_boost = 1.5 if intensity == "gentle" else 0.75
         current = apply_speech_eq(
-            current, sample_rate, mud_cut_db=mud_cut, presence_boost_db=pres_boost, air_shelf_db=air_boost
+            current,
+            sample_rate,
+            mud_cut_db=mud_cut,
+            presence_boost_db=pres_boost,
+            air_shelf_db=air_boost,
         )
         actions.append("parametric_speech_eq")
 

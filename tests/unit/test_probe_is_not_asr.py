@@ -27,7 +27,7 @@ def _voiced(pattern: list[float], f0: float, seed: int) -> np.ndarray:
     seg = n // len(pattern)
     env = np.concatenate([np.full(seg, a) for a in pattern])[:n]
     x = x * env + 0.01 * rng.standard_normal(n)
-    return x.astype(np.float32)
+    return np.asarray(x, dtype=np.float32)
 
 
 def test_different_content_same_envelope_looks_the_same() -> None:
@@ -55,9 +55,7 @@ def test_same_content_shifted_spectrum_looks_different() -> None:
     # Remove the fundamental region entirely — a gross change to the spectral
     # shape the probe actually reads (measured js ~= 0.50 on this input).
     sos = scipy.signal.butter(4, [150.0, 650.0], btype="bandstop", fs=SR, output="sos")
-    shifted = np.ascontiguousarray(
-        scipy.signal.sosfiltfilt(sos, content), dtype=np.float32
-    )
+    shifted = np.ascontiguousarray(scipy.signal.sosfiltfilt(sos, content), dtype=np.float32)
 
     res_orig = probe.infer(content, SR)
     res_shift = probe.infer(shifted, SR)

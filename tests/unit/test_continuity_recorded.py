@@ -12,9 +12,14 @@ SR = 48000
 
 def _unit(uid: int, ch: int, start: int, end: int, forced: bool) -> SpeechUnit:
     return SpeechUnit(
-        unit_id=uid, channel_id=ch, start_sample=start, end_sample=end,
-        context_start_sample=start, context_end_sample=end,
-        is_speech=True, forced_boundary=forced,
+        unit_id=uid,
+        channel_id=ch,
+        start_sample=start,
+        end_sample=end,
+        context_start_sample=start,
+        context_end_sample=end,
+        is_speech=True,
+        forced_boundary=forced,
     )
 
 
@@ -30,8 +35,8 @@ def _dec(enhanced: bool, n: int) -> UnitPolicyDecision:
 def test_units_on_different_channels_are_never_neighbours() -> None:
     n = SR // 2
     units = [
-        _unit(0, 0, 0, n, forced=True),      # ch0: enhanced, forced boundary
-        _unit(1, 1, 0, n, forced=False),     # ch1: reverted — a DIFFERENT channel
+        _unit(0, 0, 0, n, forced=True),  # ch0: enhanced, forced boundary
+        _unit(1, 1, 0, n, forced=False),  # ch1: reverted — a DIFFERENT channel
     ]
     decisions = [_dec(True, n), _dec(False, n)]
     waves = [np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)]

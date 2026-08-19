@@ -27,8 +27,7 @@ def test_gain_floor_prevents_signal_annihilation() -> None:
     # Output RMS on stationary noise must stay above roughly the floor's
     # share of the input (with margin for windowing/resampling losses).
     assert out_rms >= 0.5 * floor * in_rms, (
-        f"noise floor annihilated: in_rms={in_rms:.5f} out_rms={out_rms:.5f} "
-        f"(floor={floor})"
+        f"noise floor annihilated: in_rms={in_rms:.5f} out_rms={out_rms:.5f} (floor={floor})"
     )
     # And it must actually attenuate noise, or it does nothing at all.
     assert out_rms < 0.9 * in_rms, "enhancer did not attenuate stationary noise"

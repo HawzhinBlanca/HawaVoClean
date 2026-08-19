@@ -55,9 +55,7 @@ class JobWorkspace:
         # A fresh scratch directory per run: the job_id names the job, the
         # unique suffix guarantees no state is shared between runs.
         base_work_dir.mkdir(parents=True, exist_ok=True)
-        self.root = Path(
-            tempfile.mkdtemp(prefix=f"{self.job_id}-", dir=base_work_dir)
-        ).resolve()
+        self.root = Path(tempfile.mkdtemp(prefix=f"{self.job_id}-", dir=base_work_dir)).resolve()
         self.journal_path = self.root / "journal.jsonl"
         self.job_meta_path = self.root / "job.json"
 

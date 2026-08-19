@@ -32,7 +32,7 @@ def test_two_unit_butt_joint_duplicates_nothing() -> None:
     u0, u1 = _unit(0, 0, b), _unit(1, b, n)
     w0 = np.full(b, 1.0, dtype=np.float32)
     # unique ramp far above w0's value range: value == 10 + index
-    w1 = (10.0 + np.arange(n - b, dtype=np.float32))
+    w1 = 10.0 + np.arange(n - b, dtype=np.float32)
 
     tl = assemble_channel_timeline([u0, u1], [w0, w1], n, SR, crossfade_ms=20.0)
     fade = int(SR * 0.02)
@@ -53,17 +53,12 @@ def test_two_unit_butt_joint_duplicates_nothing() -> None:
 def test_four_unit_chain_with_forced_boundary_duplicates_nothing() -> None:
     n = SR * 2
     bounds = [0, n // 4, n // 2, 3 * n // 4, n]
-    units = [
-        _unit(i, bounds[i], bounds[i + 1], forced=(i == 2))
-        for i in range(4)
-    ]
+    units = [_unit(i, bounds[i], bounds[i + 1], forced=(i == 2)) for i in range(4)]
     # Globally unique, DISJOINT value ranges: unit i occupies
     # [1e6*(i+1), 1e6*(i+1) + len), so no unit's values can be mistaken
     # for another's.
     waves = [
-        (1e6 * (i + 1) + np.arange(bounds[i + 1] - bounds[i], dtype=np.float64)).astype(
-            np.float32
-        )
+        (1e6 * (i + 1) + np.arange(bounds[i + 1] - bounds[i], dtype=np.float64)).astype(np.float32)
         for i in range(4)
     ]
     tl = assemble_channel_timeline(units, waves, n, SR, crossfade_ms=20.0)

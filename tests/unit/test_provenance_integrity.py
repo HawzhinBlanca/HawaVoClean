@@ -7,9 +7,7 @@ import string
 import tomllib
 from pathlib import Path
 
-MODELS_DIR = (
-    Path(__file__).resolve().parents[2] / "src" / "voiceclean" / "resources" / "models"
-)
+MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "voiceclean" / "resources" / "models"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 

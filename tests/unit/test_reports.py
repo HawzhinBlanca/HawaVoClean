@@ -40,9 +40,7 @@ def test_report_serialization_and_summary() -> None:
             true_peak_dbtp=-1.0,
             integrated_lufs=-16.0,
         ),
-        core=CoreMetadata(
-            id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="a" * 64
-        ),
+        core=CoreMetadata(id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="a" * 64),
         guard=GuardMetadata(id="spectral-guard", probe_hash="1" * 64, calibration_id="cal_1"),
         environment=EnvironmentMetadata(
             platform="darwin",

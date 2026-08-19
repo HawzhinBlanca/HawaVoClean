@@ -2,22 +2,19 @@
   "$defs": {
     "CoreMetadata": {
       "additionalProperties": false,
-      "description": "Neural enhancement model identification and lock hashes.",
+      "description": "Enhancement core identification. The core is deterministic DSP; its\nprovenance is its parameter set, hashed canonically.",
       "properties": {
         "id": {
           "title": "Id",
           "type": "string"
         },
-        "commit": {
-          "title": "Commit",
+        "algorithm": {
+          "title": "Algorithm",
           "type": "string"
         },
-        "weight_sha256": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "title": "Weight Sha256",
-          "type": "object"
+        "params_hash": {
+          "title": "Params Hash",
+          "type": "string"
         },
         "phase_coherent": {
           "default": true,
@@ -27,7 +24,8 @@
       },
       "required": [
         "id",
-        "commit"
+        "algorithm",
+        "params_hash"
       ],
       "title": "CoreMetadata",
       "type": "object"
@@ -48,45 +46,17 @@
           "title": "Python Version",
           "type": "string"
         },
-        "torch_version": {
-          "title": "Torch Version",
+        "numpy_version": {
+          "title": "Numpy Version",
           "type": "string"
         },
-        "cuda_version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Cuda Version"
+        "scipy_version": {
+          "title": "Scipy Version",
+          "type": "string"
         },
-        "gpu_name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Gpu Name"
-        },
-        "driver_version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Driver Version"
+        "soundfile_version": {
+          "title": "Soundfile Version",
+          "type": "string"
         },
         "cpu_model": {
           "anyOf": [
@@ -105,21 +75,23 @@
         "platform",
         "os_version",
         "python_version",
-        "torch_version"
+        "numpy_version",
+        "scipy_version",
+        "soundfile_version"
       ],
       "title": "EnvironmentMetadata",
       "type": "object"
     },
     "GuardMetadata": {
       "additionalProperties": false,
-      "description": "Guard identification and calibration artifact hashes.",
+      "description": "Guard identification and calibration artifact hashes.\n\nThe guard compares spectral signatures; it does not verify linguistic\ncontent.",
       "properties": {
         "id": {
           "title": "Id",
           "type": "string"
         },
-        "model_sha256": {
-          "title": "Model Sha256",
+        "probe_hash": {
+          "title": "Probe Hash",
           "type": "string"
         },
         "calibration_id": {
@@ -129,7 +101,7 @@
       },
       "required": [
         "id",
-        "model_sha256",
+        "probe_hash",
         "calibration_id"
       ],
       "title": "GuardMetadata",
@@ -220,13 +192,6 @@
           "type": "integer"
         },
         "verdict": {
-          "enum": [
-            "PASS",
-            "REVERT",
-            "UNVERIFIED",
-            "ERROR",
-            "NO_SPEECH"
-          ],
           "title": "Verdict",
           "type": "string"
         },
@@ -295,18 +260,10 @@
           "title": "Candidate Sha256"
         },
         "output_sha256": {
-          "default": "",
           "title": "Output Sha256",
           "type": "string"
         },
         "guard_a_verdict": {
-          "enum": [
-            "PASS",
-            "REVERT",
-            "UNVERIFIED",
-            "ERROR",
-            "NO_SPEECH"
-          ],
           "title": "Guard A Verdict",
           "type": "string"
         },
@@ -330,13 +287,6 @@
         "guard_b_verdict": {
           "anyOf": [
             {
-              "enum": [
-                "PASS",
-                "REVERT",
-                "UNVERIFIED",
-                "ERROR",
-                "NO_SPEECH"
-              ],
               "type": "string"
             },
             {
@@ -370,11 +320,6 @@
         },
         "finish_preset_applied": {
           "default": "bypass",
-          "enum": [
-            "gentle",
-            "minimal",
-            "bypass"
-          ],
           "title": "Finish Preset Applied",
           "type": "string"
         },
@@ -386,13 +331,6 @@
           "type": "array"
         },
         "final_decision": {
-          "enum": [
-            "enhanced",
-            "original_reverted",
-            "original_unverified",
-            "original_error",
-            "original_no_speech"
-          ],
           "title": "Final Decision",
           "type": "string"
         },
@@ -416,6 +354,7 @@
         "end_time_s",
         "is_speech",
         "input_sha256",
+        "output_sha256",
         "guard_a_verdict",
         "final_decision"
       ],
@@ -449,6 +388,11 @@
         "error_passthrough": {
           "default": 0,
           "title": "Error Passthrough",
+          "type": "integer"
+        },
+        "continuity_reverted": {
+          "default": 0,
+          "title": "Continuity Reverted",
           "type": "integer"
         },
         "no_speech": {

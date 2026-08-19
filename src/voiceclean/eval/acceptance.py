@@ -27,8 +27,7 @@ def _gate_failures(report: Any) -> list[str]:
 
     if report.output.samples != report.input.samples:
         failures.append(
-            f"sample count mismatch: output {report.output.samples} != "
-            f"input {report.input.samples}"
+            f"sample count mismatch: output {report.output.samples} != input {report.input.samples}"
         )
     if report.output.channels != report.input.channels:
         failures.append(

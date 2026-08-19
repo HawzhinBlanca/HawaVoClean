@@ -46,7 +46,7 @@ def _slope_limited_min_envelope(
     Computed with the shift-doubling trick in O(n log L).
     """
     if lookahead <= 0:
-        return gain.astype(np.float32)
+        return np.asarray(gain, dtype=np.float32)
     delta = 1.0 / float(lookahead)
     env = gain.astype(np.float64)
     shift = 1
@@ -54,7 +54,7 @@ def _slope_limited_min_envelope(
         shifted = np.concatenate([env[shift:], np.full(shift, np.inf)]) + shift * delta
         env = np.minimum(env, shifted)
         shift *= 2
-    return np.minimum(env, 1.0).astype(np.float32)
+    return np.asarray(np.minimum(env, 1.0), dtype=np.float32)
 
 
 def apply_lookahead_limiter(
@@ -106,10 +106,7 @@ def apply_lookahead_limiter(
     current_g = 1.0
     for i in range(samples):
         target = float(anticipated[i])
-        if target < current_g:
-            current_g = target
-        else:
-            current_g = target + release_coeff * (current_g - target)
+        current_g = target if target < current_g else target + release_coeff * (current_g - target)
         smooth_gain[i] = current_g
 
     limited = (waveform * smooth_gain).astype(np.float32)

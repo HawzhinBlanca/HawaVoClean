@@ -31,7 +31,7 @@ jobs:
         run: uv run ruff check .
 
       - name: Type check (Mypy strict)
-        run: uv run mypy --strict src eval research tests
+        run: uv run mypy --strict src tests scripts data
 
       - name: Run Test Suite with Coverage
         run: uv run pytest --cov=voiceclean --cov-branch --cov-report=term-missing --cov-fail-under=90

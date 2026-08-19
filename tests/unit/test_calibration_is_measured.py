@@ -22,21 +22,41 @@ def _make_corpus(tmp_path: Path, name: str) -> Path:
     rng = np.random.default_rng(7)
     for i in range(2):
         t = np.arange(SR * 4) / SR
-        x = (0.3 * np.sin(2 * np.pi * (140 + 60 * i) * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 3 * t))
-             + 0.02 * rng.standard_normal(SR * 4)).astype(np.float32)
+        x = (
+            0.3 * np.sin(2 * np.pi * (140 + 60 * i) * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 3 * t))
+            + 0.02 * rng.standard_normal(SR * 4)
+        ).astype(np.float32)
         p = audio_dir / f"{name}_{i}.wav"
         sf.write(str(p), x, SR, subtype="PCM_24")
-        items.append({
-            "id": f"{name}_{i}", "audio_path": str(p), "audio_sha256": "",
-            "duration_s": 4.0, "speaker_id": "synthetic", "dialect": "synthetic",
-            "gender": "unknown", "environment": "synthetic", "degradation_type": "clean",
-            "transcript_sorani": "-", "verified_by_human": False, "split": "calibration",
-        })
+        items.append(
+            {
+                "id": f"{name}_{i}",
+                "audio_path": str(p),
+                "audio_sha256": "",
+                "duration_s": 4.0,
+                "speaker_id": "synthetic",
+                "dialect": "synthetic",
+                "gender": "unknown",
+                "environment": "synthetic",
+                "degradation_type": "clean",
+                "transcript_sorani": "-",
+                "verified_by_human": False,
+                "split": "calibration",
+            }
+        )
     manifest = tmp_path / f"{name}.json"
-    manifest.write_text(json.dumps({
-        "schema_version": 1, "manifest_id": name, "split_name": "calibration",
-        "items_count": len(items), "items": items,
-    }), encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "manifest_id": name,
+                "split_name": "calibration",
+                "items_count": len(items),
+                "items": items,
+            }
+        ),
+        encoding="utf-8",
+    )
     return manifest
 
 

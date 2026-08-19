@@ -1,12 +1,28 @@
-# Guard Calibration Protocol
+# Guard Calibration
 
-## Split Discipline
+The shipped thresholds in
+`src/voiceclean/resources/models/guard-calibration.json` are engineering
+defaults — chosen by inspection, not fitted. The artifact says so in its
+`provenance` field, and its `calibration_id` is the canonical hash of the
+thresholds themselves (verified by `voiceclean doctor` and the provenance
+test suite).
 
-- **Calibration Set**: Exclusively used to fit guard thresholds ensuring 0.0 false accepts on counterexamples.
-- **Development Set**: Used for candidate comparison and engineering tuning.
-- **Acceptance Set**: Hash-locked prior to final selection. Never used to fit thresholds or code.
-- **Corruption Set**: Realistic phonetic counterexamples (consonant splicing, word deletion, timing warp, spectral holes).
+To measure real guard behavior over a corpus:
 
-## Threshold Locking
+```bash
+voiceclean calibrate \
+  --manifest data/calibration/manifest.json \
+  --output /tmp/guard-calibration.measured.json \
+  --corruption-profile standard
+```
 
-Production refuses to start without a valid `models/guard-calibration.json` matching the locked calibration ID in `models/production-core.lock.toml`.
+The command evaluates the guard against corrupted renderings (which it must
+reject) and benign renderings (which it should accept), and writes
+*counted* rates with a `measured` block naming the corpus digest,
+corruption profile, and evaluation counts. Rates respond to the corruption
+profile — `tests/unit/test_calibration_is_measured.py` proves a hardcoded
+number cannot pass.
+
+Note the corpus limitation: bundled datasets are synthetic tones. Rates
+measured on them exercise the guard's spectral comparisons, not its
+behavior on real Kurdish speech.

@@ -50,7 +50,7 @@
           "type": "string"
         },
         "verified_by_human": {
-          "default": true,
+          "default": false,
           "title": "Verified By Human",
           "type": "boolean"
         },

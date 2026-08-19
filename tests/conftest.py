@@ -17,7 +17,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
+def pytest_sessionstart() -> None:
     legacy = REPO_ROOT / ".voiceclean-work"
     if legacy.exists():
         raise pytest.UsageError(

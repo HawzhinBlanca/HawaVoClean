@@ -15,19 +15,35 @@ from voiceclean.report.schema import (
 
 
 def _report_violating_sample_count() -> VoiceCleanReport:
-    stats = dict(sample_rate=48000, channels=1, duration_s=1.0)
     return VoiceCleanReport(
         job_id="testjob",
         config_hash="c" * 64,
-        input=MediaStats(path="in.wav", sha256="a" * 64, samples=48000, **stats),
+        input=MediaStats(
+            path="in.wav",
+            sha256="a" * 64,
+            samples=48000,
+            sample_rate=48000,
+            channels=1,
+            duration_s=1.0,
+        ),
         output=MediaStats(  # one sample short: a hard invariant violation
-            path="out.wav", sha256="b" * 64, samples=47999, true_peak_dbtp=-1.2, **stats
+            path="out.wav",
+            sha256="b" * 64,
+            samples=47999,
+            true_peak_dbtp=-1.2,
+            sample_rate=48000,
+            channels=1,
+            duration_s=1.0,
         ),
         core=CoreMetadata(id="test-core", algorithm="test", params_hash="f" * 64),
         guard=GuardMetadata(id="test-guard", probe_hash="d" * 64, calibration_id="e" * 64),
         environment=EnvironmentMetadata(
-            platform="test", os_version="test", python_version="3",
-            numpy_version="0", scipy_version="0", soundfile_version="0",
+            platform="test",
+            os_version="test",
+            python_version="3",
+            numpy_version="0",
+            scipy_version="0",
+            soundfile_version="0",
         ),
         summary=UnitSummary(units_total=1, enhanced=1),
         units=[],
@@ -44,7 +60,9 @@ def test_gate_reports_failed_instead_of_raising(monkeypatch: Any, tmp_path: Path
         ' "transcript_sorani": "-", "verified_by_human": false, "split": "acceptance"}]}',
         encoding="utf-8",
     )
-    monkeypatch.setattr(acceptance_mod, "run_pipeline", lambda **kw: _report_violating_sample_count())
+    monkeypatch.setattr(
+        acceptance_mod, "run_pipeline", lambda **_kw: _report_violating_sample_count()
+    )
 
     result = acceptance_mod.evaluate_acceptance_gates(manifest, output_dir=tmp_path / "out")
 

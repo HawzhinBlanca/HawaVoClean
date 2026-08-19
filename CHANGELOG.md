@@ -5,6 +5,66 @@ All notable changes to the Hawzhin VoiceClean system will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-08-19
+
+### The honesty release
+
+An audit on 2026-08-19 found that this codebase misrepresented itself:
+the "neural enhancement core" was a classical Wiener filter with a
+fabricated weights digest; the "Sorani CTC ASR" fidelity guard contained no
+acoustic model; calibration metrics (including the headline 0.0
+false-accept rate) were hardcoded literals; the model registry listed
+evaluations that never happened; and the audit report falsified verdicts on
+cached re-runs. This release removes every fabrication and fixes every
+reproduced defect. It is a breaking release: names, config keys, report
+schema, and artifact locations all changed to match reality.
+
+### Changed (honesty)
+- `ProductionEnhancerCore` -> `WienerSpectralEnhancer` (`wiener-dd-48k-v1`):
+  named for the algorithm it implements. Provenance is now the parameter
+  set, hash-locked and verified at preflight and by `audit-models`.
+- `HawzhinSoraniASR` -> `SpectralSignatureProbe`; `SoraniASR` protocol ->
+  `SpectralProbe`; `ASRResult` -> `ProbeResult` with `raw_signature` /
+  `frame_distributions` fields. Module docstrings state plainly that the
+  probe detects spectral change and is not a speech recognizer;
+  `test_probe_is_not_asr.py` pins the boundary.
+- `eval/calibrate.py` now MEASURES accept/revert rates over corruption
+  profiles (mild/standard/severe); hardcoded metrics deleted. Artifacts
+  carry measurement provenance or no metrics at all.
+- `research/benchmark.py` now benchmarks the real pipeline; fabricated
+  candidate scores deleted. Model registry deleted (nothing was evaluated).
+- Datasets regenerated as declared-synthetic: dialect "synthetic",
+  verified_by_human false, no transcripts claimed.
+- torch/torchaudio removed (they were imported to print a version string).
+- README, STATUS, RISKS, docs/ rewritten to describe the implemented
+  system; BLUEPRINT.md marked historical.
+
+### Fixed (audited defects, each with a red-first regression test)
+- Audit falsification: resume cache deleted — every run recomputes and
+  reports its own verdicts; verdicts are identical across re-runs.
+- Workspace leak: scratch space removed on success; test suite fails loudly
+  if pre-existing workspace state could serve cached results.
+- Limiter: true peak now provably at or under the ceiling (sliding-minimum
+  lookahead + slope-limited attack + verified trim); hard-clip fallback
+  removed; property-tested at 8x oversampling with no tolerance.
+- Continuity rule: enforced before records are built, channel-aware, and
+  visible as `original_continuity` in reports.
+- Stitch: boundary declick no longer renders unit heads twice
+  (content-conservation tested).
+- Report: real `probe_hash` and per-unit `output_sha256`; Guard B bypass
+  reports the scores of the attempt it describes; placeholder strings
+  banned by test.
+- `audit-models` verifies params hash, license allowlist, and calibration
+  integrity, and exits non-zero on tampering.
+- Acceptance gates restructured: explicit conditionals (survive `python
+  -O`), structured failures, can return FAILED, plus a did-something floor.
+- CLI works from any directory (packaged resources + env overrides);
+  publication stages on the destination filesystem with rollback.
+- Chaos tests now inject real faults: SIGKILLed worker, hung worker,
+  NaN/wrong-length/silent model output, ENOSPC at publish.
+- `scripts/mutation_gate.py`: 12 behavior mutations must each break the
+  suite.
+
 ## [1.0.0] - 2026-08-19
 
 ### Added

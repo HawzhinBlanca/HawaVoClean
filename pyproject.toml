@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hawzhin-voiceclean"
-version = "1.0.0"
-description = "Production Kurdish Sorani dialogue audio enhancement and linguistic fidelity system"
+version = "2.0.0"
+description = "Offline dialogue audio cleanup: Wiener denoising, spectral-change guard, BS.1770 mastering"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary / All Rights Reserved" }
@@ -18,8 +18,6 @@ dependencies = [
     "soundfile>=0.12.1",
     "pyloudnorm>=0.1.1",
     "pydantic>=2.6.0",
-    "torch>=2.2.0",
-    "torchaudio>=2.2.0",
 ]
 
 [project.optional-dependencies]
@@ -79,7 +77,6 @@ module = [
     "soundfile.*",
     "pyloudnorm.*",
     "scipy.*",
-    "torchaudio.*",
     "hypothesis.*",
 ]
 ignore_missing_imports = true

@@ -15,13 +15,6 @@ from typing import Any
 
 import soundfile as sf
 
-# Dev-only script: it imports the test-fixture generator from the repo
-# checkout, so the repo root must be importable when run directly.
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from tests.fixtures.generate_fixtures import generate_speech_like_waveform
 from voiceclean.eval.corruption import (
     corrupt_consonant_splice,
     corrupt_hf_consonant_removal,
@@ -57,7 +50,9 @@ def _item(
     }
 
 
-def _write_manifest(directory: Path, manifest_id: str, split: str, items: list[dict[str, Any]]) -> None:
+def _write_manifest(
+    directory: Path, manifest_id: str, split: str, items: list[dict[str, Any]]
+) -> None:
     manifest = {
         "schema_version": 1,
         "manifest_id": manifest_id,
@@ -70,6 +65,13 @@ def _write_manifest(directory: Path, manifest_id: str, split: str, items: list[d
 
 
 def generate_all_datasets() -> None:
+    # Dev-only: the fixture generator lives in the repo checkout, not the
+    # installed package, so the repo root must be importable.
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from tests.fixtures.generate_fixtures import generate_speech_like_waveform
+
     base_data = Path("data")
     base_data.mkdir(parents=True, exist_ok=True)
 
@@ -109,8 +111,14 @@ def generate_all_datasets() -> None:
     corr_audio.mkdir(parents=True, exist_ok=True)
     clean_base = generate_speech_like_waveform(duration_s=6.0, sample_rate=SR, f0=150.0)
     corruptions = [
-        ("splice", corrupt_consonant_splice(clean_base, SR, start_time_s=1.0, cut_duration_ms=100.0)),
-        ("deletion", corrupt_syllable_deletion(clean_base, SR, start_time_s=3.0, deletion_ms=250.0)),
+        (
+            "splice",
+            corrupt_consonant_splice(clean_base, SR, start_time_s=1.0, cut_duration_ms=100.0),
+        ),
+        (
+            "deletion",
+            corrupt_syllable_deletion(clean_base, SR, start_time_s=3.0, deletion_ms=250.0),
+        ),
         ("repeat", corrupt_repeated_span(clean_base, SR, start_time_s=1.5, span_ms=300.0)),
         ("muffled", corrupt_hf_consonant_removal(clean_base, SR, cutoff_hz=1200.0)),
     ]

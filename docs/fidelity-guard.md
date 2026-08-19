@@ -1,26 +1,46 @@
-# Hawzhin Sorani Fidelity Guard
+# Spectral Fidelity Guard
 
-## Overview
+## What the guard is
 
-The Hawzhin Sorani Fidelity Guard serves as the non-negotiable safety perimeter protecting Kurdish Sorani dialogue against generative hallucination, word substitutions, deletions, phonetic drift, and acoustic artifacts.
+A two-pass safety perimeter that compares the *spectral signature* of
+processed audio against the original and reverts any unit whose signature
+diverges. Guard A validates the enhancer's candidate against the original;
+Guard B validates the locally-finished audio against the pre-finish
+accepted rendering.
 
-## Guard Check Pillars
+## What the guard is not
 
-1. **High-Confidence Token Anchors**:
-   - Compares token streams via timestamp-weighted Levenshtein distance.
-   - Any deletion or substitution of high-confidence tokens (`confidence >= 0.75`) causes immediate unit rejection.
-   - Insufficient anchors in speech produces `UNVERIFIED` (fail-closed revert).
+It is **not** a speech recognizer and does not verify linguistic content.
+The probe (`voiceclean.guard.spectral_probe`) has no acoustic model: it
+maps the shape of the 0–2.5 kHz spectrum to a symbol distribution and
+compares distributions. A change that preserves spectral shape — including
+a hypothetical word substitution with similar spectral content — passes it.
+Claims about protecting "against word substitutions and phonetic drift"
+appeared in earlier revisions of this document and were not true.
 
-2. **Frame-Level CTC Posterior Preservation**:
-   - Evaluates Jensen-Shannon (JS) divergence between frame-level acoustic posteriors across voiced frames.
-   - Rejects units where `mean_js_div > 0.25` or `peak_js_div > 0.60`.
+`tests/unit/test_probe_is_not_asr.py` pins both sides of this boundary:
+different content with the same spectral envelope looks the same to the
+probe; the same content with a shifted spectrum looks different.
 
-3. **Timing and Duration Integrity**:
-   - Asserts monotonic time mapping and envelopes correlation (`r >= 0.80`).
-   - Flags time-stretching or drift greater than 40ms.
+## Guard checks
 
-4. **Acoustic Signal Integrity Detectors**:
-   - **Consonant Band Retention**: Asserts >=60% energy retention in 2kHz - 8kHz band.
-   - **Spectral Hole Detector**: Identifies subband wipeouts.
-   - **Musical Noise Detector**: Identifies isolated spectral peaks.
-   - **Clipping Detector**: Strictly forbids newly introduced hard clipping.
+1. **Sustained-state token anchors** — collapsed spectral states compared
+   by edit distance; insufficient anchors yields `UNVERIFIED` (fail-closed).
+2. **Frame distribution divergence** — Jensen-Shannon divergence between
+   per-frame symbol distributions; rejects `mean_js_div > 0.25`.
+3. **Timing and envelope integrity** — envelope correlation and drift
+   bounds (75 ms production threshold).
+4. **Acoustic signal integrity** — consonant-band retention, spectral hole,
+   musical noise, and new-clipping detectors.
+
+## Verdicts
+
+`PASS` (candidate accepted), `REVERT` (original audio used), `UNVERIFIED`
+(cannot judge — original audio used), `ERROR` (guard fault — original audio
+used), `NO_SPEECH` (guard bypassed for non-speech units).
+
+## Calibration
+
+Thresholds ship as engineering defaults and say so in the artifact.
+`voiceclean calibrate` measures real accept/revert rates over a corpus and
+corruption profile, writing metrics with measurement provenance attached.

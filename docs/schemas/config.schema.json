@@ -29,10 +29,10 @@
     },
     "EnhancementConfig": {
       "additionalProperties": false,
-      "description": "Neural enhancer configuration.",
+      "description": "Enhancement core configuration (deterministic DSP core).",
       "properties": {
         "core_id": {
-          "default": "urgent-bsrnn-baseline",
+          "default": "wiener-dd-48k-v1",
           "title": "Core Id",
           "type": "string"
         },
@@ -80,7 +80,7 @@
         },
         "dc_subsonic_cutoff_hz": {
           "default": 20.0,
-          "maximum": 50.0,
+          "maximum": 100.0,
           "minimum": 10.0,
           "title": "Dc Subsonic Cutoff Hz",
           "type": "number"
@@ -135,20 +135,20 @@
     },
     "GuardConfig": {
       "additionalProperties": false,
-      "description": "Hawzhin Sorani Fidelity Guard parameters.",
+      "description": "Spectral fidelity guard parameters.\n\nThe guard compares spectral signatures; it does not verify linguistic\ncontent. See voiceclean.guard.spectral_probe.",
       "properties": {
         "guard_id": {
-          "default": "hawzhin-ctc",
+          "default": "spectral-guard-v1",
           "title": "Guard Id",
           "type": "string"
         },
-        "asr_model_id": {
-          "default": "hawzhin-sorani-asr-v1",
-          "title": "Asr Model Id",
+        "probe_id": {
+          "default": "spectral-signature-v1",
+          "title": "Probe Id",
           "type": "string"
         },
         "calibration_file": {
-          "default": "models/guard-calibration.json",
+          "default": "guard-calibration.json",
           "title": "Calibration File",
           "type": "string"
         },
@@ -330,11 +330,6 @@
         "include_review_timecodes": {
           "default": true,
           "title": "Include Review Timecodes",
-          "type": "boolean"
-        },
-        "privacy_mode": {
-          "default": true,
-          "title": "Privacy Mode",
           "type": "boolean"
         }
       },
