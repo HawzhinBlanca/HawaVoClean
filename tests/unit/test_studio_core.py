@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from voiceclean.enhancement.factory import CORE_REGISTRY, resolve_core
-from voiceclean.enhancement.studio import studio_params_hash, studio_weight_digests
-from voiceclean.hashing import hash_json_canonical
+from hawavoclean.enhancement.factory import CORE_REGISTRY, resolve_core
+from hawavoclean.enhancement.studio import studio_params_hash, studio_weight_digests
+from hawavoclean.hashing import hash_json_canonical
 
-MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "voiceclean" / "resources" / "models"
+MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "hawavoclean" / "resources" / "models"
 
 
 def test_registry_resolves_known_cores_and_rejects_unknown() -> None:
@@ -52,7 +52,7 @@ def test_studio_inference_preserves_length_and_finiteness() -> None:
     # Gate on torch: the df import itself needs the torchaudio compat shim,
     # which StudioVoiceCore installs before importing df.
     pytest.importorskip("torch")
-    from voiceclean.enhancement.studio import StudioVoiceCore
+    from hawavoclean.enhancement.studio import StudioVoiceCore
 
     core = StudioVoiceCore()
     sr = 48000

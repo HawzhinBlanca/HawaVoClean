@@ -474,6 +474,6 @@
     "environment",
     "summary"
   ],
-  "title": "VoiceCleanReport",
+  "title": "HawaVoCleanReport",
   "type": "object"
 }

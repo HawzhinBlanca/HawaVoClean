@@ -3,9 +3,9 @@
 import numpy as np
 import pytest
 
-from voiceclean.config import SegmentationConfig
-from voiceclean.segmentation.utterances import build_speech_units
-from voiceclean.segmentation.vad import detect_speech_energy
+from hawavoclean.config import SegmentationConfig
+from hawavoclean.segmentation.utterances import build_speech_units
+from hawavoclean.segmentation.vad import detect_speech_energy
 
 
 @pytest.mark.unit

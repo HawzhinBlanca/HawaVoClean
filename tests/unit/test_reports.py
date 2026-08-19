@@ -5,21 +5,21 @@ from pathlib import Path
 
 import pytest
 
-from voiceclean.report.schema import (
+from hawavoclean.report.schema import (
     CoreMetadata,
     EnvironmentMetadata,
     GuardMetadata,
+    HawaVoCleanReport,
     MediaStats,
     UnitSummary,
-    VoiceCleanReport,
 )
-from voiceclean.report.summary import generate_human_summary
-from voiceclean.report.writer import load_json_report, write_json_report
+from hawavoclean.report.summary import generate_human_summary
+from hawavoclean.report.writer import load_json_report, write_json_report
 
 
 @pytest.mark.unit
 def test_report_serialization_and_summary() -> None:
-    rep = VoiceCleanReport(
+    rep = HawaVoCleanReport(
         job_id="test_job_123",
         config_hash="a" * 64,
         input=MediaStats(
@@ -73,5 +73,5 @@ def test_report_serialization_and_summary() -> None:
         assert loaded.job_id == "test_job_123"
 
         summary_txt = generate_human_summary(rep)
-        assert "HAWZHIN VOICECLEAN - AUDIT SUMMARY" in summary_txt
+        assert "HAWAVOCLEAN - AUDIT SUMMARY" in summary_txt
         assert "Job ID:               test_job_123" in summary_txt

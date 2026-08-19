@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from voiceclean.guard.spectral_probe import FixedProbe
-from voiceclean.pipeline import run_pipeline
+from hawavoclean.guard.spectral_probe import FixedProbe
+from hawavoclean.pipeline import run_pipeline
 
 
 @pytest.mark.unit

@@ -7,16 +7,16 @@ from typing import Any
 
 import pytest
 
-import voiceclean.cli as cli
-from voiceclean.errors import ExitCode, VoiceCleanError
-from voiceclean.paths import models_dir
+import hawavoclean.cli as cli
+from hawavoclean.errors import ExitCode, HawaVoCleanError
+from hawavoclean.paths import models_dir
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"
 
 
 def _run_cli(monkeypatch: Any, *argv: str) -> int:
-    monkeypatch.setattr(sys, "argv", ["voiceclean", *argv])
+    monkeypatch.setattr(sys, "argv", ["hawavoclean", *argv])
     with pytest.raises(SystemExit) as exc:
         cli.main()
     return int(exc.value.code or 0)
@@ -24,13 +24,13 @@ def _run_cli(monkeypatch: Any, *argv: str) -> int:
 
 def test_doctor_fails_with_empty_model_dir(monkeypatch: Any, tmp_path: Path) -> None:
     (tmp_path / "empty").mkdir()
-    monkeypatch.setenv("VOICECLEAN_MODEL_DIR", str(tmp_path / "empty"))
+    monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(tmp_path / "empty"))
     assert _run_cli(monkeypatch, "doctor") == int(ExitCode.PREFLIGHT_FAILURE)
 
 
 def test_doctor_fails_with_empty_config_dir(monkeypatch: Any, tmp_path: Path) -> None:
     (tmp_path / "cfg").mkdir()
-    monkeypatch.setenv("VOICECLEAN_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("HAWAVOCLEAN_CONFIG_DIR", str(tmp_path / "cfg"))
     assert _run_cli(monkeypatch, "doctor") == int(ExitCode.PREFLIGHT_FAILURE)
 
 
@@ -41,7 +41,7 @@ def test_doctor_detects_calibration_tampering(monkeypatch: Any, tmp_path: Path) 
     calib.write_text(
         calib.read_text().replace('"max_posterior_js_div": 0.25', '"max_posterior_js_div": 0.9')
     )
-    monkeypatch.setenv("VOICECLEAN_MODEL_DIR", str(override))
+    monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(override))
     assert _run_cli(monkeypatch, "doctor") == int(ExitCode.PREFLIGHT_FAILURE)
 
 
@@ -52,7 +52,7 @@ def test_doctor_warns_without_ffmpeg(monkeypatch: Any) -> None:
 
 def test_process_preflight_error_exit_code(monkeypatch: Any, tmp_path: Path) -> None:
     (tmp_path / "empty").mkdir()
-    monkeypatch.setenv("VOICECLEAN_MODEL_DIR", str(tmp_path / "empty"))
+    monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(tmp_path / "empty"))
     rc = _run_cli(
         monkeypatch, "process", str(FIXTURE), "-o", str(tmp_path / "o.wav"), "--overwrite"
     )
@@ -68,9 +68,9 @@ def test_process_unhandled_error_exit_code(monkeypatch: Any, tmp_path: Path) -> 
     assert rc == int(ExitCode.PUBLICATION_FAILURE)
 
 
-def test_process_voiceclean_error_exit_code(monkeypatch: Any, tmp_path: Path) -> None:
+def test_process_hawavoclean_error_exit_code(monkeypatch: Any, tmp_path: Path) -> None:
     def raise_vc(**_kw: Any) -> Any:
-        raise VoiceCleanError("custom", exit_code=ExitCode.INVALID_USER_INPUT)
+        raise HawaVoCleanError("custom", exit_code=ExitCode.INVALID_USER_INPUT)
 
     monkeypatch.setattr(cli, "run_pipeline", raise_vc)
     rc = _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(tmp_path / "o.wav"))
@@ -83,11 +83,11 @@ def published(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     import os
 
     tmp = tmp_path_factory.mktemp("pub")
-    os.environ["VOICECLEAN_WORK_DIR"] = str(tmp / "w")
-    from voiceclean.pipeline import run_pipeline
+    os.environ["HAWAVOCLEAN_WORK_DIR"] = str(tmp / "w")
+    from hawavoclean.pipeline import run_pipeline
 
     run_pipeline(input_path=FIXTURE, output_path=tmp / "v.wav", overwrite=True)
-    return tmp / "v.wav", tmp / "v.voiceclean.json"
+    return tmp / "v.wav", tmp / "v.hawavoclean.json"
 
 
 def _tampered_report(report: Path, tmp_path: Path, field: str, value: object) -> Path:
@@ -138,7 +138,7 @@ def test_eval_command_prints_failures(monkeypatch: Any, tmp_path: Path) -> None:
             "results": [{"id": "x", "passed": False, "failures": ["sample count mismatch"]}],
         }
 
-    monkeypatch.setattr("voiceclean.eval.acceptance.evaluate_acceptance_gates", fake_eval)
+    monkeypatch.setattr("hawavoclean.eval.acceptance.evaluate_acceptance_gates", fake_eval)
     rc = _run_cli(
         monkeypatch,
         "eval",

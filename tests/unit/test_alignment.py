@@ -3,9 +3,9 @@
 import numpy as np
 import pytest
 
-from voiceclean.alignment.coherence import estimate_coherence
-from voiceclean.alignment.delay import estimate_gcc_phat_delay
-from voiceclean.alignment.drift import analyze_local_drift
+from hawavoclean.alignment.coherence import estimate_coherence
+from hawavoclean.alignment.delay import estimate_gcc_phat_delay
+from hawavoclean.alignment.drift import analyze_local_drift
 
 
 @pytest.mark.unit

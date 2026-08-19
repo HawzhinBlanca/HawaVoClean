@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from voiceclean.eval.blind_abx import (
+from hawavoclean.eval.blind_abx import (
     BlindListeningSession,
     ListenerVote,
     generate_blind_trial_manifest,

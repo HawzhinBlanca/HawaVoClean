@@ -1,12 +1,12 @@
-"""Integration tests running full VoiceClean pipeline on reference fixtures."""
+"""Integration tests running full HawaVoClean pipeline on reference fixtures."""
 
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from voiceclean.guard.spectral_probe import FixedProbe
-from voiceclean.pipeline import run_pipeline
+from hawavoclean.guard.spectral_probe import FixedProbe
+from hawavoclean.pipeline import run_pipeline
 
 
 @pytest.mark.integration
@@ -25,8 +25,8 @@ def test_e2e_mono_podcast_pipeline() -> None:
         )
 
         assert out_path.exists()
-        assert (tmp / "podcast_mastered.voiceclean.json").exists()
-        assert (tmp / "podcast_mastered.voiceclean.txt").exists()
+        assert (tmp / "podcast_mastered.hawavoclean.json").exists()
+        assert (tmp / "podcast_mastered.hawavoclean.txt").exists()
 
         assert report.output.samples == report.input.samples
         assert report.output.channels == report.input.channels

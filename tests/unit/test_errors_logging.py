@@ -2,14 +2,14 @@
 
 import pytest
 
-from voiceclean.errors import (
+from hawavoclean.errors import (
     AmbiguousStereoError,
     ConfigError,
     ExitCode,
     OutputValidationError,
     PreflightError,
 )
-from voiceclean.logging import get_logger, setup_logging
+from hawavoclean.logging import get_logger, setup_logging
 
 
 @pytest.mark.unit
@@ -23,6 +23,6 @@ def test_error_exit_codes() -> None:
 @pytest.mark.unit
 def test_logging_setup() -> None:
     logger = setup_logging()
-    assert logger.name == "voiceclean"
+    assert logger.name == "hawavoclean"
     log = get_logger("test")
-    assert log.name == "voiceclean.test"
+    assert log.name == "hawavoclean.test"

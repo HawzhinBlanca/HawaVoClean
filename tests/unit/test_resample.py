@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from voiceclean.audio.resample import resample_audio
+from hawavoclean.audio.resample import resample_audio
 
 
 @pytest.mark.unit

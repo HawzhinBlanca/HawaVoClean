@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from voiceclean.pipeline import run_pipeline
+from hawavoclean.pipeline import run_pipeline
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_noisy_hum.wav"
@@ -18,7 +18,7 @@ FIXTURE = REPO / "tests" / "fixtures" / "sample_noisy_hum.wav"
 
 @pytest.mark.integration
 def test_unit_verdicts_identical_across_reruns(tmp_path: Path) -> None:
-    work = REPO / ".voiceclean-work"
+    work = REPO / ".hawavoclean-work"
     shutil.rmtree(work, ignore_errors=True)
     try:
         reports = []

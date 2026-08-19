@@ -1,6 +1,6 @@
-"""Every voiceclean command the README documents must actually exist.
+"""Every hawavoclean command the README documents must actually exist.
 
-Parses fenced bash blocks out of README.md, extracts voiceclean
+Parses fenced bash blocks out of README.md, extracts hawavoclean
 subcommands, and asserts each is registered in the CLI — so command drift
 between docs and code is a test failure, not a support ticket.
 """
@@ -19,7 +19,7 @@ def _documented_subcommands() -> set[str]:
     subcommands: set[str] = set()
     for block in blocks:
         for line in block.splitlines():
-            m = re.match(r"\s*voiceclean\s+([a-z][a-z0-9-]*)", line)
+            m = re.match(r"\s*hawavoclean\s+([a-z][a-z0-9-]*)", line)
             if m:
                 subcommands.add(m.group(1))
     return subcommands
@@ -27,7 +27,7 @@ def _documented_subcommands() -> set[str]:
 
 def _registered_subcommands() -> set[str]:
     proc = subprocess.run(
-        [sys.executable, "-m", "voiceclean.cli", "--help"],
+        [sys.executable, "-m", "hawavoclean.cli", "--help"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -39,7 +39,7 @@ def _registered_subcommands() -> set[str]:
 
 def test_every_documented_command_is_registered() -> None:
     documented = _documented_subcommands()
-    assert documented, "README documents no voiceclean commands — parsing broke?"
+    assert documented, "README documents no hawavoclean commands — parsing broke?"
     registered = _registered_subcommands()
     missing = documented - registered
     assert not missing, (

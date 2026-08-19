@@ -1,4 +1,4 @@
-# Pinned Reference Container for Hawzhin VoiceClean v1
+# Pinned Reference Container for HawaVoClean v1
 FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04@sha256:39a5a7dc50b7ec1287c7118335b71db4bc699cf3a60e0a5c2d3a3d24ea25d7ef
 
 # Install system dependencies & ffmpeg
@@ -30,5 +30,5 @@ ENV PATH="/app/.venv/bin:$PATH" \
     OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1
 
-ENTRYPOINT ["voiceclean"]
+ENTRYPOINT ["hawavoclean"]
 CMD ["doctor"]

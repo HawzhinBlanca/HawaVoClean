@@ -1,4 +1,4 @@
-"""Unit tests for VoiceClean command line interface."""
+"""Unit tests for HawaVoClean command line interface."""
 
 import argparse
 import tempfile
@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from voiceclean.cli import (
+from hawavoclean.cli import (
     cmd_audit_models,
     cmd_benchmark,
     cmd_blind_abx,
@@ -18,9 +18,9 @@ from voiceclean.cli import (
     cmd_process,
     cmd_verify,
 )
-from voiceclean.errors import ExitCode
-from voiceclean.guard.spectral_probe import FixedProbe
-from voiceclean.pipeline import run_pipeline
+from hawavoclean.errors import ExitCode
+from hawavoclean.guard.spectral_probe import FixedProbe
+from hawavoclean.pipeline import run_pipeline
 
 
 @pytest.mark.unit
@@ -59,7 +59,7 @@ def test_cli_verify_success() -> None:
 
         args = argparse.Namespace(
             output=tmp / "out.wav",
-            report=tmp / "out.voiceclean.json",
+            report=tmp / "out.hawavoclean.json",
         )
         ret = cmd_verify(args)
         assert ret == int(ExitCode.SUCCESS)

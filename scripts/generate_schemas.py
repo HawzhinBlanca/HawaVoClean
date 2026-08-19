@@ -8,8 +8,8 @@ changing config.py or report/schema.py, and commit the result.
 import json
 from pathlib import Path
 
-from voiceclean.config import VoiceCleanConfig
-from voiceclean.report.schema import CorpusManifest, VoiceCleanReport
+from hawavoclean.config import HawaVoCleanConfig
+from hawavoclean.report.schema import CorpusManifest, HawaVoCleanReport
 
 OUT = Path(__file__).resolve().parents[1] / "docs" / "schemas"
 
@@ -17,8 +17,8 @@ OUT = Path(__file__).resolve().parents[1] / "docs" / "schemas"
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     for name, model in (
-        ("config.schema.json", VoiceCleanConfig),
-        ("report.schema.json", VoiceCleanReport),
+        ("config.schema.json", HawaVoCleanConfig),
+        ("report.schema.json", HawaVoCleanReport),
         ("corpus.schema.json", CorpusManifest),
     ):
         schema = model.model_json_schema()

@@ -3,12 +3,12 @@
 import numpy as np
 import pytest
 
-from voiceclean.alignment.coherence import estimate_coherence
-from voiceclean.alignment.drift import analyze_local_drift
-from voiceclean.assembly.stitch import assemble_channel_timeline
-from voiceclean.audio.resample import resample_audio
-from voiceclean.finishing.limiter import apply_lookahead_limiter
-from voiceclean.segmentation.types import SpeechUnit
+from hawavoclean.alignment.coherence import estimate_coherence
+from hawavoclean.alignment.drift import analyze_local_drift
+from hawavoclean.assembly.stitch import assemble_channel_timeline
+from hawavoclean.audio.resample import resample_audio
+from hawavoclean.finishing.limiter import apply_lookahead_limiter
+from hawavoclean.segmentation.types import SpeechUnit
 
 SR = 48000
 

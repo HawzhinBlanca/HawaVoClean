@@ -6,10 +6,10 @@ non-deterministic failure modes, and dependency sprawl.
 
 ## Decision
 Freeze exactly one enhancement core, locked in
-`src/voiceclean/resources/models/production-core.lock.toml`. The shipped
+`src/hawavoclean/resources/models/production-core.lock.toml`. The shipped
 core is deterministic DSP (a decision-directed Wiener filter); its
 provenance is its parameter set, hash-verified against the implementation
-at preflight and by `voiceclean audit-models`.
+at preflight and by `hawavoclean audit-models`.
 
 ## Consequences
 - Single runtime path with verifiable provenance.

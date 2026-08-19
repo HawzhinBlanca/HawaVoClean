@@ -7,8 +7,8 @@ as a repeated value outside the declared fade region.
 
 import numpy as np
 
-from voiceclean.assembly.stitch import assemble_channel_timeline
-from voiceclean.segmentation.types import SpeechUnit
+from hawavoclean.assembly.stitch import assemble_channel_timeline
+from hawavoclean.segmentation.types import SpeechUnit
 
 SR = 48000
 

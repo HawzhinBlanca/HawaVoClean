@@ -10,8 +10,8 @@ reason it must never be described as a speech recognizer.
 import numpy as np
 import scipy.signal
 
-from voiceclean.guard.posterior import compare_ctc_posteriors
-from voiceclean.guard.spectral_probe import SpectralSignatureProbe
+from hawavoclean.guard.posterior import compare_ctc_posteriors
+from hawavoclean.guard.spectral_probe import SpectralSignatureProbe
 
 SR = 16000
 

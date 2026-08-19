@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from voiceclean.guard.posterior import compare_ctc_posteriors, compute_js_divergence
+from hawavoclean.guard.posterior import compare_ctc_posteriors, compute_js_divergence
 
 
 @pytest.mark.unit

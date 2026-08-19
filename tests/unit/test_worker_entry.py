@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from voiceclean.enhancement.production import NoOpEnhancer
-from voiceclean.enhancement.worker import IsolatedEnhancementWorker, _worker_process_entry
+from hawavoclean.enhancement.production import NoOpEnhancer
+from hawavoclean.enhancement.worker import IsolatedEnhancementWorker, _worker_process_entry
 
 
 class _ExplodingInit:

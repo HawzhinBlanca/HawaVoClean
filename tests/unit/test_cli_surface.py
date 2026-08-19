@@ -6,15 +6,15 @@ from typing import Any
 
 import pytest
 
-import voiceclean.cli as cli
-from voiceclean.errors import ExitCode
+import hawavoclean.cli as cli
+from hawavoclean.errors import ExitCode
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"
 
 
 def _run_cli(monkeypatch: Any, *argv: str) -> int:
-    monkeypatch.setattr(sys, "argv", ["voiceclean", *argv])
+    monkeypatch.setattr(sys, "argv", ["hawavoclean", *argv])
     with pytest.raises(SystemExit) as exc:
         cli.main()
     return int(exc.value.code or 0)
@@ -57,7 +57,7 @@ def test_verify_checksum_mismatch(monkeypatch: Any, tmp_path: Path) -> None:
     out = tmp_path / "v.wav"
     rc = _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(out), "--overwrite")
     assert rc == 0
-    report = tmp_path / "v.voiceclean.json"
+    report = tmp_path / "v.hawavoclean.json"
     # Corrupt the audio after publication: verify must fail on checksum.
     with open(out, "r+b") as f:
         f.seek(1000)
@@ -69,7 +69,7 @@ def test_verify_checksum_mismatch(monkeypatch: Any, tmp_path: Path) -> None:
 def test_verify_happy_path(monkeypatch: Any, tmp_path: Path) -> None:
     out = tmp_path / "h.wav"
     assert _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(out), "--overwrite") == 0
-    rc = _run_cli(monkeypatch, "verify", str(out), "-r", str(tmp_path / "h.voiceclean.json"))
+    rc = _run_cli(monkeypatch, "verify", str(out), "-r", str(tmp_path / "h.hawavoclean.json"))
     assert rc == 0
 
 
@@ -79,14 +79,14 @@ def test_audit_models_clean_and_tampered(monkeypatch: Any, tmp_path: Path) -> No
     # Tampered params -> non-zero. Copy resources into an override dir.
     import shutil
 
-    from voiceclean.paths import models_dir
+    from hawavoclean.paths import models_dir
 
     real_models = models_dir()  # capture BEFORE the env override
     override = tmp_path / "models"
     shutil.copytree(real_models, override)
     lock = override / "production-core.lock.toml"
     lock.write_text(lock.read_text().replace("dd_alpha = 0.95", "dd_alpha = 0.5"))
-    monkeypatch.setenv("VOICECLEAN_MODEL_DIR", str(override))
+    monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(override))
     assert _run_cli(monkeypatch, "audit-models") == int(ExitCode.PREFLIGHT_FAILURE)
 
     # Disallowed license -> non-zero

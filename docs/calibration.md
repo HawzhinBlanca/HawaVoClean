@@ -1,16 +1,16 @@
 # Guard Calibration
 
 The shipped thresholds in
-`src/voiceclean/resources/models/guard-calibration.json` are engineering
+`src/hawavoclean/resources/models/guard-calibration.json` are engineering
 defaults — chosen by inspection, not fitted. The artifact says so in its
 `provenance` field, and its `calibration_id` is the canonical hash of the
-thresholds themselves (verified by `voiceclean doctor` and the provenance
+thresholds themselves (verified by `hawavoclean doctor` and the provenance
 test suite).
 
 To measure real guard behavior over a corpus:
 
 ```bash
-voiceclean calibrate \
+hawavoclean calibrate \
   --manifest data/calibration/manifest.json \
   --output /tmp/guard-calibration.measured.json \
   --corruption-profile standard

@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from voiceclean.eval.calibrate import run_calibration
+from hawavoclean.eval.calibrate import run_calibration
 
 SR = 48000
 

@@ -1,9 +1,18 @@
 # Changelog
 
-All notable changes to the Hawzhin VoiceClean system will be documented in this file.
+All notable changes to the HawaVoClean system will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [3.0.0] - 2026-08-19
+
+### Renamed — HawaVoClean (formerly Hawzhin VoiceClean)
+- Project, package, and CLI renamed: `voiceclean` -> `hawavoclean`
+  (breaking: imports, the console command, `HAWAVOCLEAN_*` environment
+  variables, and new report suffixes `.hawavoclean.json` / `.txt`).
+  Existing reports with the old suffix remain readable via explicit paths.
+- No behavior changes; full verification battery re-run after the rename.
 
 ## [2.1.0] - 2026-08-19
 

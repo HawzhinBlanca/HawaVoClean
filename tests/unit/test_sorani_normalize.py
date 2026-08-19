@@ -2,7 +2,7 @@
 
 import pytest
 
-from voiceclean.guard.sorani_normalize import normalize_sorani_text
+from hawavoclean.guard.sorani_normalize import normalize_sorani_text
 
 
 @pytest.mark.unit

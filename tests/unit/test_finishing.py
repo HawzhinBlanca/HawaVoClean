@@ -3,16 +3,16 @@
 import numpy as np
 import pytest
 
-from voiceclean.config import FinishingConfig, GuardConfig
-from voiceclean.finishing.deess import apply_split_band_deesser
-from voiceclean.finishing.repair import (
+from hawavoclean.config import FinishingConfig, GuardConfig
+from hawavoclean.finishing.deess import apply_split_band_deesser
+from hawavoclean.finishing.repair import (
     remove_dc_subsonic,
     remove_electrical_hum,
     repair_transient_clicks,
 )
-from voiceclean.finishing.safe_finish import safe_finish_speech_unit
-from voiceclean.guard.spectral_probe import FixedProbe
-from voiceclean.guard.verdict import GuardVerdict
+from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
+from hawavoclean.guard.spectral_probe import FixedProbe
+from hawavoclean.guard.verdict import GuardVerdict
 
 
 @pytest.mark.unit

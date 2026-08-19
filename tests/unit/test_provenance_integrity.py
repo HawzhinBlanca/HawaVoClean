@@ -7,7 +7,7 @@ import string
 import tomllib
 from pathlib import Path
 
-MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "voiceclean" / "resources" / "models"
+MODELS_DIR = Path(__file__).resolve().parents[2] / "src" / "hawavoclean" / "resources" / "models"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -87,7 +87,7 @@ def test_no_unverifiable_commit_claims() -> None:
 
 def test_calibration_artifact_is_internally_consistent() -> None:
     """calibration_id must recompute from the thresholds it claims to lock."""
-    from voiceclean.hashing import hash_json_canonical
+    from hawavoclean.hashing import hash_json_canonical
 
     calib_path = MODELS_DIR / "guard-calibration.json"
     data = json.loads(calib_path.read_text(encoding="utf-8"))

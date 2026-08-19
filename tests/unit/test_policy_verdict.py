@@ -3,12 +3,12 @@
 import numpy as np
 import pytest
 
-from voiceclean.config import GuardConfig, PolicyConfig
-from voiceclean.guard.spectral_probe import FixedProbe
-from voiceclean.guard.verdict import GuardVerdict
-from voiceclean.policy.continuity import enforce_source_continuity
-from voiceclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
-from voiceclean.segmentation.types import SpeechUnit
+from hawavoclean.config import GuardConfig, PolicyConfig
+from hawavoclean.guard.spectral_probe import FixedProbe
+from hawavoclean.guard.verdict import GuardVerdict
+from hawavoclean.policy.continuity import enforce_source_continuity
+from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
+from hawavoclean.segmentation.types import SpeechUnit
 
 
 @pytest.mark.unit

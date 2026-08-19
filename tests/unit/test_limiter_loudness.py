@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from voiceclean.finishing.limiter import apply_lookahead_limiter
-from voiceclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
+from hawavoclean.finishing.limiter import apply_lookahead_limiter
+from hawavoclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
 
 
 @pytest.mark.unit

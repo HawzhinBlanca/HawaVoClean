@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from voiceclean.enhancement.production import WIENER_PARAMS, WienerSpectralEnhancer
+from hawavoclean.enhancement.production import WIENER_PARAMS, WienerSpectralEnhancer
 
 SR = 48000
 

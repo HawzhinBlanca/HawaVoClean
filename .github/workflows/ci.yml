@@ -34,4 +34,4 @@ jobs:
         run: uv run mypy --strict src tests scripts data
 
       - name: Run Test Suite with Coverage
-        run: uv run pytest --cov=voiceclean --cov-branch --cov-report=term-missing --cov-fail-under=90
+        run: uv run pytest --cov=hawavoclean --cov-branch --cov-report=term-missing --cov-fail-under=90

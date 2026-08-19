@@ -11,7 +11,7 @@ accepted rendering.
 ## What the guard is not
 
 It is **not** a speech recognizer and does not verify linguistic content.
-The probe (`voiceclean.guard.spectral_probe`) has no acoustic model: it
+The probe (`hawavoclean.guard.spectral_probe`) has no acoustic model: it
 maps the shape of the 0–2.5 kHz spectrum to a symbol distribution and
 compares distributions. A change that preserves spectral shape — including
 a hypothetical word substitution with similar spectral content — passes it.
@@ -56,5 +56,5 @@ used), `NO_SPEECH` (guard bypassed for non-speech units).
 ## Calibration
 
 Thresholds ship as engineering defaults and say so in the artifact.
-`voiceclean calibrate` measures real accept/revert rates over a corpus and
+`hawavoclean calibrate` measures real accept/revert rates over a corpus and
 corruption profile, writing metrics with measurement provenance attached.

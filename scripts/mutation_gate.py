@@ -18,13 +18,13 @@ REPO = Path(__file__).resolve().parents[1]
 MUTATIONS: list[tuple[str, str, str, str]] = [
     (
         "M1: limiter ceiling raised 0.5 dB",
-        "src/voiceclean/finishing/limiter.py",
+        "src/hawavoclean/finishing/limiter.py",
         "ceiling_linear = float(10.0 ** (ceiling_dbtp / 20.0))",
         "ceiling_linear = float(10.0 ** ((ceiling_dbtp + 0.5) / 20.0))",
     ),
     (
         "M2: lookahead anticipation deleted (shift semantics)",
-        "src/voiceclean/finishing/limiter.py",
+        "src/hawavoclean/finishing/limiter.py",
         """    if lookahead_samples > 0:
         size = lookahead_samples + 1
         windowed_min = scipy.ndimage.minimum_filter1d(
@@ -38,13 +38,13 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     ),
     (
         "M3: guard verdict always PASS",
-        "src/voiceclean/guard/verdict.py",
+        "src/hawavoclean/guard/verdict.py",
         "verdict = GuardVerdict.PASS if len(reasons) == 0 else GuardVerdict.REVERT",
         "verdict = GuardVerdict.PASS",
     ),
     (
         "M4: policy returns enhanced audio on guard REVERT",
-        "src/voiceclean/policy/decision.py",
+        "src/hawavoclean/policy/decision.py",
         """    return (
         UnitPolicyDecision(
             selected_waveform=orig_core_waveform.copy(),
@@ -70,7 +70,7 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     ),
     (
         "M5: unit reported enhanced when the enhancer failed",
-        "src/voiceclean/policy/decision.py",
+        "src/hawavoclean/policy/decision.py",
         """                selected_waveform=orig_core_waveform.copy(),
                 is_enhanced=False,
                 chosen_strength=0.0,
@@ -82,13 +82,13 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     ),
     (
         "M6: stitch writes every unit one sample late",
-        "src/voiceclean/assembly/stitch.py",
+        "src/hawavoclean/assembly/stitch.py",
         "        timeline[start:end] = wave",
         "        timeline[start + 1 : min(end + 1, total_samples)] = wave[: min(end + 1, total_samples) - (start + 1)]",
     ),
     (
         "M7: assembly sample-count invariant disabled",
-        "src/voiceclean/assembly/validate.py",
+        "src/hawavoclean/assembly/validate.py",
         """    if samples != expected_samples:
         raise OutputValidationError(
             f"Assembled output samples {samples} != expected input samples {expected_samples}"
@@ -100,13 +100,13 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     ),
     (
         "M8: ambiguous stereo silently classified dual-mono",
-        "src/voiceclean/audio/channels.py",
+        "src/hawavoclean/audio/channels.py",
         "",  # filled dynamically below
         "",
     ),
     (
         "M9: report and summary never staged (audio published alone)",
-        "src/voiceclean/job.py",
+        "src/hawavoclean/job.py",
         """            shutil.copyfile(temp_audio_path, staged_audio)
             for staged, content in ((staged_json, json_report_str), (staged_txt, txt_summary_str)):
                 with open(staged, "w", encoding="utf-8") as f:
@@ -131,19 +131,19 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
     ),
     (
         "M10: Wiener gain floor removed",
-        "src/voiceclean/enhancement/production.py",
+        "src/hawavoclean/enhancement/production.py",
         '"gain_floor": 0.05,',
         '"gain_floor": 0.0,',
     ),
     (
         "M11: encoder drops the final sample",
-        "src/voiceclean/audio/encode.py",
+        "src/hawavoclean/audio/encode.py",
         "",  # filled dynamically below
         "",
     ),
     (
         "M12: mono loudness target off by 6 dB",
-        "src/voiceclean/resources/configs/production.toml",
+        "src/hawavoclean/resources/configs/production.toml",
         "target_lufs_mono = -19.0",
         "target_lufs_mono = -13.0",
     ),
@@ -151,18 +151,18 @@ MUTATIONS: list[tuple[str, str, str, str]] = [
 
 
 def fill_dynamic_mutations() -> None:
-    channels = (REPO / "src/voiceclean/audio/channels.py").read_text()
+    channels = (REPO / "src/hawavoclean/audio/channels.py").read_text()
     # Find the ambiguous branch and neutralize it
     if "raise AmbiguousStereoError(" in channels:
         MUTATIONS[7] = (
             MUTATIONS[7][0],
-            "src/voiceclean/audio/channels.py",
+            "src/hawavoclean/audio/channels.py",
             "raise AmbiguousStereoError(",
             "return ChannelMode.DUAL_MONO_SAME\n        raise AmbiguousStereoError(",
         )
     MUTATIONS[10] = (
         MUTATIONS[10][0],
-        "src/voiceclean/audio/encode.py",
+        "src/hawavoclean/audio/encode.py",
         "        sf.write(\n            str(dest_path),\n            interleaved,",
         "        sf.write(\n            str(dest_path),\n            interleaved[:-1],",
     )

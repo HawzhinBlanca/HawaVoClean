@@ -9,16 +9,16 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from voiceclean import paths
-from voiceclean.audio.encode import encode_audio
-from voiceclean.audio.resample import resample_audio
-from voiceclean.audio.types import AudioBuffer, ChannelMode
-from voiceclean.config import GuardConfig, load_config
-from voiceclean.errors import CalibrationError, ConfigError
-from voiceclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
-from voiceclean.finishing.safe_finish import safe_finish_speech_unit
-from voiceclean.guard.calibration import load_calibration_artifact
-from voiceclean.guard.spectral_probe import FixedProbe
+from hawavoclean import paths
+from hawavoclean.audio.encode import encode_audio
+from hawavoclean.audio.resample import resample_audio
+from hawavoclean.audio.types import AudioBuffer, ChannelMode
+from hawavoclean.config import GuardConfig, load_config
+from hawavoclean.errors import CalibrationError, ConfigError
+from hawavoclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
+from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
+from hawavoclean.guard.calibration import load_calibration_artifact
+from hawavoclean.guard.spectral_probe import FixedProbe
 
 SR = 48000
 
@@ -27,9 +27,9 @@ SR = 48000
 
 
 def test_paths_env_overrides(monkeypatch: Any, tmp_path: Path) -> None:
-    monkeypatch.setenv("VOICECLEAN_CONFIG_DIR", str(tmp_path / "c"))
-    monkeypatch.setenv("VOICECLEAN_MODEL_DIR", str(tmp_path / "m"))
-    monkeypatch.setenv("VOICECLEAN_WORK_DIR", str(tmp_path / "w"))
+    monkeypatch.setenv("HAWAVOCLEAN_CONFIG_DIR", str(tmp_path / "c"))
+    monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(tmp_path / "m"))
+    monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path / "w"))
     assert paths.config_dir() == (tmp_path / "c").resolve()
     assert paths.models_dir() == (tmp_path / "m").resolve()
     assert paths.work_root() == (tmp_path / "w").resolve()
@@ -40,9 +40,9 @@ def test_paths_env_overrides(monkeypatch: Any, tmp_path: Path) -> None:
 
 
 def test_paths_defaults_inside_package(monkeypatch: Any) -> None:
-    monkeypatch.delenv("VOICECLEAN_CONFIG_DIR", raising=False)
-    monkeypatch.delenv("VOICECLEAN_MODEL_DIR", raising=False)
-    monkeypatch.delenv("VOICECLEAN_WORK_DIR", raising=False)
+    monkeypatch.delenv("HAWAVOCLEAN_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("HAWAVOCLEAN_MODEL_DIR", raising=False)
+    monkeypatch.delenv("HAWAVOCLEAN_WORK_DIR", raising=False)
     assert paths.config_dir().exists()
     assert paths.models_dir().exists()
     assert paths.work_root().name == "work"
@@ -158,7 +158,7 @@ def _tone(seconds: float = 2.0) -> np.ndarray[Any, np.dtype[np.float32]]:
 
 
 def test_safe_finish_disabled_bypasses() -> None:
-    from voiceclean.config import FinishingConfig
+    from hawavoclean.config import FinishingConfig
 
     res, _ = safe_finish_speech_unit(
         pre_finish_waveform=_tone(),
@@ -173,7 +173,7 @@ def test_safe_finish_disabled_bypasses() -> None:
 
 
 def test_safe_finish_non_speech_bypasses() -> None:
-    from voiceclean.config import FinishingConfig
+    from hawavoclean.config import FinishingConfig
 
     res, _ = safe_finish_speech_unit(
         pre_finish_waveform=_tone(),

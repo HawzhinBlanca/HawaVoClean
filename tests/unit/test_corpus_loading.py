@@ -7,9 +7,9 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from voiceclean.errors import InvalidUserInputError
-from voiceclean.eval.corpus import load_corpus_manifest, verify_corpus_audio_files
-from voiceclean.hashing import hash_file
+from hawavoclean.errors import InvalidUserInputError
+from hawavoclean.eval.corpus import load_corpus_manifest, verify_corpus_audio_files
+from hawavoclean.hashing import hash_file
 
 
 def _item_dict(item_id: str, path: str, sha: str = "") -> dict[str, object]:

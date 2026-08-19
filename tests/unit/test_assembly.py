@@ -3,11 +3,11 @@
 import numpy as np
 import pytest
 
-from voiceclean.assembly.stitch import assemble_channel_timeline
-from voiceclean.assembly.validate import validate_assembled_timeline
-from voiceclean.audio.types import AudioBuffer, ChannelMode
-from voiceclean.errors import OutputValidationError
-from voiceclean.segmentation.types import SpeechUnit
+from hawavoclean.assembly.stitch import assemble_channel_timeline
+from hawavoclean.assembly.validate import validate_assembled_timeline
+from hawavoclean.audio.types import AudioBuffer, ChannelMode
+from hawavoclean.errors import OutputValidationError
+from hawavoclean.segmentation.types import SpeechUnit
 
 
 @pytest.mark.unit

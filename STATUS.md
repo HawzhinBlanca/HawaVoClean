@@ -25,7 +25,7 @@ speech recognition — see README "What it is not".
 | Re-run determinism (same file twice) | per-unit verdicts identical |
 | `verify` over all 18 produced outputs | 18/18 pass |
 | `audit-models` tamper checks | params tamper → exit 2; bad license → exit 2; clean → exit 0 |
-| Acceptance gates (`voiceclean eval`) | PASSED 4/4 items; capable of FAILED, enforced under `python -O` |
+| Acceptance gates (`hawavoclean eval`) | PASSED 4/4 items; capable of FAILED, enforced under `python -O` |
 | True peak vs −1.0 dBTP ceiling | all outputs ≤ −5.2 dBTP; property-tested at 8× with zero tolerance |
 | Loudness targets | mono −19.0 LUFS, stereo −16.0 LUFS, exact on all samples |
 | Cross-filesystem publish (RAM disk) | process + verify exit 0; small-disk case refused at preflight |

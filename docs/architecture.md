@@ -1,4 +1,4 @@
-# Hawzhin VoiceClean v1 - System Architecture
+# HawaVoClean v1 - System Architecture
 
 ## Architectural Flow
 

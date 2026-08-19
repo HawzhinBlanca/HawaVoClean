@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from voiceclean.guard.signal import check_signal_integrity
+from hawavoclean.guard.signal import check_signal_integrity
 
 
 @pytest.mark.unit

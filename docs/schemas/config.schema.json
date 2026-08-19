@@ -135,7 +135,7 @@
     },
     "GuardConfig": {
       "additionalProperties": false,
-      "description": "Spectral fidelity guard parameters.\n\nThe guard compares spectral signatures; it does not verify linguistic\ncontent. See voiceclean.guard.spectral_probe.",
+      "description": "Spectral fidelity guard parameters.\n\nThe guard compares spectral signatures; it does not verify linguistic\ncontent. See hawavoclean.guard.spectral_probe.",
       "properties": {
         "guard_id": {
           "default": "spectral-guard-v1",
@@ -478,6 +478,6 @@
       "$ref": "#/$defs/ReportingConfig"
     }
   },
-  "title": "VoiceCleanConfig",
+  "title": "HawaVoCleanConfig",
   "type": "object"
 }

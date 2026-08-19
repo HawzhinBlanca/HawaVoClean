@@ -6,8 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from voiceclean.hashing import compute_cache_key, hash_numpy
-from voiceclean.journal import JobJournal, JournalEvent
+from hawavoclean.hashing import compute_cache_key, hash_numpy
+from hawavoclean.journal import JobJournal, JournalEvent
 
 
 @pytest.mark.unit

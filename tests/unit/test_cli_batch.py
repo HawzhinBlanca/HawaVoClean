@@ -6,16 +6,16 @@ from typing import Any
 
 import pytest
 
-import voiceclean.cli as cli
-from voiceclean.cli import _clean_stem
-from voiceclean.errors import ExitCode
+import hawavoclean.cli as cli
+from hawavoclean.cli import _clean_stem
+from hawavoclean.errors import ExitCode
 
 REPO = Path(__file__).resolve().parents[2]
 FIX = REPO / "tests" / "fixtures"
 
 
 def _run_cli(monkeypatch: Any, *argv: str) -> int:
-    monkeypatch.setattr(sys, "argv", ["voiceclean", *argv])
+    monkeypatch.setattr(sys, "argv", ["hawavoclean", *argv])
     with pytest.raises(SystemExit) as exc:
         cli.main()
     return int(exc.value.code or 0)
@@ -41,7 +41,7 @@ def test_batch_processes_all_and_exits_zero(monkeypatch: Any, tmp_path: Path) ->
     assert rc == 0
     assert (tmp_path / "sample_sorani_podcast_clean.wav").exists()
     assert (tmp_path / "sample_noisy_hum_clean.wav").exists()
-    assert (tmp_path / "sample_noisy_hum_clean.voiceclean.json").exists()
+    assert (tmp_path / "sample_noisy_hum_clean.hawavoclean.json").exists()
 
 
 def test_batch_isolates_failures_and_exits_nonzero(

@@ -3,9 +3,9 @@
 import numpy as np
 import pytest
 
-from voiceclean.audio.channels import classify_channels, handle_channel_layout
-from voiceclean.audio.types import AudioBuffer, ChannelMode
-from voiceclean.errors import AmbiguousStereoError
+from hawavoclean.audio.channels import classify_channels, handle_channel_layout
+from hawavoclean.audio.types import AudioBuffer, ChannelMode
+from hawavoclean.errors import AmbiguousStereoError
 
 SR = 48000
 

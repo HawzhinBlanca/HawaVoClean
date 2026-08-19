@@ -4,12 +4,12 @@ from typing import Any
 
 import numpy as np
 
-from voiceclean.config import SegmentationConfig
-from voiceclean.segmentation.utterances import (
+from hawavoclean.config import SegmentationConfig
+from hawavoclean.segmentation.utterances import (
     build_speech_units,
     find_lowest_energy_zero_crossing,
 )
-from voiceclean.segmentation.vad import detect_speech_energy
+from hawavoclean.segmentation.vad import detect_speech_energy
 
 SR = 48000
 

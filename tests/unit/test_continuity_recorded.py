@@ -2,10 +2,10 @@
 
 import numpy as np
 
-from voiceclean.guard.verdict import GuardVerdict
-from voiceclean.policy.continuity import enforce_source_continuity
-from voiceclean.policy.decision import UnitPolicyDecision
-from voiceclean.segmentation.types import SpeechUnit
+from hawavoclean.guard.verdict import GuardVerdict
+from hawavoclean.policy.continuity import enforce_source_continuity
+from hawavoclean.policy.decision import UnitPolicyDecision
+from hawavoclean.segmentation.types import SpeechUnit
 
 SR = 48000
 

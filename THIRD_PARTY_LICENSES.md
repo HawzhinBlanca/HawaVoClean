@@ -8,7 +8,7 @@ Verbatim license texts are reproduced below as their terms require.
 ## DeepFilterNet3 (model weights, vendored)
 
 - Upstream: https://github.com/Rikorose/DeepFilterNet
-- Vendored files: `src/voiceclean/resources/models/deepfilternet3/`
+- Vendored files: `src/hawavoclean/resources/models/deepfilternet3/`
   (config.ini, checkpoints/model_120.ckpt.best), hash-locked in
   `studio-core.lock.toml`.
 - License: MIT (upstream offers MIT OR Apache-2.0; this distribution takes

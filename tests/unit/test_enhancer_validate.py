@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from voiceclean.enhancement.production import NoOpEnhancer
-from voiceclean.enhancement.validate import validate_enhancer_output
+from hawavoclean.enhancement.production import NoOpEnhancer
+from hawavoclean.enhancement.validate import validate_enhancer_output
 
 
 @pytest.mark.unit

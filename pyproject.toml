@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "hawzhin-voiceclean"
-version = "2.1.0"
+name = "hawavoclean"
+version = "3.0.0"
 description = "Offline dialogue audio cleanup: Wiener denoising, spectral-change guard, BS.1770 mastering"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary / All Rights Reserved" }
 authors = [
-    { name = "Hawzhin VoiceClean Team", email = "engineering@hawzhin.ai" }
+    { name = "Hawzhin", email = "hawzhin88@gmail.com" }
 ]
 dependencies = [
     "numpy>=1.26.0",
@@ -42,10 +42,10 @@ dev = [
 override-dependencies = ["numpy>=1.26.0"]
 
 [project.scripts]
-voiceclean = "voiceclean.cli:main"
+hawavoclean = "hawavoclean.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/voiceclean"]
+packages = ["src/hawavoclean"]
 
 [tool.ruff]
 line-length = 100

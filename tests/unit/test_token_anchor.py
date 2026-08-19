@@ -2,8 +2,8 @@
 
 import pytest
 
-from voiceclean.guard.protocol import TokenInfo
-from voiceclean.guard.token_anchor import compare_token_anchors
+from hawavoclean.guard.protocol import TokenInfo
+from hawavoclean.guard.token_anchor import compare_token_anchors
 
 
 @pytest.mark.unit

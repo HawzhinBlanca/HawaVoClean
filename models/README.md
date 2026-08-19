@@ -1,7 +1,7 @@
 # Model Artifacts
 
-Runtime artifacts moved into the package: `src/voiceclean/resources/models/`
-(overridable via `VOICECLEAN_MODEL_DIR`). This directory intentionally holds
+Runtime artifacts moved into the package: `src/hawavoclean/resources/models/`
+(overridable via `HAWAVOCLEAN_MODEL_DIR`). This directory intentionally holds
 no artifacts.
 
 Status, honestly stated:
@@ -14,5 +14,5 @@ Status, honestly stated:
   fabricated commit hashes and license claims; it was removed rather than
   corrected, because none of the evaluations had happened.
 - The guard calibration artifact carries engineering-default thresholds and
-  says so. Measured metrics only appear after a real `voiceclean calibrate`
+  says so. Measured metrics only appear after a real `hawavoclean calibrate`
   run, with measurement provenance attached.

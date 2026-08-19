@@ -1,4 +1,4 @@
-# Hawzhin VoiceClean v1
+# HawaVoClean v1
 
 > Offline dialogue audio cleanup: Wiener spectral denoising, spectral-change
 > guarded finishing, and BS.1770 loudness mastering — engineered to never
@@ -6,7 +6,7 @@
 
 ## What this is
 
-VoiceClean takes a noisy dialogue or podcast recording and produces a
+HawaVoClean takes a noisy dialogue or podcast recording and produces a
 mastered WAV: steady-state noise reduced, hum and clicks repaired, speech
 EQ'd and de-essed, loudness normalized to broadcast targets, true peaks
 limited to −1.0 dBTP. Every processing decision is recorded in an audit
@@ -16,7 +16,7 @@ report published beside the output.
 is a decision-directed spectral Wiener filter — classical DSP, gentle,
 guarded strictly. The optional **studio profile** uses a real neural model:
 WPE dereverberation + DeepFilterNet3 (MIT-licensed, weights vendored and
-hash-locked, verified by `voiceclean audit-models`). Measured on a real
+hash-locked, verified by `hawavoclean audit-models`). Measured on a real
 94.6 s recording: noise floor −49.9 → −76.9 dBFS, SNR +26.7 dB, signal
 level preserved within 0.3 dB. DeepFilterNet3 is a *speech* enhancer —
 sustained musical tones may be attenuated as noise; review the flagged
@@ -49,7 +49,7 @@ made.
    it. There is no resume cache; re-running a job recomputes and re-reports
    every unit identically.
 6. **Verifiable provenance** — the core's parameters are hash-locked and
-   `voiceclean audit-models` fails if the lockfile and the implementation
+   `hawavoclean audit-models` fails if the lockfile and the implementation
    disagree. No digest in this repository refers to a file that does not
    exist.
 
@@ -67,7 +67,7 @@ made.
 ## Installation
 
 ```bash
-cd hawzhin-voiceclean
+cd hawavoclean
 uv sync --locked                 # base install (Wiener core, no torch)
 uv sync --locked --extra studio  # + neural studio core
 ```
@@ -78,12 +78,12 @@ Third-party license texts for the vendored model weights are in
 ## Usage
 
 ```bash
-voiceclean doctor
-voiceclean process interview.wav --output interview_clean.wav --profile production
-voiceclean process interview.wav --output interview_studio.wav --profile studio
-voiceclean batch recordings/*.m4a --output-dir cleaned/ --profile studio --suffix _studio
-voiceclean verify interview_clean.wav --report interview_clean.voiceclean.json
-voiceclean audit-models
+hawavoclean doctor
+hawavoclean process interview.wav --output interview_clean.wav --profile production
+hawavoclean process interview.wav --output interview_studio.wav --profile studio
+hawavoclean batch recordings/*.m4a --output-dir cleaned/ --profile studio --suffix _studio
+hawavoclean verify interview_clean.wav --report interview_clean.hawavoclean.json
+hawavoclean audit-models
 ```
 
 `batch` isolates failures: one bad file never aborts the rest, the summary
@@ -99,14 +99,14 @@ uv sync --extra studio
 Development and evaluation commands:
 
 ```bash
-voiceclean calibrate --manifest data/calibration/manifest.json --output /tmp/calib.json
-voiceclean eval --manifest data/acceptance/manifest.json
-voiceclean benchmark --manifest data/acceptance/manifest.json --output /tmp/bench.json
+hawavoclean calibrate --manifest data/calibration/manifest.json --output /tmp/calib.json
+hawavoclean eval --manifest data/acceptance/manifest.json
+hawavoclean benchmark --manifest data/acceptance/manifest.json --output /tmp/bench.json
 ```
 
 Paths are CWD-independent: configs and model artifacts ship inside the
-package and can be overridden with `VOICECLEAN_CONFIG_DIR`,
-`VOICECLEAN_MODEL_DIR`, and `VOICECLEAN_WORK_DIR`.
+package and can be overridden with `HAWAVOCLEAN_CONFIG_DIR`,
+`HAWAVOCLEAN_MODEL_DIR`, and `HAWAVOCLEAN_WORK_DIR`.
 
 ## License
 

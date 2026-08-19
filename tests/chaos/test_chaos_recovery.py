@@ -16,12 +16,12 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-import voiceclean.pipeline as pipeline_mod
-from voiceclean.enhancement.protocol import EnhancementResult, EnhancerMetadata
-from voiceclean.enhancement.worker import IsolatedEnhancementWorker
-from voiceclean.errors import AmbiguousStereoError, PublicationError, WorkerError
-from voiceclean.guard.spectral_probe import FixedProbe
-from voiceclean.pipeline import run_pipeline
+import hawavoclean.pipeline as pipeline_mod
+from hawavoclean.enhancement.protocol import EnhancementResult, EnhancerMetadata
+from hawavoclean.enhancement.worker import IsolatedEnhancementWorker
+from hawavoclean.errors import AmbiguousStereoError, PublicationError, WorkerError
+from hawavoclean.guard.spectral_probe import FixedProbe
+from hawavoclean.pipeline import run_pipeline
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"

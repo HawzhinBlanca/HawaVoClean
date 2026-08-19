@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from voiceclean.audio.decode import decode_audio
-from voiceclean.audio.probe import probe_audio
-from voiceclean.errors import InvalidUserInputError
+from hawavoclean.audio.decode import decode_audio
+from hawavoclean.audio.probe import probe_audio
+from hawavoclean.errors import InvalidUserInputError
 
 SR = 48000
 
@@ -46,9 +46,9 @@ def test_probe_rejects_ultrasonic(tmp_path: Path) -> None:
 def test_probe_rejects_garbage_bytes(tmp_path: Path) -> None:
     p = tmp_path / "junk.wav"
     p.write_bytes(b"not audio at all")
-    from voiceclean.errors import VoiceCleanError
+    from hawavoclean.errors import HawaVoCleanError
 
-    with pytest.raises(VoiceCleanError):
+    with pytest.raises(HawaVoCleanError):
         probe_audio(p)
 
 

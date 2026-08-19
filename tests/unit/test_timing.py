@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from voiceclean.guard.timing import check_timing_integrity
+from hawavoclean.guard.timing import check_timing_integrity
 
 
 @pytest.mark.unit

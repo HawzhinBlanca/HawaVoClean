@@ -7,12 +7,12 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from voiceclean.audio.channels import handle_channel_layout
-from voiceclean.audio.decode import decode_audio
-from voiceclean.audio.encode import encode_audio
-from voiceclean.audio.probe import probe_audio
-from voiceclean.audio.types import AudioBuffer, AudioProbeResult, ChannelMode
-from voiceclean.errors import InvalidUserInputError
+from hawavoclean.audio.channels import handle_channel_layout
+from hawavoclean.audio.decode import decode_audio
+from hawavoclean.audio.encode import encode_audio
+from hawavoclean.audio.probe import probe_audio
+from hawavoclean.audio.types import AudioBuffer, AudioProbeResult, ChannelMode
+from hawavoclean.errors import InvalidUserInputError
 
 
 @pytest.mark.unit

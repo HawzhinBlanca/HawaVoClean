@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from voiceclean.pipeline import run_pipeline
-from voiceclean.report.writer import serialize_json_report
+from hawavoclean.pipeline import run_pipeline
+from hawavoclean.report.writer import serialize_json_report
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"
@@ -32,7 +32,7 @@ def _walk_strings(obj: object, path: str = "$") -> list[tuple[str, str]]:
 
 @pytest.mark.integration
 def test_report_contains_no_placeholder_values(tmp_path: Path) -> None:
-    work = REPO / ".voiceclean-work"
+    work = REPO / ".hawavoclean-work"
     shutil.rmtree(work, ignore_errors=True)
     try:
         report = run_pipeline(

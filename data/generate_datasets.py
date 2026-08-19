@@ -15,13 +15,13 @@ from typing import Any
 
 import soundfile as sf
 
-from voiceclean.eval.corruption import (
+from hawavoclean.eval.corruption import (
     corrupt_consonant_splice,
     corrupt_hf_consonant_removal,
     corrupt_repeated_span,
     corrupt_syllable_deletion,
 )
-from voiceclean.hashing import hash_file
+from hawavoclean.hashing import hash_file
 
 SR = 48000
 

@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 import soundfile as sf
 
-from voiceclean.finishing.loudness import measure_loudness_and_peaks
-from voiceclean.guard.spectral_probe import FixedProbe
-from voiceclean.pipeline import run_pipeline
+from hawavoclean.finishing.loudness import measure_loudness_and_peaks
+from hawavoclean.guard.spectral_probe import FixedProbe
+from hawavoclean.pipeline import run_pipeline
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"

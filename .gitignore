@@ -14,8 +14,8 @@ dist/
 .coverage
 coverage.xml
 
-# VoiceClean runtime state
-.voiceclean-work/
+# HawaVoClean runtime state
+.hawavoclean-work/
 test_output/
 data/acceptance/outputs/
 

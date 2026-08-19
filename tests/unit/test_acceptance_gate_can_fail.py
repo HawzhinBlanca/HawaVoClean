@@ -3,19 +3,19 @@
 from pathlib import Path
 from typing import Any
 
-import voiceclean.eval.acceptance as acceptance_mod
-from voiceclean.report.schema import (
+import hawavoclean.eval.acceptance as acceptance_mod
+from hawavoclean.report.schema import (
     CoreMetadata,
     EnvironmentMetadata,
     GuardMetadata,
+    HawaVoCleanReport,
     MediaStats,
     UnitSummary,
-    VoiceCleanReport,
 )
 
 
-def _report_violating_sample_count() -> VoiceCleanReport:
-    return VoiceCleanReport(
+def _report_violating_sample_count() -> HawaVoCleanReport:
+    return HawaVoCleanReport(
         job_id="testjob",
         config_hash="c" * 64,
         input=MediaStats(
@@ -78,9 +78,9 @@ def test_gate_reports_failed_instead_of_raising(monkeypatch: Any, tmp_path: Path
     )
 
 
-def _base_report(**overrides: Any) -> VoiceCleanReport:
+def _base_report(**overrides: Any) -> HawaVoCleanReport:
     """A structurally valid report; overrides poke individual invariants."""
-    from voiceclean.report.schema import UnitDecisionRecord
+    from hawavoclean.report.schema import UnitDecisionRecord
 
     defaults: dict[str, Any] = {
         "job_id": "j",
@@ -130,10 +130,10 @@ def _base_report(**overrides: Any) -> VoiceCleanReport:
         ],
     }
     defaults.update(overrides)
-    return VoiceCleanReport(**defaults)
+    return HawaVoCleanReport(**defaults)
 
 
-def _run_gate_with(monkeypatch: Any, tmp_path: Path, report: VoiceCleanReport) -> dict[str, Any]:
+def _run_gate_with(monkeypatch: Any, tmp_path: Path, report: HawaVoCleanReport) -> dict[str, Any]:
     manifest = tmp_path / "m.json"
     manifest.write_text(
         '{"schema_version": 1, "manifest_id": "m", "split_name": "acceptance",'
@@ -201,7 +201,7 @@ def test_gate_true_peak_violation_fails(monkeypatch: Any, tmp_path: Path) -> Non
 
 
 def test_gate_unverified_enhanced_unit_fails(monkeypatch: Any, tmp_path: Path) -> None:
-    from voiceclean.report.schema import UnitDecisionRecord
+    from hawavoclean.report.schema import UnitDecisionRecord
 
     rep = _base_report(
         units=[
@@ -226,7 +226,7 @@ def test_gate_unverified_enhanced_unit_fails(monkeypatch: Any, tmp_path: Path) -
 
 
 def test_gate_nothing_enhanced_fails_corpus_floor(monkeypatch: Any, tmp_path: Path) -> None:
-    from voiceclean.report.schema import UnitDecisionRecord
+    from hawavoclean.report.schema import UnitDecisionRecord
 
     rep = _base_report(
         units=[

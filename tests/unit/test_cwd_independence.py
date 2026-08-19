@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from voiceclean.cli import cmd_doctor
-from voiceclean.pipeline import run_pipeline
+from hawavoclean.cli import cmd_doctor
+from hawavoclean.pipeline import run_pipeline
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"

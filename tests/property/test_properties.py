@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 from hypothesis import given, settings
 
-from voiceclean.audio.resample import resample_audio
-from voiceclean.finishing.limiter import apply_lookahead_limiter
-from voiceclean.hashing import hash_numpy
+from hawavoclean.audio.resample import resample_audio
+from hawavoclean.finishing.limiter import apply_lookahead_limiter
+from hawavoclean.hashing import hash_numpy
 
 
 @pytest.mark.property

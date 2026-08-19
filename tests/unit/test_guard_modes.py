@@ -5,9 +5,9 @@ from typing import Any
 
 import numpy as np
 
-from voiceclean.config import GuardConfig
-from voiceclean.guard.spectral_probe import SpectralSignatureProbe
-from voiceclean.guard.verdict import GuardVerdict, evaluate_guard_pass
+from hawavoclean.config import GuardConfig
+from hawavoclean.guard.spectral_probe import SpectralSignatureProbe
+from hawavoclean.guard.verdict import GuardVerdict, evaluate_guard_pass
 
 SR = 16000
 
@@ -33,8 +33,8 @@ def test_anchor_gating_applies_only_in_strict_mode(monkeypatch: Any) -> None:
     integrity mode, rejected in strict — was measured on a real recording
     and is recorded in the studio calibration artifact's provenance.)
     """
-    import voiceclean.guard.verdict as verdict_mod
-    from voiceclean.guard.token_anchor import AnchorComparisonResult
+    import hawavoclean.guard.verdict as verdict_mod
+    from hawavoclean.guard.token_anchor import AnchorComparisonResult
 
     probe = SpectralSignatureProbe()
     orig = _voiced()

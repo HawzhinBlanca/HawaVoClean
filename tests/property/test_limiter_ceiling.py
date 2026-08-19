@@ -11,7 +11,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from scipy.signal import resample_poly
 
-from voiceclean.finishing.limiter import apply_lookahead_limiter
+from hawavoclean.finishing.limiter import apply_lookahead_limiter
 
 SR = 48000
 CEILING_DBTP = -1.0
