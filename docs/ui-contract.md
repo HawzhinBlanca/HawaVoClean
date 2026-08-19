@@ -213,3 +213,40 @@ Assembled plugin directory (what Resolve loads), at
   motion (MIT); no UI kit, no Tailwind. Everything must work offline (no Google Fonts, no CDN).
 * All existing gates stay green: `ruff check`, `ruff format --check`, `mypy --strict src`, `pytest`
   (default `-m 'not fuzz'`), coverage ≥ 90 % branch for touched modules, `scripts/mutation_gate.py`.
+
+---
+
+## Addendum 1 — windowed peaks (`POST /api/peaks`)
+
+Added for goal box E3/B3 (deep zoom must show true sample detail, not interpolated buckets).
+
+Request:
+```json
+{"path": "/abs/file.wav", "start_s": 12.0, "end_s": 18.5, "buckets": 1600}
+```
+* `path` — same path policy as `/api/analyze` (403/404 otherwise).
+* `start_s` / `end_s` — floats, `0 <= start_s < end_s`. `end_s` is clamped to the file duration;
+  `start_s >= duration` → 400 `{"error":"bad_request"}`.
+* `buckets` — 1..8000, default 1200. Clamped down to the number of samples in the window.
+
+Response `PeaksWindow`:
+```json
+{
+  "path": "/abs/file.wav",
+  "start_s": 12.0, "end_s": 18.5,
+  "sample_rate": 48000, "channels": 1, "duration_s": 94.6,
+  "samples_per_bucket": 195,
+  "peaks": {"min": [..buckets floats -1..1..], "max": [..buckets floats..]},
+  "rms_db": [..buckets floats, dBFS, -120 for silence..]
+}
+```
+Semantics identical to `/api/analyze`'s waveform fields (mono mix, every bucket covers ≥1 sample),
+but computed over the requested window only.
+
+**Memory rule (normative):** the handler MUST NOT decode the whole file to serve a window. Decode
+only the requested span (ffmpeg `-ss <start> -t <len>` before `-i` for fast seek, or
+`soundfile.read(start=, stop=)` on the fallback path). Peak RSS for a 5-second window out of a
+3-hour file must stay within a few MB of the idle server (measured, not assumed).
+
+`samples_per_bucket` lets the client decide when it has reached 1 sample/bucket (no more detail to
+fetch). Clients should re-query on zoom/pan and cache by `(path, start_s, end_s, buckets)`.
