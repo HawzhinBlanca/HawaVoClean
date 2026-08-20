@@ -3,10 +3,13 @@ import { getBridge } from '../bridge';
 import {
   ACCEPTED_EXTENSIONS,
   ACCEPTED_SHORTLIST,
+  cancelAnalysis,
   cancelUpload,
   ingestDataTransfer,
   ingestFile,
   openFileDialog,
+  rateWarning,
+  sourceFailureLabel,
   useResolveClip,
 } from '../state/actions';
 import { useStore } from '../state/store';
@@ -48,7 +51,13 @@ function UploadProgress() {
   if (!upload) return null;
   const pct = upload.total > 0 ? Math.min(1, upload.loaded / upload.total) : 0;
   return (
-    <div className="uploading" role="status" aria-live="polite">
+    // D1 · this was `role="status" aria-live="polite"` around a percentage and
+    // a byte counter that update on every XHR progress event — a screen reader
+    // read the whole strip aloud several times a second for the length of a
+    // gigabyte upload. The determinate `progressbar` below already exposes the
+    // value on demand, which is the right way to publish a number that moves;
+    // the app's one polite region (App.tsx) announces the transitions.
+    <div className="uploading" role="group" aria-label={`Uploading ${upload.name}`}>
       <div className="up-head">
         <span className="up-name" title={upload.name}>
           {upload.name}
@@ -82,6 +91,40 @@ function UploadProgress() {
           {upload.phase === 'finishing' ? 'writing to the work dir' : 'uploading'}
         </span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * C5 · the wait, and the way out of it.
+ *
+ * An analysis is a single request whose cost is entirely the engine's decode:
+ * measured, the reply is the same size whatever the file is (27,243 B for a
+ * ten-minute clip, 27,413 B for a fifty-millisecond one) and parses in 0.3 ms,
+ * so the browser never has anything to do but wait. What it lacked was a door.
+ * A three-hour file is half a minute of nothing, and until now the only way
+ * out was to drop a different file over the top of it — so the strip now says
+ * whose analysis is running and offers to abandon it.
+ */
+function AnalyzeProgress({ name }: { name: string }) {
+  return (
+    <div className="analyzing-row" role="status" aria-live="polite">
+      <span className="an-spin" aria-hidden="true" />
+      <span className="an-copy">
+        <span className="an-head">
+          Analyzing <b title={name}>{name}</b>
+        </span>
+        <span className="an-detail">reading the whole file once — the engine is decoding it</span>
+      </span>
+      <button
+        type="button"
+        className="an-cancel"
+        onClick={cancelAnalysis}
+        title="Stop reading this clip"
+        aria-label="Cancel analysis"
+      >
+        <IconCancel size={11} />
+      </button>
     </div>
   );
 }
@@ -141,6 +184,10 @@ export function SourceStrip() {
     (s) => !!s.job?.status && (s.job.status.state === 'running' || s.job.status.state === 'queued'),
   );
   const engineOffline = useStore((s) => s.engineStatus === 'offline');
+  // C5 · subscribing to `error` is what makes the clip-row failure chip
+  // reactive: the classification behind `sourceFailureLabel()` is set on the
+  // same beat as this string, so a change here is a change there.
+  const error = useStore((s) => s.error);
   const [over, setOver] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const uploading = Boolean(upload);
@@ -185,6 +232,8 @@ export function SourceStrip() {
     setOver(false);
   }, []);
 
+  const rateNote = original ? rateWarning(original.sample_rate) : null;
+
   const onOpen = useCallback(() => {
     if (isWeb) inputRef.current?.click();
     else void openFileDialog();
@@ -193,6 +242,9 @@ export function SourceStrip() {
   return (
     <section
       className="panel source"
+      // D1 · an unnamed <section> is not a landmark, which left the drop well,
+      // the file input and the clip readout outside every region on the page.
+      aria-label="Source clip"
       data-uploading={uploading ? 'true' : 'false'}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -228,6 +280,8 @@ export function SourceStrip() {
       </button>
       {uploading ? (
         <UploadProgress />
+      ) : analyzing && source ? (
+        <AnalyzeProgress name={source.name} />
       ) : (
         <div className={`dropzone${over ? ' over' : ''}${disabled ? ' disabled' : ''}`}>
           <span className="glyph" aria-hidden="true">
@@ -263,6 +317,9 @@ export function SourceStrip() {
               type="file"
               accept={ACCEPT_ATTR}
               disabled={disabled}
+              // D1 · a `title` is not a label: the control had no accessible
+              // name at all in the tree.
+              aria-label="Choose an audio or video file to clean"
               title="Choose a file"
               onChange={(e) => {
                 const f = e.currentTarget.files?.item(0);
@@ -286,9 +343,15 @@ export function SourceStrip() {
                   <span className="k">Duration</span>
                   <span className="v">{fmtDuration(original.duration_s)}</span>
                 </span>
-                <span className="kv">
+                {/* C5 · a rate the pipeline will refuse is flagged here, at the
+                    moment the analysis lands, rather than a second after the
+                    user has already pressed PROCESS. */}
+                <span className={`kv${rateNote ? ' warn' : ''}`} title={rateNote ?? undefined}>
                   <span className="k">Rate</span>
-                  <span className="v">{(original.sample_rate / 1000).toFixed(1)} kHz</span>
+                  <span className="v">
+                    {(original.sample_rate / 1000).toFixed(1)} kHz
+                    {rateNote ? <IconWarn size={10} /> : null}
+                  </span>
                 </span>
                 <span className="kv">
                   <span className="k">Channels</span>
@@ -300,7 +363,25 @@ export function SourceStrip() {
                 <span className="k">Status</span>
                 <span className="v">analyzing…</span>
               </span>
-            ) : null}
+            ) : (
+              /* C5 · a clip whose analysis failed used to leave this row
+                 showing a name and nothing else, so the strip looked as if it
+                 had simply not got round to it yet. The error bar carries the
+                 sentence; this says, in the one place that is about the clip,
+                 that the clip is the thing that is wrong. */
+              <span
+                className="kv bad"
+                title={
+                  error ??
+                  'This clip has not been analyzed, so there is nothing to process yet.'
+                }
+              >
+                <span className="k">Status</span>
+                <span className="v">
+                  <IconWarn size={10} /> {sourceFailureLabel()}
+                </span>
+              </span>
+            )}
           </>
         ) : (
           <span className="empty">No clip loaded</span>

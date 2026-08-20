@@ -7,6 +7,8 @@ import type { AudioAnalysis, JobStatus, Profile } from '../api/types';
 import { reportTxtPath } from '../api/types';
 import { getPlayer } from '../audio/player';
 import { getBridge } from '../bridge';
+import { waveView } from '../render/viewWindow';
+import { classifyFailure, installFailureNet, isCancellation, type UiFailure } from './errors';
 import { getState, useStore, type HistoryEntry, type JobInfo, type SourceInfo } from './store';
 
 /**
@@ -32,12 +34,95 @@ let lastEnginePid: number | null = null;
 let stopFollow: (() => void) | null = null;
 let analyzeAbort: AbortController | null = null;
 
-function describeError(e: unknown): string {
-  if (e instanceof EngineError) return e.message;
-  if (e instanceof DOMException && e.name === 'AbortError') return 'Cancelled';
-  if (e instanceof TypeError) return 'Engine unreachable';
-  if (e instanceof Error) return e.message;
-  return String(e);
+/**
+ * C5 · the short form, for the status line. Never an exception: everything
+ * goes through `classifyFailure`, which owns the sentences (state/errors.ts).
+ */
+function describeError(e: unknown, name?: string): string {
+  return classifyFailure(e, name).headline;
+}
+
+/**
+ * Show a failure the one designed way: the sentence in the error bar, the
+ * short form in the status line, and nothing at all when it was a
+ * cancellation (an aborted fetch is how this UI abandons work, not a fault).
+ */
+function reportFailure(f: UiFailure, statusPrefix?: string): void {
+  if (isCancellation(f)) return;
+  const st = getState();
+  st.setError(f.detail);
+  st.setStatus(statusPrefix ? `${statusPrefix} · ${f.headline}` : f.headline);
+}
+
+/**
+ * Why the clip currently in the strip has no analysis, or null when it has one
+ * (or when nothing has failed). The store has no field for this and adding one
+ * is not this agent's to add, so it lives here and is read alongside `error`,
+ * which is set on exactly the same beat — a component that subscribes to
+ * `error` re-renders whenever this changes.
+ */
+let lastSourceFailure: UiFailure | null = null;
+
+export function sourceFailureLabel(): string {
+  switch (lastSourceFailure?.kind) {
+    case 'no-audio':
+      return 'no audio track';
+    case 'missing':
+      return 'file not there';
+    case 'forbidden':
+      return 'out of bounds';
+    case 'rate-high':
+    case 'rate-low':
+      return 'rate refused';
+    case 'too-large':
+      return 'too large';
+    case 'offline':
+      return 'not read yet';
+    case null:
+    case undefined:
+      return 'not analyzed';
+    default:
+      return 'unreadable';
+  }
+}
+
+/** Same, from a raw thrown value. Returns the classification for the caller. */
+function failed(e: unknown, name?: string, statusPrefix?: string): UiFailure {
+  const f = classifyFailure(e, name);
+  reportFailure(f, statusPrefix);
+  return f;
+}
+
+/**
+ * C5 · the rates the *pipeline* will take, which are not the rates
+ * `/api/analyze` will take.
+ *
+ * Measured against the running engine: a 192 kHz WAV analyses happily (200,
+ * `sample_rate: 192000`) and then the run fails a second later with
+ * `Input sample rate 192000 Hz exceeds maximum supported 48000 Hz`. Analysis
+ * decodes; the pipeline pre-flights. The failure is designed, but arming
+ * PROCESS on a clip that cannot be processed is leading the user on, so the
+ * source strip flags the rate the moment the analysis lands.
+ *
+ * These mirror `MIN_SUPPORTED_SAMPLE_RATE` and `EngineConfig.max_sample_rate`
+ * in the engine, where the maximum is capped by its own schema (`le=48000`).
+ * The flag is advisory only — it never blocks the button, so if the engine
+ * ever widens its range the worst case is a stale note, not a wall.
+ */
+export const PIPELINE_MIN_RATE_HZ = 8000;
+export const PIPELINE_MAX_RATE_HZ = 48000;
+
+/** Why this clip's rate will be refused by the pipeline, or null if it will not. */
+export function rateWarning(sampleRate: number): string | null {
+  if (!Number.isFinite(sampleRate) || sampleRate <= 0) return null;
+  const khz = (v: number): string => `${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)} kHz`;
+  if (sampleRate > PIPELINE_MAX_RATE_HZ) {
+    return `${khz(sampleRate)} is above this tool’s range — it reads the file, but a run will be refused. Resample to ${khz(PIPELINE_MAX_RATE_HZ)} or below first.`;
+  }
+  if (sampleRate < PIPELINE_MIN_RATE_HZ) {
+    return `${khz(sampleRate)} is below this tool’s range — it reads the file, but a run will be refused. ${khz(PIPELINE_MIN_RATE_HZ)} is the minimum.`;
+  }
+  return null;
 }
 
 export function baseName(path: string): string {
@@ -174,6 +259,9 @@ let watchersInstalled = false;
 function installEngineWatchers(): void {
   if (watchersInstalled) return;
   watchersInstalled = true;
+  // C5 · the net under every flow: anything that escapes a `catch` still ends
+  // in the designed error bar rather than in a console nobody has open.
+  installFailureNet((f) => reportFailure(f));
   const wake = (): void => {
     if (getState().engineStatus !== 'ready') retryEngineNow();
   };
@@ -250,6 +338,20 @@ function autoloadFromQuery(): void {
   }
 }
 
+/**
+ * How many envelope buckets to ask `/api/analyze` for.
+ *
+ * Decoding the file is the entire cost of that call — measured on a 90 min /
+ * 1.04 GB WAV, 1200 buckets and 2400 buckets both take 16.0 s — so asking for
+ * one bucket per device column costs nothing and lands the whole-file envelope
+ * at display resolution. The alternative (leaving the base coarse and letting
+ * the waveform re-query `/api/peaks` for the whole file at fit zoom) is a
+ * second full decode: 2.5 s of engine time on that same file, per clip.
+ */
+function envelopeBuckets(): number {
+  return Math.min(8000, Math.max(1200, Math.round(waveView.maxBuckets)));
+}
+
 function requireClient(): EngineClient {
   const st = getState();
   if (!st.client || st.engineStatus !== 'ready') {
@@ -279,13 +381,14 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   // audio one was taken") — so it has to survive it.
   if (st.rejection && st.rejection.kind !== 'multi') st.setRejection(null);
   st.setSource(source);
+  lastSourceFailure = null;
   st.setStatus(`Analyzing ${source.name}`);
   st.setAnalyzing(true);
   const ac = new AbortController();
   analyzeAbort = ac;
   try {
     const client = requireClient();
-    const analysis = await client.analyze(source.path, 1200, ac.signal);
+    const analysis = await client.analyze(source.path, envelopeBuckets(), ac.signal);
     if (ac.signal.aborted) return;
     useStore.getState().setOriginal(analysis);
     player.load('original', client.fileUrl(source.path));
@@ -297,15 +400,36 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   } catch (e) {
     if (ac.signal.aborted) return;
     probeSoon(e);
-    const msg = describeError(e);
-    useStore.getState().setError(`Analysis failed: ${msg}`);
-    useStore.getState().setStatus(`Analysis failed: ${msg}`);
+    lastSourceFailure = failed(e, source.name);
   } finally {
     if (analyzeAbort === ac) {
       analyzeAbort = null;
       useStore.getState().setAnalyzing(false);
     }
   }
+}
+
+/**
+ * C5 · a long analyze must have a way out.
+ *
+ * Analysis of a three-hour file is half a minute of nothing to look at, and
+ * until now the only exit was to drop a different file. `analyzeAbort` was
+ * already there — it just had no button on it. Aborting leaves the clip
+ * loaded but un-analysed, which is exactly the state the strip and the
+ * PROCESS plate already know how to draw.
+ */
+export function isAnalyzing(): boolean {
+  return analyzeAbort !== null;
+}
+
+export function cancelAnalysis(): void {
+  const ac = analyzeAbort;
+  if (!ac) return;
+  ac.abort();
+  analyzeAbort = null;
+  const st = getState();
+  st.setAnalyzing(false);
+  st.setStatus(`Analysis cancelled · ${st.source?.name ?? ''}`.trim());
 }
 
 export async function useResolveClip(): Promise<void> {
@@ -325,19 +449,18 @@ export async function useResolveClip(): Promise<void> {
       mediaId: clip.mediaId,
     });
   } catch (e) {
-    st.setError(`Resolve: ${describeError(e)}`);
+    reportFailure(classifyFailure(e), 'Resolve');
   }
 }
 
 export async function openFileDialog(): Promise<void> {
   const bridge = getBridge();
-  const st = getState();
   try {
     const path = await bridge.files.pickAudio();
     if (!path) return;
     await loadSource({ path, name: baseName(path), origin: 'file' });
   } catch (e) {
-    st.setError(`Open file: ${describeError(e)}`);
+    reportFailure(classifyFailure(e), 'Open file');
   }
 }
 
@@ -529,9 +652,7 @@ async function uploadFile(file: File): Promise<void> {
       return;
     }
     probeSoon(e);
-    const msg = describeError(e);
-    getState().setError(`Upload failed: ${msg}`);
-    getState().setStatus(`Upload failed: ${msg}`);
+    failed(e, file.name, 'Upload failed');
   }
 }
 
@@ -540,10 +661,10 @@ async function uploadFile(file: File): Promise<void> {
 
 async function analyzeCleaned(path: string): Promise<AudioAnalysis | null> {
   try {
-    return await requireClient().analyze(path, 1200);
+    return await requireClient().analyze(path, envelopeBuckets());
   } catch (e) {
     probeSoon(e);
-    getState().setStatus(`Cleaned analysis failed: ${describeError(e)}`);
+    getState().setStatus(`Cleaned analysis failed · ${describeError(e, baseName(path))}`);
     return null;
   }
 }
@@ -581,8 +702,26 @@ function recordRun(status: JobStatus, outcome: HistoryEntry['outcome']): void {
     status,
     original,
     cleaned: null,
-    error: outcome === 'failed' ? status.error?.message || status.message || 'Processing failed' : null,
+    // The run list and the copy-summary line quote this; it has to be the
+    // readable form, not the subprocess repr the engine logs.
+    error:
+      outcome === 'failed'
+        ? jobFailureLine(status, baseName(status.input_path || st.source?.path || ''))
+        : null,
   });
+}
+
+/** The engine's own words for why a run failed, in one string. */
+function jobFailureMessage(status: JobStatus): string {
+  return status.error?.message || status.message || 'the run failed';
+}
+
+/** The same thing, but fit to be read — used by the run list and the summary. */
+function jobFailureLine(status: JobStatus, name?: string): string {
+  return classifyFailure(
+    new EngineError(400, status.error?.code ?? 'job_failed', jobFailureMessage(status)),
+    name,
+  ).headline;
 }
 
 function onJobStatus(status: JobStatus): void {
@@ -594,9 +733,16 @@ function onJobStatus(status: JobStatus): void {
     st.setStatus(`${status.message || status.stage}${unit}`);
   }
   if (status.state === 'failed') {
-    const msg = status.error?.message || status.message || 'Processing failed';
-    st.setError(`${status.error?.code ? `${status.error.code}: ` : ''}${msg}`);
-    st.setStatus('Processing failed');
+    // C5 · a run's own failure gets the same treatment as a call's. The
+    // engine reports `INVALID_USER_INPUT` plus a message written for a log;
+    // neither an enum nor a subprocess repr belongs in front of a person, so
+    // the pair is re-classified through the same table as everything else.
+    const f = classifyFailure(
+      new EngineError(400, status.error?.code ?? 'job_failed', jobFailureMessage(status)),
+      st.source?.name ?? baseName(status.input_path || ''),
+    );
+    st.setError(f.detail);
+    st.setStatus(`Processing failed · ${f.headline}`);
     recordRun(status, 'failed');
   } else if (status.state === 'cancelled') {
     st.setStatus('Processing cancelled');
@@ -632,7 +778,7 @@ function onJobStatus(status: JobStatus): void {
           );
         }
       } catch (e) {
-        getState().setStatus(`Cleaned master unavailable: ${describeError(e)}`);
+        getState().setStatus(`Cleaned master unavailable · ${describeError(e)}`);
       }
     })();
   }
@@ -705,9 +851,7 @@ export async function startJob(): Promise<void> {
     followFrom(client, res.job_id);
   } catch (e) {
     probeSoon(e);
-    const msg = describeError(e);
-    useStore.getState().setError(`Could not start job: ${msg}`);
-    useStore.getState().setStatus(`Could not start job: ${msg}`);
+    failed(e, st.source.name, 'Could not start');
   }
 }
 
@@ -726,7 +870,7 @@ export async function cancelJob(): Promise<void> {
     await requireClient().cancelJob(st.job.id);
   } catch (e) {
     probeSoon(e);
-    st.setError(`Cancel failed: ${describeError(e)}`);
+    reportFailure(classifyFailure(e, st.source?.name), 'Cancel failed');
   }
 }
 
@@ -778,13 +922,22 @@ export async function selectRun(jobId: string): Promise<void> {
   if (client && (needsOriginal || needsCleaned)) {
     getState().setAnalyzing(true);
     getState().setStatus(`Re-reading ${entry.inputName}`);
-    if (needsOriginal) {
-      original = await client.analyze(entry.inputPath, 1200).catch(() => null);
-    }
-    if (needsCleaned) {
-      cleaned = await client.analyze(entry.outputPath, 1200).catch(() => null);
-    }
+    // C5 · a re-read that fails is not a silent nothing. The commonest cause
+    // is that the file has been moved or deleted since the run — which is a
+    // fact the user needs, not one to swallow into a `null`.
+    let reReadFailure: UiFailure | null = null;
+    const reRead = async (path: string, name: string): Promise<AudioAnalysis | null> => {
+      try {
+        return await client.analyze(path, envelopeBuckets());
+      } catch (e) {
+        reReadFailure ??= classifyFailure(e, name);
+        return null;
+      }
+    };
+    if (needsOriginal) original = await reRead(entry.inputPath, entry.inputName);
+    if (needsCleaned) cleaned = await reRead(entry.outputPath, baseName(entry.outputPath));
     getState().setAnalyzing(false);
+    if (reReadFailure) reportFailure(reReadFailure, 'Could not re-read this run');
     getState().patchHistory(entry.jobId, {
       original,
       cleaned,
@@ -811,7 +964,9 @@ export async function selectRun(jobId: string): Promise<void> {
       cur.setAbMode('original');
     }
   }
-  cur.setStatus(runStatusLine(entry));
+  // A re-read failure has already claimed the status line with the reason;
+  // do not paper over it with the run's happy summary.
+  if (!cur.error) cur.setStatus(runStatusLine(entry));
 }
 
 function runStatusLine(e: HistoryEntry): string {
@@ -972,7 +1127,7 @@ export async function importToResolve(): Promise<void> {
     const clip = await bridge.resolve.importMedia(st.cleanedPath);
     st.setStatus(clip ? `Imported ${clip.name}` : 'Resolve did not import the file');
   } catch (e) {
-    st.setError(`Import failed: ${describeError(e)}`);
+    reportFailure(classifyFailure(e, st.cleanedPath ? baseName(st.cleanedPath) : undefined), 'Import failed');
   }
 }
 
@@ -985,7 +1140,7 @@ export async function replaceInResolve(): Promise<void> {
     const ok = await bridge.resolve.replaceClip(st.source.mediaId, st.cleanedPath);
     st.setStatus(ok ? `Replaced ${st.source.name} with the cleaned master` : 'Resolve refused the replace');
   } catch (e) {
-    st.setError(`Replace failed: ${describeError(e)}`);
+    reportFailure(classifyFailure(e, st.source?.name), 'Replace failed');
   }
 }
 
@@ -996,7 +1151,7 @@ export async function revealOutput(): Promise<void> {
   try {
     await bridge.files.revealInFinder(st.cleanedPath);
   } catch (e) {
-    st.setError(`Reveal failed: ${describeError(e)}`);
+    reportFailure(classifyFailure(e, st.cleanedPath ? baseName(st.cleanedPath) : undefined), 'Reveal failed');
   }
 }
 

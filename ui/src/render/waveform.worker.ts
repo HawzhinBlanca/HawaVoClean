@@ -352,6 +352,79 @@ function post(msg: WaveOutMsg): void {
   ctxSelf.postMessage(msg);
 }
 
+// ---------------------------------------------------------------------------
+// C1 · what a frame costs, measured rather than asserted.
+//
+// The claim the goal makes is "the worker never blocks the main thread >16 ms".
+// The worker cannot block the main thread at all — it is a different thread —
+// so the honest quantity is how long `render()` holds *this* thread, and how
+// far apart rendered frames actually land. Both are kept here, at a cost of one
+// `performance.now()` pair per frame, and reported at most twice a second.
+
+const FT_WINDOW = 240;
+const STATS_MIN_INTERVAL_MS = 500;
+const frameMs = new Float32Array(FT_WINDOW);
+const frameGapMs = new Float32Array(FT_WINDOW);
+const ftSorted = new Float32Array(FT_WINDOW);
+let ftIdx = 0;
+let ftCount = 0;
+let frameTotal = 0;
+let frameMaxAll = 0;
+let lastFrameAt = 0;
+let lastStatsAt = 0;
+
+function percentile(src: Float32Array, n: number, q: number): number {
+  if (n <= 0) return 0;
+  ftSorted.set(src.subarray(0, n));
+  const view = ftSorted.subarray(0, n);
+  view.sort();
+  const i = Math.min(n - 1, Math.max(0, Math.round(q * (n - 1))));
+  return view[i] ?? 0;
+}
+
+function statsSnapshot(): WaveOutMsg {
+  const n = ftCount;
+  let sum = 0;
+  let max = 0;
+  for (let i = 0; i < n; i++) {
+    const v = frameMs[i] ?? 0;
+    sum += v;
+    if (v > max) max = v;
+  }
+  return {
+    type: 'stats',
+    frames: frameTotal,
+    last: Number((frameMs[(ftIdx + FT_WINDOW - 1) % FT_WINDOW] ?? 0).toFixed(3)),
+    mean: Number((n > 0 ? sum / n : 0).toFixed(3)),
+    p95: Number(percentile(frameMs, n, 0.95).toFixed(3)),
+    max: Number(max.toFixed(3)),
+    maxAll: Number(frameMaxAll.toFixed(3)),
+    window: n,
+    interval: Number(percentile(frameGapMs, n, 0.5).toFixed(3)),
+  };
+}
+
+function recordFrame(startedAt: number, endedAt: number): void {
+  const dt = endedAt - startedAt;
+  frameMs[ftIdx] = dt;
+  frameGapMs[ftIdx] = lastFrameAt > 0 ? startedAt - lastFrameAt : 0;
+  lastFrameAt = startedAt;
+  ftIdx = (ftIdx + 1) % FT_WINDOW;
+  if (ftCount < FT_WINDOW) ftCount += 1;
+  frameTotal += 1;
+  if (dt > frameMaxAll) frameMaxAll = dt;
+  if (endedAt - lastStatsAt >= STATS_MIN_INTERVAL_MS) {
+    lastStatsAt = endedAt;
+    post(statsSnapshot());
+  }
+}
+
+function renderTimed(): void {
+  const t0 = performance.now();
+  render();
+  recordFrame(t0, performance.now());
+}
+
 function scheduleRender(): void {
   needsRender = true;
   if (frameReq) return;
@@ -360,12 +433,12 @@ function scheduleRender(): void {
   if (typeof raf === 'function') {
     frameReq = raf.call(ctxSelf, () => {
       frameReq = 0;
-      if (needsRender) render();
+      if (needsRender) renderTimed();
     });
   } else {
     frameReq = setTimeout(() => {
       frameReq = 0;
-      if (needsRender) render();
+      if (needsRender) renderTimed();
     }, 16) as unknown as number;
   }
 }
@@ -1201,6 +1274,10 @@ ctxSelf.onmessage = (ev: MessageEvent<WaveMsg>) => {
           focus = msg.kind;
           scheduleRender();
         }
+        break;
+      case 'stats':
+        lastStatsAt = performance.now();
+        post(statsSnapshot());
         break;
     }
   } catch (e) {

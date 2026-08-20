@@ -115,6 +115,13 @@ export interface WaveViewMsg {
   start: number;
   end: number;
 }
+/**
+ * Ask the worker for its render-cost numbers. The worker keeps them anyway
+ * (one `performance.now()` pair per frame); this only asks it to say them.
+ */
+export interface WaveStatsReqMsg {
+  type: 'stats';
+}
 /** Palette re-read from CSS custom properties (init, and on theme change). */
 export interface WaveThemeMsg {
   type: 'theme';
@@ -132,7 +139,8 @@ export type WaveMsg =
   | WaveUnitsMsg
   | WaveFocusMsg
   | WaveViewMsg
-  | WaveThemeMsg;
+  | WaveThemeMsg
+  | WaveStatsReqMsg;
 
 export interface WaveReadyMsg {
   type: 'ready';
@@ -142,4 +150,23 @@ export interface WaveErrorMsg {
   type: 'error';
   message: string;
 }
-export type WaveOutMsg = WaveReadyMsg | WaveErrorMsg;
+/**
+ * What one worker frame actually costs (goal box C1). Times are milliseconds
+ * of worker-thread work inside `render()`, i.e. geometry rebuild + all GL
+ * calls; `p95`/`max` are over the last `window` frames, `maxAll` over every
+ * frame since init. Posted at most every 500 ms, and only when something was
+ * drawn since the last one.
+ */
+export interface WaveStatsMsg {
+  type: 'stats';
+  frames: number;
+  last: number;
+  mean: number;
+  p95: number;
+  max: number;
+  maxAll: number;
+  window: number;
+  /** Worker-side interval between rendered frames, ms (median over `window`). */
+  interval: number;
+}
+export type WaveOutMsg = WaveReadyMsg | WaveErrorMsg | WaveStatsMsg;

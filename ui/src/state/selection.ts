@@ -79,8 +79,15 @@ export function stepUnit(dir: 1 | -1): void {
     const at = ordered.findIndex((u) => t >= u.start_time_s && t < u.end_time_s);
     if (at >= 0) next = at;
     else {
+      // `after` = first unit starting at or after the playhead; -1 when the
+      // playhead is past every unit. Both directions CLAMP at the ends — a
+      // press at the last unit must not silently jump back to the first.
       const after = ordered.findIndex((u) => u.start_time_s >= t);
-      next = dir > 0 ? (after >= 0 ? after : 0) : after > 0 ? after - 1 : ordered.length - 1;
+      if (dir > 0) {
+        next = after >= 0 ? after : ordered.length - 1;
+      } else {
+        next = after === -1 ? ordered.length - 1 : Math.max(0, after - 1);
+      }
     }
   }
   const u = ordered[next];

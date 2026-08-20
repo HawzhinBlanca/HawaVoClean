@@ -33,6 +33,26 @@ function guardTone(v: string | null | undefined): 'pass' | 'fail' | 'none' {
   return 'none';
 }
 
+/**
+ * Everything the hover card says, as one sentence. Kept beside the card's own
+ * markup so the two cannot drift apart.
+ */
+function segmentLabel(u: UnitDecisionRecord): string {
+  const parts = [
+    `Unit ${u.unit_id}`,
+    `channel ${u.channel}`,
+    decisionLabel(u.final_decision),
+    `${formatTime(u.start_time_s, true)} to ${formatTime(u.end_time_s, true)}`,
+  ];
+  if (u.guard_a_verdict) parts.push(`guard A ${u.guard_a_verdict}`);
+  if (u.guard_b_verdict) parts.push(`guard B ${u.guard_b_verdict}`);
+  if (typeof u.chosen_strength === 'number' && u.chosen_strength > 0) {
+    parts.push(`strength ${u.chosen_strength.toFixed(2)}`);
+  }
+  if (u.decision_reason) parts.push(u.decision_reason);
+  return parts.join(', ');
+}
+
 interface Hover {
   unit: UnitDecisionRecord;
   x: number;
@@ -134,7 +154,16 @@ export function VerdictStrip() {
           {units.length ? `${units.length} units · ${enhanced} enhanced` : '—'}
         </span>
       </div>
-      <div className="verdict-track" ref={trackRef} onMouseLeave={onLeave}>
+      <div
+        className="verdict-track"
+        ref={trackRef}
+        // D1 · the strip is a group of toggles over one time axis; naming the
+        // group is what lets a screen-reader user understand the run of
+        // segments inside it as one thing.
+        role="group"
+        aria-label="Per-unit guard verdicts"
+        onMouseLeave={onLeave}
+      >
         {units.length && total > 0 ? (
           units.map((u) => {
             const cls = classifyDecision(u.final_decision);
@@ -143,13 +172,27 @@ export function VerdictStrip() {
             return (
               <button
                 type="button"
-                // Hundreds of units must not become hundreds of tab stops:
-                // the keyboard path to a unit is `[` / `]` (see App).
+                // D1 · deliberately out of the tab order, and this is the
+                // justification. A report can carry hundreds of units; making
+                // each one a tab stop would put the whole rest of the screen
+                // behind a few hundred presses of Tab. They keep `button`
+                // semantics and a full name, so a screen reader still reaches
+                // and activates them through its own element navigation, and
+                // every unit has a *sequential* keyboard route through `[` and
+                // `]` (and the inspector's own two buttons, which are tab
+                // stops) — which is a better one anyway, because it selects,
+                // seeks and pans the view in one press.
                 tabIndex={-1}
                 key={`${u.channel}-${u.unit_id}`}
                 className={`verdict-seg ${cls}${hover?.unit === u ? ' hot' : ''}${isSel ? ' sel' : ''}`}
                 style={style}
-                aria-label={`Unit ${u.unit_id}, channel ${u.channel}, ${decisionLabel(u.final_decision)}`}
+                // D1 · the hover tooltip must not be the only way to read a
+                // unit's decision. Two routes replace it: the inspector, which
+                // shows strictly more on selection (`[` / `]` or a click), and
+                // this name, which carries the tooltip's own fields — range,
+                // both guard verdicts, strength — so a screen reader gets the
+                // card's content without a pointer ever entering the strip.
+                aria-label={segmentLabel(u)}
                 aria-pressed={isSel}
                 onMouseEnter={(e) => onEnter(u, e)}
                 onMouseMove={onMove}

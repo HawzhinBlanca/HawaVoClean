@@ -11,11 +11,14 @@ import {
   type WavePalette,
   type WaveRgb,
   type WaveSlot,
+  type WaveStatsMsg,
 } from './waveformProtocol';
 
 export interface WaveformHostOptions {
   onReady?: (webgl2: boolean) => void;
   onError?: (message: string) => void;
+  /** Worker render cost (goal box C1). Arrives at most twice a second. */
+  onStats?: (stats: WaveStatsMsg) => void;
 }
 
 const WHITE: WaveRgb = [1, 1, 1];
@@ -110,6 +113,7 @@ export class WaveformHost {
       const m = ev.data;
       if (m.type === 'ready') opts.onReady?.(m.webgl2);
       else if (m.type === 'error') opts.onError?.(m.message);
+      else if (m.type === 'stats') opts.onStats?.(m);
     };
     this.worker.onerror = (ev) => {
       opts.onError?.(ev.message || 'waveform worker failed');
@@ -245,6 +249,11 @@ export class WaveformHost {
 
   setFocus(kind: WaveKind): void {
     this.post({ type: 'focus', kind });
+  }
+
+  /** Ask for the worker's render-cost numbers now, rather than on its own beat. */
+  requestStats(): void {
+    this.post({ type: 'stats' });
   }
 
   get width(): number {

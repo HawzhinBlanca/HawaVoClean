@@ -304,7 +304,11 @@ export function UnitInspector() {
   const canStep = ordered.length > 0;
 
   return (
-    <section className="panel inspector" data-selected={selected ? 'true' : 'false'}>
+    <section
+      className="panel inspector"
+      aria-label="Unit inspector"
+      data-selected={selected ? 'true' : 'false'}
+    >
       <div className="panel-head">
         <div className="panel-title">
           <span>Unit inspector</span>
@@ -356,7 +360,12 @@ export function UnitInspector() {
           </button>
         </div>
       </div>
-      <div className="insp-body">
+      {/* D1 · the guard score tables are taller than the panel, so this box
+          scrolls — and a scroll container with no focus stop cannot be
+          scrolled from the keyboard at all (axe: scrollable-region-focusable).
+          It is a focus stop with a name of its own; the arrows and page keys
+          it takes are the browser's own, not a binding of ours. */}
+      <div className="insp-body" tabIndex={0} role="group" aria-label="Unit detail">
         {selected ? (
           <Detail unit={selected} index={index >= 0 ? index : 0} total={ordered.length} />
         ) : (

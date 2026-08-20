@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { isTerminal } from './api/sse';
-import { getPlayer } from './audio/player';
 import { Actions } from './components/Actions';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
@@ -15,127 +14,60 @@ import { SpectrumDisplay } from './components/SpectrumDisplay';
 import { Transport } from './components/Transport';
 import { UnitInspector } from './components/UnitInspector';
 import { WaveformDisplay } from './components/WaveformDisplay';
-import {
-  cancelJob,
-  cancelUpload,
-  connectEngine,
-  ingestDataTransfer,
-  seekTo,
-  setAb,
-  startJob,
-  togglePlay,
-} from './state/actions';
-import { clearSelection, stepUnit } from './state/selection';
+import { connectEngine, ingestDataTransfer } from './state/actions';
+import { useKeyboardMap } from './state/keymap';
 import { getState, useStore } from './state/store';
 
-const SEEK_S = 5;
-const SEEK_FINE_S = 1;
-
-/** Typing must never trigger transport keys. */
-function isEditable(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  if (!el || typeof el.tagName !== 'string') return false;
-  const tag = el.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-  return el.isContentEditable === true;
-}
-
-/** Space on a focused control belongs to that control, not to the transport. */
-function isActivatable(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  if (!el || typeof el.tagName !== 'string') return false;
-  return el.tagName === 'BUTTON' || el.tagName === 'A' || el.getAttribute('role') === 'button';
-}
-
 /**
- * The whole keyboard map (goal box B1) in one place, so no two components can
- * claim the same key. Nothing here fires with Cmd/Ctrl/Alt held — those belong
- * to the browser (⌘A still selects) — and nothing fires while a text field has
- * focus or while the shortcut dialog is up.
+ * D1 · one polite live region for the whole job lifecycle.
+ *
+ * The screen already *shows* progress in four places (the header readout, the
+ * plate's face, the footer line, the source strip), and every one of them is
+ * re-rendered on every SSE tick. Wiring any of those up as a live region would
+ * announce a new percentage several times a second and make the app unusable
+ * with a screen reader on. This announces only the transitions a person would
+ * want told: the analysis starting and finishing, the run starting, and how it
+ * ended. Same string twice in a row is not re-announced, because the state
+ * only changes when it changes.
  */
-function useKeyboardMap(): void {
+function useJobAnnouncer(): string {
+  const analyzing = useStore((s) => s.analyzing);
+  const sourceName = useStore((s) => s.source?.name ?? null);
+  const state = useStore((s) => s.job?.status?.state ?? (s.job ? 'queued' : null));
+  const report = useStore((s) => s.report);
+  const errCode = useStore((s) => s.job?.status?.error?.code ?? null);
+  const [msg, setMsg] = useState('');
+
   useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.defaultPrevented) return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (isEditable(e.target)) return;
-      const st = getState();
+    if (analyzing) {
+      setMsg(sourceName ? `Analyzing ${sourceName}` : 'Analyzing clip');
+      return;
+    }
+    if (state === 'queued' || state === 'running') {
+      setMsg('Processing started');
+      return;
+    }
+    if (state === 'done') {
+      const sum = report?.summary;
+      setMsg(
+        sum
+          ? `Processing finished. ${sum.enhanced ?? 0} of ${sum.units_total ?? 0} units enhanced.`
+          : 'Processing finished.',
+      );
+      return;
+    }
+    if (state === 'failed') {
+      setMsg(`Processing failed: ${errCode ?? 'unknown error'}`);
+      return;
+    }
+    if (state === 'cancelled') {
+      setMsg('Processing cancelled');
+      return;
+    }
+    if (sourceName) setMsg(`${sourceName} ready`);
+  }, [analyzing, sourceName, state, report, errCode]);
 
-      if (e.key === '?') {
-        e.preventDefault();
-        st.setShortcutsOpen(!st.shortcutsOpen);
-        return;
-      }
-      // While the dialog is open it owns the keyboard (it handles Esc/Tab itself).
-      if (st.shortcutsOpen) return;
-
-      const hasAudio = Boolean(st.original);
-      const job = st.job;
-      const running = Boolean(job) && (!job?.status || !isTerminal(job.status.state));
-
-      switch (e.key) {
-        case 'Escape': {
-          e.preventDefault();
-          // Esc means "stop the thing that is happening", innermost first:
-          // an upload in flight, then a running job, then the selection.
-          if (st.upload) cancelUpload();
-          else if (running) void cancelJob();
-          else if (st.rejection) st.setRejection(null);
-          else if (st.selectedUnit) clearSelection();
-          return;
-        }
-        case 'ArrowLeft':
-        case 'ArrowRight': {
-          if (!hasAudio) return;
-          e.preventDefault();
-          const step = e.shiftKey ? SEEK_FINE_S : SEEK_S;
-          const dir = e.key === 'ArrowRight' ? 1 : -1;
-          seekTo(Math.max(0, getPlayer().time + dir * step));
-          return;
-        }
-        case '[':
-        case ',': {
-          e.preventDefault();
-          stepUnit(-1);
-          return;
-        }
-        case ']':
-        case '.': {
-          e.preventDefault();
-          stepUnit(1);
-          return;
-        }
-        default:
-          break;
-      }
-
-      if (e.code === 'Space' || e.key === ' ') {
-        if (isActivatable(e.target)) return;
-        e.preventDefault();
-        if (hasAudio) togglePlay();
-        return;
-      }
-
-      switch (e.key.toLowerCase()) {
-        case 'a':
-          if (hasAudio) setAb('original');
-          break;
-        case 'b':
-          if (st.cleanedPath) setAb('cleaned');
-          break;
-        case 'p': {
-          const canStart =
-            st.engineStatus === 'ready' && !!st.source && !!st.original && !st.analyzing && !running;
-          if (canStart) void startJob();
-          break;
-        }
-        default:
-          break;
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  return msg;
 }
 
 /** What the whole screen is doing, as one word the stylesheet can key on. */
@@ -197,6 +129,7 @@ function useDragWatch(): boolean {
 export default function App() {
   useKeyboardMap();
   const phase = usePhase();
+  const announcement = useJobAnnouncer();
   const dragOver = useDragWatch();
   const abMode = useStore((s) => s.abMode);
   const cleanedPath = useStore((s) => s.cleanedPath);
@@ -252,6 +185,11 @@ export default function App() {
       <Header />
       <EngineBanner />
       <SourceStrip />
+      {/* The single place the app speaks. Polite: none of this is urgent
+          enough to cut across what the user is already reading. */}
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </p>
       <main className="main">
         <div className="left">
           <WaveformDisplay />
@@ -264,12 +202,12 @@ export default function App() {
             <JobHistory />
           </div>
         </div>
-        <aside className="right">
-          <section className="panel spectrum-panel">
+        <aside className="right" aria-label="Analysis and controls">
+          <section className="panel spectrum-panel" aria-label="Spectrum">
             <SpectrumDisplay />
             <MetricsTiles />
           </section>
-          <section className="panel controls">
+          <section className="panel controls" aria-label="Processing controls">
             <ProfileControl />
             <ProcessButton />
             <Transport />

@@ -38,6 +38,28 @@ async function parseError(res: Response): Promise<EngineError> {
   return new EngineError(res.status, code, message);
 }
 
+/**
+ * C5 · a 200 is not a promise that the body parses.
+ *
+ * A proxy, a half-written response, or an engine of a different vintage can
+ * all answer 200 with something that is not the JSON this client expects.
+ * `res.json()` then throws a bare `SyntaxError: Unexpected end of JSON input`,
+ * which is an exception, not a designed state — so it is converted here into
+ * an `EngineError` the UI already knows how to describe.
+ */
+async function parseBody<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new EngineError(
+      res.status,
+      'bad_response',
+      `the engine answered ${res.status} with a body this client could not parse (${text.length} bytes)`,
+    );
+  }
+}
+
 export class EngineClient {
   readonly baseUrl: string;
   readonly token: string;
@@ -62,7 +84,7 @@ export class EngineClient {
       signal: signal ?? null,
     });
     if (!res.ok) throw await parseError(res);
-    return (await res.json()) as T;
+    return await parseBody<T>(res);
   }
 
   health(signal?: AbortSignal): Promise<HealthResponse> {

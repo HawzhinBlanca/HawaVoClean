@@ -52,6 +52,22 @@ input:focus-visible,
   filter: drop-shadow(0 0 7px var(--ix-focus-soft));
 }
 
+/* D1 · `render/waveZoom.css` predates the design system and draws FIT its own
+   1px ring in raw --cyan — the only control on the screen wearing a different
+   focus state. Corrected from this layer (the behaviour layer answers resting
+   styles the component sheets set) rather than by editing another component's
+   stylesheet; the extra class raises specificity above waveZoom's own rule.
+   Its `:disabled` dim of 0.35 is raised for the same reason as every other
+   inactive control (see app.css). */
+.wavepanel .wave-fit:focus-visible {
+  outline: 2px solid var(--ix-focus);
+  outline-offset: 2px;
+}
+
+.wavepanel .wave-fit:disabled {
+  opacity: 0.62;
+}
+
 /* Controls that live *inside* a well: the ring goes in with them. */
 .seg button:focus-visible,
 .dropzone input[type='file']:focus-visible {
@@ -589,8 +605,13 @@ input:focus-visible,
   transform: translateY(-1px);
 }
 
+/* D2 · at 0.4 the well's hint measured 2.05:1 — and that hint is the sentence
+ * that says *why* the well is closed ("Busy — finish or cancel the job
+ * first"). The well is not a control; it is a target with an explanation on
+ * it, and the explanation is the whole value of the disabled state. The dim
+ * that says "not now" is kept, at a level that can be read: 4.7:1. */
 .dropzone.disabled {
-  opacity: 0.4;
+  opacity: 0.85;
 }
 
 /* Nothing loaded yet: the well is the subject of the screen, so it carries a
@@ -698,8 +719,11 @@ input:focus-visible,
   color: var(--fg-4);
 }
 
+/* D2 · measured 2.9:1 on the shipped pixels. A unit suffix is a label, not a
+   control, so no inactive-component exemption applies: the empty state is
+   already said by the em-dash and the dimmed key. */
 .tile[data-state='empty'] .unit {
-  opacity: 0.65;
+  opacity: 1;
 }
 
 .tile .skel {
@@ -1169,7 +1193,15 @@ input:focus-visible,
 .wave-legend {
   padding: 3px var(--pad-2);
   border-radius: var(--r-xs);
-  background: linear-gradient(180deg, rgba(10, 12, 15, 0.82), rgba(6, 7, 10, 0.72));
+  /* D2 · these two are the only text in the product painted over a *drawing*
+   * rather than over a surface, so their contrast is only as good as the
+   * plate's opacity: at 0.82/0.72 a full-scale transient underneath still
+   * pushed 18-28 % of the waveform's own brightness through, and the ratio
+   * moved with the audio. Taken to 0.94/0.90 the backdrop is bounded — worst
+   * case (a solid white waveform under the whole plate) it lands at #191b1d,
+   * which is measured below with the canvas forced white. It still reads as
+   * smoked glass; the waveform is still visible through it. */
+  background: linear-gradient(180deg, rgba(10, 12, 15, 0.94), rgba(6, 7, 10, 0.9));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.05),
     0 0 0 1px rgba(0, 0, 0, 0.5),
@@ -1190,8 +1222,17 @@ input:focus-visible,
 }
 
 /* The deck you are *not* listening to is a reference, not a reading. */
+/* The unmonitored deck's key is still a label, not a control: at 0.45 over
+   --fg-3 it measured 2.31:1, and it is the one label whose backdrop is the
+   drawing itself. The pair is re-cut from a brighter base so the 25 % dim that
+   says "not the deck you are hearing" still leaves it at 4.9:1 against the
+   worst backdrop the plate can pass (canvas forced to white). */
+.wave-legend span {
+  color: var(--fg-2);
+}
+
 .wave-legend .off {
-  opacity: 0.45;
+  opacity: 0.75;
 }
 
 /* --- 5. One height for one row ------------------------------------------
@@ -1717,12 +1758,18 @@ input:focus-visible,
   text-overflow: ellipsis;
 }
 
+/* D2 · the run list is the one surface in the product painted on
+ * --metal-raised: measured on real pixels the current row's plate comes out at
+ * #232830, about two steps brighter than a panel, which put --fg-4 labels at
+ * 4.24:1. The ramp is right; the surface is brighter. Everything secondary on
+ * a row therefore steps up one grey, which measures 5.4:1 and still reads a
+ * clear step below the --fg-2 values beside it. */
 .hist-clock {
   flex: none;
   font-family: var(--font-numeric);
   font-size: var(--fs-label);
   font-variant-numeric: tabular-nums;
-  color: var(--fg-4);
+  color: var(--fg-3);
 }
 
 .hist-line2 {
@@ -1765,7 +1812,7 @@ input:focus-visible,
   font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   text-transform: uppercase;
-  color: var(--fg-4);
+  color: var(--fg-3);
   white-space: nowrap;
 }
 
@@ -1870,6 +1917,14 @@ input:focus-visible,
  * `document.getAnimations()` entirely. */
 .errbar {
   animation: errbar-in 180ms var(--ease-out) both;
+}
+
+/* D1 · the desk gives back exactly the strip the error bar floats over, so no
+   control ever ends up underneath it. `--errbar-h` is written by Footer.tsx
+   from the bar's measured height (it wraps at narrow widths) and removed when
+   the bar goes; with no bar the rule contributes nothing. */
+.app:has(> .errbar) .main {
+  padding-bottom: calc(var(--errbar-h, 38px) + 14px);
 }
 
 @keyframes errbar-in {
@@ -2044,8 +2099,23 @@ input:focus-visible,
   cursor: not-allowed;
 }
 
+/* D2 · during an outage every row goes `aria-disabled` — and stays in the tab
+ * order, keeps its `title` and is the one place the user can still read what
+ * the session did. Measured with the row dimmed to 0.72 its labels fell to
+ * 3.46:1, so the dim is nearly gone and the signal moves to desaturation
+ * instead: the amber profile tag and the cyan ON SCREEN badge drop to grey,
+ * which says "inert" without taking the type with it. */
 .hist-row[aria-disabled='true'] {
-  opacity: 0.45;
+  opacity: 0.9;
+  filter: saturate(0.4);
+}
+
+/* D2 · the plate's face is the button's own `aria-describedby`, so it has to
+ * survive the inert state at 4.5:1. Measured at 3.92:1 with the plate dimmed;
+ * one grey up on the cell keys puts it at 4.69:1 without making the plate look
+ * live. */
+.process[aria-disabled='true'] .cells b {
+  color: var(--fg-3);
 }
 
 /* =========================================================== B8 · responsive
@@ -2470,4 +2540,157 @@ input:focus-visible,
   flex-wrap: wrap;
   overflow: visible;
   row-gap: 2px;
+}
+
+/* ============================================================== C5 · ADVERSARIAL
+ * Three states the strip had no drawing for: an analysis in flight (which is
+ * where a long file spends its time), a rate the pipeline will refuse, and a
+ * clip the engine could not read at all. All three are built from the same
+ * lighting model as the transfer readout above and occupy the same grid cells,
+ * so entering one of them moves nothing.
+ * ============================================================================ */
+
+/* --- the analysis, while it runs -----------------------------------------
+ * Same cell and same inset glass as `.uploading`: an upload becoming an
+ * analysis is a change of caption, not a change of layout. There is no
+ * determinate bar because there is no determinate progress — the engine
+ * decodes the file in one pass and answers once — so the honest indicator is
+ * a cadence, not a percentage. */
+.analyzing-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: var(--r);
+  border: 1px solid var(--hair-dark);
+  background: var(--glass), linear-gradient(180deg, rgba(0, 0, 0, 0.34), rgba(0, 0, 0, 0.18));
+  box-shadow: var(--shadow-display), var(--vignette-sm);
+  min-width: 0;
+}
+
+.an-spin {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid rgba(57, 208, 255, 0.2);
+  border-top-color: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan-glow);
+  animation: an-spin 820ms linear infinite;
+}
+
+@keyframes an-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.an-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.an-head {
+  font-size: var(--fs-sm);
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.an-head b {
+  font-weight: var(--fw-medium);
+  color: var(--fg);
+}
+
+.an-detail {
+  font-size: var(--fs-label);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--fg-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.an-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-xs);
+  color: var(--fg-3);
+  background-image: var(--brushed), var(--metal-2);
+  box-shadow: var(--elev-2);
+  flex: none;
+  transition:
+    color var(--ix-mid) var(--ease-out),
+    filter var(--ix-mid) var(--ease-out);
+}
+
+.an-cancel:hover {
+  color: var(--err);
+  filter: brightness(1.25);
+}
+
+.an-cancel:active {
+  box-shadow: var(--shadow-pressed);
+}
+
+/* The global `button:focus-visible` rule above already draws the ring; this
+   only adds the halo the other small inset controls wear. (An earlier draft
+   restated `outline` here with a token that does not exist — an invalid
+   value makes the whole declaration compute to `none`, which would have
+   *removed* the ring from this button rather than restyling it.) */
+.an-cancel:focus-visible {
+  filter: drop-shadow(0 0 7px var(--ix-focus-soft));
+}
+
+/* Reduced motion: the ring stops turning, so the state has to be legible
+   standing still. It becomes a solid lit dot — the same "something is
+   happening here" reading, carried by colour instead of by movement. */
+@media (prefers-reduced-motion: reduce) {
+  .an-spin {
+    border-color: var(--cyan);
+    background: var(--cyan);
+  }
+}
+
+/* --- the two bad-clip readouts in the clip row ---------------------------
+ * `.warn` is advisory (the file reads, the run will not go); `.bad` is
+ * terminal (nothing was read at all). Both keep the column's alignment and
+ * its tabular figures — only the colour and a 10px glyph change. */
+.clipinfo .kv.warn .v {
+  color: var(--amber-2);
+}
+
+.clipinfo .kv.warn .k {
+  color: var(--amber-dim);
+}
+
+.clipinfo .kv.bad .v {
+  color: var(--err);
+}
+
+.clipinfo .kv.bad .k {
+  color: rgba(255, 90, 95, 0.55);
+}
+
+.clipinfo .kv.warn .v,
+.clipinfo .kv.bad .v {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.clipinfo .kv.warn .v svg,
+.clipinfo .kv.bad .v svg {
+  flex: none;
 }

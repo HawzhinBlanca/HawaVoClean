@@ -142,11 +142,14 @@ export function formatTime(t: number, withMs = false): string {
 }
 
 export function formatTimeShort(t: number): string {
-  const m = Math.floor(t / 60);
-  const s = t - m * 60;
   if (t < 10 && !Number.isInteger(t)) return `${t.toFixed(1)}s`;
-  if (m === 0) return `${Math.round(s)}s`;
-  return `${m}:${String(Math.round(s)).padStart(2, '0')}`;
+  // Round to whole seconds FIRST, then split: rounding the remainder on its own
+  // lets 119.6 s print as "1:60" instead of rolling over into the minute.
+  const whole = Math.round(t);
+  const m = Math.floor(whole / 60);
+  const s = whole - m * 60;
+  if (m === 0) return `${s}s`;
+  return `${m}:${String(s).padStart(2, '0')}`;
 }
 
 /**

@@ -1,0 +1,387 @@
+// api/client.ts — every call the UI makes to the engine. The things that go
+// wrong here are invisible in a happy browser run: a token on the wrong
+// carrier, an error body that parses to the wrong sentence, an abort that
+// leaks, an upload whose progress never reaches the bar.
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { EngineClient, EngineError } from './client';
+
+const BASE = 'http://127.0.0.1:8765';
+const TOKEN = 'devtok';
+
+function client(baseUrl = `${BASE}/`): EngineClient {
+  return new EngineClient({ baseUrl, token: TOKEN });
+}
+
+/** A Response stand-in: only the four members the client actually touches. */
+function res(status: number, body: string, statusText = ''): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText,
+    text: async () => body,
+    json: async () => JSON.parse(body) as unknown,
+  } as unknown as Response;
+}
+
+function mockFetch(...responses: Response[]): ReturnType<typeof vi.fn> {
+  const fn = vi.fn();
+  for (const r of responses) fn.mockResolvedValueOnce(r);
+  vi.stubGlobal('fetch', fn);
+  return fn;
+}
+
+function lastInit(fn: ReturnType<typeof vi.fn>): RequestInit {
+  return (fn.mock.calls[fn.mock.calls.length - 1]?.[1] ?? {}) as RequestInit;
+}
+
+function lastHeaders(fn: ReturnType<typeof vi.fn>): Record<string, string> {
+  return (lastInit(fn).headers ?? {}) as Record<string, string>;
+}
+
+describe('endpoint handling', () => {
+  it('strips trailing slashes so no URL ever doubles up', () => {
+    expect(new EngineClient({ baseUrl: `${BASE}///`, token: TOKEN }).baseUrl).toBe(BASE);
+    expect(client().eventsUrl('j1').startsWith(`${BASE}/api/jobs/j1/events?`)).toBe(true);
+  });
+});
+
+describe('the token travels as a header on API calls', () => {
+  it('sends X-Hawa-Token and JSON content type on a body call', async () => {
+    const fetchFn = mockFetch(res(200, '{"path":"/a.wav"}'));
+    await client().analyze('/a.wav', 1200);
+    expect(fetchFn).toHaveBeenCalledWith(`${BASE}/api/analyze`, expect.anything());
+    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBe(TOKEN);
+    expect(lastHeaders(fetchFn)['Content-Type']).toBe('application/json');
+    expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual({ path: '/a.wav', buckets: 1200 });
+  });
+
+  it('sends no content type on a GET, so no preflight is provoked', async () => {
+    const fetchFn = mockFetch(res(200, '{"ok":true}'));
+    await client().health();
+    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBe(TOKEN);
+    expect(lastHeaders(fetchFn)['Content-Type']).toBeUndefined();
+  });
+
+  it('leaves multipart alone so the browser can set the boundary', async () => {
+    const fetchFn = mockFetch(res(200, '{"path":"/up/a.wav"}'));
+    await client().upload(new File(['abc'], 'a.wav', { type: 'audio/wav' }));
+    expect(lastHeaders(fetchFn)['Content-Type']).toBeUndefined();
+    expect(lastInit(fetchFn).body).toBeInstanceOf(FormData);
+  });
+});
+
+describe('the token travels as a query parameter where a header cannot go', () => {
+  it('puts path and token in the query for <audio src> and download anchors', () => {
+    const url = new URL(client().fileUrl('/Users/me/My Clip #1.wav'));
+    expect(url.origin + url.pathname).toBe(`${BASE}/api/audio`);
+    expect(url.searchParams.get('path')).toBe('/Users/me/My Clip #1.wav');
+    expect(url.searchParams.get('token')).toBe(TOKEN);
+  });
+
+  it('encodes the job id in the SSE path and the token in its query', () => {
+    const url = new URL(client().eventsUrl('job/with space'));
+    expect(url.pathname).toBe('/api/jobs/job%2Fwith%20space/events');
+    expect(url.searchParams.get('token')).toBe(TOKEN);
+  });
+
+  it('audioUrl is the deprecated alias of fileUrl', () => {
+    expect(client().audioUrl('/a.wav')).toBe(client().fileUrl('/a.wav'));
+  });
+});
+
+describe('error shape parsing', () => {
+  it('lifts the engine’s {error, message} pair into code and message', async () => {
+    mockFetch(res(400, '{"error":"INVALID_USER_INPUT","message":"sample rate 192000 Hz"}'));
+    const err = await client().analyze('/a.wav').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EngineError);
+    expect((err as EngineError).status).toBe(400);
+    expect((err as EngineError).code).toBe('INVALID_USER_INPUT');
+    expect((err as EngineError).message).toBe('sample rate 192000 Hz');
+  });
+
+  it('uses the error code as the message when there is no message', async () => {
+    mockFetch(res(403, '{"error":"forbidden_path"}'));
+    const err = (await client().analyze('/a.wav').catch((e: unknown) => e)) as EngineError;
+    expect(err.code).toBe('forbidden_path');
+    expect(err.message).toBe('forbidden_path');
+  });
+
+  it('falls back to the status line when the error body is not JSON', async () => {
+    mockFetch(res(502, '<html>bad gateway</html>', 'Bad Gateway'));
+    const err = (await client().health().catch((e: unknown) => e)) as EngineError;
+    expect(err.code).toBe('http_502');
+    expect(err.message).toBe('502 Bad Gateway');
+  });
+
+  it('names a 404 so the SSE client can tell "gone" from "unreachable"', async () => {
+    mockFetch(res(404, '{"error":"not_found","message":"no such job"}'));
+    const err = (await client().getJob('j1').catch((e: unknown) => e)) as EngineError;
+    expect(err.status).toBe(404);
+  });
+
+  it('turns an unparseable 200 body into a designed error, not a SyntaxError', async () => {
+    mockFetch(res(200, '{"duration_s": 12'));
+    const err = (await client().analyze('/a.wav').catch((e: unknown) => e)) as EngineError;
+    expect(err).toBeInstanceOf(EngineError);
+    expect(err.code).toBe('bad_response');
+    expect(err.status).toBe(200);
+    expect(err.message).toContain('17 bytes');
+  });
+
+  it('lets a transport failure through as itself (that is what "offline" looks like)', async () => {
+    const boom = new TypeError('Failed to fetch');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(boom)),
+    );
+    await expect(client().health()).rejects.toBe(boom);
+  });
+});
+
+describe('abort plumbing', () => {
+  it('forwards the caller’s signal on every abortable call', async () => {
+    const ac = new AbortController();
+    const fetchFn = mockFetch(
+      res(200, '{}'),
+      res(200, '{}'),
+      res(200, '{}'),
+      res(200, '{}'),
+      res(200, '{}'),
+    );
+    const c = client();
+    await c.health(ac.signal);
+    expect(lastInit(fetchFn).signal).toBe(ac.signal);
+    await c.analyze('/a.wav', 1200, ac.signal);
+    expect(lastInit(fetchFn).signal).toBe(ac.signal);
+    await c.peaks('/a.wav', 0, 1, 800, ac.signal);
+    expect(lastInit(fetchFn).signal).toBe(ac.signal);
+    await c.getJob('j1', ac.signal);
+    expect(lastInit(fetchFn).signal).toBe(ac.signal);
+    await c.createJob({ input_path: '/a.wav', profile: 'studio' }, ac.signal);
+    expect(lastInit(fetchFn).signal).toBe(ac.signal);
+  });
+
+  it('passes null rather than undefined when nobody is watching', async () => {
+    const fetchFn = mockFetch(res(200, '{}'));
+    await client().health();
+    expect(lastInit(fetchFn).signal).toBeNull();
+  });
+
+  it('rejects with the AbortError the caller can recognise as a cancellation', async () => {
+    const abort = new DOMException('The user aborted a request.', 'AbortError');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(abort)),
+    );
+    const err = (await client().analyze('/a.wav').catch((e: unknown) => e)) as DOMException;
+    expect(err.name).toBe('AbortError');
+  });
+});
+
+describe('request bodies and paths', () => {
+  it('peaks asks for the window the zoom is looking at', async () => {
+    const fetchFn = mockFetch(res(200, '{}'));
+    await client().peaks('/a.wav', 1.5, 2.5, 900);
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/peaks`);
+    expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual({
+      path: '/a.wav',
+      start_s: 1.5,
+      end_s: 2.5,
+      buckets: 900,
+    });
+  });
+
+  it('createJob posts the profile and overwrite flag verbatim', async () => {
+    const fetchFn = mockFetch(res(200, '{"job_id":"j1"}'));
+    await client().createJob({ input_path: '/a.wav', profile: 'production', overwrite: true });
+    expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual({
+      input_path: '/a.wav',
+      profile: 'production',
+      overwrite: true,
+    });
+  });
+
+  it('escapes the job id in every job route', async () => {
+    const fetchFn = mockFetch(res(200, '{}'), res(200, '{"ok":true}'));
+    await client().getJob('a b/c');
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/jobs/a%20b%2Fc`);
+    await client().cancelJob('a b/c');
+    expect(fetchFn.mock.calls[1]?.[0]).toBe(`${BASE}/api/jobs/a%20b%2Fc/cancel`);
+  });
+
+  it('fetchText reads a served sidecar through the token-in-query URL', async () => {
+    const fetchFn = mockFetch(res(200, 'HAWAVOCLEAN REPORT'));
+    await expect(client().fetchText('/out/a.hawavoclean.txt')).resolves.toBe('HAWAVOCLEAN REPORT');
+    expect(String(fetchFn.mock.calls[0]?.[0])).toContain('token=devtok');
+  });
+
+  it('fetchText reports a refused file as an EngineError', async () => {
+    mockFetch(res(403, '{"error":"forbidden_path","message":"outside the allowed roots"}'));
+    const err = (await client().fetchText('/etc/passwd').catch((e: unknown) => e)) as EngineError;
+    expect(err.code).toBe('forbidden_path');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// uploadWithProgress — the one XHR in the client (fetch cannot report request
+// progress on loopback HTTP/1.1).
+
+interface FakeUploadTarget {
+  onprogress: ((e: ProgressEvent) => void) | null;
+}
+
+class FakeXhr {
+  static last: FakeXhr | null = null;
+  upload: FakeUploadTarget = { onprogress: null };
+  onerror: (() => void) | null = null;
+  ontimeout: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  onload: (() => void) | null = null;
+  status = 0;
+  statusText = '';
+  response: unknown = '';
+  responseType = '';
+  headers: Record<string, string> = {};
+  method = '';
+  url = '';
+  body: unknown = null;
+  sent = false;
+
+  constructor() {
+    FakeXhr.last = this;
+  }
+  open(method: string, url: string): void {
+    this.method = method;
+    this.url = url;
+  }
+  setRequestHeader(k: string, v: string): void {
+    this.headers[k] = v;
+  }
+  send(body: unknown): void {
+    this.body = body;
+    this.sent = true;
+  }
+  abort(): void {
+    this.onabort?.();
+  }
+  // test drivers
+  progress(loaded: number, total: number, lengthComputable = true): void {
+    this.upload.onprogress?.({ loaded, total, lengthComputable } as ProgressEvent);
+  }
+  finish(status: number, body: string, statusText = ''): void {
+    this.status = status;
+    this.statusText = statusText;
+    this.response = body;
+    this.onload?.();
+  }
+}
+
+function bigFile(bytes: number, name = 'take.wav'): File {
+  return new File([new Uint8Array(bytes)], name, { type: 'audio/wav' });
+}
+
+describe('uploadWithProgress', () => {
+  beforeEach(() => {
+    FakeXhr.last = null;
+    vi.stubGlobal('XMLHttpRequest', FakeXhr);
+  });
+
+  it('opens a POST to /api/upload with the token header and a multipart body', () => {
+    void client().uploadWithProgress(bigFile(8));
+    const xhr = FakeXhr.last as FakeXhr;
+    expect(xhr.method).toBe('POST');
+    expect(xhr.url).toBe(`${BASE}/api/upload`);
+    expect(xhr.headers['X-Hawa-Token']).toBe(TOKEN);
+    expect(xhr.body).toBeInstanceOf(FormData);
+    expect(xhr.sent).toBe(true);
+  });
+
+  it('reports byte progress and pins the bar at 100% when the engine answers', async () => {
+    const seen: Array<[number, number]> = [];
+    const p = client().uploadWithProgress(bigFile(1000), {
+      onProgress: (loaded, total) => seen.push([loaded, total]),
+    });
+    const xhr = FakeXhr.last as FakeXhr;
+    xhr.progress(250, 1000);
+    xhr.progress(750, 1000);
+    xhr.finish(200, '{"path":"/work/uploads/take.wav"}');
+    await expect(p).resolves.toEqual({ path: '/work/uploads/take.wav' });
+    expect(seen).toEqual([
+      [250, 1000],
+      [750, 1000],
+      [1000, 1000],
+    ]);
+  });
+
+  it('falls back to the file size when the transfer is not length-computable', async () => {
+    const seen: Array<[number, number]> = [];
+    const p = client().uploadWithProgress(bigFile(512), {
+      onProgress: (loaded, total) => seen.push([loaded, total]),
+    });
+    const xhr = FakeXhr.last as FakeXhr;
+    xhr.progress(128, 0, false);
+    xhr.finish(200, '{"path":"/work/a.wav"}');
+    await p;
+    expect(seen[0]).toEqual([128, 512]);
+  });
+
+  it('hands back a cancel that aborts the transfer and reads as a cancellation', async () => {
+    let cancel: (() => void) | null = null;
+    const p = client().uploadWithProgress(bigFile(1000), {
+      onCancelHandle: (fn) => {
+        cancel = fn;
+      },
+    });
+    expect(cancel).toBeTypeOf('function');
+    (cancel as unknown as () => void)();
+    const err = (await p.catch((e: unknown) => e)) as DOMException;
+    expect(err).toBeInstanceOf(DOMException);
+    expect(err.name).toBe('AbortError');
+    expect(err.message).toBe('Upload cancelled');
+  });
+
+  it('distinguishes an abort we did not ask for', async () => {
+    const p = client().uploadWithProgress(bigFile(10));
+    (FakeXhr.last as FakeXhr).abort();
+    const err = (await p.catch((e: unknown) => e)) as DOMException;
+    expect(err.name).toBe('AbortError');
+    expect(err.message).toBe('Aborted');
+  });
+
+  it('maps a dead socket and a timeout to zero-status EngineErrors', async () => {
+    const p1 = client().uploadWithProgress(bigFile(10));
+    (FakeXhr.last as FakeXhr).onerror?.();
+    const e1 = (await p1.catch((e: unknown) => e)) as EngineError;
+    expect(e1).toBeInstanceOf(EngineError);
+    expect([e1.status, e1.code]).toEqual([0, 'network']);
+
+    const p2 = client().uploadWithProgress(bigFile(10));
+    (FakeXhr.last as FakeXhr).ontimeout?.();
+    const e2 = (await p2.catch((e: unknown) => e)) as EngineError;
+    expect([e2.status, e2.code]).toEqual([0, 'timeout']);
+  });
+
+  it('reports the engine’s own refusal for a rejected upload', async () => {
+    const p = client().uploadWithProgress(bigFile(10));
+    (FakeXhr.last as FakeXhr).finish(413, '{"error":"too_large","message":"file exceeds the cap"}');
+    const err = (await p.catch((e: unknown) => e)) as EngineError;
+    expect([err.status, err.code, err.message]).toEqual([413, 'too_large', 'file exceeds the cap']);
+  });
+
+  it('treats a 200 with no path as a failure, not a success with undefined', async () => {
+    const p = client().uploadWithProgress(bigFile(10));
+    (FakeXhr.last as FakeXhr).finish(200, '{"ok":true}', 'OK');
+    const err = (await p.catch((e: unknown) => e)) as EngineError;
+    expect(err).toBeInstanceOf(EngineError);
+    expect(err.code).toBe('http_200');
+  });
+
+  it('survives a non-JSON body on a failure', async () => {
+    const p = client().uploadWithProgress(bigFile(10));
+    (FakeXhr.last as FakeXhr).finish(500, '<html>', 'Internal Server Error');
+    const err = (await p.catch((e: unknown) => e)) as EngineError;
+    expect(err.code).toBe('http_500');
+    expect(err.message).toBe('500 Internal Server Error');
+  });
+});

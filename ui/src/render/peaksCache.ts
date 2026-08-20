@@ -34,6 +34,10 @@ export function peaksSupported(): boolean {
 export function clearPeaksCache(): void {
   cache.clear();
   inflight.clear();
+  // Also re-arm the capability probe. The latch exists so one 404 does not make
+  // every zoom re-ask an engine that cannot answer — but the cache is cleared when
+  // we point at a different engine, and that one may well support the route.
+  supported = true;
 }
 
 export function roundTime(t: number): number {

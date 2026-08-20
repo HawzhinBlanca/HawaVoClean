@@ -33,10 +33,22 @@ function Tile({ label, unit, orig, clean, hasCleaned, better, digits = 1 }: Tile
   // carries a skeleton bar where the number will land (it shimmers while the
   // clip is being analyzed — see interaction.css).
   const dataState = hasClean ? 'ab' : hasOrig ? 'single' : 'empty';
+  // D1 · read as separate nodes the tile is a pile of loose numbers — "Noise
+  // floor", "−84.7", "dB", "−48.5", "−36.2" — with the one mark that says how
+  // they relate (the delta operator) already hidden as decoration. The tile is
+  // therefore named as a whole and its interior is hidden from assistive
+  // technology, so it is announced once, as the sentence it draws.
+  const say = hasClean
+    ? `${label}: ${fmt(clean, digits)} ${unit}, from ${fmt(orig, digits)} ${unit}, change ${deltaText ?? '—'} ${unit}`
+    : hasOrig
+      ? `${label}: ${fmt(orig, digits)} ${unit}, original only`
+      : `${label}: not measured yet`;
   return (
-    <div className="tile" data-state={dataState}>
-      <div className="k">{label}</div>
-      <div className="vals">
+    <div className="tile" data-state={dataState} role="group" aria-label={say}>
+      <div className="k" aria-hidden="true">
+        {label}
+      </div>
+      <div className="vals" aria-hidden="true">
         {hasClean ? (
           <span className="clean">{fmt(clean, digits)}</span>
         ) : hasOrig ? (
@@ -46,7 +58,7 @@ function Tile({ label, unit, orig, clean, hasCleaned, better, digits = 1 }: Tile
         )}
         <span className="unit">{unit}</span>
       </div>
-      <div className="sub">
+      <div className="sub" aria-hidden="true">
         {hasClean ? (
           <>
             {/* This row used to read `−24.9 → +3.2`, which every reader parses
@@ -78,7 +90,7 @@ export function MetricsTiles() {
   const cleaned = useStore((s) => s.cleaned);
   const hasCleaned = Boolean(cleaned);
   return (
-    <div className="metrics">
+    <div className="metrics" role="group" aria-label="Loudness and noise measurements">
       <Tile
         label="Integrated"
         unit="LUFS"

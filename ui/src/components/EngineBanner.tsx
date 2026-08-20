@@ -61,7 +61,21 @@ export function EngineBanner() {
   if (history.length > 0) kept.push(`${history.length} run${history.length === 1 ? '' : 's'}`);
 
   return (
-    <section className="panel offline-bar" role="alert" aria-live="assertive">
+    // D1 · this used to be `role="alert" aria-live="assertive"` on the whole
+    // section — with a retry countdown and an outage clock ticking inside it
+    // four times a second. Every tick was a fresh interruption: a screen
+    // reader user could not hear anything else while the engine was down. The
+    // section is now an ordinary named region, and the announcement is one
+    // short sentence in a live element of its own whose text does not tick.
+    // Assertive is still the right level for it: the engine going away changes
+    // what every control on the screen can do, so it earns the interruption —
+    // once.
+    <section className="panel offline-bar" aria-label="Engine status">
+      <p className="sr-only" role="alert">
+        {inflight
+          ? 'Engine offline. A run was in flight; its outcome is read back when the engine returns.'
+          : 'Engine offline. Nothing on screen was lost, and the app is reconnecting on its own.'}
+      </p>
       <span className="ob-glyph" aria-hidden="true">
         <IconWarn size={15} />
       </span>
@@ -92,6 +106,10 @@ export function EngineBanner() {
         </p>
       </div>
 
+      {/* The countdown redraws four times a second. With the section no longer
+          a live region that costs nothing — it is a clock, read when you look
+          at it — so it stays in the accessibility tree where a user browsing
+          the banner can find out that a retry is coming. */}
       <div className="ob-act">
         <span className={`ob-state${probing ? ' live' : ''}`}>
           {probing ? (

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent,
+} from 'react';
 import { getPlayer } from '../audio/player';
 import { WaveformHost } from '../render/WaveformHost';
 import { loadPeaks, peaksSupported } from '../render/peaksCache';
@@ -56,7 +63,6 @@ const RULER_FONT = '9.5px "SF Mono", ui-monospace, Menlo, Monaco, "Roboto Mono",
 const DETAIL_DEBOUNCE_MS = 120;
 /** Only re-query when the window would gain real detail over the base envelope. */
 const DETAIL_GAIN = 1.2;
-const BASE_BUCKETS = 1200;
 
 interface DetailKey {
   path: string;
@@ -224,6 +230,17 @@ export function WaveformDisplay() {
       panel.dataset.duration = dur.toFixed(6);
       panel.dataset.maxZoom = String(waveView.isMaxZoom);
     }
+    // D1 · the region's name *is* the readout. Written imperatively for the
+    // same reason the ruler is: a zoom must not cost a React render.
+    const wrap = wrapRef.current;
+    if (wrap) {
+      wrap.setAttribute(
+        'aria-label',
+        dur > 0
+          ? `Waveform, showing ${formatSeconds(v.start, span)} to ${formatSeconds(v.end, span)} of ${dur.toFixed(1)} seconds`
+          : 'Waveform, no clip loaded',
+      );
+    }
     const ov = ovRef.current;
     if (ov && dur > 0) {
       ov.setAttribute('aria-valuemin', '0');
@@ -240,6 +257,8 @@ export function WaveformDisplay() {
 
   const runDetailFetch = useCallback(() => {
     detailTimer.current = null;
+    // The burst has settled — a good moment to ask the worker what it cost.
+    hostRef.current?.requestStats();
     const host = hostRef.current;
     const st = getState();
     const client = st.client;
@@ -254,7 +273,12 @@ export function WaveformDisplay() {
     const buckets = bucketsRef.current;
     // Base envelope resolution over this window; skip the round trip when the
     // window is already drawn from as many buckets as the engine would return.
-    const baseHere = (BASE_BUCKETS * span) / dur;
+    // The base's own length is the authority — `/api/analyze` is asked for one
+    // bucket per device column, so at FIT the base *is* the answer and a
+    // whole-file `/api/peaks` would be a second full decode for nothing.
+    const baseBuckets = st.original?.peaks.min.length ?? 0;
+    if (baseBuckets <= 0) return;
+    const baseHere = (baseBuckets * span) / dur;
     const sr = st.original?.sample_rate ?? 48000;
     const gain = Math.min(buckets, Math.max(1, Math.round(span * sr)));
     if (gain < baseHere * DETAIL_GAIN) return;
@@ -345,6 +369,20 @@ export function WaveformDisplay() {
     const host = new WaveformHost(canvas, {
       onReady: (ok) => setGlOk(ok),
       onError: (m) => setError(`Waveform renderer: ${m}`),
+      // C1 · the renderer's own cost, on the panel next to the view state, so
+      // "60 fps interaction" can be read off the running app instead of
+      // inferred from a profiler trace taken once.
+      onStats: (st) => {
+        const panel = panelRef.current;
+        if (!panel) return;
+        panel.dataset.frames = String(st.frames);
+        panel.dataset.frameMs = st.last.toFixed(3);
+        panel.dataset.frameMeanMs = st.mean.toFixed(3);
+        panel.dataset.frameP95Ms = st.p95.toFixed(3);
+        panel.dataset.frameMaxMs = st.max.toFixed(3);
+        panel.dataset.frameMaxAllMs = st.maxAll.toFixed(3);
+        panel.dataset.frameIntervalMs = st.interval.toFixed(3);
+      },
     });
     hostRef.current = host;
     host.setView(waveView.start_s, waveView.end_s);
@@ -558,6 +596,98 @@ export function WaveformDisplay() {
     waveView.reset();
   }, []);
 
+  // ------------------------------------------------------------- D1 keyboard
+  //
+  // Zoom and pan were pointer-only: wheel, ruler drag, double-click. That left
+  // the one display that carries the whole clip unreachable without a mouse.
+  // Both surfaces are now focus stops with their own key handling, and both
+  // call `preventDefault` on every key they consume so the global map (which
+  // bails on `defaultPrevented`) never also seeks on the same press.
+
+  /** Pan by a fraction of the visible span, keeping the zoom. */
+  const panBy = useCallback((frac: number) => {
+    const span = waveView.span;
+    if (!(span > 0)) return;
+    const d = span * frac;
+    waveView.set(waveView.start_s + d, waveView.end_s + d);
+  }, []);
+
+  const onViewKey = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!(waveView.duration > 0)) return;
+      const mid = waveView.start_s + waveView.span / 2;
+      switch (e.key) {
+        case '+':
+        case '=':
+          waveView.zoomAt(mid, 1.6);
+          break;
+        case '-':
+        case '_':
+          waveView.zoomAt(mid, 1 / 1.6);
+          break;
+        case '0':
+          waveView.reset();
+          break;
+        case 'Home':
+          waveView.set(0, waveView.span);
+          break;
+        case 'End':
+          waveView.set(waveView.duration - waveView.span, waveView.duration);
+          break;
+        case 'PageUp':
+          panBy(-1);
+          break;
+        case 'PageDown':
+          panBy(1);
+          break;
+        default:
+          return;
+      }
+      e.preventDefault();
+    },
+    [panBy],
+  );
+
+  /**
+   * The overview is `role="scrollbar"`, so it takes the keys a scrollbar takes:
+   * arrows step, Page keys jump a windowful, Home/End go to the ends. Arrows
+   * mean *scroll* here rather than *seek* — that is what focusing a scrollbar
+   * is for — and the seek binding is one Tab away.
+   */
+  const onOverviewKey = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!(waveView.duration > 0)) return;
+      switch (e.key) {
+        case 'ArrowLeft':
+        case 'ArrowUp':
+          panBy(-0.1);
+          break;
+        case 'ArrowRight':
+        case 'ArrowDown':
+          panBy(0.1);
+          break;
+        case 'PageUp':
+          panBy(-1);
+          break;
+        case 'PageDown':
+          panBy(1);
+          break;
+        case 'Home':
+          waveView.set(0, waveView.span);
+          break;
+        case 'End':
+          waveView.set(waveView.duration - waveView.span, waveView.duration);
+          break;
+        default:
+          return;
+      }
+      e.preventDefault();
+    },
+    [panBy],
+  );
+
   // Ruler: drag to pan.
   const onRulerDown = useCallback((e: PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || !(waveView.duration > 0)) return;
@@ -634,7 +764,12 @@ export function WaveformDisplay() {
   const hasData = Boolean(original);
 
   return (
-    <section className="panel wavepanel" ref={panelRef}>
+    <section className="panel wavepanel" ref={panelRef} aria-label="Waveform">
+      <p className="sr-only" id="wave-view-help">
+        Plus and minus zoom about the centre, zero fits the whole clip, Page Up
+        and Page Down move one windowful, Home and End go to the start and the
+        end. Left and right arrows seek the transport.
+      </p>
       <div className="panel-head">
         <div className="panel-title">
           <span>Waveform</span>
@@ -682,6 +817,17 @@ export function WaveformDisplay() {
             ref={wrapRef}
             id="wave-canvas-wrap"
             className="wave-canvas-wrap"
+            // D1 · the display is an interactive region, not a picture: it
+            // seeks on click, zooms on wheel and pans on drag. It therefore
+            // gets a focus stop, a role that says "a thing with controls in
+            // it", and a label that is re-written on every view change with
+            // the window it is currently showing — so the answer to "what am I
+            // looking at" is in the accessibility tree, not only in the pixels.
+            role="group"
+            tabIndex={0}
+            aria-label="Waveform display"
+            aria-describedby="wave-view-help"
+            onKeyDown={onViewKey}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
@@ -718,11 +864,13 @@ export function WaveformDisplay() {
           className="wave-overview"
           ref={ovRef}
           role="scrollbar"
+          tabIndex={0}
           aria-label="Visible waveform window"
           aria-controls="wave-canvas-wrap"
           aria-orientation="horizontal"
           aria-valuenow={0}
-          title="Drag to scroll the visible window"
+          title="Drag to scroll the visible window · arrows and page keys when focused"
+          onKeyDown={onOverviewKey}
           onPointerDown={onOvDown}
           onPointerMove={onOvMove}
           onPointerUp={onOvUp}

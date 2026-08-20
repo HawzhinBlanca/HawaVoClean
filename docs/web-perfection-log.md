@@ -212,3 +212,100 @@ container timeline (matching `/api/peaks`, the playhead and `<audio>`) instead o
 timeline. On Flute 09 that shifts buckets by median 0.029 dB / p95 0.29 dB / worst 4.4 dB in one
 quiet bucket. Spectrum, loudness and true peak are unaffected (they see every decoded sample). The
 only exact alternative is spilling the mono signal to disk for a second pass (~2 GB on a 3 h file).
+
+## Iteration 4 — 2026-08-20 — C1, C2, C3, C5, D4 (25/27; D1/D2 in progress)
+
+**Harness honesty, recorded because it changes how to read every fps claim in this log.**
+The Claude Browser pane runs its tab with `visibilityState: "hidden"` and `innerWidth: 0`. rAF never
+fires there — and because Chrome gates a DedicatedWorker's rAF on the same document, the waveform
+worker is throttled too (3 renders in 25 s). `tabs_select` does not fix it. So C1 was measured in a
+separate headful Chrome (own profile, `--expose-gc`, killed afterwards) reporting
+`visibilityState: "visible"` and real vsync: **median rAF interval 8.3 ms** — this Mac is 120 Hz
+ProMotion, so "60 fps" was actually measured against an **8.3 ms** budget, not 16.7 ms.
+
+**C1 — 90-minute file (1.037 GB, generated then deleted).**
+| phase | events | main-thread ms/event (med/p95/max) | rAF gap (med/p95/max) |
+|---|---|---|---|
+| zoom burst 2/frame, in->out->in through 1:1 | 360 | 0.2 / 0.4 / 0.6 | 8.3 / 10.0 / 10.3 |
+| zoom 8/frame (pathological ~960 Hz) | 960 | 0.0 / 0.1 / 0.4 | 8.4 / 10.3 / 10.4 |
+| ruler pan drag | 240 | 0.2 / 0.4 / 0.4 | 8.3 / 9.6 / 10.3 |
+| seek drag (transport + playhead per event) | 240 | 0.2 / 0.4 / 0.5 | 8.3 / 9.9 / 10.3 |
+
+**Long tasks (>50 ms) across all 1800 events: 0. Zero dropped frames** (max gap 10.4 ms vs 8.3 ms
+vsync). Worker's own frame time: mean **0.107 ms**, p95 0.20 ms. The goal's actual requirement —
+"worker never blocks main thread >16 ms" — is proved structurally: the renderer is a DedicatedWorker
+on an OffscreenCanvas, so the main thread never enters it; its only main-thread cost is one
+structured-clone postMessage per event, p95 **0.4 ms**. Request discipline: a 360-event zoom burst
+produced **2** `/api/peaks` calls (120 ms debounce + AbortController + 24-entry LRU).
+
+*Real bug found and fixed by this measurement:* `/api/analyze` always asked for 1200 buckets while
+`WaveformDisplay` compared against a hard-coded `BASE_BUCKETS = 1200`, so on any display wider than
+1200 device columns the fit view instantly failed its detail test and issued a **whole-file**
+`/api/peaks` — a second full decode on every clip load, **2500 ms on the 90-minute file**. The view
+now records the display's real bucket demand. After: `/api/peaks` at fit = **0 calls**, and the fit
+view is sharper 2.5 s sooner. Asking for more buckets is free (1200 -> 2400 buckets on a 1 GB file:
+15.98 s vs 16.00 s — decoding is the entire cost).
+
+**C2 — paint and bundle.** Cold load: first-paint **76 ms**, FCP/LCP **168 ms**, DCL 53.6 ms, **0
+long tasks**. `/api/health` starts at 82.5 ms, i.e. *after* first paint — the chassis does not wait
+on the engine. Bundle measured with gzip -9 on the emitted files: JS 102.6 kB gz + CSS 15.3 kB gz +
+worker 7.9 kB gz + html 0.33 kB = **126.1 kB gz against a 500 kB budget**.
+
+**C3 — 10 analyze+process cycles**, forced GC x5 before each sample. Heap **11,859 -> 13,973 KB
+= +2.06 MB** against a 10 MB budget; per-cycle deltas decay 700 -> 26 KB (the 8-entry history ring
+filling, then ~30 KB/cycle marginal — flat, not linear). Live-object census constant at every
+sample: `<audio>` 2, `<canvas>` 4, `Worker` 0 created/0 live, `EventSource` 10 created / **0 live**,
+`blob:` URLs 20 created / **exactly 2 live**, DOM nodes plateau at 478 from cycle 8. **No leaks.**
+Correction to the goal's wording: audio elements and workers are not created per file — `DualPlayer`
+is a singleton that swaps `src` and revokes the previous blob URL, and the waveform `Worker` is
+created once at mount and `terminate()`d on unmount. Better than per-file disposal, and verified at
+zero growth over 10 switches.
+
+**C5 — 20 adversarial fixtures** driven through the real UI. Four real failures found and fixed:
+- **corrupt container** showed a 358-character raw exception (`ffprobe failed to probe /Users/.../
+  work/uploads/<uuid>/random.wav: Command '['/opt/homebrew/bin/ffprobe', ...]' returned non-zero
+  exit status 1.`), 3013 px of text ellipsised mid-path. Now: *"random.wav" is not readable audio —
+  the container is empty, truncated or corrupt. Re-export it, or try the original file.*
+- **truncated m4a** — same class, same fix.
+- **video with no audio track** — leaked the work-dir path; now *"noaudio.mp4" carries no audio track
+  — it is a video-only (or data-only) container. There is nothing here to clean.*
+- **192 kHz file** — analysed fine then failed at PROCESS with a bare `INVALID_USER_INPUT:`. Now the
+  RATE cell warns pre-flight and the refusal reads *"hi192k.wav" is 192 kHz. This tool works up to
+  48 kHz — resample it down and load it again.*
+Passing untouched: 0-byte, 1-sample, 50 ms, `it's a "take" — 01.wav`, `テスト音声.wav`,
+`🎙️ take.wav`, `-rf take.wav`, embedded newline, 196-character name (clamped to 260 px, no page
+overflow at 1440 or 960), `q&a=1?x#hash%20 take.wav` (all three artefacts HEAD 200), and a file
+deleted between analyze and process.
+
+**D4 — vitest.** 222 tests in 9 files, 556 ms: store transitions, SSE client (full back-off ladder
+measured tick-by-tick, `onGone` 404 semantics), API client (token header vs query, error shapes,
+abort, upload progress against a fake XHR), the keyboard map (every binding, modifier and
+editable-target inertness, Esc priority chain), selection/stepping, and the pure render logic
+(`ticks`, `viewWindow` pivot preservation to 1e-9, `peaksCache` LRU + capability latch). The suite
+was mutation-checked: breaking the zoom pivot, the tick minPx, the modifier guard, the SSE back-off
+formula, the history slice, the token header name, the key rounding and the `ENGINE_RESTARTED` code
+each produced failures in exactly the owning file. One production change to enable it: the keyboard
+map was lifted verbatim out of `App.tsx` into `state/keymap.ts` (a pure move).
+
+**Four items the agents flagged but could not own — fixed by the orchestrator:**
+1. **Esc did not cancel an analysis.** Added the missing rung to the Esc ladder in `state/keymap.ts`
+   (upload -> *analysis* -> job -> rejection -> selection), updated the test mock, and added a test
+   pinning the ordering. 222 tests green.
+2. **`stepUnit` wrapped asymmetrically.** With nothing selected and the playhead outside every unit,
+   `]` past the last unit came round to the **first** and `[` before the first took the **last** —
+   silently throwing the user back to the top of a take. Both now clamp; the two tests that
+   documented the old behaviour were rewritten to assert clamping.
+3. **`formatTimeShort` printed `1:60`** for 119.6 s (it rounded the seconds remainder without the
+   minute renormalisation). Now rounds to whole seconds first, then splits.
+4. **`clearPeaksCache()` did not reset the capability latch**, so once an engine without
+   `/api/peaks` had been seen the route was never probed again for the life of the page — including
+   after pointing at a different, capable engine. Now re-arms.
+
+**Gates:** ruff clean, format 160 files, `mypy --strict` clean, **492 passed**, fuzz **41 passed**,
+`pnpm typecheck` + `pnpm build` green, `pnpm test:run` **222 passed**, worker grep **0**.
+
+**Still open:** D1/D2 — the accessibility agent died mid-run (connection lost) and its work is being
+redone. Also recorded, not fixed: at 1:1 zoom on a 90-minute file there is a ~150 ms transient during
+a pan where the display draws from an interpolated base band rather than real samples (frame rate
+unaffected; a fix was attempted, could not be shown to be an improvement, and was reverted rather
+than churn the ticked renderer on a hypothesis).

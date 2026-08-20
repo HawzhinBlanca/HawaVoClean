@@ -21,11 +21,15 @@ function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+/** Fallback envelope resolution before the display has measured itself. */
+const DEFAULT_MAX_BUCKETS = 1200;
+
 class WaveViewController {
   private start = 0;
   private end = 0;
   private durationS = 0;
   private minSpanS = ABS_MIN_SPAN_S;
+  private maxBucketsN = DEFAULT_MAX_BUCKETS;
   private readonly listeners = new Set<ViewListener>();
 
   get view(): ViewWindow {
@@ -63,6 +67,17 @@ class WaveViewController {
     return this.span <= this.minSpanS * (1 + 1e-6);
   }
 
+  /**
+   * One bucket per device column of the waveform display — the finest envelope
+   * this screen can show, and therefore the resolution `/api/analyze` should be
+   * asked for. Decoding the file is the whole cost of that call, so a
+   * display-resolution envelope is free where a later whole-file `/api/peaks`
+   * re-query is a second full decode.
+   */
+  get maxBuckets(): number {
+    return this.maxBucketsN;
+  }
+
   /** How many times narrower than the whole file the window is. */
   get factor(): number {
     if (!(this.durationS > 0) || !(this.span > 0)) return 1;
@@ -88,7 +103,8 @@ class WaveViewController {
   setSource(durationS: number, sampleRate: number, maxBuckets: number): void {
     this.durationS = durationS > 0 ? durationS : 0;
     const sr = sampleRate > 0 ? sampleRate : 48000;
-    const buckets = maxBuckets > 0 ? maxBuckets : 1200;
+    const buckets = maxBuckets > 0 ? maxBuckets : DEFAULT_MAX_BUCKETS;
+    this.maxBucketsN = buckets;
     this.minSpanS = Math.max(ABS_MIN_SPAN_S, Math.min(this.durationS || buckets / sr, buckets / sr));
     this.start = 0;
     this.end = this.durationS;
@@ -97,9 +113,12 @@ class WaveViewController {
 
   /** Display got wider/narrower: the deepest useful zoom moves with it. */
   setMaxBuckets(sampleRate: number, maxBuckets: number): void {
+    // Recorded even with no clip loaded: the first `/api/analyze` of a session
+    // needs to know how wide the display is before anything has been analyzed.
+    this.maxBucketsN = maxBuckets > 0 ? maxBuckets : DEFAULT_MAX_BUCKETS;
     if (!(this.durationS > 0)) return;
     const sr = sampleRate > 0 ? sampleRate : 48000;
-    const buckets = maxBuckets > 0 ? maxBuckets : 1200;
+    const buckets = this.maxBucketsN;
     this.minSpanS = Math.max(ABS_MIN_SPAN_S, Math.min(this.durationS, buckets / sr));
     if (this.span < this.minSpanS) this.set(this.start, this.start + this.minSpanS);
   }

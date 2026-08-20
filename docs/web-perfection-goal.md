@@ -43,15 +43,15 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       widths at ≥1920.
 
 ## C. Performance & robustness
-- [ ] C1 60 fps waveform interaction (zoom/pan/seek) on a 90-minute file — measured with
+- [x] C1 60 fps waveform interaction (zoom/pan/seek) on a 90-minute file — measured with
       synthetic long audio; worker never blocks main thread >16 ms (Performance panel evidence).
-- [ ] C2 First meaningful paint of the built bundle < 1 s on localhost; bundle < 500 KB gz
+- [x] C2 First meaningful paint of the built bundle < 1 s on localhost; bundle < 500 KB gz
       (excluding fonts — there are none).
-- [ ] C3 No memory growth across 10 consecutive analyze+process cycles (heap snapshot delta
+- [x] C3 No memory growth across 10 consecutive analyze+process cycles (heap snapshot delta
       < 10 MB); audio elements and workers disposed on file switch.
 - [x] C4 Zero console errors/warnings in all exercised flows; zero failed/404 network
       requests; all requests to 127.0.0.1 only.
-- [ ] C5 Adversarial inputs at the UI boundary: 0-byte file, 3-hour file, 192 kHz file,
+- [x] C5 Adversarial inputs at the UI boundary: 0-byte file, 3-hour file, 192 kHz file,
       corrupt container, filename with quotes/unicode/emoji — every one ends in a designed
       error or success state, never a stuck spinner.
 
@@ -60,7 +60,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       all controls; verdict tooltip content reachable without hover.
 - [ ] D2 Contrast ≥ 4.5:1 for all text (checked on the dark theme values actually shipped).
 - [x] D3 `prefers-reduced-motion` honored (disables pulse/glow animation, keeps function).
-- [ ] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
+- [x] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
       (default + fuzz when engine touched) / mutation gate on clean tree / `pnpm typecheck`
       / `pnpm build`. UI logic that can be unit-tested (state machine, SSE client, API client,
       keyboard map) has vitest coverage; the rest is covered by scripted browser verification.

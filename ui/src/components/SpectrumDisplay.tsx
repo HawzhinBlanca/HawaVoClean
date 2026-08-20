@@ -94,7 +94,22 @@ export function SpectrumDisplay() {
       </div>
       <div className="spectrum-body">
         <div className="display spectrum-display">
-          <canvas ref={canvasRef} className="spectrum-canvas" />
+          {/* D1 · a canvas with no role is an unlabelled graphic. The plot
+              is not interactive — it is a picture of the two spectra — so it
+              is named as one, and the key below it (a real list, in the
+              accessibility tree) carries which series are actually present. */}
+          <canvas
+            ref={canvasRef}
+            className="spectrum-canvas"
+            role="img"
+            aria-label={
+              both
+                ? 'Long-term average spectrum: original and cleaned, with the removed energy between them'
+                : original !== null
+                  ? 'Long-term average spectrum of the original clip'
+                  : 'Long-term average spectrum: no signal yet'
+            }
+          />
         </div>
         {/*
           ONE key, directly under the picture it explains.

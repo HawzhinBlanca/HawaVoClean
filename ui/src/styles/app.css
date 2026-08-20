@@ -106,12 +106,32 @@ button:disabled {
   cursor: default;
 }
 
+/* D1 · one focus ring for the whole product. The values here are the same
+   ones interaction.css restates as the behaviour layer's `--ix-focus`; they
+   are written out with a literal fallback so this sheet alone still draws a
+   correct ring if it is ever loaded on its own. Nothing anywhere is allowed to
+   set `outline: none` without putting a ring back. */
 button:focus-visible,
 [tabindex]:focus-visible,
 input:focus-visible,
 a:focus-visible {
-  outline: 1px solid rgba(57, 208, 255, 0.7);
-  outline-offset: 1px;
+  outline: 2px solid var(--ix-focus, rgba(120, 222, 255, 0.95));
+  outline-offset: 2px;
+}
+
+/* D1 · text for assistive technology only: in the accessibility tree, off the
+   screen, and never a scroll or layout artefact (a 1px clipped box, not
+   `display: none`, which would remove it from the tree as well). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 ::selection {
@@ -454,9 +474,24 @@ kbd {
   box-shadow: var(--shadow-pressed);
 }
 
-.btn:disabled,
+/* D2 · an unavailable control still has to be readable.
+ *
+ * Measured on the shipped pixels, `opacity: 0.38` put the label of every
+ * greyed artefact button at 2.9:1 — and these buttons are `aria-disabled`
+ * precisely so they stay in the tab order and can explain themselves, so a
+ * keyboard user lands on text they cannot read. WCAG 1.4.3 exempts inactive
+ * components from the 4.5:1 rule; the split applied here is finer than the
+ * exemption:
+ *   `aria-disabled` — still focusable, still meant to be read → 4.5:1
+ *   `:disabled`     — out of the tab order entirely            → 3:1 floor
+ * "Unavailable" is then carried by the dim plus the dead hover/press response
+ * and `cursor: not-allowed`, not by illegibility. */
+.btn:disabled {
+  opacity: 0.62;
+}
+
 .btn[aria-disabled='true'] {
-  opacity: 0.38;
+  opacity: 0.72;
 }
 
 .btn.primary {
@@ -1146,7 +1181,7 @@ kbd {
 }
 
 .seg button:disabled {
-  opacity: 0.4;
+  opacity: 0.62;
 }
 
 .seg .thumb {
@@ -1205,9 +1240,15 @@ kbd {
   transform: translateY(0);
 }
 
-.process:disabled,
+/* The plate is `aria-disabled`, never `disabled`: it keeps its focus stop and
+   its readout is the button's own `aria-describedby`, so it takes the 4.5:1
+   half of the rule above. */
+.process:disabled {
+  opacity: 0.62;
+}
+
 .process[aria-disabled='true'] {
-  opacity: 0.45;
+  opacity: 0.78;
 }
 
 .process .ring {
@@ -1278,9 +1319,14 @@ kbd {
   letter-spacing: var(--ls-body);
 }
 
+/* D2 · the per-cent sign rides inside the arc, whose lit centre measures
+   around #213741 while a run is in flight — a brighter backdrop than any
+   panel, which put --fg-3 at 4.43:1. It is the unit on the one number the
+   plate is showing, so it takes --fg-2 (7.1:1) and still reads a step below
+   the figure itself, which is --fg. */
 .process .ring .center .pct small {
   font-size: var(--fs-label);
-  color: var(--fg-3);
+  color: var(--fg-2);
   margin-left: 1px;
 }
 
@@ -1377,7 +1423,7 @@ kbd {
 }
 
 .playbtn:disabled {
-  opacity: 0.35;
+  opacity: 0.62;
 }
 
 .playbtn.on {
@@ -1468,10 +1514,13 @@ kbd {
   color: var(--fg-2);
 }
 
+/* D2 · the footer sits under the error bar's spill when one is up, which lifts
+ * its plate a step and took this tag from 4.88:1 to 4.43:1. One grey up holds
+ * it at 5.9:1 with the bar and 6.5:1 without. */
 .footer .meta {
   font-family: var(--font-mono);
   font-size: var(--fs-label);
-  color: var(--fg-4);
+  color: var(--fg-3);
   white-space: nowrap;
 }
 
@@ -1696,7 +1745,7 @@ kbd {
 
 .insp-step:disabled,
 .insp-clear:disabled {
-  opacity: 0.35;
+  opacity: 0.62;
 }
 
 /* ---- empty state: the run at a glance */
@@ -2163,9 +2212,13 @@ kbd {
   gap: 3px;
 }
 
+/* D2 · the dialog is a raised panel: measured on the shipped pixels its face
+ * paints around #21252d, two steps above a normal panel, which put --fg-4 at
+ * 4.2-4.4:1 here — the same surface-not-ramp problem the run list had. Every
+ * --fg-4 label inside the dialog steps up one grey, which measures 5.4:1. */
 .sc-combo .sep,
 .kwrap .plus {
-  color: var(--fg-4);
+  color: var(--fg-3);
   font-size: var(--fs-label);
 }
 
@@ -2177,7 +2230,7 @@ kbd {
 
 .sc-what em {
   font-style: normal;
-  color: var(--fg-4);
+  color: var(--fg-3);
 }
 
 kbd {
@@ -2435,4 +2488,14 @@ kbd {
    rather than by reaching into another component's stylesheet. */
 .panel-head .spec-legend .item {
   font-size: var(--fs-label);
+}
+
+/* D2 · "this series is not in the plot" was said with `opacity: 0.55` over
+   --fg-4, which measured 2.34:1 on the real pixels. A key entry is not a
+   control — no exemption applies to it — and it is the one thing on the panel
+   that explains what the colours mean. The state is now carried entirely by
+   the swatch (which already goes flat and grey) and by the two-step colour
+   drop from --fg-2 when on to --fg-4 when off, which measures 4.9:1. */
+.spec-legend .item.off {
+  opacity: 1;
 }

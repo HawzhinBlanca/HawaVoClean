@@ -45,10 +45,27 @@ const GROUPS: Group[] = [
     ],
   },
   {
+    title: 'Switches',
+    rows: [
+      { keys: [['Tab']], what: 'Move to the next control' },
+      { keys: [['←'], ['→']], what: 'Change the A/B or profile switch', when: 'switch focused' },
+    ],
+  },
+  {
     title: 'Help',
     rows: [
       { keys: [['?']], what: 'Open this panel' },
       { keys: [['Esc']], what: 'Close this panel' },
+    ],
+  },
+  {
+    title: 'Waveform · keyboard',
+    rows: [
+      { keys: [['+'], ['−']], what: 'Zoom in / out about the centre', when: 'display focused' },
+      { keys: [['0']], what: 'Fit the whole clip', when: 'display focused' },
+      { keys: [['PgUp'], ['PgDn']], what: 'Move one windowful', when: 'display focused' },
+      { keys: [['Home'], ['End']], what: 'Jump to the start / the end', when: 'display focused' },
+      { keys: [['←'], ['→']], what: 'Scroll the window', when: 'overview focused' },
     ],
   },
   {
@@ -129,10 +146,14 @@ export function ShortcutOverlay() {
         ref={dialogRef}
       >
         <div className="panel-head">
-          <div className="panel-title" id="sc-title">
+          {/* D1 · the dialog's own title is the h2 between the page's h1 and
+              the group headings below, which were otherwise an h1 → h3 jump
+              (axe: heading-order). Every heading element in this sheet is
+              reset to inherit its type, so nothing about the drawing moves. */}
+          <h2 className="panel-title" id="sc-title">
             <span>Keyboard shortcuts</span>
             <span className="sub">· web mode</span>
-          </div>
+          </h2>
           <button
             type="button"
             className="sc-close"

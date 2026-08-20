@@ -173,16 +173,21 @@ export function Header() {
 
   return (
     <header className="panel header">
-      <div className="wordmark">
+      {/* D1 · the page had no h1 at all. The wordmark is the document's one
+          top-level heading; nothing about how it is drawn changes. */}
+      <h1 className="wordmark">
         <span className="name">HAWAVOCLEAN</span>
         <span className="ver">v3.2</span>
-      </div>
+      </h1>
       <div className="header-mid">
         <span className={`badge${host === 'resolve' ? ' accent' : ''}`}>
           {HOST_LABEL[host] ?? 'WEB'}
         </span>
         <HeaderNow />
       </div>
+      {/* The lamp's word changes at most a few times a session (connecting →
+          ready → busy), so it is a safe polite region: no counter, no clock,
+          nothing that ticks. */}
       <div className="engine" aria-live="polite">
         <Led state={led} />
         <span className="txt">

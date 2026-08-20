@@ -48,12 +48,32 @@ function Row({
     entry.enhanced !== null && entry.unitsTotal !== null
       ? `${entry.enhanced}/${entry.unitsTotal}`
       : '—';
+  // D1 · a row draws seven fragments across two lines; read one after another
+  // they are unintelligible ("Flute 09.m4a.mp4 ON SCREEN studio 5/5 units +3.2
+  // LUFS Δ 4.2 s took 06:37:31"). The row is a button, so it gets one name
+  // that is a sentence, and the fragments are marked as the decoration of that
+  // sentence.
+  const say = [
+    entry.inputName || 'clip',
+    current ? 'currently on screen' : null,
+    entry.profile,
+    entry.outcome === 'done'
+      ? `${units} units enhanced, LUFS change ${lufsDelta(entry)}, took ${fmtRuntime(entry.durationMs)}`
+      : entry.outcome === 'failed'
+        ? `failed: ${entry.error || 'unknown error'}`
+        : 'cancelled',
+    `at ${clockOf(entry.at)}`,
+    blocked ? 'unavailable while the engine is offline' : null,
+  ]
+    .filter(Boolean)
+    .join(', ');
   return (
     <button
       type="button"
       className="hist-row"
       data-current={current ? 'true' : 'false'}
       data-outcome={entry.outcome}
+      aria-label={say}
       aria-current={current ? 'true' : undefined}
       aria-disabled={blocked ? 'true' : undefined}
       onClick={() => {
@@ -119,7 +139,11 @@ export function JobHistory() {
     : 'The engine is offline — this run stays in the list and opens again the moment it reconnects.';
 
   return (
-    <section className="panel history" data-empty={history.length === 0 ? 'true' : 'false'}>
+    <section
+      className="panel history"
+      aria-label="Session runs"
+      data-empty={history.length === 0 ? 'true' : 'false'}
+    >
       <div className="panel-head">
         <div className="panel-title">
           <span>Session runs</span>
@@ -140,7 +164,7 @@ export function JobHistory() {
             </p>
           </div>
         ) : (
-          <ul className="hist-list">
+          <ul className="hist-list" aria-label={`${history.length} runs, newest first`}>
             {history.map((e) => (
               <li key={e.jobId}>
                 <Row entry={e} current={e.jobId === currentRunId} blocked={blocked} />
