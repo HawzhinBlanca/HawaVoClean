@@ -33,13 +33,13 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       verdict strip staying aligned to the visible window.
 - [x] B4 Per-unit inspection: clicking a verdict segment selects the unit — highlights its
       range, shows its guard scores/decision reason in a details panel, seeks the transport.
-- [ ] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
+- [x] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
       re-selectable without re-analyzing.
-- [ ] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
+- [x] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
       (health polling), state preserved; SSE drop mid-job recovers to the correct terminal state.
 - [x] B7 Report access: download master + JSON report + human-readable txt from the UI;
       "copy report summary" one-liner.
-- [ ] B8 Responsive from 960×640 up to ultrawide; no overlap, no dead zones, sensible max
+- [x] B8 Responsive from 960×640 up to ultrawide; no overlap, no dead zones, sensible max
       widths at ≥1920.
 
 ## C. Performance & robustness
@@ -60,7 +60,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       all controls; verdict tooltip content reachable without hover.
 - [x] D2 Contrast ≥ 4.5:1 for all text (checked on the dark theme values actually shipped).
 - [x] D3 `prefers-reduced-motion` honored (disables pulse/glow animation, keeps function).
-- [ ] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
+- [x] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
       (default + fuzz when engine touched) / mutation gate on clean tree / `pnpm typecheck`
       / `pnpm build`. UI logic that can be unit-tested (state machine, SSE client, API client,
       keyboard map) has vitest coverage; the rest is covered by scripted browser verification.

@@ -16,6 +16,7 @@ import { UnitInspector } from './components/UnitInspector';
 import { WaveformDisplay } from './components/WaveformDisplay';
 import { connectEngine, ingestDataTransfer } from './state/actions';
 import { useKeyboardMap } from './state/keymap';
+import { unitsEnhancedSpoken } from './state/plural';
 import { getState, useStore } from './state/store';
 
 /**
@@ -53,7 +54,7 @@ function useJobAnnouncer(): string {
       const sum = report?.summary;
       setMsg(
         sum
-          ? `Processing finished. ${sum.enhanced ?? 0} of ${sum.units_total ?? 0} units enhanced.`
+          ? `Processing finished. ${unitsEnhancedSpoken(sum.enhanced ?? 0, sum.units_total ?? 0)}.`
           : 'Processing finished.',
       );
       return;

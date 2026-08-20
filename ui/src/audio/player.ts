@@ -388,6 +388,28 @@ export class DualPlayer {
   }
 
   /**
+   * A7 · the identity above this deck is switching NOW; whatever the deck is
+   * holding may stay claimed only if it is already the named file.
+   *
+   * `selectRun` switches the run on screen synchronously, but the deck loads
+   * that follow sit behind engine round-trips — and a hung engine mid-restore
+   * used to leave both decks holding the PREVIOUS run's audio under the new
+   * run's name for as long as the hang lasted (measured: transport
+   * `00:00.0 / 00:12.0` and two 12 s blobs under a 94.6 s run, indefinitely,
+   * with the A/B lit CLEANED). A deck must never claim audio it does not
+   * hold, so the mismatch is retired before the first await, not after the
+   * last one. A deck already holding `url` is left exactly as it is — the
+   * revive path in {@link load} still costs zero requests — so a healthy
+   * same-file restore is unchanged. `retire` keeps the element's `src`, so
+   * the audio itself also revives without a fetch if the same file is asked
+   * for again.
+   */
+  claimOnly(deck: Deck, url: string | null): void {
+    if (url !== null && this.attached[deck] === url) return;
+    this.retire(deck);
+  }
+
+  /**
    * One byte of the deck's file, and what happened when we asked for it.
    *
    * A one-byte ranged GET rather than a HEAD: a HEAD response carries a body

@@ -4,6 +4,7 @@
 // restore, not a re-run: nothing is decoded again.
 
 import { selectRun } from '../state/actions';
+import { unitNoun, unitsEnhanced } from '../state/plural';
 import { HISTORY_LIMIT, useStore, type HistoryEntry } from '../state/store';
 import { IconCancel, IconCheck, IconWarn } from './Icons';
 
@@ -75,7 +76,11 @@ function Row({
     current ? 'currently on screen' : null,
     entry.profile,
     entry.outcome === 'done'
-      ? `${units} units enhanced, LUFS change ${lufsDelta(entry)}, took ${fmtRuntime(entry.durationMs)}`
+      ? `${
+          entry.enhanced !== null && entry.unitsTotal !== null
+            ? unitsEnhanced(entry.enhanced, entry.unitsTotal)
+            : 'units not counted'
+        }, LUFS change ${lufsDelta(entry)}, took ${fmtRuntime(entry.durationMs)}`
       : entry.outcome === 'failed'
         ? `failed: ${entry.error || 'unknown error'}`
         : 'cancelled',
@@ -126,7 +131,7 @@ function Row({
           <>
             <span className="hist-kv">
               <span className="hist-v mono">{units}</span>
-              <span className="hist-k">units</span>
+              <span className="hist-k">{unitNoun(entry.unitsTotal ?? 0)}</span>
             </span>
             <span className="hist-kv">
               <span className="hist-v mono">{lufsDelta(entry)}</span>

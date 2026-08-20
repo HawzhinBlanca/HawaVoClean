@@ -623,6 +623,11 @@ def _install_signal_handlers() -> None:
     would orphan the isolated worker subprocess and skip workspace cleanup.
     Raising KeyboardInterrupt lets every cleanup path run; the exit code
     stays conventional (130).
+
+    This handler is also the parent-death watchdog's escalation rung: a
+    process spawned from a background job inherits ``SIGINT=SIG_IGN`` across
+    exec, and in that topology the watchdog self-delivers SIGTERM instead —
+    so this must be installed before the watchdog is armed.
     """
     import signal
 
@@ -634,7 +639,24 @@ def _install_signal_handlers() -> None:
 
 
 def main() -> None:
-    """CLI main entry point."""
+    """CLI entry point: one boundary turns KeyboardInterrupt into a clean exit.
+
+    The interrupt may be a Ctrl-C mid-run, the SIGTERM handler above, or the
+    parent-death watchdog's self-interrupt — which, when the spawner died
+    before the child finished arming, can land anywhere in startup, including
+    inside ``threading.Thread.start()``. Catching at the outermost frame is
+    the only place that covers them all: "Interrupted." and the conventional
+    130, never a raw traceback.
+    """
+    try:
+        _main()
+    except KeyboardInterrupt:
+        sys.stderr.write("\nInterrupted.\n")
+        sys.exit(130)
+
+
+def _main() -> None:
+    """Build the parser and dispatch (may raise KeyboardInterrupt)."""
     setup_logging()
     _install_signal_handlers()
     # Before argument parsing, let alone any work: everything above an armed
@@ -791,9 +813,6 @@ def main() -> None:
     args = parser.parse_args()
     try:
         code = args.func(args)
-    except KeyboardInterrupt:
-        sys.stderr.write("\nInterrupted.\n")
-        sys.exit(130)
     except HawaVoCleanError as e:
         # Every subcommand maps known failures to their documented exit code —
         # not just `process`. No tracebacks for user-facing errors.

@@ -1199,3 +1199,299 @@ changes the fail-closed contract ("REVERT = you get the original back"). Recorde
 Gates: ruff/format/mypy clean, **574 passed** (was 514), fuzz 41, audit-models + doctor green. The
 two new config keys change profile hashes (provenance, not pinned locks); core lockfiles verify
 unchanged.
+
+## Audit 3 follow-up — 2026-08-20 — the watchdog in every topology
+
+The third audit left two watchdog defects; both are engine-side (`watchdog.py` / `cli.py`),
+outside the goal checklist's lettered boxes but inside its evidence discipline.
+
+**1. Background-spawn topology (the REFUTED item).** A batch started with `&` from a
+non-interactive shell — also nohup pipelines and supervisors — runs with `SIGINT=SIG_IGN`,
+which persists across exec into the per-file child, so the watchdog's `os.kill(self, SIGINT)`
+was a silent no-op and only the 5 s `os._exit` backstop remained. The audit measured a child
+that PUBLISHED a full master 4.5 s after its SIGKILLed parent died. Fix: the self-interrupt
+signal is chosen at fire time — `signal.getsignal(SIGINT) is SIG_IGN` escalates to SIGTERM,
+which `cli._install_signal_handlers` (installed before the watchdog arms) maps onto the same
+KeyboardInterrupt unwind: worker torn down, staging removed, nothing published.
+`cli.main()` also gained an outermost KeyboardInterrupt boundary, because a watchdog interrupt
+that lands during startup (spawner died before arming completed) used to escape as a raw
+traceback. Measured with the audit's own repro, both topologies: shell `&` batch SIGKILLed
+mid-file → per-file child AND its worker gone **0.183 s** after the kill; plain Popen with
+SIGINT ignored → **0.077 s**; destination still EMPTY 8 s later in both. Foreground unchanged.
+Pinned by `tests/chaos/test_background_spawn.py`: the SIG_IGN premise probed on this machine,
+then both topologies under the procwatch freeze protocol, with a 3 s interrupt-path deadline so
+the 5 s backstop can never masquerade as the fix. In-process, the escalation and the SIG_IGN
+unwind-with-cleanup are pinned in `tests/unit/test_watchdog.py` (red first: the escalation test
+failed with `SIGINT != SIGTERM` before the one-line disposition check went in).
+
+**2. Stale/exported HAWAVOCLEAN_PARENT_PID (the WEAKER item).** `HAWAVOCLEAN_PARENT_PID=99999`
+made even `--version` exit 130 with a raw KeyboardInterrupt out of `watchdog.py`. The variable
+is a private contract between a spawner and its DIRECT child, so it is honored only when
+`getppid()` names the declared pid at arm time (death is then the ppid *changing*), or when the
+child is provably a pre-arm orphan (ppid 1 and the declared pid gone) — anything else is
+ignored with a logged warning. Measured: dead pid, never-alive pid, and a live stranger's pid
+all exported → warning + `hawavoclean 3.2.0` + exit 0; the real contract still tears an orphan
+down (chaos suite: 15/15, including the SIGSTOP-safe engine-topology tests audit 3 upheld).
+
+Gates: ruff clean, format clean (191 files), `mypy --strict src` clean (79 files, and the
+release script's wider `src tests scripts data` scope clean), full pytest **583 passed x3
+consecutive** (574 + 9 new watchdog/topology tests), fuzz **41 passed**, mutation gate
+**12/12 by owners**, `bash scripts/run_release_checks.sh` exit 0 (coverage 92.57 percent,
+doctor all green). UI untouched by this work; `pnpm vitest run` 340 passed on the current tree.
+
+Honest gaps: (a) if a spawner outside `cli.main()` arms the watchdog with BOTH SIGINT and
+SIGTERM inherited ignored, only the 5 s backstop remains — in-repo callers cannot reach that
+state because the CLI installs its SIGTERM handler before arming, but the library function
+alone does not restore dispositions by design (an inherited ignore is the spawner's stated
+wish). (b) `HAWAVOCLEAN_PARENT_PID=1` is refused silently by the pre-existing `<= 1` guard,
+without the new warning. (c) The measured teardown times are one machine's; the chaos deadline
+is 3 s against a 0.25 s poll precisely so load cannot decide the verdict.
+
+## Iteration 7 addendum — 2026-08-20 — the five fix families commit 1488a33 carried without log evidence
+
+Audit 3's bookkeeping finding, settled: iteration 7's entry documented only the stereo work,
+while its commit also carried five fix families whose evidence lived in agent reports and was
+then independently re-measured by the third audit. Recorded here, after the fact and marked as
+such — these are iteration-7 measurements plus audit-3's re-verification, not new work.
+
+**1. Orphan watchdog (the round-2 REFUTED B6).** New `src/hawavoclean/watchdog.py`: a spawning
+process stamps its pid into `HAWAVOCLEAN_PARENT_PID`; the child arms a daemon thread before
+argument parsing that polls `kill(pid, 0)` and `getppid()` every 0.25 s and raises SIGINT on
+itself when the parent is gone (ordinary interrupt path: worker torn down, staging removed,
+nothing published), `os._exit(130)` backstop after 5 s. Iteration-7 measurement on the audit's
+own scenario (real engine, Flute 09, SIGKILL at "Enhancing unit 3/5"): before, the orphan ran
+4.64 s longer and published a 13,624,364 B master + JSON + txt; after, the job child is gone in
+0.25 s, workers gone, destination empty. Audit 3 re-measured the server path and upheld it:
+child dead **0.139 s** (kill at +3 s), **0.16 s** (+8 s, deep in enhancement), **0.246 s**
+(+0.2 s, the import/warmup window); SIGSTOP does not kill it (child unharmed through a 10 s
+freeze, job reconciled to done after SIGCONT). The same audit REFUTED the background-spawn
+batch topology (inherited `SIGINT=SIG_IGN`) — fixed and measured in the engine-side
+"Audit 3 follow-up" entry above.
+
+**2. Display-column floor (the round-2 REFUTED B8).** `.right` was `minmax(0, 1fr) auto`, so
+the deck-fault plate starved the spectrum panel to 0 px at 960x640. The display track now has a
+floor (`--display-floor`, 214 px / 193 px compact, stated as its parts in the stylesheet) and
+the column scrolls with a scroll-shadow cue when both panels genuinely exceed it. Instrument
+falsified first (floor forced to 0 reproduces plot 0 px / key 7.7 % visible / labels behind a
+metrics tile), then 7 widths x 7 states = 49 screens: 0 spill, 0 occlusion, 0 hard clipping,
+0 page overflow. Audit 3's own 16-cell sweep (4 viewports x deck-fault / deck-fault+offline /
+FILE GONE / 8-channel-refused): spectrum canvas **>= 55.6 px in every cell**, legend 8/8 and
+metric labels 3/3 visible by 5-point elementsFromPoint. Its one finding — `.hist-body` still
+shipped `scrollbar-width: thin` — is fixed in the web entry below.
+
+**3. Deck-fault truth (the round-2 WEAKER A7).** Three holes closed in iteration 7: a new
+`truncated` fault kind checks the deck's decoded length against the length the run reports
+(live: a 100-byte master reads readyState 4 / MediaError null / duration 0.000396 s and is
+faulted, CLEANED disabled, row flagged FILE BROKEN); an engine outage during a deck load is
+classified by evidence — the probe's own failure plus an injected liveness check — instead of
+by Chromium's `MediaError` code 4, and `retryFaultedDecks` brings the deck back on reconnect;
+every condemning fault kind marks the master unavailable with per-kind wording, so chmod-000
+and PNG masters lose their enabled `<a download>`. The ask-twice discipline dates from here:
+the engine answers 200 with a full Content-Length for a chmod-000 file and then delivers
+nothing, so an answered-but-undelivered probe is asked once more — a second answer means the
+file, no answer means the engine. Audit 3 confirmed each detection on a re-fetch and found the
+four residual holes it reported (blind HEAD re-verification of the on-screen run; A/B state on
+a condemned deck; the mid-load stale window; a valid master at 50.06 % of expected duration
+raising no fault). The first and third are closed in the web entry below.
+
+**4. History patch (the round-2 REFUTED B5).** `onJobStatus`'s done-branch history patch moved
+in front of the "is this still the current job?" guard, so a run whose cleaned analysis lands
+after the user has moved on keeps its cached numbers (before: the row read "— LUFS Δ" for the
+rest of the session and restoring it cost a full `POST /api/analyze`; audit 2 hit it on 1 of 12
+runs). Pinned by vitest ("the row that ran keeps its numbers").
+
+**5. Profile restore (the round-2 WEAKER B5).** `selectRun` restores the run's profile, so a
+PRODUCTION row no longer restores under a radiogroup reading STUDIO, and PROCESS AGAIN sends
+the restored run's own profile (vitest-pinned; audit 3 watched the radiogroup follow
+Studio <-> Production in passing and called B5 upheld).
+
+Also in that commit, smaller and previously unlogged: same-profile de-collision within a
+session (`bumpOutputPath`; the post-reload sentinel overwrite audit 2 measured remains open),
+the mutation gate's owner-scoped credit rules with negative controls, NUL-byte and surrogate
+paths as designed 400s, and honest queue positions. Gates at the commit: 574 pytest, 328
+vitest, release script exit 0, mutation gate 12/12 by owners — all re-run by audit 3 on the
+clean tree, exit 0 everywhere.
+
+## Audit 3 follow-up — 2026-08-20 — web: the on-screen run can no longer be lied about, and the run swap is atomic
+
+Engine on 8977 (own port, this tree's build), attacks driven in a real Chrome for Testing over
+Playwright (headless, SwiftShader — the pane's hidden tab cannot composite; every number below
+is from the real browser against the real engine). Fixtures confined to `test_output/iter8`.
+
+### 1. A7 · re-verification now reads the file instead of asking about it
+
+The audit's finding: the on-screen run's re-verification was three HEADs, and the engine
+answers HEAD 200 for a chmod-000 master (the open fails only when a body is produced) and for
+one truncated to 100 bytes (the stat is happy) — so attacking the file of the run being LOOKED
+AT left CLEANED lit and Master WAV an enabled link delivering junk. Server truth, measured
+first: `HEAD` on a chmod-000 master → **200**; ranged GET → **206 committed, then the body dies**
+(curl: `size_download=0`, exit 18 "partial file"); on a 100-byte truncation → 206 with
+`Content-Range: bytes 0-0/100` against the healthy file's `/13624364`.
+
+The fix, in `EngineClient.verify` + `verifyArtifacts`: every artefact costs **one ranged byte**
+(`Range: bytes=0-0`, consumed to completion — the same discipline the player's deck probe uses,
+so no `net::ERR_ABORTED` lands in the log), `delivered` is the load-bearing answer, and the
+master's full length from `Content-Range` is measured against the size the run recorded when
+its master first loaded (`HistoryEntry.masterBytes`, written the moment the run lands and
+re-recorded on every healthy sighting — never overwritten by a condemned one, because the
+recorded size is the fact the condemnation rests on). An answered-but-undelivered byte is asked
+once more; a second answer condemns the file, silence is an outage and no verdict (vitest: "an
+undelivered byte followed by silence is an outage, not a condemnation").
+
+Reproduced against the CURRENT on-screen run (94.6 s job, 13,624,364 B master), both "look
+again" gestures:
+
+- **chmod 000 + re-pick row**: Master WAV becomes an `aria-disabled` button with *"the engine
+  cannot read a byte of it — the file is unreadable where it stands"*, row flagged **NO
+  ACCESS**, plate **CLEANED DECK UNAVAILABLE** with matching wording, A/B flips to ORIGINAL
+  with CLEANED disabled; JSON and txt stay downloadable. `chmod 644` + re-pick heals all of it.
+- **truncate to 100 B + re-pick row**: row flagged **FILE BROKEN**, refusal names the numbers —
+  *"The cleaned master on disk is 100 B where this run wrote 13,624,364 B — it has been
+  truncated or rewritten, so it is not this run's master any more"* — same A/B flip, same
+  disabled link; restore + re-pick heals.
+- **engine coming back**: master chmod-000'd while the engine was SIGKILLed; on restart the
+  condemnation arrived **409 ms after the offline banner cleared, with no user gesture**.
+
+Vitest pins the client (`verify` sends exactly `bytes=0-0`, reads `Content-Range`'s
+denominator, treats a dying body as undelivered, re-raises when nobody answers) and the flows
+(truncation condemned by recorded length; chmod-000 condemned as NO ACCESS; 404 still FILE
+GONE; a healthy sighting records the yardstick; outage stays an outage).
+
+### 2. A7 · the audit's fourth hole: the run swap is now atomic-or-labelled
+
+Reproduced first, in its current shape: `selectRun` switched the run's identity synchronously
+(source, job chip, report) but the deck swap sat behind engine round-trips. With run B (12.0 s)
+on screen and the engine **SIGSTOPped** (a hung engine: every request stalls — kill -STOP, a
+real system state), clicking run A's (94.6 s) row left the job chip and clip name reading run A
+while **both `<audio>` elements kept run B's 12 s blobs, the transport read `00:00.0 / 00:12.0`,
+the status line still said "Done · 1/1 unit enhanced · short_studio.wav", and the A/B stayed
+lit CLEANED — indefinitely, for as long as the hang lasted.** (With a SIGKILLed engine the
+refused sockets fail fast and both decks end in designed `network` faults with reconnect retry
+— iteration 6's classification, re-verified — so the hang is the reproducible remnant of the
+audit's window.)
+
+The fix settles the swap before the first await, in two halves. *Atomic*: the run's own cached
+facts — analyses, report, status line — switch with the name (they are session memory; the
+post-verification code re-states them and amends the cleaned half if the master fails). 
+*Labelled*: a new `DualPlayer.claimOnly(deck, url)` retires any deck not already holding this
+run's file, synchronously — `retire` keeps the element's `src`, so a same-file restore still
+revives with zero requests. Measured after, same attack: transport reads **`00:00.0 / 00:00.0`**,
+the status line carries run A's own summary, pressing Play produces **nothing** (no element
+advances), and when the engine resumes both decks load run A's real audio (94.611854 s /
+94.613333 s) with the A/B landing on CLEANED. The raw elements still privately hold the old
+bytes during the window (the src-never-removed rule; nothing on screen or in the sound path
+claims them). Vitest pins the ordering: `claimOnly` is called with both of the run's file URLs
+*before* the first `verify` reaches the engine, the cached facts are already swapped
+synchronously, and a failed run claims no cleaned deck at all.
+
+### 3. The plural fix reaches the whole string family
+
+Audit 3: "the fix was applied to the one surface the audit named, not to the string family" —
+a 1-unit run still shipped "1 of 1 units enhanced" to the screen reader and "1/1 units
+enhanced" to the footer and run list. One helper now owns the rule (`state/plural.ts`: the noun
+agrees with the count it follows — `unitNoun`, `unitsEnhanced`, `unitsEnhancedSpoken`), and
+every surface goes through it: the live region (`App.tsx`), the footer status line and the
+copy-summary line (`actions.ts`), the run list's spoken sentence and visible cell
+(`JobHistory.tsx`), and the verdict strip's count and lane labels (`VerdictStrip.tsx`).
+`grep -rn "units" ui/src` now finds no hand-built plural outside comments. Six vitest cases pin
+the family, including `0 of 1 unit` and `0/0 units`.
+
+### 4. `.hist-body` joins the visible-scrollbar rule
+
+The exact pattern `interaction.css`'s own comment warns about: `scrollbar-width: thin` makes
+Chromium ignore the `::-webkit-scrollbar` rules beneath it and fall back to an overlay bar
+invisible until already scrolling — and the run list really scrolls in the 960x640 fault states
+(audit 3: scrollHeight 119 vs clientHeight 80/64), so rows below the fold read as missing.
+Fixed to match `.insp-body`/`.right`: `scrollbar-width: auto` and the styled 8 px bar with a
+visible track at rest. Verified on pixels in the exact state (960x640, offline banner up,
+2 runs, scrollHeight 119 vs clientHeight 64): the edge strip now carries **30 thumb + 30 track
+pixels at rest** over the body's 60 px span, against `.insp-body`'s 69 + 23 over 92 px — the
+same recipe painting the same bar. A harness trap recorded for the next audit: Playwright's
+default launch args include `--hide-scrollbars`, under which BOTH bodies read zero bar pixels
+and zero layout gutter — any scrollbar claim measured in a default headless run is vacuous;
+this measurement stripped that flag (`ignore_default_args`).
+
+### 5. D2 · the differential-pixel contrast sweep, re-run on the current build
+
+Audit 3's second bookkeeping finding: the full two-method pass predated two iterations of CSS
+change. Re-run of the pixel-truth method (capture as shipped; blank every measured element's
+glyphs via `-webkit-text-fill-color: transparent` with animations pinned; changed pixels are
+glyph pixels; read those pixels from the blanked frame for the true backdrop; the element's
+specified colour — alpha composited over that backdrop — against the worst such pixel) over
+every visible text element, ten states on the shipped bundle:
+
+| state | 1440x900 nodes / worst | 960x640 nodes / worst |
+|---|---|---|
+| idle | 84 / **4.95:1** | 79 / **4.95:1** |
+| done | 114 / **4.85:1** | 103 / **4.56:1** |
+| shortcut overlay | 102 / **4.98:1** | 59 / **4.98:1** |
+| deck-fault (FILE BROKEN) | 107 / **4.64:1** | 96 / **4.56:1** |
+| 8-channel refused | 102 / **4.88:1** | 90 / **4.78:1** |
+
+**0 failures in all ten states.** The whole-screen worst is still `.pc-sub` "DFN3 restoration
+core" — the bottom of the `--fg-4` ramp iteration 5 recut — at 4.56:1 in the done and
+deck-fault states at 960x640, then `1.0x` at 4.97–4.99:1 and the clip `Duration`/`Rate`/
+`Channels` keys at 5.08–5.12:1; the warn/refusal surfaces this sweep exists for (errbar text,
+CLIP REFUSED label, warn cells) all clear 4.5. Falsification first: `.pc-sub` forced to
+`rgb(70,78,90)` reports exactly one FAIL at 1.86:1; restored, 0. Declined rather than judged:
+the wordmark (its glyphs are its background — background-clip:text; the CSS method carried it
+at 10.7:1 in iteration 5) and the plate's running-phase "100 %" readout, which sits under an
+opacity-0 ancestor in these states and paints no pixels — invisible in truth, so no verdict.
+Skipped and counted per state: nodes behind the modal scrim (119), scroll-clipped shortcut
+rows at 960x640 (43), hidden/zero-size (0–13).
+
+### Gates and non-regression
+
+`pnpm typecheck` clean, `pnpm build` green (**351.78 kB / 109.52 kB gz** JS, 86.39 kB /
+16.52 kB gz CSS — still under the 500 KB budget), `pnpm test:run` **342 passed in 13 files**
+(14 new here: 5 client `verify`, 6 plural, 2 atomic-swap, plus the outage/condemnation flow
+cases), emitted worker still a classic script (`grep -cE '\bimport\b|\bexport\b'` = **0**).
+No Python touched by this pass (the tree's engine-side changes are the watchdog entry above).
+Re-verified on the final build in the same sessions: restore-with-healthy-files re-enables all
+three links and the CLEANED deck; the mono flow (analyze → PROCESS → 5/5 → A/B) is unchanged;
+the stereo lanes, panel floor and history behaviours were not touched by any of these diffs
+(`VerdictStrip` changed only its two plural templates, CSS only the `.hist-body` scrollbar
+block).
+
+### Honest gaps
+
+(a) Audit 3's two other deck-fault holes stand: the A/B on a condemned deck discovered through
+a *deck load* (PNG-as-wav) was not re-attacked here — the `setAbMode(activeDeck)` mirror and
+today's chmod/truncate runs suggest it is dead, but that is inference, not measurement — and a
+valid master at just over half its expected duration (`DECK_MIN_DURATION_RATIO = 0.5`,
+exclusive) still raises no fault. (b) `masterBytes` is session memory: after a reload the first
+healthy sighting re-records it, so a truncation that happens *between* reload and that sighting
+is caught by the deck's duration check, not by length. (c) During the labelled swap window the
+A/B still shows the *intent* (CLEANED lit on an empty, silent deck) rather than a loading
+state. (d) The contrast sweep ran in headless SwiftShader Chrome at deviceScaleFactor 1 —
+same code path, not the GPU's exact antialiasing — and the running phase is still measured only
+through its tokens, as iteration 5 recorded. (e) The condemnation attacks leave one incomplete
+ranged response in the network log per attack (the probe reading a body the engine cannot
+produce) — that is the attack path observing the attack, not a happy-flow regression.
+
+## Loop close — 2026-08-20 — 27/27, third-audit-backed
+
+A7 is the last box ticked, and unlike the two premature closes before it, this one is earned:
+audit 3 upheld the stereo-lane half with independent pixel scans, and iteration 8 closed the
+deck-truth holes with the audit's own attacks run against the CURRENT on-screen run — chmod 000
+condemned via a 1-byte ranged GET ("the engine cannot read a byte of it"), truncation condemned by
+byte count ("100 B where this run wrote 13,624,364 B"), both healing on restore, and the
+hung-engine deck-swap hole fixed atomic-or-labelled (a deck can never again claim audio it does
+not hold). The watchdog now also covers background-spawn topologies (SIGINT-ignored: escalates to
+SIGTERM; child + worker gone in 0.077-0.183 s with an empty destination where a full master used
+to publish), and a stale exported HAWAVOCLEAN_PARENT_PID warns instead of killing every CLI run.
+
+Final state, verified by the orchestrator on the closing tree: ruff + format clean,
+mypy --strict clean, **583 pytest**, 41 fuzz, **342 vitest**, worker classic (0 import/export),
+D2 contrast re-run current (0 failures across 10 states, worst 4.56:1), release script exit 0,
+mutation gate 12/12 by owning tests on the clean tree.
+
+Three adversarial audit rounds were run against this goal; rounds one and two each refuted six
+boxes that had been ticked in good faith, and round three upheld 16 of 18 fresh-eyes claims with
+the remainder fixed and re-attacked above. Known, recorded limits that are NOT failures of the
+goal: the studio profile ships a flat-gain (guard-reverted) result on sources DFN3 damages —
+finishing-on-reverted-units is a fail-closed-contract policy decision deliberately left to the
+user; 4-8 kHz that a source never captured is not synthesized; the analyze overview grid on lossy
+containers follows the container timeline (bounded 1.5 ms divergence from the pipeline's decode);
+and a >2-channel report has never been seen on screen because the web API refuses those files
+before a job starts.

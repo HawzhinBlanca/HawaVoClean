@@ -1701,17 +1701,31 @@ input:focus-visible,
   max-height: min(300px, 40vh);
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  /* Same trap `.insp-body` fell into (see "A scrollable panel has to look
+     scrollable" above): `scrollbar-width: thin` makes Chromium ignore the
+     ::-webkit-scrollbar rules below and fall back to an overlay bar that is
+     invisible until the user is already scrolling. At 960x640 in the
+     fault/banner states this body is capped at 64-118px and *does* scroll,
+     so rows below the fold read as simply missing. `auto` hands the styled
+     8px bar back, and the track makes the channel visible at rest. */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
 }
 
 .hist-body::-webkit-scrollbar {
   width: 8px;
 }
 
+.hist-body::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.8);
+}
+
 .hist-body::-webkit-scrollbar-thumb {
-  background: var(--hair-strong);
+  background: rgba(255, 255, 255, 0.22);
   border-radius: var(--r-sm);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 .hist-list {

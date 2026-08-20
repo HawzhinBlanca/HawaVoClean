@@ -11,6 +11,7 @@ import {
 import { classifyDecision, decisionLabel, type UnitDecisionRecord } from '../api/types';
 import { formatTime } from '../render/ticks';
 import { waveView } from '../render/viewWindow';
+import { unitNoun } from '../state/plural';
 import { channelName, highlightFor, reportChannels, selectUnit, unitKey } from '../state/selection';
 import { useStore } from '../state/store';
 
@@ -219,7 +220,7 @@ export function VerdictStrip() {
       <div className="label">
         <span className="caps">Verdicts</span>
         <span className="count">
-          {units.length ? `${units.length} unit${units.length === 1 ? '' : 's'} · ${enhanced} enhanced` : '—'}
+          {units.length ? `${units.length} ${unitNoun(units.length)} · ${enhanced} enhanced` : '—'}
         </span>
       </div>
       <div
@@ -250,7 +251,7 @@ export function VerdictStrip() {
                   key={ch}
                   style={laneStyle}
                   role="group"
-                  aria-label={`${name.long}, ${mine.length} unit${mine.length === 1 ? '' : 's'}`}
+                  aria-label={`${name.long}, ${mine.length} ${unitNoun(mine.length)}`}
                 >
                   {/* The tag rides *inside* the track rather than in a gutter
                       beside it: the track's box is the waveform canvas's box to

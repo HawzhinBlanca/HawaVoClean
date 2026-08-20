@@ -22,6 +22,9 @@ const player = vi.hoisted(() => ({
   activeDeck: 'original' as 'original' | 'cleaned',
   pause: vi.fn(),
   load: vi.fn(),
+  // "You may keep your audio only if it is already this file" — the labelled
+  // half of the atomic-or-labelled run swap. See the A7 swap tests below.
+  claimOnly: vi.fn(),
   setActive: vi.fn(),
   seek: vi.fn(),
   toggle: vi.fn(),
@@ -157,7 +160,7 @@ interface FakeClient {
   getJob: ReturnType<typeof vi.fn>;
   cancelJob: ReturnType<typeof vi.fn>;
   peaks: ReturnType<typeof vi.fn>;
-  exists: ReturnType<typeof vi.fn>;
+  verify: ReturnType<typeof vi.fn>;
   fileUrl: (p: string) => string;
   eventsUrl: (id: string) => string;
 }
@@ -179,9 +182,10 @@ function makeClient(): FakeClient {
     getJob: vi.fn(),
     cancelJob: vi.fn(async () => ({ ok: true })),
     peaks: vi.fn(),
-    // `HEAD /api/audio` — the artefact existence check a restore now makes.
-    // Everything is there unless a test says otherwise.
-    exists: vi.fn(async (_path: string) => true),
+    // One ranged byte of `/api/audio` — the artefact verification a restore
+    // makes. Everything is there, readable, 1000 B long unless a test says
+    // otherwise.
+    verify: vi.fn(async (_path: string) => ({ status: 206, delivered: true, size: 1000 })),
     fileUrl: (p: string) => `http://127.0.0.1:8765/api/audio?path=${encodeURIComponent(p)}`,
     eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events?token=devtok`,
   };
@@ -343,6 +347,9 @@ describe('the job status stream', () => {
     });
     expect(st.history[0]?.cleaned).not.toBeNull();
     expect(st.statusLine).toContain('5/5 units enhanced');
+    // A7 · the master's served length is recorded the moment the run lands —
+    // it is the yardstick every later re-verification measures against.
+    expect(st.history[0]?.masterBytes).toBe(1000);
   });
 
   it('a failed run is re-worded, not quoted, and is recorded as failed', async () => {
@@ -838,10 +845,12 @@ function done(
     inputPath?: string;
     profile?: 'studio' | 'production';
     outputPath: string;
+    masterBytes?: number;
   },
 ): void {
   const outputPath = over.outputPath;
   store.useStore.getState().pushHistory({
+    ...(over.masterBytes !== undefined ? { masterBytes: over.masterBytes } : {}),
     jobId: over.jobId,
     profile: over.profile ?? 'studio',
     inputPath: over.inputPath ?? '/a.wav',
@@ -955,18 +964,18 @@ describe('A7/B5 · the A/B control cannot claim a deck the player is not on', ()
 });
 
 describe('B5 · restoring a run whose files are gone tells the truth', () => {
-  it('checks the artefacts on restore — with HEAD, never /api/analyze', async () => {
+  it('checks the artefacts on restore — one ranged byte each, never /api/analyze', async () => {
     const { actions, store, client } = await boot();
     done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
     client.analyze.mockClear();
-    client.exists.mockClear();
+    client.verify.mockClear();
 
     await actions.selectRun('j1');
     await settle();
 
     expect(client.analyze).not.toHaveBeenCalled();
-    expect(client.exists.mock.calls.map((c) => c[0]).sort()).toEqual([
+    expect(client.verify.mock.calls.map((c) => c[0]).sort()).toEqual([
       '/out/j1.hawavoclean.json',
       '/out/j1.hawavoclean.txt',
       '/out/j1.wav',
@@ -983,7 +992,11 @@ describe('B5 · restoring a run whose files are gone tells the truth', () => {
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
     client.analyze.mockClear();
     player.load.mockClear();
-    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
+    client.verify.mockImplementation(async (p: string) =>
+      p === '/out/j1.wav'
+        ? { status: 404, delivered: false, size: null }
+        : { status: 206, delivered: true, size: 1000 },
+    );
 
     await actions.selectRun('j1');
     await settle();
@@ -1027,7 +1040,11 @@ describe('B5 · restoring a run whose files are gone tells the truth', () => {
     const { actions, store, client } = await boot();
     done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
-    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
+    client.verify.mockImplementation(async (p: string) =>
+      p === '/out/j1.wav'
+        ? { status: 404, delivered: false, size: null }
+        : { status: 206, delivered: true, size: 1000 },
+    );
     await actions.selectRun('j1');
     await settle();
     const a = actions.artifactsFor(
@@ -1045,7 +1062,11 @@ describe('B5 · restoring a run whose files are gone tells the truth', () => {
     const { actions, store, client } = await boot();
     done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
-    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
+    client.verify.mockImplementation(async (p: string) =>
+      p === '/out/j1.wav'
+        ? { status: 404, delivered: false, size: null }
+        : { status: 206, delivered: true, size: 1000 },
+    );
     await actions.selectRun('j1');
     await settle();
     expect(store.useStore.getState().artifacts?.master).toBe(false);
@@ -1053,7 +1074,7 @@ describe('B5 · restoring a run whose files are gone tells the truth', () => {
     // The file comes back — a volume remounted, an undo in Finder. Re-opening
     // the run already on screen is the gesture that means "look again", and it
     // is the only one: nothing else re-checks a run that is already showing.
-    client.exists.mockImplementation(async () => true);
+    client.verify.mockImplementation(async () => ({ status: 206, delivered: true, size: 1000 }));
     await actions.selectRun('j1');
     await settle();
 
@@ -1068,7 +1089,7 @@ describe('B5 · restoring a run whose files are gone tells the truth', () => {
     const { actions, store, client, EngineError } = await boot();
     done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
-    client.exists.mockRejectedValue(new EngineError(0, 'network', 'Engine unreachable'));
+    client.verify.mockRejectedValue(new EngineError(0, 'network', 'Engine unreachable'));
 
     await actions.selectRun('j1');
     await settle();
@@ -1150,13 +1171,13 @@ describe('B5 · two runs of the same profile do not overwrite each other', () =>
     done(store, { jobId: 'j2', inputPath: '/a.wav', outputPath: '/dir/a_studio.wav' });
     expect(store.useStore.getState().history.find((h) => h.jobId === 'j1')?.supersededBy).toBe('j2');
 
-    client.exists.mockClear();
+    client.verify.mockClear();
     await actions.selectRun('j1');
     await settle();
 
     const st = store.useStore.getState();
     // Nothing is asked of the engine: the files are known not to be this run's.
-    expect(client.exists).not.toHaveBeenCalled();
+    expect(client.verify).not.toHaveBeenCalled();
     expect(st.artifacts).toMatchObject({ master: false, json: false, txt: false });
     expect(st.artifacts?.reason).toContain('later run');
     expect(st.abMode).toBe('original');
@@ -1358,8 +1379,82 @@ describe('B5 · restoring a run restores the run, not half of it', () => {
   });
 });
 
+describe('A7 · selecting a run swaps identity and decks atomically-or-labelled', () => {
+  // The measured failure this pins: with the engine hung (SIGSTOP — every
+  // request stalls), clicking another run's row switched the job chip and the
+  // clip name while both <audio> elements kept the previous run's 12 s blobs
+  // and the A/B stayed lit CLEANED — the decks claimed audio they did not
+  // hold, for as long as the hang lasted. The swap must therefore be settled
+  // synchronously, before the first engine round-trip.
+  it('unclaims mismatched decks and swaps the cached facts before the engine answers', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', inputPath: '/a.wav', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', inputPath: '/b.wav', outputPath: '/out/j2.wav' });
+    // The engine hangs: the restore's first round-trip never resolves.
+    client.verify.mockImplementation(() => new Promise(() => undefined));
+    player.claimOnly.mockClear();
+
+    const pending = actions.selectRun('j1'); // cannot finish — never awaited
+
+    // Everything below is already true, synchronously:
+    const st = store.useStore.getState();
+    expect(st.currentRunId).toBe('j1');
+    // the decks were told whose audio they may claim — j1's files, nothing else
+    expect(player.claimOnly.mock.calls).toEqual([
+      ['original', client.fileUrl('/a.wav')],
+      ['cleaned', client.fileUrl('/out/j1.wav')],
+    ]);
+    // …and told before the engine was asked anything at all
+    const firstClaim = player.claimOnly.mock.invocationCallOrder[0] ?? Infinity;
+    const firstVerify = client.verify.mock.invocationCallOrder[0] ?? -Infinity;
+    expect(firstClaim).toBeLessThan(firstVerify);
+    // the run-local facts switched with the name, not after the engine answered
+    expect(st.original?.path).toBe('/a.wav');
+    expect(st.cleaned?.path).toBe('/out/j1.wav');
+    expect(st.cleanedPath).toBe('/out/j1.wav');
+    expect(st.statusLine).toContain('j1.wav');
+    void pending;
+  });
+
+  it('a failed run’s restore claims no cleaned deck at all', async () => {
+    const { actions, store } = await boot();
+    store.useStore.getState().pushHistory({
+      jobId: 'jf',
+      profile: 'studio',
+      inputPath: '/a.wav',
+      inputName: 'a.wav',
+      outcome: 'failed',
+      durationMs: 900,
+      at: Date.now(),
+      enhanced: null,
+      unitsTotal: null,
+      lufsIn: null,
+      lufsOut: null,
+      noiseIn: null,
+      noiseOut: null,
+      outputPath: '',
+      reportPath: '',
+      report: null,
+      status: jobStatus('failed'),
+      original: analysis(),
+      cleaned: null,
+      error: 'it broke',
+    });
+    // j2 is pushed after jf, so jf is NOT the run on screen and its selection
+    // takes the full restore path rather than the re-pick shortcut.
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    player.claimOnly.mockClear();
+
+    await actions.selectRun('jf');
+    await settle();
+
+    expect(player.claimOnly.mock.calls[1]).toEqual(['cleaned', null]);
+    expect(store.useStore.getState().cleanedPath).toBeNull();
+  });
+});
+
 describe('B5 · the run on screen is re-verified, not trusted for ever', () => {
-  it('re-picking the row it is on asks the engine again — three HEADs, no analyze', async () => {
+  it('re-picking the row it is on asks the engine again — three ranged reads, no analyze', async () => {
     const { actions, store, client } = await boot();
     done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
@@ -1369,15 +1464,19 @@ describe('B5 · the run on screen is re-verified, not trusted for ever', () => {
 
     // The master is deleted under the live run. Nothing on screen probes it:
     // the cleaned deck plays from a blob already in memory.
-    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
-    client.exists.mockClear();
+    client.verify.mockImplementation(async (p: string) =>
+      p === '/out/j1.wav'
+        ? { status: 404, delivered: false, size: null }
+        : { status: 206, delivered: true, size: 1000 },
+    );
+    client.verify.mockClear();
     client.analyze.mockClear();
     player.load.mockClear();
 
     await actions.selectRun('j1'); // the row it is already on
     await settle();
 
-    expect(client.exists).toHaveBeenCalledTimes(3);
+    expect(client.verify).toHaveBeenCalledTimes(3);
     expect(client.analyze).not.toHaveBeenCalled();
     const st = store.useStore.getState();
     expect(st.artifacts?.master).toBe(false);
@@ -1413,7 +1512,7 @@ describe('B5 · the run on screen is re-verified, not trusted for ever', () => {
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
     await actions.selectRun('j1');
     await settle();
-    client.exists.mockRejectedValue(new TypeError('Failed to fetch'));
+    client.verify.mockRejectedValue(new TypeError('Failed to fetch'));
 
     await actions.selectRun('j1');
     await settle();
@@ -1421,6 +1520,103 @@ describe('B5 · the run on screen is re-verified, not trusted for ever', () => {
     const st = store.useStore.getState();
     expect(st.artifacts?.master).toBe(true); // the last real answer stands
     expect(st.deckFault).toBeNull();
+  });
+});
+
+// A7 · the audit's two attacks on the run on screen. A HEAD answers 200 for
+// both of them — a chmod-000 master (the stat is happy; only producing a body
+// fails) and a 100-byte truncation (the file exists; the audio is gone) — so
+// the re-verification has to *read* something, and for the master, measure it.
+describe('A7 · re-verification reads the file instead of stat-ing it', () => {
+  it('a master truncated under the live run is condemned by its recorded length', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav', masterBytes: 1000 });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    await actions.selectRun('j1');
+    await settle();
+    expect(store.useStore.getState().artifacts?.master).toBe(true);
+
+    // The attack: `truncate -s 100`. The file is still there and still hands
+    // over its ranged byte perfectly happily — only the length says it is not
+    // the file this run wrote.
+    client.verify.mockImplementation(async (p: string) =>
+      p === '/out/j1.wav'
+        ? { status: 206, delivered: true, size: 100 }
+        : { status: 206, delivered: true, size: 1000 },
+    );
+    client.analyze.mockClear();
+    await actions.selectRun('j1'); // the row it is already on: "look again"
+    await settle();
+
+    const st = store.useStore.getState();
+    expect(client.analyze).not.toHaveBeenCalled();
+    expect(st.artifacts?.master).toBe(false);
+    expect(st.artifacts?.flag).toBe('FILE BROKEN');
+    expect(st.artifacts?.reason).toContain('100 B');
+    expect(st.artifacts?.reason).toContain('1,000 B');
+    expect(st.deckFault?.deck).toBe('cleaned');
+    expect(st.abMode).toBe('original');
+    expect(st.cleaned).toBeNull();
+    // The condemned sighting must not overwrite the yardstick it rests on.
+    expect(st.history.find((h) => h.jobId === 'j1')?.masterBytes).toBe(1000);
+  });
+
+  it('a master the engine lists but cannot read is condemned, not served', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    await actions.selectRun('j1');
+    await settle();
+
+    // The attack: `chmod 000`. The engine commits a 2xx (the stat succeeded)
+    // and then cannot produce the byte — twice, which is what separates the
+    // file from an engine dying between headers and body.
+    client.verify.mockImplementation(async (p: string) =>
+      p === '/out/j1.wav'
+        ? { status: 200, delivered: false, size: null }
+        : { status: 206, delivered: true, size: 1000 },
+    );
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    expect(st.artifacts?.master).toBe(false);
+    expect(st.artifacts?.flag).toBe('NO ACCESS');
+    expect(st.artifacts?.reason).toContain('cannot read');
+    expect(st.deckFault?.deck).toBe('cleaned');
+    expect(st.abMode).toBe('original');
+  });
+
+  it('an undelivered byte followed by silence is an outage, not a condemnation', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    await actions.selectRun('j1');
+    await settle();
+
+    // Headers came, the byte did not, and the second ask got nothing at all:
+    // the engine died between the two. Nothing true is known about the file.
+    client.verify
+      .mockImplementationOnce(async () => ({ status: 200, delivered: false, size: null }))
+      .mockRejectedValue(new TypeError('Failed to fetch'));
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    expect(st.artifacts?.master).toBe(true); // the last real answer stands
+    expect(st.deckFault).toBeNull();
+  });
+
+  it('a first healthy verification records the length it saw as the yardstick', async () => {
+    const { actions, store } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    expect(store.useStore.getState().history.find((h) => h.jobId === 'j1')?.masterBytes).toBe(
+      undefined,
+    );
+    await actions.selectRun('j1');
+    await settle();
+    expect(store.useStore.getState().history.find((h) => h.jobId === 'j1')?.masterBytes).toBe(1000);
   });
 });
 

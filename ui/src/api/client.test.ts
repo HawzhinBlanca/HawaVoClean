@@ -385,3 +385,63 @@ describe('uploadWithProgress', () => {
     expect(err.message).toBe('500 Internal Server Error');
   });
 });
+
+// ---------------------------------------------------------------------------
+// verify — the one-byte ranged read behind artefact re-verification. A HEAD
+// answers 200 for a chmod-000 file and for a truncated one, which is exactly
+// why this method exists; these tests pin the three answers it can give.
+
+/** A ranged-GET Response stand-in: status, headers, and a body that can die. */
+function byteRes(over: {
+  status?: number;
+  headers?: Record<string, string>;
+  bodyFails?: boolean;
+}): Response {
+  const status = over.status ?? 206;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: '',
+    headers: new Headers(over.headers ?? {}),
+    arrayBuffer: async () => {
+      if (over.bodyFails) throw new TypeError('stream died');
+      return new ArrayBuffer(1);
+    },
+  } as unknown as Response;
+}
+
+describe('verify', () => {
+  it('asks for exactly one byte and reads the full length off Content-Range', async () => {
+    const fn = mockFetch(
+      byteRes({ status: 206, headers: { 'Content-Range': 'bytes 0-0/13624364' } }),
+    );
+    const p = await client().verify('/out/a.wav');
+    expect(lastHeaders(fn)['Range']).toBe('bytes=0-0');
+    expect(p).toEqual({ status: 206, delivered: true, size: 13624364 });
+  });
+
+  it('a 2xx whose body dies before the byte is not delivered — the chmod-000 shape', async () => {
+    mockFetch(byteRes({ status: 200, bodyFails: true }));
+    const p = await client().verify('/out/a.wav');
+    expect(p.delivered).toBe(false);
+    expect(p.status).toBe(200);
+  });
+
+  it('a 404 is an answer: not delivered, no size, status carried', async () => {
+    mockFetch(byteRes({ status: 404 }));
+    const p = await client().verify('/out/a.wav');
+    expect(p).toEqual({ status: 404, delivered: false, size: null });
+  });
+
+  it('a 200 without Content-Range still yields a size — the empty-file shape', async () => {
+    mockFetch(byteRes({ status: 200, headers: { 'Content-Length': '0' } }));
+    const p = await client().verify('/out/a.wav');
+    expect(p).toEqual({ status: 200, delivered: true, size: 0 });
+  });
+
+  it('an engine that never answers re-raises — offline is not deleted', async () => {
+    const fn = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    vi.stubGlobal('fetch', fn);
+    await expect(client().verify('/out/a.wav')).rejects.toBeInstanceOf(TypeError);
+  });
+});

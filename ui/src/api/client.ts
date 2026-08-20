@@ -13,6 +13,22 @@ export interface Endpoint {
   token: string;
 }
 
+/**
+ * What a one-byte ranged GET of an artefact actually established.
+ * See {@link EngineClient.verify} for why a HEAD cannot be trusted here.
+ */
+export interface ArtifactProbe {
+  /** The engine's HTTP answer (206 for the ranged byte, 200 for a whole file). */
+  status: number;
+  /** The answer was 2xx *and* the requested byte really arrived. */
+  delivered: boolean;
+  /**
+   * The file's full length — `Content-Range`'s denominator, or
+   * `Content-Length` on a 200 — or null when the engine did not say.
+   */
+  size: number | null;
+}
+
 export class EngineError extends Error {
   readonly status: number;
   readonly code: string;
@@ -205,24 +221,50 @@ export class EngineClient {
   }
 
   /**
-   * Is this file still where the run left it?
+   * Is this file still where the run left it — *really*?
    *
-   * `HEAD /api/audio` is the cheapest true answer the engine can give: same
-   * status and headers as the GET, no body, no decode. 404 means the file is
-   * gone; anything else that is not an error means it is there. A thrown
-   * `fetch` (the engine is not answering at all) is *not* an answer and is
-   * re-raised, because "the engine is offline" and "your master was deleted"
-   * are two different things and the UI says two different things about them.
+   * A HEAD used to be the whole check, and a HEAD is a stat: the engine
+   * answers 200 for a master that has been `chmod 000`ed (the open fails only
+   * when a body is produced) and for one truncated to 100 bytes (the stat is
+   * happy; the audio is gone). So the check now reads something: one byte,
+   * `Range: bytes=0-0`, consumed to completion — the same discipline the
+   * player's own probe uses, so no `net::ERR_ABORTED` is left in the log.
+   *
+   * `delivered` is the load-bearing answer: the engine committed a 2xx *and*
+   * the byte actually arrived. `size` is the file's full length from
+   * `Content-Range` (or `Content-Length` on a 200), which is what lets a
+   * caller who recorded the master's size at load time catch a truncation the
+   * status code will never admit to.
+   *
+   * A thrown `fetch` (the engine is not answering at all) is *not* an answer
+   * and is re-raised, because "the engine is offline" and "your master was
+   * deleted" are two different things and the UI says two different things
+   * about them.
    */
-  async exists(path: string, signal?: AbortSignal): Promise<boolean> {
+  async verify(path: string, signal?: AbortSignal): Promise<ArtifactProbe> {
     const res = await fetch(this.fileUrl(path), {
-      method: 'HEAD',
+      headers: { Range: 'bytes=0-0' },
       cache: 'no-store',
       signal: signal ?? null,
     });
-    if (res.status === 404) return false;
-    if (res.status >= 400) throw await parseError(res);
-    return true;
+    let delivered = false;
+    try {
+      // Read the byte (or the error body) to completion. A 2xx whose body
+      // dies mid-read is the chmod-000 shape: headers committed, bytes never
+      // produced. That is a fact about the *file*, not a transport error.
+      await res.arrayBuffer();
+      delivered = res.ok;
+    } catch {
+      delivered = false;
+    }
+    // `bytes 0-0/13624364` — the denominator is the whole file. A 200 (the
+    // engine ignores ranges on an empty file) carries plain Content-Length.
+    const total = res.headers.get('Content-Range')?.split('/')[1];
+    let size = Number(total ?? Number.NaN);
+    if (!Number.isFinite(size) && res.status === 200) {
+      size = Number(res.headers.get('Content-Length') ?? Number.NaN);
+    }
+    return { status: res.status, delivered, size: Number.isFinite(size) ? size : null };
   }
 
   /** Plain text of a served file (the human-readable report sidecar). */

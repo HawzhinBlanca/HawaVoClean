@@ -8,6 +8,7 @@ import { reportTxtPath } from '../api/types';
 import { getPlayer, type DeckFault } from '../audio/player';
 import { getBridge } from '../bridge';
 import { waveView } from '../render/viewWindow';
+import { unitsEnhanced } from './plural';
 import {
   classifyFailure,
   failureSource,
@@ -247,7 +248,8 @@ async function probeEngine(): Promise<void> {
       retryFaultedDecks();
       retryStrandedAnalysis();
       // An outage is a gap in which anything on disk may have moved. The run
-      // on screen gets the same three HEADs a restore does — no `/api/analyze`.
+      // on screen gets the same verification a restore does — one ranged byte
+      // per artefact plus the master-length check — no `/api/analyze`.
       void reverifyCurrentRun();
     }
     autoloadFromQuery();
@@ -635,7 +637,9 @@ function retryFaultedDecks(): void {
  * looking at changed nothing: `Master WAV` stayed an enabled link whose own
  * href answered 404, the row carried no flag, and the cleaned deck played on
  * from the blob already in memory, so nothing ever probed the file. This is
- * the same three HEADs, run for the current run on the gestures that mean
+ * the same verification a restore makes (one ranged byte per artefact, plus
+ * the master's length against the size this run recorded — see
+ * `verifyArtifacts`), run for the current run on the gestures that mean
  * "look again" — re-picking the row it is on, and the engine coming back.
  * It never calls `/api/analyze`, so it costs nothing a restore does not.
  */
@@ -645,13 +649,21 @@ async function reverifyCurrentRun(): Promise<void> {
   if (!id) return;
   const entry = st.history.find((h) => h.jobId === id);
   if (!entry) return;
-  const avail = await verifyArtifacts(st.client, entry);
-  if (!avail) return;
+  const verified = await verifyArtifacts(st.client, entry);
+  if (!verified) return;
+  const avail = verified.art;
   const cur = getState();
   if (cur.currentRunId !== id) return; // the user moved on while we asked
   const was = cur.artifacts?.master ?? true;
   cur.setArtifacts(avail);
-  cur.patchHistory(id, { artifacts: avail });
+  cur.patchHistory(id, {
+    artifacts: avail,
+    // A healthy sighting (re)records the yardstick; a condemned one never
+    // overwrites it — the recorded size is the fact the condemnation rests on.
+    ...(avail.master && verified.masterBytes !== null
+      ? { masterBytes: verified.masterBytes }
+      : {}),
+  });
   if (avail.master || !was) return;
   // The master has gone since this run was put on screen. Everything the run
   // is — its report, its numbers, its units — is still true; the deck and the
@@ -1066,6 +1078,19 @@ function onJobStatus(status: JobStatus): void {
     void (async () => {
       try {
         const client = requireClient();
+        // A7 · the size the engine serves for this master *now* is the
+        // yardstick every later re-verification measures against — a
+        // truncation changes it, and a HEAD-style stat never notices. One
+        // byte, recorded once, on the run's own row (never guarded by "is
+        // this still the current job": the row belongs to that run).
+        void client
+          .verify(out)
+          .then((p) => {
+            if (p.delivered && p.size !== null) {
+              getState().patchHistory(status.job_id, { masterBytes: p.size });
+            }
+          })
+          .catch(() => undefined);
         const analysis = await analyzeCleaned(out);
         const cur = getState();
         // B5 · the history row belongs to *that* run, not to whatever is on
@@ -1094,7 +1119,7 @@ function onJobStatus(status: JobStatus): void {
         if (report) {
           const s = report.summary;
           cur.setStatus(
-            `Done · ${s.enhanced ?? 0}/${s.units_total ?? 0} units enhanced · ${baseName(out)}`,
+            `Done · ${unitsEnhanced(s.enhanced ?? 0, s.units_total ?? 0)} · ${baseName(out)}`,
           );
         }
       } catch (e) {
@@ -1270,7 +1295,7 @@ export async function selectRun(jobId: string): Promise<void> {
     // not: the files of the run *on screen* were verified once, when it was
     // opened, and never after — so deleting the master under a live run left
     // an enabled download link answering 404 with nothing on screen saying so.
-    // Three HEADs, no `/api/analyze`, no re-decode.
+    // One ranged byte per artefact, no `/api/analyze`, no re-decode.
     await reverifyCurrentRun();
     return;
   }
@@ -1308,17 +1333,47 @@ export async function selectRun(jobId: string): Promise<void> {
   const client = st.client;
   const doneRun = entry.outcome === 'done' && Boolean(entry.outputPath);
 
+  // A7 · the swap is atomic-or-labelled, and it is settled HERE — before the
+  // first engine round-trip — because everything below this line can hang or
+  // die with the engine. Two halves:
+  //
+  // *Atomic*: the run's own facts (analyses, report, status) are session
+  // memory, so the cached ones switch with the name. Before this, a restore
+  // that stalled at its first request left run B's waveform, metrics and
+  // status line standing under run A's name for as long as the stall lasted.
+  // The post-verification code below re-states these, amending the cleaned
+  // half if the master fails verification.
+  st.setOriginal(entry.original);
+  st.setCleaned(doneRun ? entry.cleaned : null, doneRun ? entry.outputPath : null);
+  st.setStatus(runStatusLine(entry));
+  // *Labelled*: a deck keeps its audio only if it is already this run's file;
+  // otherwise it goes silent and unclaimed now, not after the engine answers.
+  // The measured failure: engine hung mid-restore → both decks still held the
+  // previous run's 12 s blobs under a 94.6 s run's name, A/B lit CLEANED.
+  getPlayer().claimOnly('original', client ? client.fileUrl(entry.inputPath) : null);
+  getPlayer().claimOnly(
+    'cleaned',
+    client && doneRun ? client.fileUrl(entry.outputPath) : null,
+  );
+
   // B5 · a cached analysis is not proof that the file behind it is still
   // there. Before this check a restore reported "RESULT Complete 5/5" with an
   // enabled Master WAV link that 404s, because `entry.cleaned` was present and
-  // nothing ever asked the engine about the *file*. Three HEADs answer that —
-  // no decode, no `/api/analyze`, so the zero-analyze property of a restore is
+  // nothing ever asked the engine about the *file*. One ranged byte per
+  // artefact answers that (a HEAD does not — see `verifyArtifacts`) — no
+  // decode, no `/api/analyze`, so the zero-analyze property of a restore is
   // untouched.
-  const avail = await verifyArtifacts(client, entry);
+  const verified = await verifyArtifacts(client, entry);
   if (getState().currentRunId !== entry.jobId) return; // the user moved on
-  if (avail) {
+  const avail = verified?.art ?? null;
+  if (verified && avail) {
     getState().setArtifacts(avail);
-    getState().patchHistory(entry.jobId, { artifacts: avail });
+    getState().patchHistory(entry.jobId, {
+      artifacts: avail,
+      ...(avail.master && verified.masterBytes !== null
+        ? { masterBytes: verified.masterBytes }
+        : {}),
+    });
   }
   // A run whose master is gone is not a run with a cleaned deck. Everything
   // else about it — its report, its numbers, its units — is still true.
@@ -1412,17 +1467,64 @@ export async function selectRun(jobId: string): Promise<void> {
  */
 function deckGoneDetail(avail: ArtifactState): string {
   if (!avail.master) {
+    // The flag carries *which way* the master failed verification; the plate's
+    // sentence has to agree with it, or the screen says "no longer on disk"
+    // about a file that is sitting right there truncated.
+    if (avail.flag === 'FILE BROKEN') {
+      return 'The cleaned master on disk is not the file this run wrote — it has been truncated or rewritten — so there is no cleaned deck; the A/B is playing the original.';
+    }
+    if (avail.flag === 'NO ACCESS') {
+      return 'The cleaned master cannot be read where it stands, so there is no cleaned deck — the A/B is playing the original.';
+    }
     return 'The cleaned master is no longer on disk, so there is no cleaned deck — the A/B is playing the original.';
   }
   return avail.reason;
 }
 
+/** Bytes as the condemnation sentence needs them: exact, with separators. */
+function fmtBytes(n: number | null): string {
+  return n === null ? 'an unknown length' : `${n.toLocaleString('en-US')} B`;
+}
+
+/** What one one-byte probe of one artefact actually established. */
+type ArtifactVerdict =
+  | { state: 'ok'; size: number | null }
+  | { state: 'gone' } // the engine answered 404
+  | { state: 'unreadable' }; // the engine committed a 2xx and could not produce the byte
+
 /**
- * B5 · which of a finished run's three files the engine can still serve.
+ * One artefact, really read. A 2xx whose byte never arrives is ambiguous —
+ * a file the engine lists but cannot open (chmod 000, a volume gone under
+ * it), or an engine dying between headers and body — and one more byte-sized
+ * question separates them: a second answer means the file, no answer at all
+ * means the engine (the throw lands in `verifyArtifacts`'s outage catch).
+ * Same rule as the player's own deck probe.
+ */
+async function probeArtifact(client: EngineClient, path: string): Promise<ArtifactVerdict> {
+  const once = async (): Promise<ArtifactVerdict | null> => {
+    const p = await client.verify(path);
+    if (p.status === 404) return { state: 'gone' };
+    if (p.status >= 400) {
+      // Any other refusal is the engine having an opinion about the request,
+      // not evidence about the file; treated like the outage case.
+      throw new EngineError(p.status, `http_${p.status}`, 'artefact probe refused');
+    }
+    return p.delivered ? { state: 'ok', size: p.size } : null;
+  };
+  return (await once()) ?? (await once()) ?? { state: 'unreadable' };
+}
+
+/**
+ * B5/A7 · which of a finished run's three files the engine can still serve —
+ * established by *reading* them, not by asking whether they exist.
  *
- * `HEAD /api/audio` is the whole check: same status as the GET, no body, no
- * decode, and a 404 is a fact rather than a guess. Nothing here calls
- * `/api/analyze`, so restoring a run stays free.
+ * A HEAD answers 200 for a master that has been `chmod 000`ed and for one
+ * truncated to 100 bytes, so the old three-HEAD check waved through exactly
+ * the two attacks it was built against. Each artefact now costs one ranged
+ * byte (`EngineClient.verify`), and the master's full length is additionally
+ * measured against the size this run recorded when its master first loaded
+ * (`HistoryEntry.masterBytes`). Nothing here calls `/api/analyze`, so
+ * restoring a run stays free.
  *
  * Returns null when no answer could be had — no engine, or a run that never
  * produced anything. Silence beats a false accusation, and an outage is
@@ -1431,44 +1533,88 @@ function deckGoneDetail(avail: ArtifactState): string {
 async function verifyArtifacts(
   client: EngineClient | null,
   entry: HistoryEntry,
-): Promise<ArtifactState | null> {
+): Promise<{ art: ArtifactState; masterBytes: number | null } | null> {
   if (entry.outcome !== 'done' || !entry.outputPath) return null;
   // A superseded run's files are not its own: a later run wrote over them, so
   // its report and the bytes behind its links describe two different passes.
   // That answer costs no request at all.
   if (entry.supersededBy) {
     return {
-      master: false,
-      json: false,
-      txt: false,
-      reason:
-        'A later run wrote over this run’s files — what is on disk now belongs to that run, not to this report.',
+      art: {
+        master: false,
+        json: false,
+        txt: false,
+        reason:
+          'A later run wrote over this run’s files — what is on disk now belongs to that run, not to this report.',
+      },
+      masterBytes: null,
     };
   }
   if (!client) return null;
   const jsonPath = entry.reportPath || '';
   const txtPath = jsonPath ? reportTxtPath(jsonPath) : '';
   try {
-    const [master, json, txt] = await Promise.all([
-      client.exists(entry.outputPath),
-      jsonPath ? client.exists(jsonPath) : Promise.resolve(false),
-      txtPath ? client.exists(txtPath) : Promise.resolve(false),
+    const [m, j, t] = await Promise.all([
+      probeArtifact(client, entry.outputPath),
+      jsonPath ? probeArtifact(client, jsonPath) : Promise.resolve<ArtifactVerdict>({ state: 'gone' }),
+      txtPath ? probeArtifact(client, txtPath) : Promise.resolve<ArtifactVerdict>({ state: 'gone' }),
     ]);
-    if (master && json && txt) return { master, json, txt, reason: '' };
+    const expected = entry.masterBytes ?? null;
+    const sizeOk =
+      m.state !== 'ok' || expected === null || m.size === null || m.size === expected;
+    const master = m.state === 'ok' && sizeOk;
+    const json = j.state === 'ok';
+    const txt = t.state === 'ok';
+    const masterBytes = master ? m.size : null;
+    if (master && json && txt) {
+      return { art: { master, json, txt, reason: '' }, masterBytes };
+    }
+    // A master that is present-but-wrong gets its own words: "gone" would send
+    // the user looking for a file that is right where they left it.
+    if (m.state === 'ok' && !sizeOk) {
+      return {
+        art: {
+          master: false,
+          json,
+          txt,
+          reason: `The cleaned master on disk is ${fmtBytes(m.size)} where this run wrote ${fmtBytes(
+            expected,
+          )} — it has been truncated or rewritten, so it is not this run’s master any more. The report on screen is this session’s own copy of the run.`,
+          flag: 'FILE BROKEN',
+        },
+        masterBytes: null,
+      };
+    }
+    if (m.state === 'unreadable') {
+      return {
+        art: {
+          master: false,
+          json,
+          txt,
+          reason:
+            'The cleaned master is still listed, but the engine cannot read a byte of it — the file is unreadable where it stands. The report on screen is this session’s own copy of the run.',
+          flag: 'NO ACCESS',
+        },
+        masterBytes: null,
+      };
+    }
     const gone = [
-      !master ? 'the cleaned master' : null,
+      m.state !== 'ok' ? 'the cleaned master' : null,
       !json ? 'the JSON report' : null,
       !txt ? 'the .txt summary' : null,
     ].filter((x): x is string => x !== null);
     const list =
       gone.length > 1 ? `${gone.slice(0, -1).join(', ')} and ${gone[gone.length - 1]}` : gone[0];
     return {
-      master,
-      json,
-      txt,
-      reason: `This run’s files are not all where it left them — ${list} ${
-        gone.length > 1 ? 'are' : 'is'
-      } no longer on disk. The report on screen is this session’s own copy of the run.`,
+      art: {
+        master,
+        json,
+        txt,
+        reason: `This run’s files are not all where it left them — ${list} ${
+          gone.length > 1 ? 'are' : 'is'
+        } no longer on disk. The report on screen is this session’s own copy of the run.`,
+      },
+      masterBytes,
     };
   } catch {
     // The engine did not answer at all. That is an outage, not a deletion.
@@ -1481,7 +1627,7 @@ function runStatusLine(e: HistoryEntry): string {
   if (e.outcome === 'cancelled') return `Cancelled · ${e.inputName}`;
   const units =
     e.enhanced !== null && e.unitsTotal !== null
-      ? ` · ${e.enhanced}/${e.unitsTotal} units enhanced`
+      ? ` · ${unitsEnhanced(e.enhanced, e.unitsTotal)}`
       : '';
   return `Done${units} · ${baseName(e.outputPath) || e.inputName}`;
 }
@@ -1512,7 +1658,7 @@ export function summaryLine(e: HistoryEntry): string {
     return parts.join(' · ');
   }
   if (e.enhanced !== null && e.unitsTotal !== null) {
-    parts.push(`${e.enhanced}/${e.unitsTotal} units enhanced`);
+    parts.push(unitsEnhanced(e.enhanced, e.unitsTotal));
   }
   const li = num(e.lufsIn);
   const lo = num(e.lufsOut);

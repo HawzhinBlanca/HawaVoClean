@@ -139,6 +139,14 @@ export interface HistoryEntry {
   supersededBy?: string | null;
   /** What the engine could still serve the last time this run was opened. */
   artifacts?: ArtifactState | null;
+  /**
+   * The master's byte length as the engine served it when this run's master
+   * was first loaded. This is the yardstick a later re-verification measures
+   * against: a 100-byte truncation answers HEAD 200 and delivers its one
+   * probed byte perfectly happily — only the length says it is not the file
+   * this run wrote. Null until the first healthy sighting.
+   */
+  masterBytes?: number | null;
 }
 
 /** How many runs the session keeps. */

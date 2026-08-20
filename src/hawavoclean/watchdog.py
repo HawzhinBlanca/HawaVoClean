@@ -8,17 +8,39 @@ had already reconciled to "failed, nothing was written".
 
 So the *child* watches. A spawning process stamps its own pid into
 :data:`PARENT_PID_ENV`; the child arms a daemon thread that polls that pid
-and, the moment it is gone, raises SIGINT on itself so the ordinary
+and, the moment it is gone, raises a signal on itself so the ordinary
 interrupt path runs — worker torn down, workspace removed, nothing
 published — with a hard ``os._exit`` backstop if that unwind does not
 finish. Liveness is checked two ways because either alone can lie:
 ``kill(pid, 0)`` (a pid can be recycled) and ``getppid()`` (which changes
 to 1 on reparenting).
+
+Two topology lessons are folded in:
+
+* The self-interrupt is SIGINT only while SIGINT can do anything. A process
+  spawned from a background job (``cmd &`` in a non-interactive shell,
+  nohup pipelines, most supervisors) inherits ``SIGINT=SIG_IGN`` across
+  exec, and CPython leaves an inherited ignore alone — so a self-SIGINT
+  there is a silent no-op and a fast child can publish inside the backstop
+  grace. In that state the watchdog escalates to SIGTERM, which
+  ``cli.main()`` maps onto the same KeyboardInterrupt unwind before this
+  watchdog is ever armed.
+
+* :data:`PARENT_PID_ENV` is a private contract between a spawner and its
+  DIRECT child. It is only honored when ``getppid()`` still names the
+  declared pid at arm time (parent death is then detected by the ppid
+  *changing*), or when the child is provably the orphan of a spawner that
+  died before arming (already reparented to init and the declared pid gone).
+  Anything else — a stale export, a leaked shell variable — is ignored with
+  a warning instead of killing an unrelated invocation at startup.
 """
 
+import logging
 import os
 import signal
 import threading
+
+logger = logging.getLogger(__name__)
 
 #: Environment variable naming the pid a child should watch.
 PARENT_PID_ENV = "HAWAVOCLEAN_PARENT_PID"
@@ -41,17 +63,38 @@ def child_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-def parent_is_alive(parent_pid: int) -> bool:
-    """Whether the process that spawned us is still there."""
-    if os.getppid() != parent_pid:
-        return False  # reparented: our parent is gone, whoever holds that pid now
+def _pid_exists(pid: int) -> bool:
+    """Whether ``pid`` names a live process (not necessarily one of ours)."""
     try:
-        os.kill(parent_pid, 0)
+        os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:  # pragma: no cover - alive, just not ours to signal
         return True
     return True
+
+
+def parent_is_alive(parent_pid: int) -> bool:
+    """Whether the process that spawned us is still there."""
+    if os.getppid() != parent_pid:
+        return False  # reparented: our parent is gone, whoever holds that pid now
+    return _pid_exists(parent_pid)
+
+
+def _self_interrupt_signal() -> signal.Signals:
+    """The signal whose delivery will actually unwind this process.
+
+    SIGINT while it is catchable. A process spawned from a background job
+    runs with an inherited ``SIGINT=SIG_IGN`` (POSIX keeps terminal Ctrl-C
+    away from background work, and the ignore persists across exec), so a
+    self-SIGINT there would change nothing; escalate to SIGTERM, which
+    ``cli._install_signal_handlers`` turns into the same KeyboardInterrupt
+    unwind. Checked at fire time, from the watchdog thread —
+    ``signal.getsignal`` is thread-safe where ``signal.signal`` is not.
+    """
+    if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+        return signal.SIGTERM
+    return signal.SIGINT
 
 
 def install_parent_death_watchdog(
@@ -63,7 +106,10 @@ def install_parent_death_watchdog(
 
     Returns the watching thread, or ``None`` when the variable is absent or
     unusable — a hand-run CLI has no watched parent and must never exit
-    because the shell that launched it went away.
+    because the shell that launched it went away. "Unusable" includes a
+    declared pid that is not this process's parent: the variable is a
+    private contract between the spawner and its direct child, and a stale
+    or exported value must not kill an unrelated invocation at startup.
 
     Call this as early as possible. The lesson from the enhancement worker,
     which armed its own watchdog only after model warmup, is that every
@@ -79,6 +125,29 @@ def install_parent_death_watchdog(
     if parent_pid <= 1 or parent_pid == os.getpid():
         return None
 
+    ppid = os.getppid()
+    if ppid != parent_pid:
+        # The declarer is not our parent. One real exception: our spawner
+        # declared itself and then died in the window before this ran — that
+        # child is already hanging off init and the declared pid is gone, and
+        # it must still tear itself down or the arming gap is a free pass to
+        # finish and publish. Everything else is a stale or leaked variable.
+        if not (ppid == 1 and not _pid_exists(parent_pid)):
+            logger.warning(
+                "Ignoring %s=%d: not set by this process's parent (ppid %d). "
+                "The variable is a private spawner contract; a stale or "
+                "exported value must not end an unrelated invocation.",
+                PARENT_PID_ENV,
+                parent_pid,
+                ppid,
+            )
+            return None
+        logger.warning(
+            "Declared parent %d died before the watchdog armed; tearing down.",
+            parent_pid,
+        )
+        # Fall through: the poll loop below notices at once.
+
     def _watch() -> None:
         while parent_is_alive(parent_pid):
             threading.Event().wait(poll_interval_s)
@@ -86,7 +155,7 @@ def install_parent_death_watchdog(
         # scratch workspace, a staging directory at the destination and a
         # worker subprocess, and all three have interrupt-safe cleanup.
         try:
-            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), _self_interrupt_signal())
         except OSError:  # pragma: no cover - only if the pid table is broken
             os._exit(ORPHAN_EXIT_CODE)
         # Backstop: a main thread stuck in a long C call (a decode, a model
