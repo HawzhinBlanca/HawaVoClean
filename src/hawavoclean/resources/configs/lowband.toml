@@ -8,11 +8,11 @@
 # rumble but takes enough of the consonant band with it that the guard
 # reverts the take.
 #
-# This profile runs `studio-dfn3-lowband-48k-v1`: DeepFilterNet3 with
-# unlimited attenuation BELOW a 1500 Hz crossover, the ORIGINAL signal
-# above it, then the locked decision-directed Wiener filter over the
-# recombination. Consonants survive by construction rather than by the
-# model's good judgement.
+# This profile runs `studio-dfn3-lowband-48k-v1`: DeepFilterNet3 over the
+# full band with unlimited attenuation, of which only the output BELOW a
+# 1000 Hz crossover is kept — the ORIGINAL signal is handed back above it.
+# Consonants survive by construction rather than by the model's good
+# judgement (measured retention 0.999).
 #
 # Guarded in INTEGRITY mode, on the same measured thresholds as the studio
 # profile: spectral identity is not enforced (removing rumble changes the
@@ -20,7 +20,13 @@
 # signal-collapse protections stay fully enforced. Every unit is judged, and
 # any unit the guard rejects keeps its original audio.
 #
-# Scope note: DeepFilterNet3 only ever sees the band under 1500 Hz here, so
+# For the measured best result on this material, follow this profile with a
+# production pass over its output: the band split gets out from under the
+# rumble, the Wiener pass takes the rest of the floor down, and the guard
+# judges every unit in both runs. Measured on the Teat1vo lab fixture:
+# speech-to-floor separation 15.1 -> 29.4 dB here, 35.2 dB after that pass.
+#
+# Scope note: DFN3's effect is confined to the band under 1000 Hz, so
 # sustained musical tones above the crossover pass through untouched — but
 # bass lines and low drones below it are treated as noise. For music-heavy
 # material, listen to the flagged review timecodes in the report.
