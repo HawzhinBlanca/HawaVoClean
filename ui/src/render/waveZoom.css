@@ -216,9 +216,98 @@
   --vd: 1;
 }
 
-.verdict-track > .verdict-seg {
+/* Descendant, not child: on a multi-channel report each segment lives inside
+   its channel's lane. A lane is left: 0 / right: 0 inside the track, so the
+   percentage a segment resolves against is the same width either way and the
+   x geometry is identical in both layouts. */
+.verdict-track .verdict-seg {
   left: calc((var(--t0) - var(--vs)) / var(--vd) * 100%);
   width: max(2px, calc((var(--t1) - var(--t0)) / var(--vd) * 100% - 1px));
+}
+
+/* ------------------------------------------------ per-channel lanes (A7/B4)
+   A split-speakers run decides per channel, and those decisions overlap in
+   time: ch0 0.000–20.570 and ch1 0.000–20.474 are two different verdicts about
+   the same seconds. Stacked in one lane the later one wins every pixel, so
+   half the report could not be hovered, clicked or selected at all.
+
+   Each channel gets its own sub-track. The *track* keeps its box — same x,
+   same width as the waveform canvas, which is what the strip's 0.000 px
+   alignment depends on — and only grows taller; the lanes divide that height
+   between them. A one-channel report never enters this branch and keeps the
+   22px single-lane strip exactly as it was. */
+.verdict-track[data-lanes='1'] {
+  --lanes: 1;
+}
+
+.verdict-track:not([data-lanes='1']) {
+  height: calc(var(--lanes, 2) * var(--lane-h, 18px));
+}
+
+.verdict-lane {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--lane) / var(--lanes) * 100%);
+  height: calc(100% / var(--lanes));
+}
+
+/* The hairline between lanes: two bars of the same colour touching would read
+   as one taller bar, so the lanes are separated by the well showing through. */
+.verdict-lane + .verdict-lane::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.045);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.verdict-lane > .verdict-seg {
+  top: 3px;
+  bottom: 3px;
+}
+
+/* L / R. It sits over the start of the lane because the track cannot give up
+   width without breaking its alignment with the canvas — so it is
+   pointer-events: none (a segment underneath keeps every one of its pixels as
+   a hit target) and it carries its own scrim so it reads on any segment
+   colour. */
+.lane-tag {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  padding: 0 4px 0 3px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.06em;
+  line-height: 1;
+  color: rgba(232, 238, 246, 0.82);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  background: linear-gradient(
+    90deg,
+    rgba(10, 12, 15, 0.86) 0%,
+    rgba(10, 12, 15, 0.74) 62%,
+    rgba(10, 12, 15, 0) 100%
+  );
+}
+
+@media (max-height: 720px) {
+  /* The waveform's furniture gives up pixels first at short heights; a lane
+     still reads at 15px (an 11px bar plus its gaps). */
+  .verdict-track:not([data-lanes='1']) {
+    --lane-h: 15px;
+  }
 }
 
 /* A time-axis-linked element has to share the axis: the track spans exactly the
@@ -249,4 +338,42 @@
 .wave-body .verdict-legend {
   grid-area: legend;
   align-self: center;
+}
+
+/* ------------------------------------------ selection band, channel-scoped */
+/* On a multi-channel report the lit band fills only its channel's slice of the
+   display (the worker draws it; see the note beside `4. selection band`), and
+   this is the word for it. It is placed vertically by the same lane arithmetic
+   the band uses and horizontally in one style write per view change, so a pan
+   does not cost a React render. */
+.wave-selchan {
+  position: absolute;
+  left: 2px;
+  top: calc((var(--lane) + 0.5) / var(--lanes) * 100%);
+  transform: translateY(-50%);
+  z-index: 2;
+  padding: 2px 5px;
+  border-radius: var(--r-xxs);
+  pointer-events: none;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: rgba(240, 245, 252, 0.92);
+  background: rgba(9, 11, 14, 0.72);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+    0 2px 6px rgba(0, 0, 0, 0.5);
+}
+
+@media (max-height: 720px) {
+  /* Same rule the playhead readout and the deck legend follow: with the error
+     bar up the display can fall to ~34px, and furniture goes rather than being
+     shown in pieces. The channel is still named by the strip's lane tags and
+     by the inspector's badge. */
+  .app:has(> .errbar) .wavepanel .wave-selchan {
+    display: none;
+  }
 }

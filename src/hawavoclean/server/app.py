@@ -254,6 +254,27 @@ def default_output_path(input_path: Path, profile: str) -> Path:
     return input_path.parent / f"{_clean_stem(input_path)}{suffix}.wav"
 
 
+def _safe_upload_name(raw: str | None) -> str:
+    """A storable file name from an attacker-controlled multipart filename.
+
+    Traversal is neutralised by taking the basename, and the two kinds of
+    text that no filesystem call can accept are removed rather than allowed
+    to raise ``ValueError`` out of ``open()``/``unlink()``: NUL bytes, and
+    unpaired surrogates (a raw multipart header can carry either). Every
+    other character a POSIX name may hold — space, newline, quote, emoji,
+    non-UTF-8 bytes as surrogate escapes — is preserved.
+    """
+    name = (raw or "").replace("\x00", "")
+    try:
+        os.fsencode(name)
+    except (UnicodeEncodeError, ValueError):
+        name = name.encode("utf-8", "replace").decode("utf-8")
+    name = Path(name).name
+    if not name or name in (".", ".."):  # Path("..").name == "..": targets the dir itself
+        return "upload.bin"
+    return name
+
+
 def content_type_for(path: Path) -> str:
     mime = _AUDIO_MIME.get(path.suffix.lower())
     if mime is None:
@@ -566,10 +587,13 @@ def create_app(
         copy stays chunked (measured: a 1.07 GB upload moves the engine's RSS
         by 5.7 MB) and that a failure part-way through does not leave a
         half-written file behind pretending to be audio.
+
+        The part's filename is attacker-controlled text, not a name: it is
+        reduced to a basename, and characters no filesystem call can accept
+        (a NUL byte, an unpaired surrogate) are dropped rather than allowed
+        to raise ``ValueError`` out of ``open()`` as a 500.
         """
-        name = Path(file.filename or "").name or "upload.bin"
-        if name in (".", ".."):  # Path("..").name == "..": would target the directory itself
-            name = "upload.bin"
+        name = _safe_upload_name(file.filename)
         dest_dir = work_root() / "uploads" / uuid.uuid4().hex
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / name
@@ -590,8 +614,12 @@ def create_app(
                         )
                     out.write(chunk)
         except BaseException:
-            dest.unlink(missing_ok=True)
-            with contextlib.suppress(OSError):
+            # Cleanup must never raise over the failure it is cleaning up
+            # after: an unlink that itself throws would replace the real
+            # error with its own.
+            with contextlib.suppress(OSError, ValueError):
+                dest.unlink(missing_ok=True)
+            with contextlib.suppress(OSError, ValueError):
                 dest_dir.rmdir()
             raise
         finally:

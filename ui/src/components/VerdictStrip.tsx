@@ -1,8 +1,17 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+} from 'react';
 import { classifyDecision, decisionLabel, type UnitDecisionRecord } from '../api/types';
 import { formatTime } from '../render/ticks';
 import { waveView } from '../render/viewWindow';
-import { selectUnit, unitKey } from '../state/selection';
+import { channelName, highlightFor, reportChannels, selectUnit, unitKey } from '../state/selection';
 import { useStore } from '../state/store';
 
 const SCORE_KEYS: Array<[string, string]> = [
@@ -37,10 +46,10 @@ function guardTone(v: string | null | undefined): 'pass' | 'fail' | 'none' {
  * Everything the hover card says, as one sentence. Kept beside the card's own
  * markup so the two cannot drift apart.
  */
-function segmentLabel(u: UnitDecisionRecord): string {
+function segmentLabel(u: UnitDecisionRecord, channels: number[]): string {
   const parts = [
     `Unit ${u.unit_id}`,
-    `channel ${u.channel}`,
+    channels.length > 1 ? channelName(u.channel, channels).long : `channel ${u.channel}`,
     decisionLabel(u.final_decision),
     `${formatTime(u.start_time_s, true)} to ${formatTime(u.end_time_s, true)}`,
   ];
@@ -61,6 +70,9 @@ interface Hover {
 
 /** Per-segment custom properties; the track supplies --vs/--vd. */
 type SegStyle = CSSProperties & { '--t0': number; '--t1': number };
+/** Lane geometry: which sub-track this is, and how many there are. */
+type LaneStyle = CSSProperties & { '--lane': number };
+type TrackStyle = CSSProperties & { '--lanes': number };
 
 export function VerdictStrip() {
   const report = useStore((s) => s.report);
@@ -73,6 +85,17 @@ export function VerdictStrip() {
 
   const units = report?.units ?? [];
   const total = duration > 0 ? duration : units.length ? (units[units.length - 1]?.end_time_s ?? 0) : 0;
+
+  // A7/B4 · a split-speakers run decides *per channel*, and those decisions
+  // overlap in time. Laid out in one lane they stack on top of each other:
+  // measured on a real 2-channel run, the last channel painted was topmost on
+  // 687 of the track's 689 px, so half the report had no hover, no click and
+  // no selection at all. One lane per channel is the fix, and it is only ever
+  // reached when the report really has more than one — a mono report (and a
+  // dual-mono one, which decides on ch0 alone) keeps the single-lane strip
+  // pixel for pixel.
+  const channels = useMemo(() => reportChannels(report?.units ?? []), [report]);
+  const multi = channels.length > 1;
 
   // The strip is a time-axis-linked element: it must show exactly the window
   // the waveform shows. Segments carry their own times as custom properties
@@ -96,9 +119,9 @@ export function VerdictStrip() {
   const onEnter = useCallback(
     (u: UnitDecisionRecord, e: MouseEvent) => {
       setHover({ unit: u, x: e.clientX, y: e.clientY });
-      setHighlight({ start: u.start_time_s, end: u.end_time_s });
+      setHighlight(highlightFor(u, channels));
     },
-    [setHighlight],
+    [setHighlight, channels],
   );
   const onMove = useCallback((e: MouseEvent) => {
     setHover((h) => (h ? { ...h, x: e.clientX, y: e.clientY } : h));
@@ -106,9 +129,8 @@ export function VerdictStrip() {
   const onLeave = useCallback(() => {
     setHover(null);
     // Hover only borrows the highlight; the selection keeps it.
-    const sel = useStore.getState().selectedUnit;
-    setHighlight(sel ? { start: sel.start_time_s, end: sel.end_time_s } : null);
-  }, [setHighlight]);
+    setHighlight(highlightFor(useStore.getState().selectedUnit, channels));
+  }, [setHighlight, channels]);
 
   useEffect(() => {
     if (!report) {
@@ -146,12 +168,58 @@ export function VerdictStrip() {
 
   const enhanced = units.filter((u) => u.final_decision === 'enhanced').length;
 
+  // One segment, wherever it lives — directly in the track for a mono report,
+  // inside its channel's lane for a multi-channel one. Written once so the two
+  // cases cannot drift apart.
+  const segment = (u: UnitDecisionRecord) => {
+    const cls = classifyDecision(u.final_decision);
+    const style: SegStyle = { '--t0': u.start_time_s, '--t1': u.end_time_s };
+    const isSel = selected ? unitKey(selected) === unitKey(u) : false;
+    return (
+      <button
+        type="button"
+        // D1 · deliberately out of the tab order, and this is the
+        // justification. A report can carry hundreds of units; making
+        // each one a tab stop would put the whole rest of the screen
+        // behind a few hundred presses of Tab. They keep `button`
+        // semantics and a full name, so a screen reader still reaches
+        // and activates them through its own element navigation, and
+        // every unit has a *sequential* keyboard route through `[` and
+        // `]` (and the inspector's own two buttons, which are tab
+        // stops) — which is a better one anyway, because it selects,
+        // seeks and pans the view in one press.
+        tabIndex={-1}
+        key={unitKey(u)}
+        className={`verdict-seg ${cls}${hover?.unit === u ? ' hot' : ''}${isSel ? ' sel' : ''}`}
+        style={style}
+        // D1 · the hover tooltip must not be the only way to read a
+        // unit's decision. Two routes replace it: the inspector, which
+        // shows strictly more on selection (`[` / `]` or a click), and
+        // this name, which carries the tooltip's own fields — range,
+        // both guard verdicts, strength — so a screen reader gets the
+        // card's content without a pointer ever entering the strip.
+        aria-label={segmentLabel(u, channels)}
+        aria-pressed={isSel}
+        onMouseEnter={(e) => onEnter(u, e)}
+        onMouseMove={onMove}
+        onClick={(e) => {
+          // Keep the keyboard on the transport: a segment is a click
+          // target, not a focus stop (Space must still play/pause).
+          e.currentTarget.blur();
+          selectUnit(u);
+        }}
+      />
+    );
+  };
+
+  const trackStyle: TrackStyle | undefined = multi ? { '--lanes': channels.length } : undefined;
+
   return (
     <div className="verdict">
       <div className="label">
         <span className="caps">Verdicts</span>
         <span className="count">
-          {units.length ? `${units.length} units · ${enhanced} enhanced` : '—'}
+          {units.length ? `${units.length} unit${units.length === 1 ? '' : 's'} · ${enhanced} enhanced` : '—'}
         </span>
       </div>
       <div
@@ -161,50 +229,48 @@ export function VerdictStrip() {
         // group is what lets a screen-reader user understand the run of
         // segments inside it as one thing.
         role="group"
-        aria-label="Per-unit guard verdicts"
+        aria-label={
+          multi
+            ? `Per-unit guard verdicts, one lane per channel (${channels.length} channels)`
+            : 'Per-unit guard verdicts'
+        }
+        data-lanes={channels.length || 1}
+        style={trackStyle}
         onMouseLeave={onLeave}
       >
         {units.length && total > 0 ? (
-          units.map((u) => {
-            const cls = classifyDecision(u.final_decision);
-            const style: SegStyle = { '--t0': u.start_time_s, '--t1': u.end_time_s };
-            const isSel = selected ? unitKey(selected) === unitKey(u) : false;
-            return (
-              <button
-                type="button"
-                // D1 · deliberately out of the tab order, and this is the
-                // justification. A report can carry hundreds of units; making
-                // each one a tab stop would put the whole rest of the screen
-                // behind a few hundred presses of Tab. They keep `button`
-                // semantics and a full name, so a screen reader still reaches
-                // and activates them through its own element navigation, and
-                // every unit has a *sequential* keyboard route through `[` and
-                // `]` (and the inspector's own two buttons, which are tab
-                // stops) — which is a better one anyway, because it selects,
-                // seeks and pans the view in one press.
-                tabIndex={-1}
-                key={`${u.channel}-${u.unit_id}`}
-                className={`verdict-seg ${cls}${hover?.unit === u ? ' hot' : ''}${isSel ? ' sel' : ''}`}
-                style={style}
-                // D1 · the hover tooltip must not be the only way to read a
-                // unit's decision. Two routes replace it: the inspector, which
-                // shows strictly more on selection (`[` / `]` or a click), and
-                // this name, which carries the tooltip's own fields — range,
-                // both guard verdicts, strength — so a screen reader gets the
-                // card's content without a pointer ever entering the strip.
-                aria-label={segmentLabel(u)}
-                aria-pressed={isSel}
-                onMouseEnter={(e) => onEnter(u, e)}
-                onMouseMove={onMove}
-                onClick={(e) => {
-                  // Keep the keyboard on the transport: a segment is a click
-                  // target, not a focus stop (Space must still play/pause).
-                  e.currentTarget.blur();
-                  selectUnit(u);
-                }}
-              />
-            );
-          })
+          multi ? (
+            channels.map((ch, i) => {
+              const name = channelName(ch, channels);
+              const mine = units.filter((u) => u.channel === ch);
+              const laneStyle: LaneStyle = { '--lane': i };
+              return (
+                <div
+                  className="verdict-lane"
+                  key={ch}
+                  style={laneStyle}
+                  role="group"
+                  aria-label={`${name.long}, ${mine.length} unit${mine.length === 1 ? '' : 's'}`}
+                >
+                  {/* The tag rides *inside* the track rather than in a gutter
+                      beside it: the track's box is the waveform canvas's box to
+                      0.000 px, and a label column would move one of them. It is
+                      pointer-events: none, so it can never take a click or a
+                      hover away from the segment underneath it — the scan that
+                      caught this bug would otherwise find the tag topmost. */}
+                  {/* No `title`: this span cannot take a pointer, so a
+                      tooltip on it could never fire. The lane's own group
+                      name carries the words. */}
+                  <span className="lane-tag" aria-hidden="true">
+                    {name.short}
+                  </span>
+                  {mine.map(segment)}
+                </div>
+              );
+            })
+          ) : (
+            units.map(segment)
+          )
         ) : (
           <div className="verdict-empty">
             {report ? 'Report has no units' : 'Per-unit guard decisions appear here after processing'}
@@ -230,7 +296,10 @@ export function VerdictStrip() {
           <div className="head">
             <span className="mono" style={{ color: 'var(--fg)' }}>
               Unit {hover.unit.unit_id}
-              <span style={{ color: 'var(--fg-3)' }}> · ch {hover.unit.channel}</span>
+              <span style={{ color: 'var(--fg-3)' }}>
+                {' · '}
+                {multi ? channelName(hover.unit.channel, channels).short : `ch ${hover.unit.channel}`}
+              </span>
             </span>
             {/* same badge recipe as the inspector and the strip itself */}
             <span className={`pill ${classifyDecision(hover.unit.final_decision)}`}>

@@ -97,9 +97,24 @@ export interface WaveHoverMsg {
   type: 'hover';
   x: number | null; // CSS px within the canvas
 }
+/**
+ * The lit range, and — on a multi-channel report — which channel's range it
+ * is. `lane` is the channel's index among the report's channels and `lanes`
+ * how many there are; the band is then drawn in that horizontal slice of the
+ * display instead of across the whole of it, so a ch0 unit and the ch1 unit
+ * overlapping it in time cannot paint the same pixels. Omitted for mono, which
+ * keeps the full-height band it has always had.
+ */
+export interface WaveHighlightRange {
+  start: number;
+  end: number;
+  lane?: number;
+  lanes?: number;
+}
+
 export interface WaveHighlightMsg {
   type: 'highlight';
-  range: { start: number; end: number } | null;
+  range: WaveHighlightRange | null;
 }
 export interface WaveUnitsMsg {
   type: 'units';

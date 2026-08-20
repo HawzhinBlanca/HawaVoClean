@@ -149,14 +149,22 @@ class JobWorkspace:
                 ):
                     os.replace(staged, dest)
                     renamed.append((staged, dest))
-            except Exception as e:
-                # Roll back the artifacts that already landed.
+            except BaseException as e:
+                # BaseException, not Exception: a Ctrl-C (or the SIGTERM the
+                # CLI turns into one, or the parent-death watchdog's SIGINT)
+                # can land between two of these renames, and `except
+                # Exception` would let KeyboardInterrupt out of here with one
+                # or two of the three artifacts already at the destination —
+                # a master with no report beside it, which is exactly the
+                # partial publication this method exists to prevent.
                 for _, dest in renamed:
                     import contextlib
 
                     with contextlib.suppress(Exception):
                         dest.unlink()
-                raise PublicationError(f"Atomic file publish failed: {e}") from e
+                if isinstance(e, Exception):
+                    raise PublicationError(f"Atomic file publish failed: {e}") from e
+                raise  # an interrupt stays an interrupt: the run was cancelled
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 

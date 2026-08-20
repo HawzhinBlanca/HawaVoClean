@@ -31,6 +31,7 @@ from typing import Any, Literal
 
 from hawavoclean.errors import ExitCode
 from hawavoclean.logging import get_logger
+from hawavoclean.watchdog import child_env
 
 logger = get_logger("server.jobs")
 
@@ -117,6 +118,19 @@ def default_command(record: JobRecord) -> list[str]:
     return cmd
 
 
+def queue_position(queued: int, a_job_is_running: bool) -> int:
+    """Where a just-submitted job stands in line, counting from 1.
+
+    ``queued`` includes the newcomer; the job the worker is already running
+    is no longer in the queue but is still ahead of it. Counting only the
+    queue made the answer depend on whether the worker thread had got round
+    to popping the first job yet — the same three submissions could report
+    "position 3" or "position 2" from one run to the next, and the test that
+    pinned it failed about one run in seven.
+    """
+    return queued + (1 if a_job_is_running else 0)
+
+
 _Subscriber = tuple[asyncio.AbstractEventLoop, asyncio.Queue[dict[str, Any]]]
 
 
@@ -167,7 +181,8 @@ class JobManager:
                 raise RuntimeError("job manager is shut down")
             self._jobs[record.job_id] = record
             self._queue.append(record.job_id)
-            position = len(self._queue)
+            running = any(r.state == "running" for r in self._jobs.values())
+            position = queue_position(len(self._queue), running)
             record.message = "Queued" if position == 1 else f"Queued (position {position})"
             self._wake.notify_all()
             return record.snapshot()
@@ -313,6 +328,19 @@ class JobManager:
                         record.error = {"code": "INTERNAL", "message": str(e)}
                         self._finish_locked(record, "failed", str(e))
 
+    def _child_env(self) -> dict[str, str]:
+        """The child's environment, always carrying this engine's pid.
+
+        ``shutdown()`` only runs when the engine exits *gracefully*. An engine
+        that is SIGKILLed (crash, OOM killer, ``kill -9``) runs no cleanup at
+        all, and the job child — a full ``hawavoclean process`` run — used to
+        be reparented to init and go on to write a complete master and report
+        for a run the UI had already reconciled to "failed, nothing was
+        written". So the child watches the engine itself:
+        ``hawavoclean.watchdog``.
+        """
+        return child_env(self._env)
+
     def _run_job(self, record: JobRecord) -> None:
         cmd = self._command_factory(record)
         try:
@@ -325,7 +353,7 @@ class JobManager:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                env=self._env,
+                env=self._child_env(),
             )
         except OSError as e:
             with self._lock:

@@ -48,9 +48,15 @@ export interface PlayerSnapshot {
  * `missing`    the engine answered 404 — the file is not there any more
  * `forbidden`  the engine refused to serve it (403, path policy)
  * `unreadable` the bytes arrived but no decoder would take them
+ * `truncated`  a decoder took them and found no audio worth the name — a
+ *              length of zero, or a small fraction of the length the run says
+ *              this file has. Chrome accepts a RIFF header with nothing behind
+ *              it: `readyState` 4, `MediaError` null, `duration` 0.000396 s.
+ *              Left alone that is the worst deck of all, because every other
+ *              signal says the deck is fine and pressing Play does nothing.
  * `network`    the engine could not be reached at all
  */
-export type DeckFaultKind = 'missing' | 'forbidden' | 'unreadable' | 'network';
+export type DeckFaultKind = 'missing' | 'forbidden' | 'unreadable' | 'truncated' | 'network';
 
 /**
  * A deck that was asked for and could not be played.
@@ -69,6 +75,8 @@ export interface DeckFault {
   status: number | null;
   /** The deck that took over, or null when there was nothing to fall back to. */
   fellBackTo: Deck | null;
+  /** For `truncated`: what the element read, and what the run says it should be. */
+  duration?: { got: number; expected: number | null };
 }
 
 type Listener = (snap: PlayerSnapshot) => void;
@@ -96,6 +104,19 @@ const MEMORY_DECK_MAX_BYTES = 128 * 1024 * 1024;
 const MEDIA_ERR_ABORTED = 1;
 const MEDIA_ERR_NETWORK = 2;
 
+/**
+ * How short a deck may be before it is a fault rather than a file.
+ *
+ * Two rules, and both are needed. A deck of *zero* length can make no sound
+ * whatever the run says about it. A deck that is a small fraction of the
+ * length the run reports is not the file that run wrote: the container
+ * timelines this app deals with differ by milliseconds at most (measured: 1.46
+ * ms over a 95 s lossy clip), so half is orders of magnitude outside anything
+ * legitimate and cannot fire on a healthy master.
+ */
+const DECK_MIN_DURATION_S = 0.05;
+const DECK_MIN_DURATION_RATIO = 0.5;
+
 export class DualPlayer {
   private readonly els: Record<Deck, HTMLAudioElement>;
   private ctx: AudioContext | null = null;
@@ -111,6 +132,23 @@ export class DualPlayer {
   private objectUrl: Record<Deck, string | null> = { original: null, cleaned: null };
   /** Bumped on every load/retire so a slow fetch can be dropped, not aborted. */
   private epoch: Record<Deck, number> = { original: 0, cleaned: 0 };
+  /**
+   * How long the run says this deck's file is, when the caller knows. The
+   * element's own `duration` is checked against it — see {@link DeckFaultKind}
+   * `truncated`.
+   */
+  private expected: Record<Deck, number | null> = { original: null, cleaned: null };
+  /** One duration verdict per load; `durationchange` fires many times. */
+  private durationJudged: Record<Deck, boolean> = { original: false, cleaned: false };
+  /**
+   * The size probe threw rather than answering. That is the engine not being
+   * reachable at all — evidence the element's own `MediaError` does not carry,
+   * because Chromium reports a src it could not fetch as code 4
+   * (`SRC_NOT_SUPPORTED`), which is indistinguishable from junk bytes.
+   */
+  private probeFailed: Record<Deck, boolean> = { original: false, cleaned: false };
+  /** Injected: is the engine answering at all right now? (see setLivenessProbe) */
+  private engineLive: (() => boolean) | null = null;
   /** A `setActive` that arrived while the deck was still fetching. */
   private pendingActive: Deck | null = null;
   /** The last published fault per deck, cleared when the deck is asked for again. */
@@ -134,7 +172,12 @@ export class DualPlayer {
           this.emit();
         }
       });
-      el.addEventListener('loadedmetadata', () => this.emit());
+      el.addEventListener('loadedmetadata', () => {
+        this.judgeDuration(deck);
+        this.emit();
+      });
+      // A deck can also arrive at its real length later than its metadata.
+      el.addEventListener('durationchange', () => this.judgeDuration(deck));
       // A media element that cannot play what it was given is a deck that is
       // out of service, not a line in a log. The size probe in `attach` cuts
       // off the common case (a 404 never reaches the element at all), but a
@@ -146,7 +189,7 @@ export class DualPlayer {
         // MEDIA_ERR_ABORTED is ours: a src swap or a dispose. Everything else
         // means this deck cannot make sound.
         if (this.state[deck] !== 'empty' && code !== MEDIA_ERR_ABORTED) {
-          this.fail(deck, code === MEDIA_ERR_NETWORK ? 'network' : 'unreadable', null);
+          this.fail(deck, this.classifyElementError(deck, code), null);
           return;
         }
         this.emit();
@@ -243,6 +286,65 @@ export class DualPlayer {
     return this.faults[deck];
   }
 
+  /**
+   * How the player asks whether the engine is answering at all.
+   *
+   * It needs an answer because `MediaError.code` cannot give it one. An engine
+   * that dies while a deck is loading makes Chromium report code **4**
+   * (`SRC_NOT_SUPPORTED`) — the same code as a PNG renamed `.wav` — so a
+   * healthy master went out of service as "nothing here could decode it" and,
+   * because only a `network` fault is ever retried, stayed dead for the rest
+   * of the session after the engine came back. Liveness is what tells the two
+   * apart, and this is the seam the store hangs it on.
+   */
+  setLivenessProbe(fn: (() => boolean) | null): void {
+    this.engineLive = fn;
+  }
+
+  /**
+   * Which kind of fault an element error really is.
+   *
+   * Order matters: the element's own `MEDIA_ERR_NETWORK` is the clearest
+   * answer; the size probe having thrown is the next, because a probe that
+   * never got a reply is the engine being unreachable regardless of what the
+   * media stack made of the src afterwards; the injected liveness check is the
+   * last, for the case where nothing on this deck's own path failed visibly.
+   */
+  private classifyElementError(deck: Deck, code: number): DeckFaultKind {
+    if (code === MEDIA_ERR_NETWORK) return 'network';
+    if (this.probeFailed[deck]) return 'network';
+    if (this.engineLive && !this.engineLive()) return 'network';
+    return 'unreadable';
+  }
+
+  /**
+   * A deck that decodes to nothing is out of service, however happy the
+   * element looks.
+   *
+   * The truncated master is the quietest failure this player can have: a RIFF
+   * header with 60 bytes behind it gives `readyState` 4, `MediaError` null and
+   * `duration` 0.000396 s, so every check the rest of this class makes passes,
+   * the A/B stays lit on CLEANED, the transport reads 00:00.0 / 00:00.0 and
+   * Play does nothing at all. The run's own report knows how long that file is
+   * meant to be, so the length is checkable — and being checkable, it is
+   * checked.
+   */
+  private judgeDuration(deck: Deck): void {
+    if (this.state[deck] !== 'ready') return;
+    if (this.durationJudged[deck]) return;
+    const d = this.els[deck].duration;
+    // Not knowing yet is not a verdict: `NaN` before metadata and `Infinity`
+    // on a stream with no declared length both mean "ask again later".
+    if (!Number.isFinite(d)) return;
+    const expected = this.expected[deck];
+    const tooShort =
+      d <= DECK_MIN_DURATION_S ||
+      (expected !== null && expected > 0 && d < expected * DECK_MIN_DURATION_RATIO);
+    this.durationJudged[deck] = true;
+    if (!tooShort) return;
+    this.fail(deck, 'truncated', null, { got: d, expected });
+  }
+
   /** Publishes every deck that goes out of service. See {@link DeckFault}. */
   onFault(fn: FaultListener): () => void {
     this.faultListeners.add(fn);
@@ -251,7 +353,13 @@ export class DualPlayer {
     };
   }
 
-  load(deck: Deck, url: string | null): void {
+  /**
+   * @param expectedDuration seconds this file is known to hold — the run's own
+   * report, or the analysis of the file itself. Passing it is what lets a deck
+   * that decodes to nothing be caught (see {@link judgeDuration}); `null` keeps
+   * only the "zero length is never playable" half of that check.
+   */
+  load(deck: Deck, url: string | null, expectedDuration: number | null = null): void {
     if (url === null) {
       this.retire(deck);
       return;
@@ -259,20 +367,53 @@ export class DualPlayer {
     // Asking for a deck again is a fresh attempt: whatever it failed at last
     // time is no longer the current answer.
     this.faults[deck] = null;
+    this.expected[deck] = expectedDuration;
     if (this.wanted[deck] === url && this.state[deck] !== 'empty') return;
     this.wanted[deck] = url;
+    this.durationJudged[deck] = false;
+    this.probeFailed[deck] = false;
     // Re-selecting a run whose master is still on the element: revive it
     // instead of re-fetching, so no request is made at all.
     if (this.attached[deck] === url) {
       this.state[deck] = 'ready';
       this.epoch[deck] += 1;
       this.afterAttach(deck);
+      this.judgeDuration(deck);
       return;
     }
     this.state[deck] = 'loading';
     const gen = ++this.epoch[deck];
     void this.attach(deck, url, gen);
     this.emit();
+  }
+
+  /**
+   * One byte of the deck's file, and what happened when we asked for it.
+   *
+   * A one-byte ranged GET rather than a HEAD: a HEAD response carries a body
+   * stream that is never consumed, and Chromium records the unread stream as
+   * `net::ERR_ABORTED` — the exact entry this path exists to avoid. One byte
+   * can be read to completion, and `Content-Range` carries the full length.
+   *
+   * `null` means nobody answered. `delivered: false` means the engine answered
+   * and then could not produce the bytes, which is a different fact and needs
+   * to stay a different fact.
+   */
+  private async probeOnce(
+    url: string,
+  ): Promise<{ status: number; ok: boolean; delivered: boolean; headers: Headers } | null> {
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+    } catch {
+      return null;
+    }
+    try {
+      await res.arrayBuffer();
+      return { status: res.status, ok: res.ok, delivered: true, headers: res.headers };
+    } catch {
+      return { status: res.status, ok: res.ok, delivered: false, headers: res.headers };
+    }
   }
 
   /**
@@ -285,31 +426,49 @@ export class DualPlayer {
     let src = url;
     /** The engine's own answer to the probe, or null when it never answered. */
     let answered: number | null = null;
-    try {
-      // The size probe is a one-byte ranged GET rather than a HEAD: a HEAD
-      // response carries a body stream that is never consumed, and Chromium
-      // records the unread stream as `net::ERR_ABORTED` — the exact entry this
-      // path exists to avoid. One byte can be read to completion, and
-      // `Content-Range` carries the full length.
-      const probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
-      await probe.arrayBuffer();
+    let probe = await this.probeOnce(url);
+    // Answered, then handed over nothing. That is two different worlds — a file
+    // the engine has listed and cannot read (a chmod 000 master, a volume that
+    // went away under it), or the engine dying between the headers and the
+    // body — and one more byte-sized question separates them: a second answer
+    // means the file, no answer at all means the engine.
+    if (probe && probe.ok && !probe.delivered) {
+      const second = await this.probeOnce(url);
+      if (this.epoch[deck] !== gen) return;
+      if (second === null) {
+        this.probeFailed[deck] = true;
+      } else if (second.ok && !second.delivered) {
+        this.fail(deck, 'forbidden', second.status);
+        return;
+      }
+      probe = second;
+    }
+    if (probe === null) {
+      // Nobody answered. That is not the engine saying no, so the element is
+      // still given the URL and its own error — if there is one — comes back
+      // through the `error` listener as a fault. It is recorded, though: the
+      // element reports that failure as code 4, which reads exactly like junk
+      // bytes, and this is the only evidence that says otherwise.
+      this.probeFailed[deck] = true;
+    } else {
       answered = probe.status;
       if (probe.ok) {
         const total = probe.headers.get('Content-Range')?.split('/')[1];
         const len = Number(total ?? probe.headers.get('Content-Length') ?? Number.NaN);
         if (Number.isFinite(len) && len > 0 && len <= MEMORY_DECK_MAX_BYTES) {
-          const res = await fetch(url, { cache: 'no-store' });
-          if (res.ok) {
-            const blob = await res.blob();
-            if (this.epoch[deck] === gen) src = URL.createObjectURL(blob);
+          try {
+            const res = await fetch(url, { cache: 'no-store' });
+            if (res.ok) {
+              const blob = await res.blob();
+              if (this.epoch[deck] === gen) src = URL.createObjectURL(blob);
+            }
+          } catch {
+            // The pull died where the probe had succeeded: the engine went
+            // away in between. Same evidence, same conclusion.
+            this.probeFailed[deck] = true;
           }
         }
       }
-    } catch {
-      // Nobody answered: offline, refused, or a body we could not read. That
-      // is not the engine saying no, so the element is still given the URL and
-      // its own error — if there is one — comes back through the `error`
-      // listener as a fault.
     }
     if (this.epoch[deck] !== gen) {
       if (src.startsWith('blob:')) URL.revokeObjectURL(src);
@@ -431,7 +590,12 @@ export class DualPlayer {
    * was the one making sound. A player that quietly swaps decks is a player
    * that makes the screen lie, so the swap is now an event.
    */
-  private fail(deck: Deck, kind: DeckFaultKind, status: number | null): void {
+  private fail(
+    deck: Deck,
+    kind: DeckFaultKind,
+    status: number | null,
+    duration?: { got: number; expected: number | null },
+  ): void {
     const already = this.faults[deck];
     if (already && already.kind === kind && this.state[deck] === 'empty') return;
     // Read before `takeOutOfService` clears it: the fault has to name the file
@@ -448,7 +612,7 @@ export class DualPlayer {
     const switched = this.takeOutOfService(deck, true);
     const fellBackTo =
       switched ?? (wasHeadingHere && this.state[other] === 'ready' ? other : null);
-    const fault: DeckFault = { deck, url, kind, status, fellBackTo };
+    const fault: DeckFault = { deck, url, kind, status, fellBackTo, ...(duration ? { duration } : {}) };
     this.faults[deck] = fault;
     this.emit();
     for (const fn of this.faultListeners) fn(fault);

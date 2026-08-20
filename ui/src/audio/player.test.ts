@@ -255,3 +255,213 @@ describe('a deck taken out of service', () => {
     expect(player.activeDeck).toBe('cleaned');
   });
 });
+
+describe('a deck that opens but holds no audio', () => {
+  /** What a media element does with a file the decoder accepts and empties. */
+  function metadata(index: number, duration: number): void {
+    const el = document.querySelectorAll('audio')[index] as HTMLAudioElement;
+    Object.defineProperty(el, 'duration', { configurable: true, value: duration });
+    Object.defineProperty(el, 'readyState', { configurable: true, value: 4 });
+    el.dispatchEvent(new Event('loadedmetadata'));
+  }
+
+  it('is a fault: a 100-byte master is readyState 4, MediaError null, duration 0.000396', async () => {
+    engine({ [OK]: 206, [GONE]: 200 });
+    start();
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    player.setActive('cleaned');
+    expect(player.activeDeck).toBe('cleaned');
+
+    // Chrome accepts the RIFF prefix and reports a real, ready element. Every
+    // other signal this class has says the deck is fine — only the length
+    // knows, and only because the run said how long the file should be.
+    metadata(1, 0.000396);
+
+    expect(player.hasDeck('cleaned')).toBe(false);
+    expect(player.activeDeck).toBe('original');
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({ deck: 'cleaned', kind: 'truncated', fellBackTo: 'original' });
+    expect(faults[0]?.duration).toEqual({ got: 0.000396, expected: 8 });
+  });
+
+  it('a zero-length deck is a fault even when nothing said how long it should be', async () => {
+    engine({ [OK]: 206, [GONE]: 200 });
+    start();
+    player.load('original', OK);
+    await settle();
+    player.load('cleaned', GONE);
+    await settle();
+    metadata(1, 0);
+    expect(faults[0]).toMatchObject({ kind: 'truncated' });
+    expect(faults[0]?.duration).toEqual({ got: 0, expected: null });
+  });
+
+  it('does not fault a deck that is merely still loading', async () => {
+    engine({ [OK]: 206, [GONE]: 200 });
+    start();
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    metadata(1, Number.NaN); // before metadata
+    metadata(1, Number.POSITIVE_INFINITY); // a stream with no declared length
+    expect(faults).toHaveLength(0);
+    metadata(1, 8.0); // and then the real answer
+    expect(faults).toHaveLength(0);
+    expect(player.isReady('cleaned')).toBe(true);
+  });
+
+  it('a deck holding a fraction of the run is a fault even when it is not empty', async () => {
+    engine({ [OK]: 206, [GONE]: 200 });
+    start();
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    metadata(1, 2.1); // a quarter of the run: a write that stopped early
+    expect(faults[0]).toMatchObject({ kind: 'truncated' });
+  });
+
+  it('a deck a little shorter than the run is not a truncated deck', async () => {
+    engine({ [OK]: 206, [GONE]: 200 });
+    start();
+    player.load('original', OK, 94.6);
+    await settle();
+    player.load('cleaned', GONE, 94.6);
+    await settle();
+    // Container-vs-decoder timelines differ by milliseconds on this engine.
+    metadata(1, 94.5985);
+    expect(faults).toHaveLength(0);
+  });
+});
+
+describe('a file the engine has listed and cannot read', () => {
+  /**
+   * chmod 000 on a master, measured against the real engine: `GET` answers
+   * **200** with a full `Content-Length`, and then the body never arrives
+   * (curl exit 18, zero bytes of a ranged read). Headers are not delivery.
+   */
+  function undeliverable(okStatus: number): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        if (u === OK) return init?.headers ? ranged(206) : whole();
+        const headers = new Headers();
+        headers.set('Content-Length', '1152044');
+        return {
+          ok: okStatus < 400,
+          status: okStatus,
+          headers,
+          arrayBuffer: async () => {
+            throw new TypeError('network error');
+          },
+          blob: async () => {
+            throw new TypeError('network error');
+          },
+        } as unknown as Response;
+      }),
+    );
+  }
+
+  it('is the file’s fault, not the engine’s — and it condemns the master', async () => {
+    undeliverable(200);
+    start();
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    // Both probes answer and neither delivers, so the answer is about the
+    // file. Reported as `network` it would have said "the engine could not be
+    // reached" about a live engine — and, because an outage condemns nothing,
+    // would have left `Master WAV` an enabled <a download>.
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({ deck: 'cleaned', kind: 'forbidden', status: 200 });
+    expect(player.hasDeck('cleaned')).toBe(false);
+  });
+
+  it('but an engine that stops answering between the two asks is an outage', async () => {
+    let asked = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (u: string, init?: RequestInit) => {
+        if (u === OK) return init?.headers ? ranged(206) : whole();
+        asked += 1;
+        if (asked > 1) throw new TypeError('Failed to fetch'); // it died in between
+        const headers = new Headers();
+        headers.set('Content-Length', '1152044');
+        return {
+          ok: true,
+          status: 200,
+          headers,
+          arrayBuffer: async () => {
+            throw new TypeError('network error');
+          },
+        } as unknown as Response;
+      }),
+    );
+    start();
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    // No fault yet: the element still gets its chance, and the evidence that
+    // the engine is gone is remembered for when it fails.
+    expect(faults).toHaveLength(0);
+    const el = document.querySelectorAll('audio')[1] as HTMLAudioElement;
+    Object.defineProperty(el, 'error', { configurable: true, value: { code: 4 } });
+    el.dispatchEvent(new Event('error'));
+    expect(faults[0]).toMatchObject({ kind: 'network' });
+  });
+});
+
+describe('an engine that dies while a deck is loading', () => {
+  function breakElement(index: number, code: number): void {
+    const el = document.querySelectorAll('audio')[index] as HTMLAudioElement;
+    Object.defineProperty(el, 'error', { configurable: true, value: { code } });
+    el.dispatchEvent(new Event('error'));
+  }
+
+  it('is `network`, not `unreadable` — Chromium reports both as code 4', async () => {
+    engine({ [OK]: 206 }); // GONE is not in the map: nobody answers the probe
+    start();
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    // The element was still handed the URL, and it fails the way an
+    // unreachable engine makes it fail: SRC_NOT_SUPPORTED, exactly the code a
+    // PNG renamed `.wav` produces. The probe having thrown is the only
+    // evidence that tells the two apart, and it is the evidence that decides.
+    breakElement(1, 4);
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({ deck: 'cleaned', kind: 'network' });
+    expect(player.deckFault('cleaned')?.kind).toBe('network');
+  });
+
+  it('takes the injected liveness answer when its own probe saw nothing wrong', async () => {
+    engine({ [OK]: 206, [GONE]: 200 });
+    start();
+    player.setLivenessProbe(() => false); // the store: the engine is offline
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    breakElement(1, 4);
+    expect(faults[0]?.kind).toBe('network');
+  });
+
+  it('still calls junk bytes junk while the engine is answering', async () => {
+    engine({ [OK]: 206, [GONE]: 200 });
+    start();
+    player.setLivenessProbe(() => true);
+    player.load('original', OK, 8);
+    await settle();
+    player.load('cleaned', GONE, 8);
+    await settle();
+    breakElement(1, 4);
+    expect(faults[0]?.kind).toBe('unreadable');
+  });
+});

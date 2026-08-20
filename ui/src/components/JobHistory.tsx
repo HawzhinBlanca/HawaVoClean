@@ -60,7 +60,10 @@ function Row({
   const flag = entry.supersededBy
     ? 'SUPERSEDED'
     : entry.artifacts && !entry.artifacts.master
-      ? 'FILE GONE'
+      ? // A master that is still on disk but holds no audio is not "gone", and
+        // saying so sent the user looking in the wrong place. The kind of
+        // failure travels with the answer (state/store.ts, `ArtifactState`).
+        (entry.artifacts.flag ?? 'FILE GONE')
       : null;
   const flagWhy = entry.supersededBy
     ? 'A later run wrote over this run’s files. The report here is this session’s own copy; the files on disk belong to that later run.'

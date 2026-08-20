@@ -28,6 +28,10 @@ const player = vi.hoisted(() => ({
   hasDeck: vi.fn((_deck: 'original' | 'cleaned') => true),
   deckFault: vi.fn((_deck: 'original' | 'cleaned') => null as { kind: string } | null),
   onFault: vi.fn((_fn: (f: unknown) => void) => () => undefined),
+  // How the player asks whether the engine is answering — the fact that tells
+  // "the engine died mid-load" apart from "these bytes are junk", both of
+  // which Chromium reports as MediaError.code 4.
+  setLivenessProbe: vi.fn((_fn: (() => boolean) | null) => undefined),
 }));
 vi.mock('../audio/player', () => ({ getPlayer: () => player }));
 
@@ -318,7 +322,9 @@ describe('the job status stream', () => {
     expect(st.report?.summary.enhanced).toBe(5);
     expect(st.cleanedPath).toBe('/out/a.wav');
     expect(st.abMode).toBe('cleaned');
-    expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/a.wav'));
+    // The length the run says this master holds rides with the load: a deck
+    // that opens far shorter than that is a truncated file, not a deck.
+    expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/a.wav'), 100);
     expect(player.setActive).toHaveBeenCalledWith('cleaned');
     expect(client.analyze).toHaveBeenCalledTimes(1); // the cleaned master only
 
@@ -553,16 +559,18 @@ describe('B5 · re-opening a finished run', () => {
     expect(st.cleaned).not.toBeNull();
     expect(st.cleanedPath).toBe('/out/j1.wav');
     expect(st.abMode).toBe('cleaned');
-    expect(player.load).toHaveBeenCalledWith('original', client.fileUrl('/a.wav'));
-    expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/j1.wav'));
+    expect(player.load).toHaveBeenCalledWith('original', client.fileUrl('/a.wav'), 100);
+    expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/j1.wav'), 100);
     expect(st.analyzing).toBe(false);
     expect(st.statusLine).toContain('units enhanced');
   });
 
-  it('is a no-op for the run already on screen', async () => {
+  it('does not re-run the restore for the run already on screen', async () => {
     const { actions, store, client } = await boot();
     finished(store, 'j1');
     player.pause.mockClear();
+    // Not a no-op any more — it re-verifies the artefacts (three HEADs, see
+    // the B5 block below) — but nothing of the restore itself happens again.
     await actions.selectRun('j1'); // pushHistory already made it current
     expect(player.pause).not.toHaveBeenCalled();
     expect(client.analyze).not.toHaveBeenCalled();
@@ -1279,3 +1287,241 @@ describe('B6 · health cadence', () => {
     expect(store.useStore.getState().statusLine).toContain('Engine back');
   });
 });
+
+describe('B5 · a run keeps what its own analysis found, whoever is on screen', () => {
+  it('caches the cleaned analysis on the run even when the user has moved on', async () => {
+    const { actions, store, client } = await boot();
+    // An older run to move to, and the run about to finish.
+    done(store, { jobId: 'j0', outputPath: '/out/j0.wav' });
+    armed(store);
+
+    let land: ((a: AudioAnalysis) => void) | null = null;
+    client.analyze.mockImplementation(
+      () =>
+        new Promise<AudioAnalysis>((res) => {
+          land = res;
+        }),
+    );
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('done')));
+    await settle();
+    expect(land).not.toBeNull(); // the cleaned analysis is in flight
+
+    // The user opens the older run before that answer comes back.
+    await actions.selectRun('j0');
+    await settle();
+    expect(store.useStore.getState().currentRunId).toBe('j0');
+
+    (land as unknown as (a: AudioAnalysis) => void)(
+      analysis({ path: '/out/a.wav', loudness: { integrated_lufs: -21.7, true_peak_dbtp: -1 }, noise_floor_db: -84.7 }),
+    );
+    await settle();
+
+    // The row that ran keeps its numbers: it is that run's answer, not a
+    // property of what happens to be on screen when it arrives. Before this,
+    // the row read "— LUFS Δ" for the rest of the session and re-opening it
+    // cost a full POST /api/analyze.
+    const row = store.useStore.getState().history.find((h) => h.jobId === 'j1');
+    expect(row?.cleaned).not.toBeNull();
+    expect(row?.lufsOut).toBe(-21.7);
+    expect(row?.noiseOut).toBe(-84.7);
+    // …and the deck on screen is still the run the user asked for.
+    expect(store.useStore.getState().currentRunId).toBe('j0');
+    expect(store.useStore.getState().cleanedPath).toBe('/out/j0.wav');
+  });
+});
+
+describe('B5 · restoring a run restores the run, not half of it', () => {
+  it('puts the profile back, so PROCESS AGAIN means again', async () => {
+    const { actions, store } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav', profile: 'production' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav', profile: 'studio' });
+    expect(store.useStore.getState().profile).toBe('studio');
+
+    await actions.selectRun('j1');
+    await settle();
+
+    // The screen used to assert both at once: a PRODUCTION row on screen with
+    // the radiogroup reading STUDIO, and PROCESS AGAIN running studio.
+    expect(store.useStore.getState().profile).toBe('production');
+  });
+
+  it('sends the restored run’s own profile when it is run again', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav', profile: 'production' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav', profile: 'studio' });
+    await actions.selectRun('j1');
+    await settle();
+    client.createJob.mockClear();
+    await actions.startJob();
+    expect(client.createJob.mock.calls[0]?.[0]).toMatchObject({ profile: 'production' });
+  });
+});
+
+describe('B5 · the run on screen is re-verified, not trusted for ever', () => {
+  it('re-picking the row it is on asks the engine again — three HEADs, no analyze', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    await actions.selectRun('j1');
+    await settle();
+    expect(store.useStore.getState().artifacts?.master).toBe(true);
+
+    // The master is deleted under the live run. Nothing on screen probes it:
+    // the cleaned deck plays from a blob already in memory.
+    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
+    client.exists.mockClear();
+    client.analyze.mockClear();
+    player.load.mockClear();
+
+    await actions.selectRun('j1'); // the row it is already on
+    await settle();
+
+    expect(client.exists).toHaveBeenCalledTimes(3);
+    expect(client.analyze).not.toHaveBeenCalled();
+    const st = store.useStore.getState();
+    expect(st.artifacts?.master).toBe(false);
+    expect(st.history.find((h) => h.jobId === 'j1')?.artifacts?.master).toBe(false);
+    expect(st.deckFault?.deck).toBe('cleaned');
+    expect(st.cleaned).toBeNull();
+    expect(st.abMode).toBe('original');
+    expect(player.load).toHaveBeenCalledWith('cleaned', null);
+  });
+
+  it('says nothing new when the files are still there', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    await actions.selectRun('j1');
+    await settle();
+    player.load.mockClear();
+    client.analyze.mockClear();
+
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    expect(client.analyze).not.toHaveBeenCalled();
+    expect(player.load).not.toHaveBeenCalled();
+    expect(st.deckFault).toBeNull();
+    expect(st.artifacts?.master).toBe(true);
+  });
+
+  it('an engine that cannot be asked accuses nobody', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    await actions.selectRun('j1');
+    await settle();
+    client.exists.mockRejectedValue(new TypeError('Failed to fetch'));
+
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    expect(st.artifacts?.master).toBe(true); // the last real answer stands
+    expect(st.deckFault).toBeNull();
+  });
+});
+
+describe('A7 · a master that is there but unplayable is not a master', () => {
+  async function faultListener(actions: ActionsMod): Promise<(f: unknown) => void> {
+    await actions.connectEngine();
+    await settle();
+    const fn = player.onFault.mock.calls[0]?.[0];
+    if (!fn) throw new Error('actions never subscribed to deck faults');
+    return fn;
+  }
+
+  for (const [kind, flag, says] of [
+    ['truncated', 'FILE BROKEN', 'empty or truncated'],
+    ['unreadable', 'FILE BROKEN', 'nothing here can decode it'],
+  ] as const) {
+    it(`a ${kind} cleaned deck takes the download with it`, async () => {
+      const { actions, store, client } = await boot();
+      const fire = await faultListener(actions);
+      const st = store.useStore.getState();
+      st.setCleaned(analysis(), '/out/a.wav');
+      st.setAbMode('cleaned');
+      player.activeDeck = 'original';
+
+      fire({
+        deck: 'cleaned',
+        url: client.fileUrl('/out/a.wav'),
+        kind,
+        status: null,
+        fellBackTo: 'original',
+        ...(kind === 'truncated' ? { duration: { got: 0.000396, expected: 100 } } : {}),
+      });
+
+      const after = store.useStore.getState();
+      // The defect: `markArtifacts` used to run only for 'missing'/'forbidden',
+      // so `Master WAV` stayed an enabled <a download> for a file the app had
+      // just declared unplayable.
+      expect(after.artifacts?.master).toBe(false);
+      expect(after.artifacts?.reason).toContain(says);
+      expect(after.artifacts?.flag).toBe(flag);
+      expect(after.cleaned).toBeNull();
+      expect(after.deckFault?.deck).toBe('cleaned');
+    });
+  }
+
+  it('names the length a truncated deck actually opened with', async () => {
+    const { actions, store, client } = await boot();
+    const fire = await faultListener(actions);
+    store.useStore.getState().setCleaned(analysis(), '/out/a.wav');
+    player.activeDeck = 'original';
+    fire({
+      deck: 'cleaned',
+      url: client.fileUrl('/out/a.wav'),
+      kind: 'truncated',
+      status: null,
+      fellBackTo: 'original',
+      duration: { got: 0.000396, expected: 94.6 },
+    });
+    const said = store.useStore.getState().deckFault?.detail ?? '';
+    expect(said).toContain('less than a millisecond of audio');
+    expect(said).toContain('94.6 s long');
+    expect(said).toContain('playing the original');
+  });
+
+  it('a deck lost to an outage still condemns nothing', async () => {
+    const { actions, store, client } = await boot();
+    const fire = await faultListener(actions);
+    store.useStore.getState().setCleaned(analysis(), '/out/a.wav');
+    player.activeDeck = 'original';
+    fire({
+      deck: 'cleaned',
+      url: client.fileUrl('/out/a.wav'),
+      kind: 'network',
+      status: null,
+      fellBackTo: 'original',
+    });
+    expect(store.useStore.getState().artifacts).toBeNull();
+    expect(store.useStore.getState().cleaned).not.toBeNull();
+  });
+});
+
+describe('B6 · a deck lost to an outage comes back with the engine', () => {
+  it('retries a cleaned deck whose analysis died in the same outage', async () => {
+    const { actions, store, client } = await boot();
+    await actions.connectEngine();
+    const st = store.useStore.getState();
+    st.setSource({ path: '/a.wav', name: 'a.wav', origin: 'file' });
+    st.setOriginal(analysis());
+    // The run finished, then the engine went away before its analysis landed:
+    // a path with no cached analysis behind it, which the old retry skipped.
+    st.setCleaned(null, '/out/a.wav');
+    player.deckFault.mockImplementation((deck) => (deck === 'cleaned' ? { kind: 'network' } : null));
+
+    client.health.mockRejectedValue(new TypeError('Failed to fetch'));
+    await settle(10000);
+    expect(store.useStore.getState().engineStatus).toBe('offline');
+    player.load.mockClear();
+    client.health.mockResolvedValue({ ok: true, version: '3.2.0', profiles: ['studio'], engine_pid: 4242 });
+    await settle(5000);
+
+    expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/a.wav'), 100);
+    expect(store.useStore.getState().deckFault).toBeNull();
+  });
+})

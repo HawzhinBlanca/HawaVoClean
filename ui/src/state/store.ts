@@ -25,11 +25,23 @@ export type AbMode = 'original' | 'cleaned';
  * the honest state for a run whose files were written a second ago.
  */
 export interface ArtifactState {
+  /**
+   * Can the cleaned master still be handed over *as this run's master*? False
+   * covers both halves of that question: the file is not there, and the file
+   * is there but is no longer the audio the report describes (truncated, or
+   * bytes nothing can decode). `reason` says which.
+   */
   master: boolean;
   json: boolean;
   txt: boolean;
   /** The one sentence the disabled links and the run row explain themselves with. */
   reason: string;
+  /**
+   * The two-word flag the run list stamps on the row. `FILE GONE` is the
+   * default and was for a while the only one, which made a master that was
+   * still on disk but unplayable read as deleted.
+   */
+  flag?: string;
 }
 
 /**
@@ -183,7 +195,13 @@ export interface AppState {
   view: ViewWindow;
 
   hoverUnit: HoverUnit | null;
-  highlightRange: { start: number; end: number } | null;
+  /**
+   * The lit range in the waveform. `channel` is carried only when the report
+   * decided on more than one — a split-speakers run's per-channel units
+   * overlap in time, so the band has to say whose seconds it is lighting.
+   * `state/selection.ts` is what fills it in; the store never guesses.
+   */
+  highlightRange: { start: number; end: number; channel?: number } | null;
 
   /**
    * The unit picked in the verdict strip. Selection is a property of the
@@ -237,7 +255,7 @@ export interface AppState {
   setView(start: number, end: number): void;
   resetView(): void;
   setHoverUnit(h: HoverUnit | null): void;
-  setHighlight(r: { start: number; end: number } | null): void;
+  setHighlight(r: { start: number; end: number; channel?: number } | null): void;
   setSelectedUnit(u: UnitDecisionRecord | null): void;
   setShortcutsOpen(v: boolean): void;
   setStatus(line: string): void;

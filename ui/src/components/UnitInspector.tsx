@@ -11,7 +11,14 @@ import {
   type UnitDecisionRecord,
 } from '../api/types';
 import { formatTime } from '../render/ticks';
-import { clearSelection, orderedUnits, selectedIndex, stepUnit } from '../state/selection';
+import {
+  channelName,
+  clearSelection,
+  orderedUnits,
+  reportChannels,
+  selectedIndex,
+  stepUnit,
+} from '../state/selection';
 import { useStore } from '../state/store';
 import { IconCancel } from './Icons';
 
@@ -229,8 +236,20 @@ function Summary() {
   );
 }
 
-function Detail({ unit, index, total }: { unit: UnitDecisionRecord; index: number; total: number }) {
+function Detail({
+  unit,
+  index,
+  total,
+  channels,
+}: {
+  unit: UnitDecisionRecord;
+  index: number;
+  total: number;
+  channels: number[];
+}) {
   const cls = classifyDecision(unit.final_decision);
+  const multi = channels.length > 1;
+  const name = channelName(unit.channel, channels);
   const dur = unit.end_time_s - unit.start_time_s;
   const strength = typeof unit.chosen_strength === 'number' ? unit.chosen_strength : null;
   const actions = unit.finish_actions ?? [];
@@ -238,6 +257,16 @@ function Detail({ unit, index, total }: { unit: UnitDecisionRecord; index: numbe
     <div className="insp-grid">
       <div className="insp-col insp-ident">
         <div className="insp-idhead">
+          {/* A7/B4 · on a multi-channel report the channel is not a detail —
+              it is half of the unit's identity. Two units can cover the same
+              seconds and differ only in this, so it is read *with* the unit
+              number rather than being a row eight lines down the list. A mono
+              report has nothing to disambiguate and keeps the head it had. */}
+          {multi ? (
+            <span className={`insp-chan lane-${channels.indexOf(unit.channel)}`} title={name.long}>
+              {name.short}
+            </span>
+          ) : null}
           <span className="uid mono">
             UNIT {String(unit.unit_id).padStart(2, '0')}
             <span className="of"> · {index + 1}/{total}</span>
@@ -247,7 +276,11 @@ function Detail({ unit, index, total }: { unit: UnitDecisionRecord; index: numbe
               inline full-saturation swatch. */}
           <span className={`pill ${cls}`}>{decisionLabel(unit.final_decision)}</span>
         </div>
-        <Row k="Channel" v={String(unit.channel)} />
+        <Row
+          k="Channel"
+          v={multi ? `${name.short} · ${name.long.replace(/ channel$/, '')}` : String(unit.channel)}
+          title={`channel index ${unit.channel}`}
+        />
         <Row
           k="Range"
           v={`${formatTime(unit.start_time_s, true)} → ${formatTime(unit.end_time_s, true)}`}
@@ -312,8 +345,10 @@ export function UnitInspector() {
   const setShortcutsOpen = useStore((s) => s.setShortcutsOpen);
 
   const ordered = useMemo(() => orderedUnits(), [report]);
+  const channels = useMemo(() => reportChannels(report?.units ?? []), [report]);
   const index = selected ? selectedIndex(ordered) : -1;
   const canStep = ordered.length > 0;
+  const selName = selected && channels.length > 1 ? channelName(selected.channel, channels) : null;
 
   return (
     <section
@@ -327,6 +362,7 @@ export function UnitInspector() {
           {selected ? (
             <span className="sub">
               · unit {index >= 0 ? index + 1 : '?'} of {ordered.length}
+              {selName ? ` · ${selName.short}` : ''}
             </span>
           ) : null}
         </div>
@@ -379,7 +415,12 @@ export function UnitInspector() {
           it takes are the browser's own, not a binding of ours. */}
       <div className="insp-body" tabIndex={0} role="group" aria-label="Unit detail">
         {selected ? (
-          <Detail unit={selected} index={index >= 0 ? index : 0} total={ordered.length} />
+          <Detail
+            unit={selected}
+            index={index >= 0 ? index : 0}
+            total={ordered.length}
+            channels={channels}
+          />
         ) : (
           <Summary />
         )}

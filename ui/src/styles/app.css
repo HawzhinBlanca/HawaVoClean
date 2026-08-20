@@ -949,14 +949,84 @@ kbd {
   font-size: var(--fs-label);
 }
 
-/* ---------------------------------------------------------------- right column */
+/* ---------------------------------------------------------------- right column
+ *
+ * B8 · **no panel in this column may be starved by what a sibling grows.**
+ *
+ * The column used to be `minmax(0, 1fr) auto`: the display panel took what was
+ * left after the controls panel had taken everything it wanted, and `0` was an
+ * allowed answer. So a plate added to the controls panel came *straight out of
+ * the spectrum* — the deck-fault caution measured 69.3 px and took exactly that
+ * much off the plot at every window size, which at 960x640 is the whole plot
+ * (72 px -> 0) and takes the key down with it, since the key sits under a
+ * `overflow: hidden` body. Nothing in the panel that was starved had any say
+ * in it, and no gate could see it: the DOM is intact, the CSS is valid, and
+ * only a measured pixel height says the display has stopped existing.
+ *
+ * Two rules replace that, and together they hold for any plate anyone adds
+ * next — the point is that the fix is not about this one plate:
+ *
+ *   1. the display track has a floor (`--display-floor`) — the height at which
+ *      the panel is still a panel: its head, a plot no smaller than the one
+ *      this app already ships at its smallest supported window, its key, and
+ *      the metric tiles;
+ *   2. when both panels' real needs exceed the column, the *column* scrolls.
+ *      An overflow that can be scrolled to is a designed state; a panel
+ *      silently crushed to zero is not. Nothing changes in the common case:
+ *      while the content fits there is no scrollbar and no measurement moves.
+ */
 .right {
+  /* The floor is stated as the parts it is made of, so it can be re-derived
+     when any of them changes: head 30 + body padding 22 + a plot no shallower
+     than four dB gridlines (56) + gap 7 + key 13 + metric tiles 84 + the
+     panel's two hairlines. */
+  --display-floor: 214px;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(var(--display-floor), 1fr) auto;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--gap);
   min-height: 0;
   min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* the column is its own scroll world: a wheel over it must not scroll the
+     page behind it once it reaches an end */
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  /* An overflow nobody can see is the dead zone B8 forbids, and this Chrome
+     gives a scrolled grid an *overlay* scrollbar (measured: offsetWidth −
+     clientWidth = 0 with every scrollbar declaration tried), so the bar itself
+     cannot be the affordance. These four layers are the standard local/scroll
+     pair: the two `local` covers ride the content and the two `scroll` shadows
+     stay pinned to the frame, so an edge with more behind it is shaded and an
+     edge at the end of the content is not. They cost nothing and appear only
+     when there is something to scroll to. */
+  background-image:
+    linear-gradient(var(--page), rgba(0, 0, 0, 0)),
+    linear-gradient(rgba(0, 0, 0, 0), var(--page)),
+    radial-gradient(farthest-side at 50% 0, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0)),
+    radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
+  background-position:
+    50% 0,
+    50% 100%,
+    50% 0,
+    50% 100%;
+  background-repeat: no-repeat;
+  background-size:
+    100% 18px,
+    100% 18px,
+    100% 9px,
+    100% 9px;
+  background-attachment: local, local, scroll, scroll;
+}
+
+.right::-webkit-scrollbar {
+  width: 8px;
+}
+
+.right::-webkit-scrollbar-thumb {
+  background: var(--hair-strong);
+  border-radius: var(--r-sm);
 }
 
 .spectrum-panel {
@@ -1640,6 +1710,9 @@ kbd {
 
   .right {
     gap: 10px;
+    /* the same floor recomputed against this window's own chrome: head 30 +
+       body padding 14 + plot 56 + gap 5 + key 13 + tiles 73 + 2 hairlines */
+    --display-floor: 193px;
   }
 
   .controls {
@@ -1922,7 +1995,29 @@ kbd {
   border-bottom: 1px solid var(--line);
 }
 
+/* A7/B4 · the channel badge, on a multi-channel report only. It is deliberately
+   the same neutral steel in every lane: L and R are the identity, and giving a
+   channel a hue would collide with the two colours this instrument already
+   spends (amber = original deck, cyan = cleaned deck). */
+.insp-idhead .insp-chan {
+  flex: none;
+  min-width: 22px;
+  padding: 2px 6px;
+  border-radius: var(--r-xs);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: var(--ls-caps);
+  text-align: center;
+  color: var(--fg);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+}
+
 .insp-idhead .uid {
+  margin-right: auto;
   font-size: var(--fs-md);
   font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);

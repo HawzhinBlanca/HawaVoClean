@@ -15,6 +15,7 @@ import { timeTicksIn } from './ticks';
 import {
   DEFAULT_WAVE_PALETTE,
   type WaveDeckColors,
+  type WaveHighlightRange,
   type WaveKind,
   type WaveMsg,
   type WaveOutMsg,
@@ -331,7 +332,7 @@ let viewEnd = 0;
 let playhead = 0;
 let playheadVisible = false;
 let hoverX: number | null = null;
-let highlight: { start: number; end: number } | null = null;
+let highlight: WaveHighlightRange | null = null;
 let unitBounds: Float32Array = new Float32Array(0);
 let focus: WaveKind = 'original';
 
@@ -1096,14 +1097,48 @@ function render(): void {
   }
 
   // 4. selection band
+  //
+  // A7/B4 · on a multi-channel report the band is *channel-scoped*. The decks
+  // are one mixed-to-mono envelope — `/api/peaks` folds the file down before
+  // it buckets it, so there is no second envelope to draw and painting the
+  // same curve twice under two labels would be a fiction. What is real is
+  // which channel the decision belongs to, so the band says that instead: it
+  // fills only that channel's horizontal slice of the display and closes it
+  // with its own hairlines, while a much fainter full-height wash and faint
+  // full-height edges keep the *time* extent readable across the whole
+  // display. A ch0 unit and the ch1 unit overlapping it in time then paint
+  // different pixels, which is the property the single lane did not have.
   if (highlight && highlight.end > viewStart && highlight.start < viewEnd) {
     const hx0 = Math.max(0, timeToX(highlight.start));
     const hx1 = Math.min(W, timeToX(highlight.end));
-    rectBegin(palette.highlight, 0.055);
-    rect(hx0, 0, hx1, H);
-    rectBegin(palette.highlight, 0.32);
-    if (highlight.start >= viewStart) vline(hx0, dpr, 0, H);
-    if (highlight.end <= viewEnd) vline(hx1, dpr, 0, H);
+    const lanes = highlight.lanes ?? 1;
+    const lane = highlight.lane ?? 0;
+    const split = lanes > 1 && lane >= 0 && lane < lanes;
+    const y0 = split ? (lane / lanes) * H : 0;
+    const y1 = split ? ((lane + 1) / lanes) * H : H;
+    const startIn = highlight.start >= viewStart;
+    const endIn = highlight.end <= viewEnd;
+    if (split) {
+      // the whole-display context wash, well below the band's own fill
+      rectBegin(palette.highlight, 0.018);
+      rect(hx0, 0, hx1, H);
+      rectBegin(palette.highlight, 0.1);
+      rect(hx0, y0, hx1, y1);
+      rectBegin(palette.highlight, 0.11);
+      if (startIn) vline(hx0, dpr, 0, H);
+      if (endIn) vline(hx1, dpr, 0, H);
+      rectBegin(palette.highlight, 0.42);
+      hline(y0 + dpr / 2, dpr, hx0, hx1);
+      hline(y1 - dpr / 2, dpr, hx0, hx1);
+      if (startIn) vline(hx0, dpr, y0, y1);
+      if (endIn) vline(hx1, dpr, y0, y1);
+    } else {
+      rectBegin(palette.highlight, 0.055);
+      rect(hx0, 0, hx1, H);
+      rectBegin(palette.highlight, 0.32);
+      if (startIn) vline(hx0, dpr, 0, H);
+      if (endIn) vline(hx1, dpr, 0, H);
+    }
   }
   rectFlush();
 

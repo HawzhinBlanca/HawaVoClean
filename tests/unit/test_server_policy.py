@@ -57,6 +57,49 @@ def test_inside_work_dir_and_home_are_allowed(
     assert exc.value.status == 404
 
 
+def test_text_that_cannot_be_a_filename_is_400_not_a_raised_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NUL and unpaired surrogates make ``lstat`` raise ``ValueError`` from
+    inside ``Path.resolve()``. The policy documents 400/403/404 as its only
+    answers, so both must be refusals — not a 500 with a Python exception."""
+    monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path))
+    for bad, needle in (
+        (f"{tmp_path}/a\x00b.wav", "NUL byte"),
+        (f"{tmp_path}/trailing.wav\x00", "NUL byte"),
+        ("\x00", "NUL byte"),
+        (f"{tmp_path}/a\ud800b.wav", "usable filename"),  # JSON "\ud800" decodes to this
+        (f"{tmp_path}/a\udfffb.wav", "usable filename"),
+    ):
+        with pytest.raises(PathPolicyError) as exc:
+            resolve_client_path(bad)
+        assert exc.value.status == 400 and exc.value.code == "bad_request", bad
+        assert needle in exc.value.message, exc.value.message
+        # must_exist takes the same route, and never reaches the stat either
+        with pytest.raises(PathPolicyError) as exc:
+            resolve_client_path(bad, must_exist=True)
+        assert exc.value.status == 400, bad
+
+
+def test_other_control_characters_are_legal_in_a_posix_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only NUL is impossible. Newline, CR, tab, ESC, DEL and non-UTF-8 bytes
+    are all things a real file can be called, so they get the ordinary
+    answers — a resolved path, or 404 — never a refusal of their own."""
+    monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path))
+    for name in ("a\nb.wav", "a\rb.wav", "a\tb.wav", "a\x1bb.wav", "a\x7fb.wav", "a\udcffb.wav"):
+        target = tmp_path / name
+        resolved = resolve_client_path(str(target))
+        assert resolved == target.resolve()
+        with pytest.raises(PathPolicyError) as exc:
+            resolve_client_path(str(target), must_exist=True)
+        assert exc.value.status == 404, name
+    real = tmp_path / 'it\'s a "take"\n01.wav'
+    real.write_bytes(b"RIFF")
+    assert resolve_client_path(str(real), must_exist=True) == real.resolve()
+
+
 def test_dotdot_and_symlink_escapes_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

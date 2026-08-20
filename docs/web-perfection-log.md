@@ -1013,3 +1013,152 @@ touched. **A7, B4, B5, B6, B8 and D4 are unticked.** Three round-one fixes were 
     the three-HEAD artefact verification, the output-path de-collision, the stranded-clip retry and
     the gate-integrity rewrite). The code was verified behaviourally by the auditor; the log simply
     did not carry the measurements. Recorded here so the gap is not silent.
+
+## Iteration 7 — 2026-08-20 — A7/B4: the half of a stereo report that was not on screen
+
+Engine on 8933 (own port, own process), a real headless Chrome over CDP for every measurement
+below (the Claude pane's tab does not composite, so it cannot screenshot, and its dispatched
+clicks did not reach the page). Fixtures built for this pass and deleted after it:
+`test_output/stereo/stereo-voice.wav` (L = the Flute 09 voice 0–60 s, R = the same voice from
+30 s — genuinely different content per channel, Pearson **r = 0.0015**, max |L−R| 0.86),
+`stereo-tone.wav` (L = 220 Hz over 0–40 s, R = 660 Hz over 20–60 s, r = −0.00002) and
+`mono-voice.wav` (the same voice, 1 channel, 60 s).
+
+### 1. What was actually wrong
+
+The engine classifies both fixtures as `split_speakers` (`classify_channels`: correlation < 0.40)
+and then decides **per channel**. The real report from `stereo-voice.wav`:
+
+```
+ch0 u0 0.000–20.570   ch0 u1 20.570–40.251   ch0 u2 40.251–60.001
+ch1 u3 0.000–20.474   ch1 u4 20.474–40.528   ch1 u5 40.528–60.001
+```
+
+Two full sets of decisions over the same seconds, emitted one channel after the other — so a
+real stereo report is *never* sorted by time to begin with. The strip laid all of them out in
+one lane, `position: absolute` at the same y. Falsified here rather than taken on trust: with
+the new lanes forced back into one (`.verdict-lane{top:0;height:100%}` injected at run time)
+the same `elementFromPoint` scan the audit used reports **one** distinct segment centre-y and
+**ch1 topmost on 1525 of 1526 px, ch0 on 0** — units 0, 1 and 2 unreachable by any pointer.
+The instrument catches the defect it is here for.
+
+### 2. One lane per channel, and the track's box unchanged
+
+The strip now stacks a sub-track per channel *inside the same track element*. That matters:
+the track's x and width are the waveform canvas's x and width to 0.000 px, and that is what the
+view-linked alignment rests on, so the track may only grow **taller**. Lanes are
+`left: 0; right: 0` bands at `top: lane/lanes*100%`, and the segment's own
+`left`/`width` formula is untouched — a lane is exactly as wide as the track, so the percentage
+resolves against the same number either way.
+
+Measured on the running engine, 1440x900, `stereo-voice.wav`, studio:
+
+| | before (audit) | after |
+|---|---|---|
+| distinct segment centre-y | 1 | **2** |
+| topmost px at ch0's centre-y | 1 | **ch0 1015, ch1 0** (of 1018) |
+| topmost px at ch1's centre-y | 687 (ch1) | **ch1 1016, ch0 0** (of 1018) |
+| units with zero reachable px | 2 of 4 | **0 of 6** |
+
+Per unit, at its own lane's centre-y: 348 / 333 / 334 px (ch0) and 347 / 340 / 329 px (ch1) —
+every unit gets its whole width, because the `L`/`R` tag is `pointer-events: none` and takes
+nothing from the segment under it. Track alignment after the change: `track.x − canvas.x =
+0.000 px`, `track.width − canvas.width = 0.000 px`; segment geometry against
+`(t − view.start)/view.span` is within **0.008 px** at FIT.
+
+Widths swept the same way: **960x640** — track 30px (the `max-height: 720px` rule takes the lane
+to 15px), lanes 15px, segments 9px, alignment 0.000/0.000, tags `13/13` client/scroll width and
+`15/15` height (no overflow), legend hidden by the existing 1120px rule, scan 585/586 px per lane.
+**2560x1440** — track 36px, lanes 18px, alignment 0.000/0.000, all six units reachable
+(495–523 px each). The stereo strip costs the waveform 14px of height at 18px lanes and 8px at
+15px lanes; that is the only thing on the panel that changed size.
+
+Mono is untouched, measured rather than assumed: `mono-voice.wav` gives `data-lanes="1"`, **no**
+lane elements, **no** tags, track height **22**, segment height **14** — the audit's own numbers —
+and alignment 0.000/0.000. A dual-mono file lands here too, because the lane count is read from
+the units' own channels (the engine processes ch0 and duplicates it), not from `input.channels`.
+
+### 3. Selection that says which channel it is
+
+The decks are one **mixed-to-mono** envelope: `/api/peaks` calls `.to_mono()` before it buckets,
+and both decks play the mixed file. So the display was *not* split into per-channel waveforms —
+drawing the same curve twice under an L and an R label would be a fiction, and the endpoint that
+would make it true is engine surface this pass does not own. The channel is carried by the
+**selection band** instead: it fills only its channel's horizontal slice of the display, closed
+top and bottom with its own hairlines, over a much fainter full-height wash and faint full-height
+edges that keep the *time* extent readable. A DOM tag inside the band says the words.
+
+Measured on the two units that overlap in time (ch0 u1 20.570–40.251 vs ch1 u4 20.474–40.528),
+same clip, same zoom, mean luminance inside the band's x-range vs outside it:
+
+| selection | display top half | display bottom half |
+|---|---|---|
+| ch0 (L) | **67.04** (out-of-band 44.73) | 34.86 (out-of-band 31.04) |
+| ch1 (R) | 46.89 | **54.75** |
+
+The lane's own fill is ~6x the context wash in the other lane; 81 593 px of the 1018x300 crop
+differ between the two selections, and the out-of-band columns are pixel-identical. The tag reads
+`LEFT CHANNEL` at 25% of the display height and `RIGHT CHANNEL` at 75%, positioned by one style
+write per view change (no React render on a pan). The inspector agrees: an `L`/`R` badge at the
+head of the record beside the unit number, `· unit 2 of 6 · L` in the panel title, and the Channel
+row promoted from `0` to `L · left`. On a mono report none of those three appear at all.
+
+### 4. `[` / `]`, and what it walks
+
+Changed deliberately, and the two vitest cases that pinned the old order were rewritten to pin
+the new one (they are marked CHANGED in `selection.test.ts` with the reason). Reading order was
+time-major with a channel tie-break; on a report whose channels overlap that flips lane on nearly
+every press — ch1 20.474 then ch0 20.570 is a 96 ms move and a lane change — and visits two units
+that both start at 0.000 back to back without the playhead moving at all. It is now
+**channel-major**: each lane in time order, lane after lane, which is the order the lanes are
+drawn in. With nothing selected the bootstrap is confined to the first lane, because a playhead
+at 30 s sits inside a unit of *every* channel at once.
+
+Walked live with real key events, 7 x `]` then 3 x `[`, reading the lit segment, the inspector's
+index and badge, and the waveform tag after each press:
+
+```
+]  L u0 (1/6 L)  L u1 (2/6 L)  L u2 (3/6 L)  R u3 (4/6 R)  R u4 (5/6 R)  R u5 (6/6 R)  R u5 (clamped)
+[  R u4 (5/6 R)  R u3 (4/6 R)  L u2 (3/6 L)
+```
+
+All ten steps agree across all four readouts. Bootstrap: selection cleared, playhead parked at
+30 s, `]` selects **L u1** (20.105–40.030, the *left* unit the playhead is in) and seeks to 20.1.
+
+### 5. A second, harder fixture
+
+`stereo-tone.wav` is the audit's own shape and it lands a *mixed* verdict set — `original_reverted`
+x2 and `original_no_speech` on L, `original_no_speech`, `original_reverted` and `original_error`
+on R — so the lanes were also read with four different segment colours in them. Scan: ch0 1017/1018
+at lane 0's centre-y, ch1 1017/1018 at lane 1's, six of six units reachable.
+
+### 6. Contrast, a11y and gates
+
+Measured on the shipped pixels rather than from the stylesheet: the lane tag's glyph is **9.83:1**
+over its scrim on a cyan segment and **9.81:1** over an amber one, the waveform's channel tag
+**14.57:1**, the inspector's channel badge **11.37:1**. axe-core 4.13.0 injected at run time over
+the stereo done state: **0 violations**, the single `color-contrast` *incomplete* being the same
+whole-app one as before (164 nodes, every text node over this stylesheet's gradients, the gradient
+wordmark included). `pnpm typecheck` clean, `pnpm build` green, `pnpm test:run` **328 passed in 12
+files** (13 of them new here: `reportChannels` / `channelName` / `highlightFor`, the channel-major
+order, the out-of-time-order report, the first-lane bootstrap, and the mono no-channel case), and
+the emitted worker is still a classic script (`grep -cE '\bimport\b|\bexport\b'` = **0**).
+
+### 7. Honest gaps
+
+(a) **A report with more than two channels is unit-tested only.** `channelName` numbers them
+`C0, C1, …` and the lane CSS is written for any count, but the web API refuses a >2-channel file
+before a job starts (`AmbiguousStereoError`, and the CHANNELS pre-flight warns about it), so no
+run through this UI can produce one; only a CLI run with `channel_mode: split_speakers` declared
+could, and there is no path that hands such a report to the page. Nothing on screen has been seen
+with three lanes.
+(b) **The waveform is still one mixed envelope.** The band and its tag say which channel a
+decision belongs to; they do not show that channel's audio. A true per-channel display needs
+`/api/peaks` to stop folding to mono, which is an engine change.
+(c) The `L`/`R` tag paints over the first ~13 px of whatever segment starts at t=0. It takes no
+pointer (measured: unit 0 keeps all 348 px of its width as a hit target) and a segment carries no
+information in its first 13 px that it does not carry in the rest, but it *is* an overlay, and it
+is there because the track cannot give up width without losing its 0.000 px alignment.
+(d) Screenshots were taken in headless Chrome with SwiftShader (`--use-angle=swiftshader`), not on
+the GPU; the WebGL2 path is the same code, but the exact anti-aliasing of the band edges on a real
+GPU was not compared.

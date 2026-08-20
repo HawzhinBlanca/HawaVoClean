@@ -217,6 +217,48 @@ def test_chaos_disk_full_at_publish_leaves_no_partial_output(
 
 
 @pytest.mark.chaos
+def test_chaos_interrupt_between_renames_rolls_back(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A Ctrl-C landing between two of the three publish renames must roll back.
+
+    Publication renames the master, then the JSON report, then the TXT
+    summary. ``KeyboardInterrupt`` is a ``BaseException``, so an
+    ``except Exception`` rollback lets it out of the middle of that loop with
+    the master already at the destination and no report beside it — the
+    partial publication the atomic publisher exists to prevent, and the one
+    an interrupt can actually cause (the CLI turns SIGTERM into the same
+    exception, and so does the parent-death watchdog).
+    """
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def interrupted_replace(src: Any, dst: Any) -> None:
+        calls["n"] += 1
+        if calls["n"] >= 2:  # the master has landed; now the user hits Ctrl-C
+            raise KeyboardInterrupt
+        real_replace(src, dst)
+
+    dest_dir = tmp_path / "published"
+    dest_dir.mkdir()
+    monkeypatch.setattr(os, "replace", interrupted_replace)
+
+    with pytest.raises(KeyboardInterrupt):  # an interrupt stays an interrupt
+        run_pipeline(
+            input_path=FIXTURE,
+            output_path=dest_dir / "out.wav",
+            profile="production",
+            overwrite=True,
+            probe_override=FixedProbe(),
+        )
+
+    monkeypatch.setattr(os, "replace", real_replace)
+    assert calls["n"] >= 2, "the publish never reached the rename that was interrupted"
+    leftovers = sorted(p.name for p in dest_dir.iterdir())
+    assert not leftovers, f"interrupted publish left artifacts at destination: {leftovers}"
+
+
+@pytest.mark.chaos
 def test_chaos_ambiguous_stereo_rejected_without_silent_downmix(tmp_path: Path) -> None:
     with pytest.raises(AmbiguousStereoError):
         run_pipeline(

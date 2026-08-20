@@ -5,6 +5,7 @@ import { mixRgb, parseCssRgb } from './glutil';
 import {
   DEFAULT_WAVE_PALETTE,
   type WaveDeckColors,
+  type WaveHighlightRange,
   type WaveKind,
   type WaveMsg,
   type WaveOutMsg,
@@ -239,7 +240,7 @@ export class WaveformHost {
     this.post({ type: 'hover', x });
   }
 
-  setHighlight(range: { start: number; end: number } | null): void {
+  setHighlight(range: WaveHighlightRange | null): void {
     this.post({ type: 'highlight', range });
   }
 

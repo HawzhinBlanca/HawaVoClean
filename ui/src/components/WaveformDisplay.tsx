@@ -1,8 +1,10 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent,
 } from 'react';
@@ -14,6 +16,7 @@ import { waveView } from '../render/viewWindow';
 import type { WaveKind } from '../render/waveformProtocol';
 import '../render/waveZoom.css';
 import { seekTo } from '../state/actions';
+import { channelName, reportChannels } from '../state/selection';
 import { getState, useStore } from '../state/store';
 import { VerdictStrip } from './VerdictStrip';
 
@@ -81,6 +84,9 @@ export function WaveformDisplay() {
   const rulerRef = useRef<HTMLCanvasElement | null>(null);
   const rangeRef = useRef<HTMLSpanElement | null>(null);
   const magRef = useRef<HTMLSpanElement | null>(null);
+  const selTagRef = useRef<HTMLSpanElement | null>(null);
+  const selTagW = useRef(0);
+  const widthRef = useRef(0);
   const ovCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const ovWinRef = useRef<HTMLDivElement | null>(null);
   const ovRef = useRef<HTMLDivElement | null>(null);
@@ -105,6 +111,15 @@ export function WaveformDisplay() {
   const analyzing = useStore((s) => s.analyzing);
   const source = useStore((s) => s.source);
   const setError = useStore((s) => s.setError);
+
+  // A7/B4 · which channels this report decided on. A split-speakers run emits
+  // a set of units per channel and those sets overlap in time, so the lit band
+  // has to say *whose* seconds it is lighting; `channels.indexOf` turns the
+  // channel number into the lane the renderer draws in.
+  const channels = useMemo(() => reportChannels(report?.units ?? []), [report]);
+  const selChannel = highlight?.channel;
+  const selName =
+    channels.length > 1 && selChannel !== undefined ? channelName(selChannel, channels) : null;
 
   // ---------------------------------------------------------------- painting
   // Everything below runs off the view controller, never off React state, so a
@@ -194,6 +209,25 @@ export function WaveformDisplay() {
     }
   }, []);
 
+  /**
+   * The selection band's channel tag. Its y is CSS (the lane's own slice of
+   * the display); only its x depends on the view, so it moves with a single
+   * style write per view change — never a React render. `data-start` carries
+   * the band's start time so this can stay a zero-dependency callback like the
+   * rest of the chrome.
+   */
+  const syncSelTag = useCallback(() => {
+    const tag = selTagRef.current;
+    if (!tag) return;
+    const start = Number(tag.dataset.start ?? '');
+    const span = waveView.span;
+    const w = widthRef.current;
+    if (!Number.isFinite(start) || !(span > 0) || w <= 0) return;
+    const x = ((start - waveView.start_s) / span) * w;
+    const tw = selTagW.current || tag.offsetWidth;
+    tag.style.left = `${Math.round(clamp(x + 3, 2, Math.max(2, w - tw - 2)))}px`;
+  }, []);
+
   const updateChrome = useCallback(() => {
     const v = waveView.view;
     const dur = waveView.duration;
@@ -251,7 +285,8 @@ export function WaveformDisplay() {
         `${formatSeconds(v.start, span)} to ${formatSeconds(v.end, span)}`,
       );
     }
-  }, []);
+    syncSelTag();
+  }, [syncSelTag]);
 
   // ------------------------------------------------------------ detail fetch
 
@@ -390,9 +425,12 @@ export function WaveformDisplay() {
     host.setView(waveView.start_s, waveView.end_s);
     const ro = new ResizeObserver((entries) => {
       const e = entries[0];
-      if (e) setWidth(Math.round(e.contentRect.width));
+      if (!e) return;
+      widthRef.current = e.contentRect.width;
+      setWidth(Math.round(e.contentRect.width));
     });
     ro.observe(wrap);
+    widthRef.current = wrap.getBoundingClientRect().width;
     setWidth(Math.round(wrap.getBoundingClientRect().width));
     const unsub = getPlayer().subscribe((snap) => {
       const hasAudio = getPlayer().hasDeck('original') || getPlayer().hasDeck('cleaned');
@@ -480,8 +518,33 @@ export function WaveformDisplay() {
   }, [abMode]);
 
   useEffect(() => {
-    hostRef.current?.setHighlight(highlight);
-  }, [highlight]);
+    const host = hostRef.current;
+    if (!host) return;
+    if (!highlight) {
+      host.setHighlight(null);
+      return;
+    }
+    // The lane is the channel's position among the report's channels, not the
+    // channel number itself: a report whose only units are on channel 1 has
+    // one lane, and a 0/2 pair has lanes 0 and 1.
+    const lane = highlight.channel === undefined ? -1 : channels.indexOf(highlight.channel);
+    host.setHighlight(
+      channels.length > 1 && lane >= 0
+        ? { start: highlight.start, end: highlight.end, lane, lanes: channels.length }
+        : { start: highlight.start, end: highlight.end },
+    );
+  }, [highlight, channels]);
+
+  // The tag's text and its band start, then one placement pass. Measuring the
+  // tag here (once per selection) is what keeps `syncSelTag` free of layout
+  // reads on the pan path.
+  useEffect(() => {
+    const tag = selTagRef.current;
+    if (!tag || !highlight || !selName) return;
+    tag.dataset.start = String(highlight.start);
+    selTagW.current = tag.offsetWidth;
+    syncSelTag();
+  }, [highlight, selName, syncSelTag]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -841,6 +904,29 @@ export function WaveformDisplay() {
                 <span ref={timeRef} className="wave-time">
                   00:00.000
                 </span>
+                {selName ? (
+                  /* A7/B4 · the selection band is channel-scoped on a
+                     multi-channel report, and this is what says so in words.
+                     It rides at the vertical centre of the band's own lane and
+                     at the band's left edge, and it is pointer-events: none,
+                     so it never takes a click from the display underneath. The
+                     waveform itself stays one mixed envelope — see the note in
+                     the worker — so this labels the *decision*, not the
+                     picture. */
+                  <span
+                    ref={selTagRef}
+                    className="wave-selchan"
+                    aria-hidden="true"
+                    style={
+                      {
+                        '--lane': Math.max(0, channels.indexOf(selChannel ?? 0)),
+                        '--lanes': channels.length,
+                      } as CSSProperties
+                    }
+                  >
+                    {selName.long}
+                  </span>
+                ) : null}
                 <div className="wave-legend" aria-hidden="true">
                   <span className={`orig${cleaned && abMode !== 'original' ? ' off' : ''}`}>
                     <i /> Original

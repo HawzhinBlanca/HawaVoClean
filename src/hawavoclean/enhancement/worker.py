@@ -8,6 +8,7 @@ response deadlines only.
 import multiprocessing as mp
 import os
 import queue
+import threading
 import time
 from typing import Any
 
@@ -16,6 +17,31 @@ import numpy as np
 from hawavoclean.enhancement.production import WienerSpectralEnhancer
 from hawavoclean.enhancement.protocol import EnhancementResult, Enhancer
 from hawavoclean.errors import WorkerCrashError, WorkerTimeoutError
+from hawavoclean.watchdog import parent_is_alive
+
+#: How often an orphaned worker checks whether its parent is still there.
+WATCHDOG_POLL_S = 0.5
+
+
+def _arm_parent_death_watchdog(poll_s: float = WATCHDOG_POLL_S) -> threading.Thread:
+    """Exit this process as soon as the process that spawned it is gone.
+
+    There is nothing to unwind here — the worker holds a model and two
+    queues, both of which die with it — so the answer is an immediate
+    ``os._exit``. Liveness is ``hawavoclean.watchdog.parent_is_alive``: pid
+    probe *and* ``getppid()``, because a recycled pid fools the first and a
+    platform that keeps the old ppid after reparenting fools the second.
+    """
+    parent_pid = os.getppid()
+
+    def _watch_parent() -> None:
+        while parent_is_alive(parent_pid):
+            threading.Event().wait(poll_s)
+        os._exit(0)
+
+    thread = threading.Thread(target=_watch_parent, name="hawavoclean-worker-watchdog", daemon=True)
+    thread.start()
+    return thread
 
 
 def _worker_process_entry(
@@ -27,6 +53,20 @@ def _worker_process_entry(
     phase_coherent: bool = True,
 ) -> None:
     """Entry point for the isolated worker subprocess."""
+    # Parent-death watchdog FIRST, before the model exists. A parent killed
+    # by SIGTERM/SIGKILL never runs its finally: blocks, and daemon=True only
+    # covers a normal interpreter exit, so the child must notice on its own —
+    # even mid-inference. This used to be armed after warmup, which left the
+    # whole of import + construction + model load (seconds, and the most
+    # likely moment for a user to give up and kill the parent) unwatched.
+    #
+    # Only when we really are a spawned child: `_worker_process_entry` is
+    # also called in-process by the unit tests, and a watchdog thread there
+    # would be watching the *test runner's* parent with an os._exit(0) on the
+    # end of it.
+    if mp.parent_process() is not None:
+        _arm_parent_death_watchdog()
+
     try:
         try:
             enhancer: Enhancer = enhancer_class(
@@ -40,28 +80,6 @@ def _worker_process_entry(
         return
 
     resp_queue.put({"type": "READY"})
-
-    # Parent-death watchdog on its own thread: a parent killed by
-    # SIGTERM/SIGKILL never runs its finally: blocks and daemon=True only
-    # covers normal interpreter exit, so the child must notice on its own —
-    # even mid-inference. Liveness is checked with kill(ppid, 0), which is
-    # reliable across platforms (getppid() can keep the old value after
-    # reparenting on some systems).
-    import threading
-
-    parent_pid = os.getppid()
-
-    def _watch_parent() -> None:
-        while True:
-            try:
-                os.kill(parent_pid, 0)
-            except (ProcessLookupError, PermissionError):
-                os._exit(0)
-            if os.getppid() != parent_pid:
-                os._exit(0)
-            threading.Event().wait(0.5)
-
-    threading.Thread(target=_watch_parent, daemon=True).start()
 
     while True:
         try:

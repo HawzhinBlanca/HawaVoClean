@@ -246,6 +246,9 @@ async function probeEngine(): Promise<void> {
       getState().setStatus(`Engine back · v${health.version}`);
       retryFaultedDecks();
       retryStrandedAnalysis();
+      // An outage is a gap in which anything on disk may have moved. The run
+      // on screen gets the same three HEADs a restore does — no `/api/analyze`.
+      void reverifyCurrentRun();
     }
     autoloadFromQuery();
     if (wasDown || restarted) await resumeAfterReconnect(client);
@@ -432,8 +435,32 @@ function deckName(deck: 'original' | 'cleaned'): string {
   return deck === 'cleaned' ? 'cleaned master' : 'original';
 }
 
+/** How long a deck turned out to be, in the words a person reads. */
+function shortLength(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'no audio at all';
+  // A 100-byte WAV measures 0.000396 s, which rounds to "0 ms" — a number that
+  // reads like a rounding error rather than like the fact it is.
+  if (seconds < 0.001) return 'less than a millisecond of audio';
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms of audio`;
+  return `${seconds.toFixed(1)} s of audio`;
+}
+
 /** The player's fault, as the sentence the transport shows. */
 function describeDeckFault(f: DeckFault): DeckFaultInfo {
+  // A truncated deck is the one kind whose sentence needs the measurement in
+  // it: the file *is* there and the browser *did* open it, so "could not be
+  // loaded — it is empty" would read like a contradiction without the numbers.
+  if (f.kind === 'truncated') {
+    const got = shortLength(f.duration?.got ?? 0);
+    const expected = f.duration?.expected ?? null;
+    const against = expected ? `, where this run is ${expected.toFixed(1)} s long` : '';
+    const fellShort = f.fellBackTo ? `, so the A/B is playing the ${deckName(f.fellBackTo)}` : '';
+    return {
+      deck: f.deck,
+      headline: f.deck === 'cleaned' ? 'CLEANED DECK UNAVAILABLE' : 'ORIGINAL DECK UNAVAILABLE',
+      detail: `The ${deckName(f.deck)} opened with ${got}${against} — the file on disk is empty or truncated${fellShort}.`,
+    };
+  }
   const why =
     f.kind === 'missing'
       ? 'it is not on disk any more'
@@ -450,6 +477,45 @@ function describeDeckFault(f: DeckFault): DeckFaultInfo {
   };
 }
 
+/**
+ * What the artefact row and the run list should say about a master the deck
+ * has just refused, or null when the fault condemns nothing.
+ *
+ * `network` is the null case and the only one: an engine that is not answering
+ * says nothing at all about the file, which is still exactly where the run
+ * left it. Everything else means this master cannot be handed over as this
+ * run's master — either because it is not there, or because what is there is
+ * not the audio the report describes — and a control that offers it anyway is
+ * the same lie the A/B switch used to tell.
+ */
+function condemnedMaster(f: DeckFault): { reason: string; flag: string } | null {
+  switch (f.kind) {
+    case 'missing':
+      return {
+        reason:
+          'The cleaned master is no longer on disk — it was moved or deleted after the run.',
+        flag: 'FILE GONE',
+      };
+    case 'forbidden':
+      return { reason: 'The engine refused to serve the cleaned master.', flag: 'NO ACCESS' };
+    case 'truncated': {
+      const got = shortLength(f.duration?.got ?? 0);
+      return {
+        reason: `The cleaned master is still on disk, but it holds ${got} — it is empty or truncated, so it is not this run's master any more.`,
+        flag: 'FILE BROKEN',
+      };
+    }
+    case 'unreadable':
+      return {
+        reason:
+          'The cleaned master is still on disk, but nothing here can decode it — the bytes are not the audio this run wrote.',
+        flag: 'FILE BROKEN',
+      };
+    default:
+      return null;
+  }
+}
+
 /** Is this fault about the file the screen is currently showing? */
 function faultIsCurrent(f: DeckFault): boolean {
   const st = getState();
@@ -463,6 +529,10 @@ let deckFaultNetInstalled = false;
 function installDeckFaultNet(): void {
   if (deckFaultNetInstalled) return;
   deckFaultNetInstalled = true;
+  // The player cannot tell "the engine is gone" from "these bytes are junk" on
+  // its own — Chromium reports both as `MediaError.code` 4 — so it is handed
+  // the one fact this module owns.
+  getPlayer().setLivenessProbe(() => getState().engineStatus === 'ready');
   getPlayer().onFault((f) => {
     // The switch follows the player unconditionally — even for a fault about a
     // clip that is no longer on screen, `activeDeck` is the truth about what
@@ -474,17 +544,18 @@ function installDeckFaultNet(): void {
     st.setDeckFault(said);
     st.setStatus(said.detail);
     if (f.deck !== 'cleaned') return;
-    // A cleaned deck the engine says is not there is a master that cannot be
-    // downloaded either: the same fact, told once. The analysis goes with it —
-    // it describes a file that is not there, and leaving it in place would keep
-    // the waveform asking `/api/peaks` for a path that 404s.
-    if (f.kind === 'missing' || f.kind === 'forbidden') {
-      const reason =
-        f.kind === 'missing'
-          ? 'The cleaned master is no longer on disk — it was moved or deleted after the run.'
-          : 'The engine refused to serve the cleaned master.';
+    // A cleaned deck that cannot be played is a master that cannot be handed
+    // over either: the same fact, told once. Before this it was told only for
+    // the two kinds where the engine had answered "no" — so a master truncated
+    // to 100 bytes, or a PNG renamed `.wav`, left `Master WAV` an enabled
+    // `<a download>` for a file the app had just declared unplayable.
+    // The analysis goes with it — it describes a file that is not there any
+    // more in any useful sense, and leaving it in place keeps the waveform
+    // asking `/api/peaks` for it.
+    const condemned = condemnedMaster(f);
+    if (condemned) {
       st.setCleaned(null, st.cleanedPath);
-      markArtifacts({ master: false, reason });
+      markArtifacts({ master: false, reason: condemned.reason, flag: condemned.flag });
     }
   });
 }
@@ -501,6 +572,7 @@ function markArtifacts(patch: Partial<ArtifactState> & { reason: string }): void
     json: patch.json ?? cur?.json ?? true,
     txt: patch.txt ?? cur?.txt ?? true,
     reason: patch.reason,
+    ...(patch.flag ? { flag: patch.flag } : {}),
   };
   st.setArtifacts(next);
   if (st.currentRunId) st.patchHistory(st.currentRunId, { artifacts: next });
@@ -537,14 +609,63 @@ function retryFaultedDecks(): void {
   const player = getPlayer();
   let retried = false;
   if (player.deckFault('original')?.kind === 'network' && st.source) {
-    player.load('original', client.fileUrl(st.source.path));
+    player.load('original', client.fileUrl(st.source.path), st.original?.duration_s ?? null);
     retried = true;
   }
-  if (player.deckFault('cleaned')?.kind === 'network' && st.cleanedPath && st.cleaned) {
-    player.load('cleaned', client.fileUrl(st.cleanedPath));
+  // The cleaned deck is retried on the *path*, not on the analysis. Requiring
+  // `st.cleaned` meant that a run whose cleaned analysis had also died in the
+  // same outage could never get its deck back, which is precisely the run most
+  // likely to have lost it.
+  if (player.deckFault('cleaned')?.kind === 'network' && st.cleanedPath) {
+    player.load(
+      'cleaned',
+      client.fileUrl(st.cleanedPath),
+      st.cleaned?.duration_s ?? st.original?.duration_s ?? null,
+    );
     retried = true;
   }
   if (retried) st.setDeckFault(null);
+}
+
+/**
+ * B5 · the run on screen is a run like any other, and its files can go too.
+ *
+ * `selectRun` verifies a run's artefacts when it puts it on screen, and then
+ * never looks again — so deleting the master of the run you are *already*
+ * looking at changed nothing: `Master WAV` stayed an enabled link whose own
+ * href answered 404, the row carried no flag, and the cleaned deck played on
+ * from the blob already in memory, so nothing ever probed the file. This is
+ * the same three HEADs, run for the current run on the gestures that mean
+ * "look again" — re-picking the row it is on, and the engine coming back.
+ * It never calls `/api/analyze`, so it costs nothing a restore does not.
+ */
+async function reverifyCurrentRun(): Promise<void> {
+  const st = getState();
+  const id = st.currentRunId;
+  if (!id) return;
+  const entry = st.history.find((h) => h.jobId === id);
+  if (!entry) return;
+  const avail = await verifyArtifacts(st.client, entry);
+  if (!avail) return;
+  const cur = getState();
+  if (cur.currentRunId !== id) return; // the user moved on while we asked
+  const was = cur.artifacts?.master ?? true;
+  cur.setArtifacts(avail);
+  cur.patchHistory(id, { artifacts: avail });
+  if (avail.master || !was) return;
+  // The master has gone since this run was put on screen. Everything the run
+  // is — its report, its numbers, its units — is still true; the deck and the
+  // download are what stop being offered.
+  cur.setCleaned(null, cur.cleanedPath);
+  getPlayer().load('cleaned', null);
+  getPlayer().setActive('original');
+  cur.setAbMode('original');
+  cur.setDeckFault({
+    deck: 'cleaned',
+    headline: 'CLEANED DECK UNAVAILABLE',
+    detail: deckGoneDetail(avail),
+  });
+  cur.setStatus(avail.reason);
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +699,9 @@ export async function loadSource(source: SourceInfo): Promise<void> {
     const analysis = await client.analyze(source.path, envelopeBuckets(), ac.signal);
     if (ac.signal.aborted) return;
     useStore.getState().setOriginal(analysis);
-    player.load('original', client.fileUrl(source.path));
+    // The engine has just decoded this file end to end, so its length is
+    // known: a deck that opens far shorter than that is not this clip.
+    player.load('original', client.fileUrl(source.path), analysis.duration_s);
     player.setActive('original');
     useStore.getState().setAbMode('original');
     useStore.getState().setStatus(
@@ -945,17 +1068,27 @@ function onJobStatus(status: JobStatus): void {
         const client = requireClient();
         const analysis = await analyzeCleaned(out);
         const cur = getState();
-        if (!cur.job || cur.job.id !== status.job_id) return;
-        cur.setCleaned(analysis, out);
-        // Cache the cleaned analysis on the run so re-selecting it later costs
-        // nothing (goal box B5: restore without re-analyzing).
+        // B5 · the history row belongs to *that* run, not to whatever is on
+        // screen when its analysis lands. This patch used to sit behind the
+        // "is this still the current job?" guard below, so a run whose
+        // analysis returned after the user had moved on lost its cached
+        // numbers permanently: the row read "— LUFS Δ" for the rest of the
+        // session and re-selecting it cost a full POST /api/analyze.
         cur.patchHistory(status.job_id, {
           cleaned: analysis,
           lufsOut: analysis?.loudness.integrated_lufs ?? null,
           noiseOut: analysis?.noise_floor_db ?? null,
         });
+        if (!cur.job || cur.job.id !== status.job_id) return;
+        cur.setCleaned(analysis, out);
         const player = getPlayer();
-        player.load('cleaned', client.fileUrl(out));
+        player.load(
+          'cleaned',
+          client.fileUrl(out),
+          // What the run says this master holds: the deck is checked against
+          // it, so a master that decodes to nothing cannot sit there lit.
+          analysis?.duration_s ?? cur.original?.duration_s ?? null,
+        );
         player.setActive('cleaned');
         cur.setAbMode('cleaned');
         if (report) {
@@ -1131,7 +1264,16 @@ export async function selectRun(jobId: string): Promise<void> {
   // A file that came back (a volume remounted, an undo in Finder) otherwise
   // needs the user to leave the run and return to it for no reason at all.
   const recheck = Boolean(st.artifacts && !st.artifacts.master);
-  if (st.currentRunId === jobId && !recheck) return;
+  if (st.currentRunId === jobId && !recheck) {
+    // Not a no-op any more. Re-picking the row you are on is the gesture that
+    // means "look again", and until this line it was the one gesture that did
+    // not: the files of the run *on screen* were verified once, when it was
+    // opened, and never after — so deleting the master under a live run left
+    // an enabled download link answering 404 with nothing on screen saying so.
+    // Three HEADs, no `/api/analyze`, no re-decode.
+    await reverifyCurrentRun();
+    return;
+  }
   const entry = st.history.find((h) => h.jobId === jobId);
   if (!entry) return;
   if (st.job && st.job.status && !isTerminal(st.job.status.state)) {
@@ -1154,6 +1296,11 @@ export async function selectRun(jobId: string): Promise<void> {
   });
   st.setReport(entry.report);
   st.setCurrentRun(entry.jobId);
+  // The profile is part of the run, not a preference that outlives it. Without
+  // this a PRODUCTION row restored with the radiogroup still reading STUDIO —
+  // the screen asserting both at once — and PROCESS AGAIN then ran studio,
+  // which is not "again" at all.
+  st.setProfile(entry.profile);
   st.setDeckFault(null);
   st.setArtifacts(null);
   st.resetView();
@@ -1220,9 +1367,13 @@ export async function selectRun(jobId: string): Promise<void> {
   // asking `/api/peaks` for a path that answers 404.
   cur.setCleaned(restored ? cleaned : null, doneRun ? entry.outputPath : null);
   if (client) {
-    player.load('original', client.fileUrl(entry.inputPath));
+    player.load('original', client.fileUrl(entry.inputPath), original?.duration_s ?? null);
     if (restored) {
-      player.load('cleaned', client.fileUrl(entry.outputPath));
+      player.load(
+        'cleaned',
+        client.fileUrl(entry.outputPath),
+        cleaned?.duration_s ?? original?.duration_s ?? null,
+      );
       player.setActive('cleaned');
       cur.setAbMode('cleaned');
     } else {
@@ -1238,13 +1389,32 @@ export async function selectRun(jobId: string): Promise<void> {
     cur.setDeckFault({
       deck: 'cleaned',
       headline: 'CLEANED DECK UNAVAILABLE',
-      detail: avail.reason,
+      detail: deckGoneDetail(avail),
     });
   }
   // A re-read failure has already claimed the status line with the reason;
   // do not paper over it with the run's happy summary.
   if (cur.error) return;
   cur.setStatus(doneRun && !restored && avail ? avail.reason : runStatusLine(entry));
+}
+
+/**
+ * The sentence the transport plate carries when a restore finds the master
+ * gone.
+ *
+ * It is deliberately *not* `ArtifactState.reason`, which is the paragraph the
+ * download row and the run list need — it has to explain all three files and
+ * where the report on screen came from. Put under the A/B switch that
+ * paragraph was five wrapped lines of plate inside a fixed-height column, and
+ * the plate is not the place for the long version: this control's question is
+ * only "what can I listen to". The long answer is still one hover away on the
+ * artefact row, and on the run's own row.
+ */
+function deckGoneDetail(avail: ArtifactState): string {
+  if (!avail.master) {
+    return 'The cleaned master is no longer on disk, so there is no cleaned deck — the A/B is playing the original.';
+  }
+  return avail.reason;
 }
 
 /**

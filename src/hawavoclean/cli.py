@@ -33,6 +33,7 @@ from hawavoclean.paths import models_dir, profile_config_path
 from hawavoclean.pipeline import run_pipeline
 from hawavoclean.progress import ProgressEvent
 from hawavoclean.report.writer import load_json_report
+from hawavoclean.watchdog import child_env, install_parent_death_watchdog
 
 logger = get_logger("cli")
 
@@ -273,7 +274,9 @@ def _run_one_isolated(
     if overwrite:
         cmd.append("--overwrite")
     try:
-        proc = _sp.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        # child_env: a batch killed with SIGKILL cannot reap this child, so
+        # the child is told whose death to watch for.
+        proc = _sp.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=child_env())
     except _sp.TimeoutExpired:
         return f"FAILED: timed out after {timeout_s:.0f}s (killed; batch continued)"
     if proc.returncode != 0:
@@ -634,6 +637,9 @@ def main() -> None:
     """CLI main entry point."""
     setup_logging()
     _install_signal_handlers()
+    # Before argument parsing, let alone any work: everything above an armed
+    # watchdog is time a killed parent's orphan spends unwatched.
+    install_parent_death_watchdog()
     parser = argparse.ArgumentParser(
         prog="hawavoclean",
         description=(

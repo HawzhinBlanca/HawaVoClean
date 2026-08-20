@@ -205,6 +205,72 @@ def test_analyze_path_policy_and_missing(client: TestClient, work: Path) -> None
     assert r.json()["error"] == "invalid_user_input"
 
 
+def test_unstorable_paths_are_400_on_every_endpoint_that_takes_one(
+    client: TestClient, work: Path
+) -> None:
+    """A NUL byte or an unpaired surrogate used to reach ``lstat`` and come
+    back as ``500 {"error":"internal_error","message":"ValueError: lstat:
+    embedded null character in path"}`` — reachable from the UI's documented
+    ``?file=`` autoload. Every path input now refuses it by design."""
+    src = _tiny_wav(work / "ok.wav")
+    nul = f"{work}/a\\u0000b.wav"
+    surrogate = f"{work}/a\\ud800b.wav"
+    hdr = {**H, "Content-Type": "application/json"}
+
+    for body in (
+        f'{{"path": "{nul}"}}',
+        f'{{"path": "{surrogate}"}}',
+    ):
+        for route in ("/api/analyze", "/api/peaks"):
+            r = client.post(route, headers=hdr, content=body.encode())
+            assert r.status_code == 400, (route, body, r.status_code, r.text)
+            assert r.json()["error"] == "bad_request"
+
+    for body in (
+        f'{{"input_path": "{nul}", "profile": "studio"}}',
+        f'{{"input_path": "{surrogate}", "profile": "studio"}}',
+        f'{{"input_path": "{src}", "profile": "studio", "output_path": "{nul}"}}',
+    ):
+        r = client.post("/api/jobs", headers=hdr, content=body.encode())
+        assert r.status_code == 400, (body, r.status_code, r.text)
+        assert r.json()["error"] == "bad_request"
+
+    # The query-string route: a browser can percent-encode a NUL.
+    r = client.get(f"/api/audio?path={work}/a%00b.wav", headers=H)
+    assert r.status_code == 400 and r.json()["error"] == "bad_request"
+
+    # And a name a POSIX filesystem *can* hold still gets the ordinary answer.
+    r = client.post("/api/analyze", headers=H, json={"path": f"{work}/a\nb.wav"})
+    assert r.status_code == 404 and r.json()["error"] == "not_found"
+
+
+def test_upload_filename_with_a_nul_byte_is_stored_not_a_500(
+    client: TestClient, work: Path
+) -> None:
+    """httpx percent-encodes a filename, so this needs a hand-built body. The
+    NUL used to reach ``open()`` — and then the cleanup ``unlink()``, whose
+    own ValueError replaced the original error in the 500."""
+    boundary = "----hawa"
+    body = (
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="a\x00b.wav"\r\n'
+            "Content-Type: audio/wav\r\n\r\n"
+        ).encode()
+        + b"RIFFdata"
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    r = client.post(
+        "/api/upload",
+        headers={**H, "Content-Type": f"multipart/form-data; boundary={boundary}"},
+        content=body,
+    )
+    assert r.status_code == 200, r.text
+    saved = Path(r.json()["path"])
+    assert saved.name == "ab.wav" and saved.read_bytes() == b"RIFFdata"
+    assert saved.parent.parent == work / "uploads"
+
+
 # ---------------------------------------------------------------------- jobs
 
 

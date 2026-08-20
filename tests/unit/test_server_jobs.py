@@ -3,6 +3,7 @@ asyncio subscriptions. Uses fake children (python -c) so it runs in seconds."""
 
 import asyncio
 import json
+import os
 import sys
 import textwrap
 import time
@@ -16,6 +17,7 @@ from hawavoclean.server.jobs import (
     JobManager,
     JobRecord,
     default_command,
+    queue_position,
 )
 
 pytestmark = pytest.mark.unit
@@ -102,6 +104,62 @@ def test_default_command_matches_contract(tmp_path: Path) -> None:
     ]
     rec.overwrite = False
     assert "--overwrite" not in default_command(rec)
+
+
+def test_queue_position_does_not_depend_on_the_worker_thread() -> None:
+    """Three submissions are "position 3" whether or not the worker has yet
+    popped the first one.
+
+    The queue position used to be ``len(self._queue)`` alone, so the answer
+    flipped between 3 and 2 depending on a thread race — the same job, the
+    same line, a different number. ``test_cancel_queued_job_and_fifo_order``
+    failed about one run in seven because of it (measured: 3 failures in 20
+    isolated runs before this, 0 in 25 after), and one red test is enough to
+    abort the mutation gate's baseline.
+    """
+    assert queue_position(1, False) == 1  # nothing ahead: "Queued"
+    assert queue_position(1, True) == 2  # the running job is still ahead of you
+    # The one invariant that removes the race: the third submission is third
+    # in line whether the first job is still queued or already running.
+    assert queue_position(3, False) == queue_position(2, True) == 3
+    assert queue_position(4, False) == queue_position(3, True) == 4
+
+
+def test_child_is_told_which_pid_to_watch(tmp_path: Path) -> None:
+    """Every job child carries the engine's pid, so an engine that is
+    SIGKILLed (no shutdown(), no finally) does not leave it running to
+    completion and publishing a master for a run reported as failed."""
+
+    seen = tmp_path / "watched-pid.txt"
+
+    def factory(_record: JobRecord) -> list[str]:
+        return _py(
+            f"""
+            import os
+            open({str(seen)!r}, "w").write(os.environ.get("HAWAVOCLEAN_PARENT_PID", "MISSING"))
+            """
+        )
+
+    manager = JobManager(command_factory=factory)
+    try:
+        snap = manager.submit(
+            input_path=tmp_path / "in.wav",
+            output_path=tmp_path / "out.wav",
+            profile="studio",
+            overwrite=False,
+        )
+        _wait_terminal(manager, snap["job_id"])
+    finally:
+        manager.shutdown()
+    assert seen.read_text() == str(os.getpid()), "the job child was not told whose death to watch"
+
+    # An explicit env is honoured too, and still carries the pid.
+    manager2 = JobManager(command_factory=factory, env={"PATH": os.environ.get("PATH", "")})
+    try:
+        assert manager2._child_env()["HAWAVOCLEAN_PARENT_PID"] == str(os.getpid())
+        assert manager2._child_env()["PATH"] == os.environ.get("PATH", "")
+    finally:
+        manager2.shutdown()
 
 
 def test_success_path_parses_progress_and_loads_report(tmp_path: Path) -> None:
