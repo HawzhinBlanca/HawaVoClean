@@ -92,6 +92,44 @@ def _install_torchaudio_compat() -> None:
     sys.modules["torchaudio.backend.common"] = common
 
 
+def load_deepfilternet3() -> tuple[Any, Any]:
+    """Initialise DeepFilterNet3 from the vendored, hash-locked weights.
+
+    Every core that runs DFN3 loads it through here, so ``_MODEL_DIR`` — the
+    directory whose digests the lockfiles pin — is named exactly once.
+    """
+    _install_torchaudio_compat()
+    from df.enhance import init_df
+
+    model, df_state, _ = init_df(model_base_dir=str(_MODEL_DIR), log_level="ERROR", log_file=None)
+    return model, df_state
+
+
+def run_deepfilternet3(
+    model: Any,
+    df_state: Any,
+    audio_48k: np.ndarray[Any, np.dtype[np.float32]],
+    atten_lim_db: float,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Run DFN3 over 48 kHz mono audio.
+
+    ``atten_lim_db`` follows the locked convention shared by every DFN3 core:
+    0 means *unlimited* attenuation, and is passed to the model as ``None``.
+    """
+    import torch
+    from df.enhance import enhance as df_enhance
+
+    with torch.no_grad():
+        tensor = torch.from_numpy(np.ascontiguousarray(audio_48k)).unsqueeze(0)
+        out = df_enhance(
+            model,
+            df_state,
+            tensor,
+            atten_lim_db=atten_lim_db if atten_lim_db > 0 else None,
+        )
+    return np.asarray(out.squeeze(0).numpy(), dtype=np.float32)
+
+
 class StudioVoiceCore(Enhancer):
     """WPE dereverberation followed by DeepFilterNet3 speech enhancement."""
 
@@ -135,12 +173,7 @@ class StudioVoiceCore(Enhancer):
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
-        _install_torchaudio_compat()
-        from df.enhance import init_df
-
-        self._model, self._df_state, _ = init_df(
-            model_base_dir=str(_MODEL_DIR), log_level="ERROR", log_file=None
-        )
+        self._model, self._df_state = load_deepfilternet3()
 
     def warmup(self) -> None:
         self._ensure_model()
@@ -186,24 +219,14 @@ class StudioVoiceCore(Enhancer):
             )
 
         self._ensure_model()
-        import torch
-        from df.enhance import enhance as df_enhance
-
         audio_48k = resample_audio(waveform, sample_rate, self._sample_rate)
 
         if bool(STUDIO_PARAMS["wpe_dereverb"]):
             audio_48k = self._wpe_dereverb(audio_48k)
 
-        atten = float(STUDIO_PARAMS["atten_lim_db"])
-        with torch.no_grad():
-            tensor = torch.from_numpy(np.ascontiguousarray(audio_48k)).unsqueeze(0)
-            out = df_enhance(
-                self._model,
-                self._df_state,
-                tensor,
-                atten_lim_db=atten if atten > 0 else None,
-            )
-        enhanced_48k = np.asarray(out.squeeze(0).numpy(), dtype=np.float32)
+        enhanced_48k = run_deepfilternet3(
+            self._model, self._df_state, audio_48k, float(STUDIO_PARAMS["atten_lim_db"])
+        )
 
         if bool(STUDIO_PARAMS["tail_suppress"]):
             from hawavoclean.finishing.dereverb import suppress_late_reverb

@@ -1255,6 +1255,12 @@ kbd {
   font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
+  /* A segment is one word on one line. The pill is a fixed 28px tall and the
+     thumb is measured from the button box, so a label allowed to wrap — the
+     hyphen in "LOW-BAND" was the first to try — breaks onto two lines inside
+     a box that has no room for a second, and the segment stops matching its
+     own thumb. */
+  white-space: nowrap;
   transition: color var(--dur) var(--ease-out);
 }
 

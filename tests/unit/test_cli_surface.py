@@ -29,6 +29,28 @@ def test_doctor_via_main(monkeypatch: Any, tmp_path: Path) -> None:
     assert _run_cli(monkeypatch, "doctor") == 0
 
 
+def test_every_offered_profile_is_actually_runnable() -> None:
+    """The CLI's choices, the engine's profile list, the API's accepted values
+    and the packaged configs must describe the same set.
+
+    A profile offered in one place and missing in another is a run that fails
+    after the user has already committed to it — and `doctor` cannot warn about
+    a config nobody thought to ship.
+    """
+    import typing
+
+    from hawavoclean.cli import PROFILE_CHOICES
+    from hawavoclean.paths import profile_config_path
+    from hawavoclean.server.app import PROFILES, JobRequest
+
+    for name in PROFILE_CHOICES:
+        assert profile_config_path(name).exists(), f"{name}: no packaged config"
+    assert set(PROFILES) <= set(PROFILE_CHOICES), "engine offers a profile the CLI cannot run"
+    accepted = set(typing.get_args(JobRequest.model_fields["profile"].annotation))
+    assert set(PROFILES) <= accepted, "engine advertises a profile its API would reject"
+    assert accepted <= set(PROFILE_CHOICES), "API accepts a profile that has no config"
+
+
 def test_process_missing_input_is_invalid_user_input(monkeypatch: Any, tmp_path: Path) -> None:
     rc = _run_cli(monkeypatch, "process", str(tmp_path / "nope.wav"), "-o", str(tmp_path / "o.wav"))
     assert rc == int(ExitCode.INVALID_USER_INPUT)

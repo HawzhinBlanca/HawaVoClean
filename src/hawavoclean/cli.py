@@ -37,6 +37,12 @@ from hawavoclean.watchdog import child_env, install_parent_death_watchdog
 
 logger = get_logger("cli")
 
+#: Profiles reachable from the command line, in the order they are offered.
+#: Each name is a TOML in ``hawavoclean/resources/configs/``; ``doctor``
+#: validates every one of them, so adding a file here without adding the
+#: config (or vice versa) fails preflight rather than at run time.
+PROFILE_CHOICES: tuple[str, ...] = ("production", "studio", "lowband", "development")
+
 
 def exit_with_code(code: ExitCode | int, message: str | None = None) -> NoReturn:
     """Print message and terminate process with standard exit code."""
@@ -77,18 +83,21 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     else:
         print("[WARN] FFprobe binary not found in PATH; falling back to soundfile.")
 
-    # 3. Configuration files (packaged resources, CWD-independent)
-    prod_cfg = profile_config_path("production")
-    if prod_cfg.exists():
-        try:
-            load_config(prod_cfg, is_production=True)
-            print(f"[OK] Production config valid: {prod_cfg}")
-        except Exception as e:
-            print(f"[FAIL] Production config invalid: {e}")
+    # 3. Configuration files (packaged resources, CWD-independent). Every
+    # profile the CLI offers must load, or `--profile <name>` would fail
+    # after the user has already committed to a run.
+    for profile in PROFILE_CHOICES:
+        cfg_path = profile_config_path(profile)
+        if not cfg_path.exists():
+            print(f"[FAIL] {profile} config missing: {cfg_path}")
             all_passed = False
-    else:
-        print(f"[FAIL] Production config missing: {prod_cfg}")
-        all_passed = False
+            continue
+        try:
+            load_config(cfg_path, is_production=profile != "development")
+            print(f"[OK] Profile config valid: {profile} ({cfg_path.name})")
+        except Exception as e:
+            print(f"[FAIL] {profile} config invalid: {e}")
+            all_passed = False
 
     # 4. Guard calibration artifact — including integrity recompute
     calib_file = models_dir() / "guard-calibration.json"
@@ -684,9 +693,7 @@ def _main() -> None:
     p_proc.add_argument("input", help="Path to input audio file")
     p_proc.add_argument("--output", "-o", required=True, help="Path to output mastered WAV")
     p_proc.add_argument("--config", "-c", help="Path to custom TOML configuration")
-    p_proc.add_argument(
-        "--profile", "-p", choices=["production", "development", "studio"], default="production"
-    )
+    p_proc.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"
     )
@@ -703,9 +710,7 @@ def _main() -> None:
     )
     p_batch.add_argument("inputs", nargs="+", help="Input audio files")
     p_batch.add_argument("--output-dir", "-o", required=True, help="Directory for outputs")
-    p_batch.add_argument(
-        "--profile", "-p", choices=["production", "development", "studio"], default="production"
-    )
+    p_batch.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
     p_batch.add_argument(
         "--suffix", default="_clean", help="Appended to each stem (default: _clean)"
     )

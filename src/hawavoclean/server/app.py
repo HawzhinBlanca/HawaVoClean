@@ -49,8 +49,13 @@ from hawavoclean.server.policy import PathPolicyError, resolve_client_path
 
 logger = get_logger("server")
 
-PROFILES: tuple[str, ...] = ("studio", "production")
-_OUTPUT_SUFFIX = {"studio": "_studio", "production": "_clean", "development": "_dev"}
+PROFILES: tuple[str, ...] = ("studio", "lowband", "production")
+_OUTPUT_SUFFIX = {
+    "studio": "_studio",
+    "lowband": "_lowband",
+    "production": "_clean",
+    "development": "_dev",
+}
 _AUDIO_MIME = {
     ".wav": "audio/wav",
     ".wave": "audio/wav",
@@ -242,7 +247,7 @@ class PeaksRequest(BaseModel):
 
 class JobRequest(BaseModel):
     input_path: str
-    profile: Literal["studio", "production", "development"]
+    profile: Literal["studio", "lowband", "production", "development"]
     output_path: str | None = None
     overwrite: bool = False
 

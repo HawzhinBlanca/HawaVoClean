@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `studio-dfn3-lowband-48k-v1`, a band-split restoration core
+
+A muffled recording whose noise is low-frequency tonal rumble defeats both
+existing cores, and the lab evidence says so precisely. On the Teat1vo
+fixture (`test_output/teat1vo-lab/`, 24 s, mono, speech-to-floor separation
+15.1 dB):
+
+| profile | separation | 60–300 Hz pause rumble | guard |
+| --- | --- | --- | --- |
+| source | 15.1 dB | −32.3 dB rel. speech | — |
+| production (Wiener) | 19.8 dB | −34.6 dB | enhanced |
+| studio (full-band DFN3) | 15.1 dB | −30.5 dB | **all units reverted** |
+| lowband | 29.4 dB | −71.6 dB | enhanced |
+| lowband → production | **35.2 dB** | **−83.3 dB** | enhanced in both runs |
+
+The studio core reverts because full-band DeepFilterNet3 keeps only 0.22 of
+the original 2–8 kHz energy on this material — it takes the consonants with
+the rumble. The new core runs DFN3 over the full band (the distribution it
+was trained on) but keeps only its output below a crossover, handing the
+untouched original back above it:
+
+```
+enhanced = DFN3(x)                       # unlimited attenuation
+out      = lowpass(enhanced) + (x - lowpass(x))
+```
+
+- **Consonants are preserved by construction.** Measured consonant
+  retention 0.999; the guard's spectral-hole score is 0.066 against its
+  0.100 threshold, versus 0.585 for the naive alternative of feeding DFN3 a
+  pre-lowpassed signal (which the guard reverts).
+- **One filter, subtracted — not two.** Both bands come from the same
+  lowpass, so an identity enhancement reconstructs the input to a float
+  rounding error and the crossover cannot colour anything. Two
+  independently designed Butterworths would sum to a ripple and a phase
+  step exactly where the first formant is. Pinned by
+  `test_crossover_reconstructs_the_input_when_the_model_changes_nothing`
+  and by mutation **M14**.
+- **The crossover is locked, because it is the core.** Measured against the
+  guard's own threshold: 700 Hz → 0.050, **1000 Hz → 0.066 (shipped)**,
+  1300 Hz → 0.088, 1500 Hz → 0.103 (rejected), 2500 Hz → 0.187 (rejected).
+  Above ~1.1 kHz DFN3 reaches into the consonant band and every unit is
+  reverted, so `crossover_hz` is inside `params_hash`: moving it is a new
+  core and a relock, enforced by preflight, `audit-models`, and mutation
+  **M13**.
+- **Note on the lab's 40.0 dB figure.** The prototype chain reached it by
+  running the band split as an unguarded script and feeding the raw,
+  unmastered result to a production pass. Productized, the split is judged
+  by the guard like everything else and the intermediate is a real master,
+  which lands the same chain at 35.2 dB. The number is lower because the
+  aggressive step is now accountable.
+
+Shipped as: `studio-lowband-core.lock.toml` (shares the studio core's
+vendored DFN3 weights, digested independently; no WPE, so `nara_wpe` is not
+a dependency), the `lowband` profile (`--profile lowband`, engine API, and
+a third segment in the web UI's profile control), and
+`tests/unit/test_studio_lowband_core.py`.
+
+### Changed
+- `hawavoclean doctor` now validates **every** profile config the CLI
+  offers, not just `production` — a missing or invalid profile config was
+  previously only discovered after a user had committed to a run.
+- `StudioVoiceCore`'s DFN3 loading and inference moved into
+  `load_deepfilternet3()` / `run_deepfilternet3()` so both DFN3 cores name
+  the vendored weight directory and the "0 means unlimited" attenuation
+  convention exactly once. Output is bit-identical and `studio_params_hash`
+  is unchanged; Flute 09's studio run reproduces every per-unit output hash.
+- `.seg button` no longer wraps: a hyphenated segment label ("LOW-BAND")
+  broke onto a second line inside a fixed-height pill and stopped matching
+  its own thumb.
+
 ### Added — engine bridge for the first UI screen (`docs/ui-contract.md`)
 - `hawavoclean serve --port 0 --token TOKEN [--ui-dir DIR]`: a loopback-only
   FastAPI/uvicorn server (`hawavoclean/server/`). Binds 127.0.0.1 only (any

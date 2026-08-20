@@ -58,15 +58,18 @@ const UNITS = [
   { id: 4, start: 44.0, end: 60.0, speech: true, decision: 'enhanced' },
 ];
 
+/** Engine-side default output suffix per profile (server/app.py `_OUTPUT_SUFFIX`). */
+const OUTPUT_SUFFIX = { studio: 'studio', lowband: 'lowband', production: 'clean' };
+
 function isCleanedPath(p) {
   const b = basename(p).toLowerCase();
-  return b.includes('_studio') || b.includes('_clean');
+  return Object.values(OUTPUT_SUFFIX).some((s) => b.includes(`_${s}`));
 }
 
 /** Synthesize a speech-like mono signal. Cleaned variant: lower noise floor. */
 function synthesize(path) {
   const cleaned = isCleanedPath(path);
-  const stemSeed = seedFrom(basename(path).replace(/_(studio|clean)\.wav$/i, ''));
+  const stemSeed = seedFrom(basename(path).replace(/_(studio|lowband|clean)\.wav$/i, ''));
   const rnd = mulberry32(stemSeed);
   const out = new Float32Array(N);
 
@@ -316,10 +319,12 @@ function makeReport(job) {
   return {
     schema_version: 1, job_id: job.id, config_hash: createHash('sha256').update('mock-config').digest('hex'),
     input: media(job.input_path, -23.4, -3.1), output: media(job.output_path, -19.0, -1.0),
-    core: job.profile === 'studio'
-      ? { id: 'studio-dfn3-48k-v1', algorithm: 'WPE + DeepFilterNet3', params_hash: 'b1f7' + '0'.repeat(60), phase_coherent: true }
-      : { id: 'wiener-dd-48k-v1', algorithm: 'Wiener decision-directed', params_hash: 'a9c2' + '0'.repeat(60), phase_coherent: true },
-    guard: { id: 'spectral-guard-v1', probe_hash: 'c3d4' + '0'.repeat(60), calibration_id: job.profile === 'studio' ? 'guard-calibration-studio' : 'guard-calibration' },
+    core: {
+      studio: { id: 'studio-dfn3-48k-v1', algorithm: 'WPE + DeepFilterNet3', params_hash: 'b1f7' + '0'.repeat(60), phase_coherent: true },
+      lowband: { id: 'studio-dfn3-lowband-48k-v1', algorithm: 'DeepFilterNet3 crossed over with the original at 1000 Hz', params_hash: 'd5e8' + '0'.repeat(60), phase_coherent: false },
+      production: { id: 'wiener-dd-48k-v1', algorithm: 'Wiener decision-directed', params_hash: 'a9c2' + '0'.repeat(60), phase_coherent: true },
+    }[job.profile],
+    guard: { id: 'spectral-guard-v1', probe_hash: 'c3d4' + '0'.repeat(60), calibration_id: job.profile === 'production' ? 'guard-calibration' : 'guard-calibration-studio' },
     environment: { platform: 'mock', os_version: process.version, python_version: 'n/a', numpy_version: 'n/a', scipy_version: 'n/a', soundfile_version: 'n/a', cpu_model: null },
     summary: { units_total: units.length, enhanced, reverted, unverified: 0, error_passthrough: 0, continuity_reverted: 0, no_speech: noSpeech, finish_applied: enhanced, finish_bypassed: units.length - enhanced },
     review_timecodes: units.filter((u) => u.final_decision === 'original_reverted').map((u) => ({ unit_id: u.unit_id, start_time_s: u.start_time_s, end_time_s: u.end_time_s, channel: 0, verdict: 'REVERT', reason: u.decision_reason })),
@@ -536,7 +541,7 @@ const server = createServer(async (req, res) => {
 
   try {
     if (p === '/api/health' && req.method === 'GET') {
-      return json(res, 200, { ok: true, version: VERSION, profiles: ['studio', 'production'], engine_pid: process.pid });
+      return json(res, 200, { ok: true, version: VERSION, profiles: ['studio', 'lowband', 'production'], engine_pid: process.pid });
     }
     if (p === '/api/analyze' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString() || '{}');
@@ -551,10 +556,10 @@ const server = createServer(async (req, res) => {
       if (body.output_path !== undefined && !pathAllowed(body.output_path)) {
         return err(res, 403, 'forbidden', 'Output path outside allowed roots');
       }
-      const profile = body.profile === 'production' ? 'production' : 'studio';
+      const profile = ['production', 'lowband'].includes(body.profile) ? body.profile : 'studio';
       const dir = body.input_path.slice(0, body.input_path.lastIndexOf('/'));
       const stem = cleanStem(body.input_path);
-      const output_path = body.output_path || `${dir}/${stem}_${profile === 'studio' ? 'studio' : 'clean'}.wav`;
+      const output_path = body.output_path || `${dir}/${stem}_${OUTPUT_SUFFIX[profile]}.wav`;
       const report_path = output_path.replace(/\.wav$/i, '') + '.hawavoclean.json';
       const job = {
         id: `j_${randomUUID().replace(/-/g, '').slice(0, 12)}`, state: 'queued', stage: 'preflight', progress: 0,
