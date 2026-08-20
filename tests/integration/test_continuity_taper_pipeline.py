@@ -9,6 +9,7 @@ notices.
 
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -22,18 +23,26 @@ from hawavoclean.policy.continuity import (
     CONTINUITY_TAPER_MS,
     ContinuityResolution,
 )
+from hawavoclean.policy.decision import UnitPolicyDecision
+from hawavoclean.report.schema import HawaVoCleanReport
+from hawavoclean.segmentation.types import SpeechUnit
 
 FIXTURE = Path("tests/fixtures/sample_sorani_podcast.wav")
 SR = 48000
 TAPER_N = int(round(SR * CONTINUITY_TAPER_MS / 1000.0))
 
 
-def _run(out: Path, force_taper_on_first_enhanced: bool):
+def _run(out: Path, force_taper_on_first_enhanced: bool) -> HawaVoCleanReport:
     """Run the pipeline, optionally planting a fade the policy would not have
     planned, so the wiring can be observed on a fixture with no forced cuts."""
-    real = pipeline_module.resolve_source_continuity
+    real = pipeline_module.resolve_source_continuity  # type: ignore[attr-defined]
 
-    def planted(units, decisions, orig_core_waveforms, sample_rate):
+    def planted(
+        units: list[SpeechUnit],
+        decisions: list[UnitPolicyDecision],
+        orig_core_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]],
+        sample_rate: int,
+    ) -> ContinuityResolution:
         res = real(units, decisions, orig_core_waveforms, sample_rate)
         fade_out = list(res.fade_out_samples)
         for i, d in enumerate(res.decisions):
@@ -43,7 +52,7 @@ def _run(out: Path, force_taper_on_first_enhanced: bool):
         return ContinuityResolution(res.decisions, res.reverted_ids, res.fade_in_samples, fade_out)
 
     if force_taper_on_first_enhanced:
-        pipeline_module.resolve_source_continuity = planted
+        pipeline_module.resolve_source_continuity = planted  # type: ignore[attr-defined]
     try:
         return run_pipeline(
             input_path=FIXTURE,
@@ -53,7 +62,7 @@ def _run(out: Path, force_taper_on_first_enhanced: bool):
             probe_override=FixedProbe(),
         )
     finally:
-        pipeline_module.resolve_source_continuity = real
+        pipeline_module.resolve_source_continuity = real  # type: ignore[attr-defined]
 
 
 @pytest.mark.integration

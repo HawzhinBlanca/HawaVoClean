@@ -8,10 +8,16 @@ the unit's own enhancement back to the original before the joint satisfies the
 same rule for 30 ms of audio.
 """
 
+from typing import Any
+
 import numpy as np
 import pytest
 
+from hawavoclean.config import load_config
+from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
+from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.guard.verdict import GuardVerdict
+from hawavoclean.paths import profile_config_path
 from hawavoclean.policy.continuity import (
     CONTINUITY_TAPER_MS,
     MAX_TAPER_FRACTION,
@@ -49,7 +55,9 @@ def _dec(enhanced: bool, n: int) -> UnitPolicyDecision:
     )
 
 
-def _chain(n_units: int, length: int = UNIT_N, last_enhanced: bool = False):
+def _chain(
+    n_units: int, length: int = UNIT_N, last_enhanced: bool = False
+) -> tuple[list[SpeechUnit], list[UnitPolicyDecision], list[np.ndarray[Any, np.dtype[np.float32]]]]:
     """``n_units`` same-channel units, EVERY boundary forced — the shape of a
     continuous-speech recording with no pauses to cut at, which is what made
     the old rule cascade through a whole file."""
@@ -245,6 +253,35 @@ def test_the_fade_weight_is_monotone_across_the_window() -> None:
 
 
 @pytest.mark.unit
+def test_a_left_edge_fade_alone_touches_only_the_head() -> None:
+    """A unit whose seam is on its LEFT — its predecessor across the forced cut
+    shipped original — fades in and leaves its tail alone."""
+    original = np.zeros(UNIT_N, dtype=np.float32)
+    finished = np.ones(UNIT_N, dtype=np.float32)
+
+    out = apply_continuity_taper(finished, original, TAPER_N, 0)
+    assert out[0] == original[0]
+    assert out[-1] == finished[-1], "the tail was faded, but the seam is on the head"
+    assert np.array_equal(out[TAPER_N:], finished[TAPER_N:])
+
+
+@pytest.mark.unit
+def test_a_degenerate_one_sample_fade_ships_the_original() -> None:
+    """A one-sample fade has no ramp to speak of. It must resolve toward the
+    original — the safe side — rather than toward a half-weighted blend."""
+    original = np.zeros(8, dtype=np.float32)
+    finished = np.ones(8, dtype=np.float32)
+
+    head = apply_continuity_taper(finished, original, 1, 0)
+    assert head[0] == original[0]
+    assert np.array_equal(head[1:], finished[1:])
+
+    tail = apply_continuity_taper(finished, original, 0, 1)
+    assert tail[-1] == original[-1]
+    assert np.array_equal(tail[:-1], finished[:-1])
+
+
+@pytest.mark.unit
 def test_no_fade_requested_returns_the_input_unchanged() -> None:
     finished = np.linspace(0.0, 1.0, 128, dtype=np.float32)
     original = np.zeros(128, dtype=np.float32)
@@ -298,3 +335,40 @@ def test_the_fade_removes_the_step_a_hard_cut_leaves() -> None:
 
     assert hard_step == pytest.approx(0.15, abs=1e-6)
     assert soft_step == 0.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("profile", ["production", "studio", "development"])
+@pytest.mark.parametrize("n", [977, SR // 2, SR, 3 * SR + 137])
+def test_finishing_preserves_length_so_the_fade_stays_at_the_joint(profile: str, n: int) -> None:
+    """A load-bearing invariant for the fade, pinned here because nothing else
+    pins it.
+
+    The fade-out is written to the LAST ``fade`` samples of the finished
+    waveform, and :func:`~hawavoclean.assembly.stitch.assemble_channel_timeline`
+    pads or truncates that waveform to the unit's core length. Truncation is
+    harmless — the fade is already at the core length. Padding is not: a
+    finished waveform SHORTER than the core would have its fade zero-padded
+    away from the joint, and the seam would come back silently. So finishing
+    must never shorten a unit.
+    """
+    cfg = load_config(profile_config_path(profile), is_production=profile == "production")
+    rng = np.random.default_rng(3)
+    t = np.arange(n) / SR
+    wave = (
+        0.2 * np.sin(2 * np.pi * 140 * t) * (1 + 0.5 * np.sin(2 * np.pi * 3 * t))
+        + 0.02 * rng.standard_normal(n)
+    ).astype(np.float32)
+
+    res, _ = safe_finish_speech_unit(
+        pre_finish_waveform=wave,
+        sample_rate=SR,
+        is_speech=True,
+        probe=FixedProbe(),
+        finishing_config=cfg.finishing,
+        guard_config=cfg.guard,
+    )
+    assert len(res.finished_waveform) == n, (
+        f"{profile} finishing returned {len(res.finished_waveform)} samples for a "
+        f"{n}-sample unit; the continuity fade would no longer land at the joint"
+    )
