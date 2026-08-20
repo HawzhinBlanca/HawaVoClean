@@ -19,7 +19,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       values, consistent letter-spacing on small caps, no default-font element anywhere.
 - [x] A5 Micro-interaction: hover/active states on every control; PROCESS press animation;
       state transitions (idle→running→done) animated on transform/opacity only; LED pulses.
-- [x] A6 Empty/loading states designed (before any file is loaded the screen must still look
+- [ ] A6 Empty/loading states designed (before any file is loaded the screen must still look
       like a product, not a blank shell); drop-target highlight on drag-over.
 - [x] A7 A/B and verdict strip read instantly: verdict segments with hover tooltip + click to
       seek to the unit; A/B switch visually obvious which deck is live.
@@ -33,9 +33,9 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       verdict strip staying aligned to the visible window.
 - [x] B4 Per-unit inspection: clicking a verdict segment selects the unit — highlights its
       range, shows its guard scores/decision reason in a details panel, seeks the transport.
-- [x] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
+- [ ] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
       re-selectable without re-analyzing.
-- [x] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
+- [ ] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
       (health polling), state preserved; SSE drop mid-job recovers to the correct terminal state.
 - [x] B7 Report access: download master + JSON report + human-readable txt from the UI;
       "copy report summary" one-liner.
@@ -49,9 +49,9 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       (excluding fonts — there are none).
 - [x] C3 No memory growth across 10 consecutive analyze+process cycles (heap snapshot delta
       < 10 MB); audio elements and workers disposed on file switch.
-- [x] C4 Zero console errors/warnings in all exercised flows; zero failed/404 network
+- [ ] C4 Zero console errors/warnings in all exercised flows; zero failed/404 network
       requests; all requests to 127.0.0.1 only.
-- [x] C5 Adversarial inputs at the UI boundary: 0-byte file, 3-hour file, 192 kHz file,
+- [ ] C5 Adversarial inputs at the UI boundary: 0-byte file, 3-hour file, 192 kHz file,
       corrupt container, filename with quotes/unicode/emoji — every one ends in a designed
       error or success state, never a stuck spinner.
 
@@ -60,7 +60,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       all controls; verdict tooltip content reachable without hover.
 - [x] D2 Contrast ≥ 4.5:1 for all text (checked on the dark theme values actually shipped).
 - [x] D3 `prefers-reduced-motion` honored (disables pulse/glow animation, keeps function).
-- [x] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
+- [ ] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
       (default + fuzz when engine touched) / mutation gate on clean tree / `pnpm typecheck`
       / `pnpm build`. UI logic that can be unit-tested (state machine, SSE client, API client,
       keyboard map) has vitest coverage; the rest is covered by scripted browser verification.

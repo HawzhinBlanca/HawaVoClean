@@ -622,3 +622,88 @@ real screen reader was run — the announcement log is what the DOM would hand a
 contrast was measured at 1440x900 and 960x640 but not re-measured at ultrawide where the layout
 reflows to three columns; and 13 below-the-fold shortcut rows at 960x640 were measured by class
 equivalence rather than directly.
+
+## Adversarial audit — 2026-08-20 — "27/27" was premature; 6 boxes unticked
+
+Three independent skeptics were told to REFUTE the completion claim rather than confirm it. Most of
+the work survived independent re-measurement — several claims came back stronger than the log's own
+evidence (the verdict strip is pixel-exact against the waveform at every zoom, worst 0.05 px at 1:1;
+history re-selection really costs 0 `/api/analyze` calls even across 10 rapid switches; the three
+artefacts are SHA-256 identical to disk; streaming loudness re-derived from outside the codebase
+agrees to 1.08e-7 LU and ffmpeg's own `ebur128` — a separate implementation — agrees too; 0 contrast
+failures reproduce under a different pixel method at five widths including two the loop never
+measured). But it refuted enough to matter, so **A6, B5, B6, C4, C5 and D4 are unticked (21/27)**.
+
+### REFUTED — real defects, being fixed
+
+1. **The A/B control lies about which deck you are hearing.** Delete the master from the work dir and
+   restore that run: the cleaned `<audio>` fails with `MEDIA_ELEMENT_ERROR code 4`, the player's
+   fallback calls `setActive('original')` — but never mirrors it into the store. The A/B control
+   still reads CLEANED, lit, `aria-checked=true`, and pressing Play plays the ORIGINAL element
+   unmuted (currentTime advanced 6.15 -> 46.75 s over ~30 s) while the UI insists you are hearing the
+   cleaned master. No error anywhere. **This is the exact failure class the whole project exists to
+   eliminate**, and it reproduces on ANY cleaned-deck load failure, not just a deleted file.
+2. **A run whose master is gone restores as a success.** `selectRun` only re-reads when the cached
+   analysis is missing, so a missing FILE is never noticed: header `UNITS 5/5`, `RESULT Complete`,
+   and an enabled Master WAV link that returns 404.
+3. **Two runs of the same profile overwrite each other.** Same output path, so the older history row
+   shows its own cached report on screen while its download links hand over the NEWER run's bytes.
+4. **A clip stranded by a mid-analyze kill never recovers.** The failure state is designed, but after
+   the engine restarts the badge stays NO ANALYSIS forever, PROCESS stays disabled, `/api/analyze` is
+   never retried, there is no retry affordance, and the error row still promises "this comes back on
+   its own when it reconnects" — which is now false.
+5. **Layout broken at 1280x800 and 2560x1440** (idle AND done). The inspector's hint row collapses:
+   each `<kbd>` goes from clientWidth 15 px at 1440/1920 to **8 px with scrollWidth 11 px** — 37 %
+   glyph overflow, so `[`, `]` and `?` spill out of crushed pills, and "step units" is squeezed
+   52.2 -> 25.9 px and wraps into the keycaps. **1280 was never tested by the loop at all.** Second
+   gate-invisible layout regression this project has shipped.
+6. **A favicon 404** on a real cold load. The browser pane never issues that request, so the
+   environment the loop measured C4 in is the one environment that hides it.
+
+### The gates themselves were weaker than they looked
+
+7. **The mutation gate can pass vacuously.** `run_suite` treats ANY non-zero pytest exit as "caught",
+   and pytest runs with `-x`. In the audit's run, **7 of the 12 mutations were credited to an
+   unrelated flaky chaos test** that short-circuited the suite before the mutated code ever ran. The
+   12/12 I reported is true (the 7 were re-run in isolation and genuinely caught) but **the evidence
+   that produced it was worthless**.
+8. **The project's own release gate fails on a clean tree.** `scripts/run_release_checks.sh` step 3/5
+   runs `mypy --strict src tests scripts data` -> **10 errors in 5 files**, every one in a test file
+   this web effort authored. The loop only ever ran `mypy --strict src`, so it never saw them.
+9. **Two of the four bugs I "fixed and verified" have no test pinning them** — `formatTimeShort`
+   printing `1:60` and `clearPeaksCache` not re-arming the capability latch can both be reintroduced
+   verbatim with 222/222 still green.
+
+### Numbers corrected
+
+10. **E1's headline is mono-only.** 12,756 -> 222 MB / 32.9 s reproduces exactly — for a mono float32
+    file, which is the shape the loop's own fixture generator writes. The same 2,073.6 MB as **stereo
+    16-bit costs 252-283 MB and 55-57 s: 1.7x the wall time.** The work is CPU-bound (self_cpu 54.17 s
+    of 55.51 s wall) in the per-channel loudness biquads and 4x true-peak oversampling. Flatness in
+    file length is upheld and is stronger than claimed (6x the file, 2 % *less* peak RSS).
+11. **The streaming rewrite is not faster.** On a like-for-like 30-minute pair: whole-file oracle
+    5.49 s / 3038.8 MB vs streaming 5.72 s / 225.8 MB. The memory win (13.5x here) is real; the
+    "36.1 -> 32.9 s" speed win is not reproducible at that size.
+12. **E3 "bit-exact on AAC" holds only after a position-dependent shift.** The container's stts
+    timeline and the decoder's diverge linearly at 15.6 ppm: max |diff| = 0 at lag +1 sample at t=1 s
+    but **+70 samples (1.46 ms) at t=94 s**. Over a [40,45) window, 430 of 1200 buckets differ from a
+    full decode by up to 0.313 full scale, and at 1:1 zoom the "raw samples" are the wrong 48 samples.
+    No committed test covers a mid-file window on a lossy container. (Related to, and larger than, the
+    overview-grid trade-off already recorded in iteration 3.)
+13. **C2's "126.1 kB gz" is a property of the file on disk, not of the product.** There is no
+    GZip middleware in the server, so **439.8 kB actually crosses the socket** on every cold load. The
+    box's bar is still met (439.8 kB raw < 500 kB) but the number in the log described a compression
+    step that does not exist.
+
+### Also weaker, queued behind the above
+
+14. Engine death mid-job takes **~11 s** to notice (the SSE stream dying does not trigger a probe;
+    only the 10 s health poll does), so the UI shows a phantom "Enhancing unit 2/5" meanwhile.
+15. An **8-channel WAV** gets no pre-flight warning and fails with the raw engine string naming an
+    internal knob (`split_speakers`), truncated mid-word — the same defect class C5 claimed to have
+    eliminated.
+16. The spectrum's REMOVED **key and accessible name are name-driven** while the fill is value-driven:
+    with zero removed pixels the key still reads "Removed" lit and the aria-label still promises it.
+17. The **overview scrubber has no hover state** (0 pixels change) despite being a draggable Tab stop.
+18. `Footer.tsx` hardcodes `<b>Engine error</b>` and reuses it for non-engine failures — a clipboard
+    permission denial surfaced as "ENGINE ERROR".
