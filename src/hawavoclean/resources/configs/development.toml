@@ -61,6 +61,12 @@ dehum_50_60hz = true
 declick = true
 plosive_attenuation = true
 dynamic_eq = true
+# Measured tonal restoration: band levels against a speech-intelligibility
+# target, corrected by the bounded difference, or 0.0 dB when the voice is
+# already inside the target band. max_tonal_gain_db is a hard ceiling on the
+# filter bank, verified against its own measured response on every call.
+tonal_restoration = true
+max_tonal_gain_db = 12.0
 deess_band = true
 max_deess_gr_db = 6.0
 level_rider = true

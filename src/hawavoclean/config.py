@@ -124,6 +124,17 @@ class FinishingConfig(BaseFrozenModel):
     declick: bool = True
     plosive_attenuation: bool = True
     dynamic_eq: bool = True
+    # Measured tonal restoration: band levels against a speech-intelligibility
+    # target, corrected by the bounded difference. Off means a muffled
+    # recording is published as muffled as it arrived. See
+    # hawavoclean.finishing.detect.measure_speech_tilt for the target curve and
+    # how it was calibrated.
+    tonal_restoration: bool = True
+    # Ceiling on the whole tonal move, in dB of filter gain. This is a hard
+    # bound on the filter bank, verified against its own measured response on
+    # every call, not a target: the correction is whatever the file's measured
+    # deficit earns, up to this.
+    max_tonal_gain_db: float = Field(default=12.0, ge=0.0, le=18.0)
     deess_band: bool = True
     max_deess_gr_db: float = Field(default=4.0, ge=0.0, le=12.0)
     level_rider: bool = True

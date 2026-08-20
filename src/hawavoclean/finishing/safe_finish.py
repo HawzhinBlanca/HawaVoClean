@@ -7,9 +7,17 @@ import numpy as np
 
 from hawavoclean.config import FinishingConfig, GuardConfig
 from hawavoclean.finishing.deess import apply_split_band_deesser
-from hawavoclean.finishing.detect import detect_defects
+from hawavoclean.finishing.detect import (
+    TILT_MAX_BRILLIANCE_LIFT_DB,
+    TILT_MAX_LOW_CUT_DB,
+    TILT_MAX_LOW_LIFT_DB,
+    TILT_MAX_PRESENCE_LIFT_DB,
+    SpeechTiltReport,
+    detect_defects,
+    measure_speech_tilt,
+)
 from hawavoclean.finishing.dynamics import apply_dialogue_leveler
-from hawavoclean.finishing.eq import apply_speech_eq
+from hawavoclean.finishing.eq import apply_speech_eq, apply_tonal_restoration, solve_tonal_gains
 from hawavoclean.finishing.repair import (
     remove_dc_subsonic,
     remove_electrical_hum,
@@ -38,8 +46,17 @@ def apply_finishing_stages(
     sample_rate: int,
     config: FinishingConfig,
     intensity: Literal["gentle", "minimal"],
+    tilt: SpeechTiltReport | None = None,
 ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], list[str]]:
-    """Apply deterministic finishing chain conditioned on defect detection."""
+    """Apply deterministic finishing chain conditioned on defect detection.
+
+    `tilt` is the FILE-level tonal measurement when the caller has one. Units
+    are finished independently, so measuring the tilt per unit lets the tone
+    step between adjacent blocks — 2.8 dB of 3-6 kHz across two 12 s units of
+    the recording that prompted this, which is an audible pump at every unit
+    boundary. The pipeline measures once for the whole file and passes it here;
+    a direct caller that does not gets a per-unit measurement instead.
+    """
     current = waveform.copy()
     actions: list[str] = []
 
@@ -82,7 +99,55 @@ def apply_finishing_stages(
         )
         actions.append(f"low_mid_trim({cut:+.1f}dB, excess={excess:+.1f}dB)")
 
-    # 5. De-essing
+    # 4b. Measured tonal restoration. Distinct from the mud trim above and
+    # deliberately kept separate from it: the mud trim answers "are the
+    # low-mids in excess", this answers "does this voice reach the
+    # intelligibility target, and by how much is it short". A recording can
+    # need one, the other, both or neither, and both are bounded, so the worst
+    # case is the sum of two bounded moves.
+    sibilance_may_have_changed = False
+    if config.tonal_restoration:
+        report = tilt if tilt is not None else measure_speech_tilt(current, sample_rate)
+        # The minimal rung of the Guard B ladder halves everything, as the rest
+        # of this chain does: if gentle was rejected, do less, not something else.
+        scale = 1.0 if intensity == "gentle" else 0.5
+        want_low = report.low_shelf_db * scale
+        want_presence = report.presence_db * scale
+        want_brilliance = report.brilliance_db * scale
+        if report.measured and report.is_correction:
+            cap = float(config.max_tonal_gain_db)
+            low_gain, presence_gain, brilliance_gain = solve_tonal_gains(
+                sample_rate,
+                want_low,
+                want_presence,
+                want_brilliance,
+                max_low_cut_db=min(TILT_MAX_LOW_CUT_DB, cap),
+                max_low_lift_db=min(TILT_MAX_LOW_LIFT_DB, cap),
+                max_presence_db=min(TILT_MAX_PRESENCE_LIFT_DB, cap),
+                max_brilliance_db=min(TILT_MAX_BRILLIANCE_LIFT_DB, cap),
+            )
+            before = current
+            current = apply_tonal_restoration(
+                current,
+                sample_rate,
+                low_gain,
+                presence_gain,
+                brilliance_gain,
+                max_abs_gain_db=cap,
+            )
+            if current is not before:
+                sibilance_may_have_changed = brilliance_gain >= 0.5
+                actions.append(
+                    f"tonal_restore(low={low_gain:+.1f}dB,presence={presence_gain:+.1f}dB,"
+                    f"brilliance={brilliance_gain:+.1f}dB; {report.summary()})"
+                )
+
+    # 5. De-essing. A brilliance lift can raise sibilance that was not harsh
+    # before it, and the detection above ran on the unlifted signal — so when
+    # the tonal stage moved 3-6 kHz, ask again rather than shipping the
+    # sibilance the lift just created.
+    if config.deess_band and sibilance_may_have_changed and not defects.has_harsh_sibilance:
+        defects = detect_defects(current, sample_rate)
     if config.deess_band and defects.has_harsh_sibilance:
         max_gr = config.max_deess_gr_db if intensity == "gentle" else config.max_deess_gr_db * 0.5
         current, gr = apply_split_band_deesser(current, sample_rate, max_reduction_db=max_gr)
@@ -108,8 +173,13 @@ def safe_finish_speech_unit(
     finishing_config: FinishingConfig,
     guard_config: GuardConfig,
     cached_pre_finish_probe: ProbeResult | None = None,
+    tilt: SpeechTiltReport | None = None,
 ) -> tuple[SafeFinishResult, ProbeResult]:
-    """Execute safe finishing ladder guarded by Guard B."""
+    """Execute safe finishing ladder guarded by Guard B.
+
+    `tilt` is the file-level tonal measurement, so every unit of one recording
+    receives the identical filter; see `apply_finishing_stages`.
+    """
     if not finishing_config.enabled or not is_speech or finishing_config.preset == "bypass":
         return (
             SafeFinishResult(
@@ -125,7 +195,7 @@ def safe_finish_speech_unit(
 
     # Step 1: Try Gentle preset
     gentle_wave, gentle_actions = apply_finishing_stages(
-        pre_finish_waveform, sample_rate, finishing_config, intensity="gentle"
+        pre_finish_waveform, sample_rate, finishing_config, intensity="gentle", tilt=tilt
     )
     guard_b_gentle, _ = evaluate_guard_pass(
         orig_waveform=pre_finish_waveform,
@@ -152,7 +222,7 @@ def safe_finish_speech_unit(
 
     # Step 2: Try Minimal preset
     min_wave, min_actions = apply_finishing_stages(
-        pre_finish_waveform, sample_rate, finishing_config, intensity="minimal"
+        pre_finish_waveform, sample_rate, finishing_config, intensity="minimal", tilt=tilt
     )
     guard_b_min, _ = evaluate_guard_pass(
         orig_waveform=pre_finish_waveform,

@@ -36,6 +36,11 @@ from hawavoclean.errors import (
     PreflightError,
     PublicationError,
 )
+from hawavoclean.finishing.detect import (
+    SpeechTiltReport,
+    aggregate_speech_tilt,
+    measure_speech_tilt,
+)
 from hawavoclean.finishing.limiter import apply_lookahead_limiter
 from hawavoclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
 from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
@@ -488,6 +493,22 @@ def _run_after_preflight(
         unit_decision_records: list[UnitDecisionRecord] = []
         final_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
+        # Tonal balance is a property of the RECORDING, not of a 20 s block of
+        # it. Measure every unit that will actually be finished, combine by
+        # median, and hand the one answer to all of them — otherwise adjacent
+        # units get different EQ and the tone pumps at every boundary (measured
+        # at 2.8 dB of 3-6 kHz between two units of one file). Nothing is held
+        # here but three floats per unit; the audio is not copied.
+        file_tilt: SpeechTiltReport | None = None
+        if config.finishing.enabled and config.finishing.tonal_restoration:
+            per_unit_tilts = [
+                measure_speech_tilt(decisions[i].selected_waveform, audio_buf.sample_rate)
+                for i, unit in enumerate(all_units)
+                if unit.is_speech and decisions[i].is_enhanced
+            ]
+            if per_unit_tilts:
+                file_tilt = aggregate_speech_tilt(per_unit_tilts)
+
         for idx, u in enumerate(all_units):
             dec = decisions[idx]
             t_finish_start = time.perf_counter()
@@ -506,6 +527,7 @@ def _run_after_preflight(
                     probe=probe,
                     finishing_config=config.finishing,
                     guard_config=active_guard_cfg,
+                    tilt=file_tilt,
                 )
                 final_wave = finish_res.finished_waveform
                 finish_preset = finish_res.preset_applied

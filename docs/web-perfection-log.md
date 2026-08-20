@@ -1162,3 +1162,40 @@ is there because the track cannot give up width without losing its 0.000 px alig
 (d) Screenshots were taken in headless Chrome with SwiftShader (`--use-angle=swiftshader`), not on
 the GPU; the WebGL2 path is the same code, but the exact anti-aliasing of the band edges on a real
 GPU was not compared.
+
+## Iteration 7b — 2026-08-20 — tonal restoration (user-reported: "the output is embarrasingly bad")
+
+The user tested /Users/hawzhin/Desktop/Teat1vo.mp3 and was right to call the output embarrassing:
+every band moved by exactly +15.7 dB — a flat loudness gain on a muffled, boomy source, no tonal
+work at all. Cause: `mud_imbalance_db` scored 38.7 against a 42.0 gate (missed by 3.3 dB), and even
+a hit would only have bought a 2 dB low cut against a ~24 dB presence deficit, with the presence and
+air moves hardcoded to zero since the 3.1.1 thinning complaint.
+
+**Fix: bounded tonal restoration in finishing.** Three bands measured against a target calibrated on
+the references we actually have — the pinned 3.1.1 natural-voice fixture and Flute 09 (the file the
+user approved). The suggested "broadcast" target was rejected by measurement: it would have given the
+approved file a ~20 dB boost. Deadband-edge semantics: correction stops at the edge of acceptable, so
+over-brightening is impossible by construction. Two gates keep it off empty bands (syllabic dynamics
+>= 12 dB, capture backstop at -48 dB), both ramped after a hard threshold made adjacent units swap
+10 dB of EQ. Caps: shelf +-6/+4, presence <= +10, brilliance <= +12, nothing above 6 kHz.
+One filter per RECORDING (median across units) — per-unit it pumped 2.8 dB at boundaries.
+
+Found on the way: `apply_speech_eq` has always delivered TWICE the requested dB (`filtfilt` squares
+the response; -6.0 requested = -11.92 measured). Existing callers are calibrated around it; the new
+bank designs for half and measures its finished cascade on every call, refusing one over bound.
+
+**Results (end-to-end, real pipeline):** Teat1vo production: 2-4 kHz +3.5 dB, 4-8 kHz +8.9 dB, low
+end within 0.5 dB, 8-16 kHz +0.2 dB (dead region honestly left alone), -16.0 LUFS / -1.5 dBTP,
+Guard B PASS (consonant retention 3.69, hole 0.001). **Flute 09: zero correction, both profiles,
+digit-for-digit identical to the pre-change run** — the regression canary the 3.1.1 complaint
+demanded. Synthetic controls: flat voice untouched, brick-wall lowpass refused (`no-dynamics`),
+boomy cut, thin/harsh gets bass back and no further thinning, near-silent declined.
+
+**Open policy question, deliberately not decided by an agent:** the studio profile still ships the
+flat-gain result on this file, because Guard A reverts DFN3's output (consonant retention 0.206) and
+reverted units skip per-unit finishing entirely. Running finishing on reverted units would fix it but
+changes the fail-closed contract ("REVERT = you get the original back"). Recorded for the user.
+
+Gates: ruff/format/mypy clean, **574 passed** (was 514), fuzz 41, audit-models + doctor green. The
+two new config keys change profile hashes (provenance, not pinned locks); core lockfiles verify
+unchanged.

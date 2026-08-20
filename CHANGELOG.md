@@ -197,6 +197,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Job failure mapping tolerates a stderr drain thread kept alive past the
   child by an orphaned grandchild (no more `deque mutated during iteration`).
 
+## [3.3.0] - 2026-08-20
+
+### Fixed — a muffled recording came back muffled, 15.7 dB louder
+Reported on a real 24 s take ("embarrassingly bad"), and the measurement said
+the same thing: EVERY band of the output had moved by exactly the same
++15.7 dB. The chain had applied a flat loudness gain and nothing else.
+
+Two reasons, both real. The `mud_imbalance_db` detector scored the file at
+38.7 dB against a 42.0 dB gate and missed by 3.3 dB — but even a hit would not
+have helped, because the only correction behind that gate is a 2 dB low-mid
+trim, and this file's deficit was ~24 dB of missing presence, not an excess of
+low-mids. A one-number low-mid/presence ratio cannot see a recording whose low
+end is NORMAL and whose consonant region was never captured.
+
+**New: measured tonal restoration** (`detect.measure_speech_tilt`,
+`eq.apply_tonal_restoration`, `finishing.tonal_restoration` /
+`max_tonal_gain_db`). Band levels are measured against a speech-intelligibility
+target — 90-300 Hz, 1.5-3 kHz and 3-6 kHz, each relative to the 300-1000 Hz
+body of the voice — and the correction is the bounded difference: a low shelf
+(cut ≤ 6 dB, lift ≤ 4 dB), a presence bell (≤ 10 dB) and a brilliance bell
+(≤ 12 dB). Nothing is corrected above 6 kHz at all; air that was never recorded
+cannot be restored, only imitated with hiss.
+
+**The target was calibrated on the two recordings this is judged by**, not on a
+textbook spectrum. Measured (p75 of speech-active frames, dB relative to body):
+
+| | 90-300 | 1.5-3k | 3-6k |
+|---|---|---|---|
+| pinned 3.1.1 natural-voice fixture | +13.0 | -22.0 | -33.4 |
+| Flute 09 — user approved this sound | +7.0 | -27.8 | -33.4 |
+| the reported file | +3.0 | -26.4 | -44.7 |
+
+The approved recording and the reported one are within 1.4 dB of each other
+from 90 Hz to 3 kHz and 11 dB apart above it. Any correction driven by the low
+end or the presence band would have moved both — which is 3.1.1 ("harsh and
+treble sounding, dialogs bass removed lot") happening a second time. So the
+targets sit below both acceptable references, a 7 dB deadband sits on top of
+that, and the correction stops AT the deadband edge. A voice inside the band
+gets exactly 0.0 dB and no voice can be pushed past it: over-brightening is
+impossible by construction rather than by tuning.
+
+**Two gates keep it off bands that have nothing in them.** A band must carry
+DYNAMICS — its loud level minus its own quiet level ≥ 12 dB, ramped, because
+speech swings tens of dB across syllables and hiss, buzz, codec noise and
+dither do not (approved recording +42 dB at 3-6 kHz, reported file +18 dB, a
+brick-wall-lowpassed control +1.4 dB, correctly refused). And it must have been
+CAPTURED at all: a backstop below -48 dB relative to the body, also ramped.
+Both are ramps, not thresholds — with a cliff, adjacent units of the reported
+file landed on opposite sides and swapped 10 dB of EQ mid-file.
+
+**Measured, end to end, on the user's file (production profile):**
+2-4 kHz +3.5 dB, 4-8 kHz +8.9 dB, every band below 1 kHz within 0.5 dB, 8-16 kHz
++0.2 dB (the dead region, untouched). -16.0 LUFS, -1.5 dBTP. Guard B PASS:
+consonant retention 3.69, spectral hole 0.001, musical noise 0.000.
+**On Flute 09, both profiles: no `tonal_restore` action at all**, and the output
+band table is identical to the pre-change run to within 0.01 dB in every band.
+
+Also found and fixed on the way:
+- Tonal balance is a property of the RECORDING, not of a 20 s block of it. The
+  pipeline now measures every unit it will finish, combines by median, and
+  applies one filter to all of them. Per unit it drifted 2.8 dB of 3-6 kHz
+  between two adjacent blocks of the reported file — an audible pump at every
+  boundary.
+- `apply_speech_eq` applies each biquad with `filtfilt`, which squares the
+  magnitude response: it has always delivered TWICE the dB it was asked for
+  (-2.0 requested measures -3.97; -6.0 measures -11.92). Its existing callers
+  are calibrated around that and are untouched. The new bank designs each
+  section for half its gain and then MEASURES the finished cascade on every
+  call, refusing to apply one that exceeds its declared bound.
+- Three overlapping sections cannot each act on one band alone, so the gains
+  are solved against the analytic response rather than requested naively. A
+  variant that was free to pull the bells below flat turned a pure bass cut
+  into a bass-and-treble cut — dull and mid-forward, the 3.1.1 failure again —
+  so the bells stay lift-only and the leftover spill is bounded by test
+  instead: an untargeted band never receives a cut, nor more than half of what
+  the band that earned the move received.
+- A brilliance lift can create sibilance that was not harsh before it, and
+  de-essing was decided on the unlifted signal. Sibilance is now re-detected
+  after a lift.
+
+New permanent gate `tests/unit/test_finishing_tonal_restoration.py` (60 tests)
+with a committed corpus (`tests/support/tonal_corpus.py`). `test_output/` is
+gitignored, so the load-bearing pair is synthetic: `approved_recording_profile`
+reproduces the approved recording's measured profile to within 0.2 dB in every
+band and must receive 0.0 dB, and `presence_starved_profile` is that same
+signal with the reported file's 11 dB deficit above 3 kHz and must be restored.
+The real audio is also tested when it is present on the machine.
+
+**What this does not fix, stated plainly.** The reported file is 57 dB down at
+4-8 kHz and 74 dB down above 8 kHz. That was never captured and is not
+recoverable; the correction refuses to touch it and the file still sounds like
+what it is — a dull, distant recording, now intelligible rather than muffled.
+The dynamics gate can tell a constant floor from modulated content, but it
+cannot tell attenuated speech from signal-following codec noise; the reported
+file's upper bands track its body almost exactly (envelope correlation 0.95),
+which is what both a lowpassed voice and coder noise look like. And on the
+STUDIO profile this file gets no correction at all: DeepFilterNet3 removes 79%
+of its consonant band (retention 0.206, spectral hole 0.387), Guard A correctly
+reverts the unit — and the pipeline only finishes units that were enhanced, so
+finishing is skipped with it. Production is the profile that carries this fix
+on this file.
+
 ## [3.2.0] - 2026-08-19
 
 ### Added — decay-gated late-reverb suppression (studio core v1.1.0)

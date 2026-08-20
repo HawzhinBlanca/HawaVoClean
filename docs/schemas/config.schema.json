@@ -105,6 +105,18 @@
           "title": "Dynamic Eq",
           "type": "boolean"
         },
+        "tonal_restoration": {
+          "default": true,
+          "title": "Tonal Restoration",
+          "type": "boolean"
+        },
+        "max_tonal_gain_db": {
+          "default": 12.0,
+          "maximum": 18.0,
+          "minimum": 0.0,
+          "title": "Max Tonal Gain Db",
+          "type": "number"
+        },
         "deess_band": {
           "default": true,
           "title": "Deess Band",
@@ -152,6 +164,22 @@
           "title": "Calibration File",
           "type": "string"
         },
+        "mode": {
+          "default": "strict_spectral",
+          "enum": [
+            "strict_spectral",
+            "integrity"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "max_peak_js_div": {
+          "default": 0.6,
+          "maximum": 2.0,
+          "minimum": 0.0,
+          "title": "Max Peak Js Div",
+          "type": "number"
+        },
         "min_anchor_confidence": {
           "default": 0.75,
           "maximum": 1.0,
@@ -179,7 +207,7 @@
           "type": "boolean"
         },
         "spectral_hole_thresh": {
-          "default": 0.15,
+          "default": 0.1,
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Spectral Hole Thresh",
