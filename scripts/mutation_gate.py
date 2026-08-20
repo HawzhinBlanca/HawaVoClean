@@ -426,6 +426,47 @@ MUTATIONS: list[Mutation] = [
             "tests/integration/test_continuity_taper_pipeline.py::test_a_continuity_revert_is_recorded_as_one",
         ),
     ),
+    Mutation(
+        "M22",
+        "band-split crossover moved to 2500 Hz",
+        "src/hawavoclean/enhancement/studio_lowband.py",
+        '"crossover_hz": 1000.0,',
+        '"crossover_hz": 2500.0,',
+        # Owners: the crossover is this core's one locked decision — at 2500 Hz
+        # the measured spectral-hole score is 0.187 against a 0.100 threshold,
+        # i.e. every unit reverted. Moving it must be a relock, so the lockfile
+        # invariant and the params-hash test are the detectors.
+        owners=(
+            "tests/unit/test_studio_core.py::test_every_registered_core_has_a_consistent_lockfile",
+            "tests/unit/test_studio_lowband_core.py::test_crossover_frequency_and_order_are_inside_the_params_hash",
+            "tests/unit/test_studio_lowband_core.py::test_lock_declares_the_shipped_crossover",
+        ),
+    ),
+    Mutation(
+        "M23",
+        "crossover high band taken with a second filter, not the complement",
+        "src/hawavoclean/enhancement/studio_lowband.py",
+        """    low = lowpass_zero_phase(enhanced, sample_rate, crossover_hz, order)
+    orig_low = lowpass_zero_phase(original, sample_rate, crossover_hz, order)
+    return (low + (original - orig_low)).astype(np.float32)""",
+        """    import scipy.signal
+
+    low = lowpass_zero_phase(enhanced, sample_rate, crossover_hz, order)
+    sos = scipy.signal.butter(order, crossover_hz, btype="high", fs=sample_rate, output="sos")
+    orig32 = np.asarray(original, dtype=np.float32)
+    padlen = min(3 * (2 * len(sos) + 1), max(0, len(orig32) - 1))
+    high = np.asarray(
+        scipy.signal.sosfiltfilt(sos, orig32.astype(np.float64), padlen=padlen), dtype=np.float32
+    )
+    return (low + high).astype(np.float32)""",
+        # Owner: the exact reason the split is one filter and a subtraction. Two
+        # independently designed Butterworths sum to a ripple and a phase step
+        # at the crossover — precisely where the first formant is — and only
+        # the reconstruction property notices.
+        owners=(
+            "tests/unit/test_studio_lowband_core.py::test_crossover_reconstructs_the_input_when_the_model_changes_nothing",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")

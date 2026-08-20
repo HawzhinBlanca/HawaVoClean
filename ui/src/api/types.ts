@@ -47,7 +47,7 @@ export interface PeaksWindow {
   rms_db: number[];
 }
 
-export type Profile = 'studio' | 'production';
+export type Profile = 'studio' | 'lowband' | 'production';
 
 export interface CreateJobRequest {
   input_path: string;

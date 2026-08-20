@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from hawavoclean import __version__
 from hawavoclean.server.app import (
+    PROFILES,
     create_app,
     default_output_path,
     parse_range,
@@ -126,7 +127,7 @@ def test_token_by_header_or_query(client: TestClient) -> None:
     assert body == {
         "ok": True,
         "version": __version__,
-        "profiles": ["studio", "production"],
+        "profiles": ["studio", "lowband", "production"],
         "engine_pid": body["engine_pid"],
     }
     assert isinstance(body["engine_pid"], int)
@@ -596,6 +597,11 @@ def test_default_output_path_rule() -> None:
     )
     assert default_output_path(Path("/a/take.WAV"), "production") == Path("/a/take_clean.wav")
     assert default_output_path(Path("/a/x.mov"), "development") == Path("/a/x_dev.wav")
+    # Every offered profile needs its own suffix, or two profiles' masters
+    # collide on one name and the second silently overwrites the first.
+    assert default_output_path(Path("/a/take.wav"), "lowband") == Path("/a/take_lowband.wav")
+    suffixes = [str(default_output_path(Path("/a/t.wav"), p)) for p in PROFILES]
+    assert len(set(suffixes)) == len(suffixes), suffixes
 
 
 def test_shutdown_responds_then_calls_hook(work: Path) -> None:

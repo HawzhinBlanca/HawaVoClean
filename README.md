@@ -12,7 +12,7 @@ EQ'd and de-essed, loudness normalized to broadcast targets, true peaks
 limited to −1.0 dBTP. Every processing decision is recorded in an audit
 report published beside the output.
 
-**Two enhancement cores, honestly labelled.** The default production core
+**Three enhancement cores, honestly labelled.** The default production core
 is a decision-directed spectral Wiener filter — classical DSP, gentle,
 guarded strictly. The optional **studio profile** uses a real neural model:
 WPE dereverberation + DeepFilterNet3 (MIT-licensed, weights vendored and
@@ -21,6 +21,19 @@ hash-locked, verified by `hawavoclean audit-models`). Measured on a real
 level preserved within 0.3 dB. DeepFilterNet3 is a *speech* enhancer —
 sustained musical tones may be attenuated as noise; review the flagged
 timecodes in the report for music-heavy material.
+
+The **low-band profile** is for the case where both of those fail: a
+muffled recording whose noise is low-frequency tonal rumble. The Wiener
+filter cannot get under the rumble without hitting its gain floor, and
+full-band DeepFilterNet3 takes the consonants with it (measured on a real
+24 s recording: 0.22 of the original 2–8 kHz energy retained, and the guard
+reverted the whole take). This core runs DFN3 over the full band but keeps
+only its output *below a 1000 Hz crossover*, handing the original back
+above it — so consonants survive by construction, not by the model's good
+judgement. Measured on that same recording: speech-to-floor separation
+15.1 → 29.4 dB, 60–300 Hz pause rumble down 39 dB, consonant retention
+0.999, guard spectral-hole score 0.066 against its 0.100 threshold. Follow
+it with a production pass (see Usage) for 35.2 dB separation.
 
 **What it still is not.** There is no speech recognition in this system.
 The fidelity guard compares *spectral signatures*: in `strict_spectral`
@@ -81,6 +94,7 @@ Third-party license texts for the vendored model weights are in
 hawavoclean doctor
 hawavoclean process interview.wav --output interview_clean.wav --profile production
 hawavoclean process interview.wav --output interview_studio.wav --profile studio
+hawavoclean process rumbly.wav --output rumbly_lowband.wav --profile lowband
 hawavoclean batch recordings/*.m4a --output-dir cleaned/ --profile studio --suffix _studio
 hawavoclean verify interview_clean.wav --report interview_clean.hawavoclean.json
 hawavoclean audit-models
@@ -90,7 +104,18 @@ hawavoclean audit-models
 names every failure, and the exit code is non-zero unless every file
 succeeded.
 
-The studio profile needs the optional neural dependencies:
+For a muffled recording sitting on low-frequency rumble, the measured best
+result is the low-band profile followed by a production pass — the band
+split gets out from under the rumble, the Wiener pass takes the rest of the
+floor down, and the guard judges every unit in both runs:
+
+```bash
+hawavoclean process rumbly.wav --output rumbly_lowband.wav --profile lowband
+hawavoclean process rumbly_lowband.wav --output rumbly_final.wav --profile production
+```
+
+Both the studio and low-band profiles need the optional neural
+dependencies:
 
 ```bash
 uv sync --extra studio

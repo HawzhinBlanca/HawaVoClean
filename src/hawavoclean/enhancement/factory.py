@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from hawavoclean.enhancement.production import WienerSpectralEnhancer, wiener_params_hash
 from hawavoclean.enhancement.protocol import Enhancer
 from hawavoclean.enhancement.studio import StudioVoiceCore, studio_params_hash
+from hawavoclean.enhancement.studio_lowband import StudioLowBandCore, studio_lowband_params_hash
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,15 @@ CORE_REGISTRY: dict[str, CoreRegistration] = {
         lock_filename="studio-core.lock.toml",
         implementation_params_hash=studio_params_hash,
         requires_modules=("df", "torch", "nara_wpe"),
+        device_aware=True,
+    ),
+    # Shares the studio core's vendored DFN3 weights; no WPE, so nara_wpe is
+    # not among its requirements.
+    "studio-dfn3-lowband-48k-v1": CoreRegistration(
+        enhancer_class=StudioLowBandCore,
+        lock_filename="studio-lowband-core.lock.toml",
+        implementation_params_hash=studio_lowband_params_hash,
+        requires_modules=("df", "torch"),
         device_aware=True,
     ),
 }
