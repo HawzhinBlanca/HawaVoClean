@@ -5,6 +5,32 @@ from typing import Any
 
 import numpy as np
 
+STFT_FRAME_BLOCK = 512
+"""Frames transformed per batched ``rfft``; bounds the temporary, not the result."""
+
+
+def _magnitude_stft(
+    wave: np.ndarray[Any, np.dtype[np.float32]],
+    n_fft: int,
+    hop: int,
+    win: np.ndarray[Any, np.dtype[np.float64]],
+    num_frames: int,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Windowed magnitude STFT, one batched ``rfft`` per block of frames.
+
+    ``np.fft.rfft`` over the last axis of a 2-D array is the same transform
+    applied to each row, and on this stack it is bit-for-bit the per-row call
+    (``tests/unit/test_guard_batched_stft.py`` pins max-abs-difference at
+    exactly 0.0). Batching only removes ~44k Python-level FFT calls per guard
+    pass; it does not change one bin.
+    """
+    stft = np.zeros((num_frames, n_fft // 2 + 1), dtype=np.float32)
+    frames = np.lib.stride_tricks.sliding_window_view(wave, n_fft)[::hop][:num_frames]
+    for lo in range(0, num_frames, STFT_FRAME_BLOCK):
+        hi = min(num_frames, lo + STFT_FRAME_BLOCK)
+        stft[lo:hi] = np.abs(np.fft.rfft(frames[lo:hi] * win, n=n_fft, axis=-1))
+    return stft
+
 
 @dataclass
 class SignalIntegrityResult:
@@ -77,13 +103,8 @@ def check_signal_integrity(
             failure_reasons=reasons,
         )
 
-    stft_orig = np.zeros((num_frames, n_fft // 2 + 1), dtype=np.float32)
-    stft_cand = np.zeros((num_frames, n_fft // 2 + 1), dtype=np.float32)
-
-    for i in range(num_frames):
-        start = i * hop
-        stft_orig[i] = np.abs(np.fft.rfft(w_orig[start : start + n_fft] * win, n=n_fft))
-        stft_cand[i] = np.abs(np.fft.rfft(w_cand[start : start + n_fft] * win, n=n_fft))
+    stft_orig = _magnitude_stft(w_orig, n_fft, hop, win, num_frames)
+    stft_cand = _magnitude_stft(w_cand, n_fft, hop, win, num_frames)
 
     freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
 

@@ -53,8 +53,26 @@ def generate_human_summary(report: HawaVoCleanReport) -> str:
         f"  - Finish Applied:   {report.summary.finish_applied}",
         f"  - Finish Bypassed:  {report.summary.finish_bypassed}",
         "",
-        "--- FLAGGED REVIEW TIMECODES ---",
     ]
+
+    if len(report.passes) > 1:
+        lines.append("--- MULTI-PASS AUDIT TRAIL ---")
+        for p in report.passes:
+            if p.discarded:
+                lines.append(
+                    f"  Pass {p.pass_index}: DISCARDED — {p.discard_reason or 'no reason recorded'}"
+                )
+                continue
+            strengths = ", ".join(f"{s:.2f}" for s in p.chosen_strengths) or "none"
+            lufs = f"{p.integrated_lufs:.1f} LUFS" if p.integrated_lufs is not None else "N/A"
+            lines.append(
+                f"  Pass {p.pass_index}: {p.enhanced}/{p.units_total} enhanced, "
+                f"{p.reverted} reverted, strengths [{strengths}], "
+                f"separation {p.separation_db:.1f} dB, {lufs}"
+            )
+        lines.append("")
+
+    lines.append("--- FLAGGED REVIEW TIMECODES ---")
 
     if not report.review_timecodes:
         lines.append("  None. All speech units passed verification cleanly.")

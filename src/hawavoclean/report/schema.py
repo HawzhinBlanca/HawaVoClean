@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from hawavoclean.runtime import active_device
+
 
 class ReportBaseModel(BaseModel):
     """Base model with strict forbidden extra fields and JSON serialization support."""
@@ -55,6 +57,15 @@ class EnvironmentMetadata(ReportBaseModel):
     scipy_version: str
     soundfile_version: str
     cpu_model: str | None = None
+    #: The compute device the enhancement core actually ran on. A GPU does not
+    #: compute the same samples as the CPU, so a result that did not say which
+    #: one produced it could be attributed to the wrong compute path — and two
+    #: runs of the same config on two machines can legitimately differ here
+    #: while sharing a config hash. Defaults from the live process (see
+    #: :func:`hawavoclean.runtime.active_device`) exactly as the platform and
+    #: library versions above do; a classical-DSP core always reports ``cpu``
+    #: whatever ``runtime.device`` asked for, because that is what ran.
+    compute_device: str = Field(default_factory=active_device)
 
 
 class UnitSummary(ReportBaseModel):
@@ -80,6 +91,29 @@ class ReviewTimecode(ReportBaseModel):
     channel: int
     verdict: str
     reason: str
+
+
+class PassRecord(ReportBaseModel):
+    """One pass of a multi-pass run: what went in, what came out, what the
+    guard did, and — when auto mode discarded the pass — why it did not ship.
+
+    ``input_sha256``/``output_sha256`` chain pass to pass (pass k's input is
+    pass k-1's output), so the journey from source to shipped master is
+    auditable even though only the final pass's unit records are the report's
+    ``units``.
+    """
+
+    pass_index: int
+    input_sha256: str
+    output_sha256: str
+    units_total: int = 0
+    enhanced: int = 0
+    reverted: int = 0
+    chosen_strengths: list[float] = Field(default_factory=list)
+    separation_db: float
+    integrated_lufs: float | None = None
+    discarded: bool = False
+    discard_reason: str | None = None
 
 
 class UnitDecisionRecord(ReportBaseModel):
@@ -121,6 +155,11 @@ class HawaVoCleanReport(ReportBaseModel):
     summary: UnitSummary
     review_timecodes: list[ReviewTimecode] = Field(default_factory=list)
     units: list[UnitDecisionRecord] = Field(default_factory=list)
+    #: Multi-pass audit trail (empty for the ordinary single-pass run, so
+    #: every pre-existing report, test, and consumer is untouched). The
+    #: report's ``units`` are always the FINAL (shipped) pass's records;
+    #: this list is the journey, including any auto-discarded pass.
+    passes: list[PassRecord] = Field(default_factory=list)
 
 
 class CorpusItem(ReportBaseModel):

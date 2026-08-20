@@ -12,14 +12,28 @@
 # flagged review timecodes in the report.
 
 [runtime]
+# Compute device for DeepFilterNet3. "auto" is cpu: measured on the reference
+# machine, MPS is 2.2x slower here AND produces different samples (max |delta|
+# 1.8e-08), so a GPU is opt-in rather than a default. The device that ran is
+# recorded in the report as environment.compute_device.
 device = "auto"
 isolated_worker = true
 worker_timeout_s = 300.0
+# Resident-set budget for the process running the enhancement core. The core
+# polices itself against it before accepting each unit; a worker that has
+# overrun refuses further work, the parent recycles it, and that unit falls
+# back to ORIGINAL audio. (RLIMIT_AS is not usable: unsettable on macOS, and
+# elsewhere it caps reserved virtual address space, which torch reserves in
+# gigabytes without touching.)
 worker_memory_limit_mb = 8192
 development = false
 num_threads = 1
 
 [input]
+# The accepted input-rate envelope, enforced by the media probe before a
+# sample is decoded: min(supported_sample_rates) is the floor, max_sample_rate
+# the ceiling. Every rate between them is resampled to the core's 48 kHz, so
+# the list is an envelope and not a membership test.
 max_sample_rate = 48000
 supported_sample_rates = [8000, 16000, 22050, 24000, 32000, 44100, 48000]
 channel_mode = "auto"

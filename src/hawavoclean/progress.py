@@ -41,10 +41,18 @@ class ProgressEvent:
     message: str
     unit_index: int | None = None
     unit_total: int | None = None
+    #: Multi-pass runs only: which pass this event belongs to. ``pass_total``
+    #: stays ``None`` in auto mode, where the total is unknown until the run
+    #: stands itself down. Single-pass runs never set ``pass_index``, so their
+    #: event stream is byte-identical to the pre-multipass contract.
+    pass_index: int | None = None
+    pass_total: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Contract JSON shape: ``{"event":"progress","stage":..,"progress":..,"message":..}``
-        plus ``"unit":{"index":..,"total":..}`` when the event is about one unit."""
+        plus ``"unit":{"index":..,"total":..}`` when the event is about one unit,
+        plus ``"pass":{"index":..,"total":..}`` when it belongs to a multi-pass
+        run (``total`` is ``null`` while auto mode has not decided the total)."""
         out: dict[str, Any] = {
             "event": "progress",
             "stage": self.stage,
@@ -53,6 +61,8 @@ class ProgressEvent:
         }
         if self.unit_index is not None and self.unit_total is not None:
             out["unit"] = {"index": self.unit_index, "total": self.unit_total}
+        if self.pass_index is not None:
+            out["pass"] = {"index": self.pass_index, "total": self.pass_total}
         return out
 
 

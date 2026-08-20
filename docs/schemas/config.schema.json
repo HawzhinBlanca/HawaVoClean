@@ -366,13 +366,14 @@
     },
     "RuntimeConfig": {
       "additionalProperties": false,
-      "description": "Runtime execution settings.",
+      "description": "Runtime execution settings.\n\nEvery key here is enforced. ``device`` and ``num_threads`` are applied by\n:func:`hawavoclean.runtime.activate_runtime`, which :func:`load_config`\ncalls; ``isolated_worker``, ``worker_timeout_s`` and ``development`` are\nread by the pipeline and by :func:`load_config` respectively.\n\nA note on field *names*: this schema is hashed into ``config_hash``, which\nis hashed into the job id, which seeds the master's deterministic dither.\nAdding, removing, or renaming a key here therefore changes the last bits\nof every published sample. Keys are made to mean something rather than\ndeleted for that reason; the deletion of a genuinely dead key is a\ndeliberate act that reissues the reference hashes.",
       "properties": {
         "device": {
           "default": "auto",
           "enum": [
             "auto",
             "cuda",
+            "mps",
             "cpu"
           ],
           "title": "Device",

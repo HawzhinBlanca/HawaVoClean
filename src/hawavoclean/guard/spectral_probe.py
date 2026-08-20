@@ -68,6 +68,9 @@ SORANI_VOCAB: list[str] = [
 
 VOCAB_TO_ID: dict[str, int] = {char: idx for idx, char in enumerate(SORANI_VOCAB)}
 
+STFT_FRAME_BLOCK = 512
+"""Frames per batched ``rfft``; bounds the temporary, not the result."""
+
 
 class SpectralSignatureProbe(SpectralProbe):
     """Deterministic spectral-shape signature probe."""
@@ -108,10 +111,15 @@ class SpectralSignatureProbe(SpectralProbe):
         num_frames = max(1, (len(waveform) - win_length) // hop_length + 1)
         stft = np.zeros((num_frames, n_fft // 2 + 1), dtype=np.float32)
 
-        for i in range(num_frames):
-            chunk = waveform[i * hop_length : i * hop_length + win_length] * window
-            fft_mag = np.abs(np.fft.rfft(chunk, n=n_fft))
-            stft[i] = fft_mag
+        # One batched rfft per block of frames instead of one call per frame.
+        # rfft over the last axis of a 2-D array is the identical per-row
+        # transform (verified bit-for-bit, not approximately), so the emitted
+        # signature is unchanged; only the Python call count drops.
+        frames = np.lib.stride_tricks.sliding_window_view(waveform, win_length)[::hop_length]
+        frames = frames[:num_frames]
+        for lo in range(0, num_frames, STFT_FRAME_BLOCK):
+            hi = min(num_frames, lo + STFT_FRAME_BLOCK)
+            stft[lo:hi] = np.abs(np.fft.rfft(frames[lo:hi] * window, n=n_fft, axis=-1))
 
         # First 80 linear bins (0 to ~2.5 kHz at 16 kHz), log-compressed.
         n_bins = 80

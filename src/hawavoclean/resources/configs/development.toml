@@ -2,14 +2,26 @@
 # Schema Version 1
 
 [runtime]
+# See production.toml for what these mean. "auto" is cpu; a GPU is opt-in.
 device = "auto"
 isolated_worker = false
 worker_timeout_s = 300.0
+# Resident-set budget for the process running the enhancement core. The core
+# polices itself against it before accepting each unit; a worker that has
+# overrun refuses further work, the parent recycles it, and that unit falls
+# back to ORIGINAL audio. (RLIMIT_AS is not usable: unsettable on macOS, and
+# elsewhere it caps reserved virtual address space, which torch reserves in
+# gigabytes without touching.)
 worker_memory_limit_mb = 16384
 development = true
+# Two concurrent enhancement workers, each capped to its share of the cores.
 num_threads = 2
 
 [input]
+# The accepted input-rate envelope, enforced by the media probe before a
+# sample is decoded: min(supported_sample_rates) is the floor, max_sample_rate
+# the ceiling. Every rate between them is resampled to the core's 48 kHz, so
+# the list is an envelope and not a membership test.
 max_sample_rate = 48000
 supported_sample_rates = [8000, 16000, 22050, 24000, 32000, 44100, 48000]
 channel_mode = "auto"

@@ -69,6 +69,10 @@
           ],
           "default": null,
           "title": "Cpu Model"
+        },
+        "compute_device": {
+          "title": "Compute Device",
+          "type": "string"
         }
       },
       "required": [
@@ -169,6 +173,87 @@
         "duration_s"
       ],
       "title": "MediaStats",
+      "type": "object"
+    },
+    "PassRecord": {
+      "additionalProperties": false,
+      "description": "One pass of a multi-pass run: what went in, what came out, what the\nguard did, and \u2014 when auto mode discarded the pass \u2014 why it did not ship.\n\n``input_sha256``/``output_sha256`` chain pass to pass (pass k's input is\npass k-1's output), so the journey from source to shipped master is\nauditable even though only the final pass's unit records are the report's\n``units``.",
+      "properties": {
+        "pass_index": {
+          "title": "Pass Index",
+          "type": "integer"
+        },
+        "input_sha256": {
+          "title": "Input Sha256",
+          "type": "string"
+        },
+        "output_sha256": {
+          "title": "Output Sha256",
+          "type": "string"
+        },
+        "units_total": {
+          "default": 0,
+          "title": "Units Total",
+          "type": "integer"
+        },
+        "enhanced": {
+          "default": 0,
+          "title": "Enhanced",
+          "type": "integer"
+        },
+        "reverted": {
+          "default": 0,
+          "title": "Reverted",
+          "type": "integer"
+        },
+        "chosen_strengths": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Chosen Strengths",
+          "type": "array"
+        },
+        "separation_db": {
+          "title": "Separation Db",
+          "type": "number"
+        },
+        "integrated_lufs": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Integrated Lufs"
+        },
+        "discarded": {
+          "default": false,
+          "title": "Discarded",
+          "type": "boolean"
+        },
+        "discard_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Discard Reason"
+        }
+      },
+      "required": [
+        "pass_index",
+        "input_sha256",
+        "output_sha256",
+        "separation_db"
+      ],
+      "title": "PassRecord",
       "type": "object"
     },
     "ReviewTimecode": {
@@ -461,6 +546,13 @@
         "$ref": "#/$defs/UnitDecisionRecord"
       },
       "title": "Units",
+      "type": "array"
+    },
+    "passes": {
+      "items": {
+        "$ref": "#/$defs/PassRecord"
+      },
+      "title": "Passes",
       "type": "array"
     }
   },

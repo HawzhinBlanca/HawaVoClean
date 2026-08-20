@@ -4,10 +4,11 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from hawavoclean.errors import ConfigError
 from hawavoclean.hashing import hash_json_canonical
+from hawavoclean.runtime import activate_runtime, threads_per_worker, worker_pool_size
 
 
 class BaseFrozenModel(BaseModel):
@@ -17,20 +18,73 @@ class BaseFrozenModel(BaseModel):
 
 
 class RuntimeConfig(BaseFrozenModel):
-    """Runtime execution settings."""
+    """Runtime execution settings.
 
-    device: Literal["auto", "cuda", "cpu"] = "auto"
+    Every key here is enforced. ``device`` and ``num_threads`` are applied by
+    :func:`hawavoclean.runtime.activate_runtime`, which :func:`load_config`
+    calls; ``isolated_worker``, ``worker_timeout_s`` and ``development`` are
+    read by the pipeline and by :func:`load_config` respectively.
+
+    A note on field *names*: this schema is hashed into ``config_hash``, which
+    is hashed into the job id, which seeds the master's deterministic dither.
+    Adding, removing, or renaming a key here therefore changes the last bits
+    of every published sample. Keys are made to mean something rather than
+    deleted for that reason; the deletion of a genuinely dead key is a
+    deliberate act that reissues the reference hashes.
+    """
+
+    #: Compute device for the enhancement core. ``auto`` resolves through
+    #: :data:`hawavoclean.runtime.AUTO_DEVICE_PREFERENCE` (today: cpu only —
+    #: a GPU backend changes the samples a run produces, so it is opt-in).
+    #: An explicit device this machine cannot provide is a hard error, not a
+    #: silent fallback. The device that actually ran is recorded in the
+    #: report as ``environment.compute_device``.
+    device: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     isolated_worker: bool = True
     worker_timeout_s: float = Field(default=120.0, ge=5.0, le=600.0)
+    #: Resident-set budget for the process that runs the enhancement core.
+    #: Enforced by the core itself (:func:`hawavoclean.runtime.check_memory_budget`),
+    #: checked before it accepts each unit: a worker that has already blown
+    #: the budget refuses further work, the parent recycles it, and the unit
+    #: it refused falls back to ORIGINAL audio — the same fail-closed path a
+    #: crash or a timeout takes. Self-policing rather than ``RLIMIT_AS``
+    #: because every memory rlimit is unsettable on this project's reference
+    #: platform (macOS reports ``RLIM_INFINITY`` and rejects the setrlimit),
+    #: and where it can be set it caps reserved *virtual* address space, which
+    #: torch reserves in gigabytes without touching — killing healthy runs
+    #: rather than runaway ones.
     worker_memory_limit_mb: int = Field(default=8192, ge=1024)
     development: bool = False
+    #: Size of the enhancement worker pool: how many speech units may be
+    #: enhanced concurrently. NOT an intra-op/BLAS thread count — conflating
+    #: the two oversubscribes the CPU with ``num_threads`` squared threads.
+    #: When it asks for more than one worker, each worker is given a
+    #: proportional share of the machine via ``OMP_NUM_THREADS``
+    #: (:func:`hawavoclean.runtime.threads_per_worker`); at the default of 1
+    #: nothing is set and the numeric stack keeps its own defaults.
     num_threads: int = Field(default=1, ge=1, le=64)
+
+    def pool_size(self) -> int:
+        """Effective worker-pool size on this machine (clamped to CPU count)."""
+        return worker_pool_size(self.num_threads)
+
+    def threads_per_worker(self) -> int:
+        """CPU threads each pooled worker may use without oversubscribing."""
+        return threads_per_worker(self.num_threads)
 
 
 class InputConfig(BaseFrozenModel):
     """Input validation and channel handling."""
 
     max_sample_rate: int = Field(default=48000, le=48000)
+    #: The input rates this build is declared to handle. It is enforced as the
+    #: accepted *envelope* — ``min(...)`` is the floor the media probe refuses
+    #: below, ``max_sample_rate`` the ceiling it refuses above — and NOT as a
+    #: membership test, because membership would be a lie in the other
+    #: direction: every rate between the endpoints is resampled to the core's
+    #: 48 kHz and processed correctly today, so rejecting 11.025 kHz for being
+    #: absent from the list would refuse material the engine handles. The
+    #: endpoints are what the UI's advisory rate warning mirrors.
     supported_sample_rates: list[int] = Field(
         default_factory=lambda: [8000, 16000, 22050, 24000, 32000, 44100, 48000]
     )
@@ -38,6 +92,33 @@ class InputConfig(BaseFrozenModel):
         "auto", "mono", "dual_mono_same", "split_speakers", "ambiguous_stereo"
     ] = "auto"
     output_bit_depth: Literal["pcm24", "float32"] = "pcm24"
+
+    @field_validator("supported_sample_rates")
+    @classmethod
+    def validate_supported_sample_rates(cls, v: list[int]) -> list[int]:
+        if not v:
+            raise ValueError(
+                "input.supported_sample_rates must not be empty: it is the accepted "
+                "rate envelope, and an empty envelope accepts nothing."
+            )
+        if any(r <= 0 for r in v):
+            raise ValueError("input.supported_sample_rates entries must be positive Hz values.")
+        return sorted(set(v))
+
+    @model_validator(mode="after")
+    def validate_sample_rate_envelope(self) -> "InputConfig":
+        if self.min_sample_rate > self.max_sample_rate:
+            raise ValueError(
+                f"input.supported_sample_rates starts at {self.min_sample_rate} Hz but "
+                f"input.max_sample_rate is {self.max_sample_rate} Hz: no input rate "
+                "could ever be accepted."
+            )
+        return self
+
+    @property
+    def min_sample_rate(self) -> int:
+        """Floor of the accepted rate envelope."""
+        return min(self.supported_sample_rates)
 
 
 class SegmentationConfig(BaseFrozenModel):
@@ -182,7 +263,16 @@ class HawaVoCleanConfig(BaseFrozenModel):
 
 
 def load_config(path: Path | str | None = None, is_production: bool = True) -> HawaVoCleanConfig:
-    """Load configuration from TOML file or return defaults with production constraints."""
+    """Load configuration from TOML file or return defaults with production constraints.
+
+    Loading a configuration also *arms* its ``[runtime]`` section — the device
+    is resolved and published, and a per-worker thread budget is set when the
+    config asks for a worker pool. That is deliberate: it is the one moment a
+    configuration stops being data and starts being the run, and it is what
+    lets the spawned enhancement worker and the report agree on the compute
+    device. An explicitly requested device this machine cannot provide fails
+    here, before any audio is touched.
+    """
     data: dict[str, Any] = {}
     if path is not None:
         p = Path(path)
@@ -202,4 +292,10 @@ def load_config(path: Path | str | None = None, is_production: bool = True) -> H
     if is_production and config.runtime.development:
         raise ConfigError("Production mode refuses to run with runtime.development = true")
 
+    activate_runtime(
+        config.runtime.device,
+        core_id=config.enhancement.core_id,
+        num_threads=config.runtime.num_threads,
+        memory_limit_mb=config.runtime.worker_memory_limit_mb,
+    )
     return config

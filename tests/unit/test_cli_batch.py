@@ -130,3 +130,116 @@ def test_batch_real_deadline_kills_a_genuinely_hung_child(tmp_path: Path) -> Non
     elapsed = time.perf_counter() - t0
     assert "timed out" in status or "FAILED" in status, status
     assert elapsed < 30.0, f"deadline not enforced: {elapsed:.1f}s"
+
+
+def test_batch_keeps_one_warm_child_across_files(monkeypatch: Any, tmp_path: Path) -> None:
+    """The per-file child existed for isolation, not to reload the model.
+
+    Three files, one child: the interpreter and the enhancement core are
+    started once for the batch instead of once per file. That is the whole
+    saving, so it is asserted directly rather than inferred from a clock.
+    """
+    import hawavoclean.cli as c
+
+    c._batch_child.close()
+    before = c._batch_child.spawns
+    srcs = []
+    for i in range(3):
+        p = tmp_path / f"take{i}.wav"
+        p.write_bytes((FIX / "sample_sorani_podcast.wav").read_bytes())
+        srcs.append(str(p))
+    try:
+        rc = _run_cli(monkeypatch, "batch", *srcs, "-o", str(tmp_path / "out"), "--overwrite")
+    finally:
+        c._batch_child.close()
+    assert rc == 0
+    assert c._batch_child.spawns - before == 1, (
+        f"batch spawned {c._batch_child.spawns - before} children for 3 files; "
+        "the warm child is not being reused"
+    )
+    for i in range(3):
+        assert (tmp_path / "out" / f"take{i}_clean.wav").exists()
+
+
+def test_a_deadline_breach_discards_the_child_and_the_next_file_gets_a_new_one(
+    tmp_path: Path,
+) -> None:
+    """Isolation, with the warm child: a file that misses its deadline is
+    killed with its whole process group, and the file after it publishes on a
+    replacement child rather than inheriting a process nobody can reason about.
+
+    The deadline is made unmeetable rather than the work made slow, so the
+    breach is a property of the test and not of the machine's load.
+    """
+    import hawavoclean.cli as c
+
+    c._batch_child.close()
+    before = c._batch_child.spawns
+    try:
+        missed = c._run_one_isolated(
+            FIX / "sample_sorani_podcast.wav", tmp_path / "late.wav", "production", True, 0.001
+        )
+        assert "timed out" in missed, missed
+        assert not (tmp_path / "late.wav").exists(), "a killed child still published"
+
+        good = c._run_one_isolated(
+            FIX / "sample_sorani_podcast.wav", tmp_path / "good.wav", "production", True, 300.0
+        )
+        assert good.startswith("ok"), good
+        assert (tmp_path / "good.wav").exists()
+        assert c._batch_child.spawns - before == 2, (
+            "the child that missed its deadline was reused instead of replaced"
+        )
+    finally:
+        c._batch_child.close()
+
+
+def test_a_batched_file_publishes_exactly_what_a_standalone_run_publishes(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Reusing a warm pool across files must not change one byte of any of
+    them — the same claim the pool makes across units, made across files."""
+    import hashlib
+
+    import hawavoclean.cli as c
+    from tests.support.wavbytes import masked_wav_bytes
+
+    src = tmp_path / "take.wav"
+    src.write_bytes((FIX / "sample_noisy_hum.wav").read_bytes())
+
+    alone = tmp_path / "alone.wav"
+    assert _run_cli(monkeypatch, "process", str(src), "-o", str(alone), "--overwrite") == 0
+
+    batched_dir = tmp_path / "batched"
+    c._batch_child.close()
+    try:
+        assert _run_cli(monkeypatch, "batch", str(src), "-o", str(batched_dir), "--overwrite") == 0
+    finally:
+        c._batch_child.close()
+
+    def sha(p: Path) -> str:
+        return hashlib.sha256(masked_wav_bytes(p.read_bytes())).hexdigest()
+
+    assert sha(batched_dir / "take_clean.wav") == sha(alone), (
+        "the batch's warm pool changed the published master"
+    )
+
+
+def test_noise_on_the_protocol_pipe_does_not_fail_a_file() -> None:
+    """fd 1 is inherited all the way down to the enhancement worker processes.
+
+    A library banner or a stray ``print`` three processes below would arrive on
+    the same pipe the batch protocol uses. The child pushes all of that onto
+    stderr, and the parent additionally refuses to mistake a non-JSON line for
+    an answer — belt and braces, because the failure mode is "a healthy file is
+    reported as failed".
+    """
+    import hawavoclean.cli as c
+
+    child = c._BatchChild()
+    child._lines.put("Intel MKL WARNING: something entirely unrelated\n")
+    child._lines.put("\n")
+    child._lines.put('[{"not": "an object"}]\n')
+    child._lines.put('{"ok": true}\n')
+    reply = child._await_reply(__import__("time").monotonic() + 5.0)
+    assert reply == {"ok": True}

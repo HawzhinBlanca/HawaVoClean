@@ -2,14 +2,33 @@
 # Schema Version 1
 
 [runtime]
+# Compute device for the enhancement core. "auto" resolves to cpu today:
+# a GPU backend does not compute the same samples as the CPU backend, and on
+# the reference machine MPS measured 2.2x SLOWER than CPU for DeepFilterNet3.
+# "cuda"/"mps" are opt-in and are recorded in the report as
+# environment.compute_device; an explicit device this machine cannot provide
+# is a hard error, never a silent fallback.
 device = "auto"
 isolated_worker = true
 worker_timeout_s = 120.0
+# Resident-set budget for the process running the enhancement core. The core
+# polices itself against it before accepting each unit; a worker that has
+# overrun refuses further work, the parent recycles it, and that unit falls
+# back to ORIGINAL audio. (RLIMIT_AS is not usable: unsettable on macOS, and
+# elsewhere it caps reserved virtual address space, which torch reserves in
+# gigabytes without touching.)
 worker_memory_limit_mb = 8192
 development = false
+# Enhancement worker pool size: how many speech units may be enhanced at once.
+# Not a BLAS/intra-op thread count. Above 1, each worker is given a
+# proportional share of the machine via OMP_NUM_THREADS.
 num_threads = 1
 
 [input]
+# The accepted input-rate envelope, enforced by the media probe before a
+# sample is decoded: min(supported_sample_rates) is the floor, max_sample_rate
+# the ceiling. Every rate between them is resampled to the core's 48 kHz, so
+# the list is an envelope and not a membership test.
 max_sample_rate = 48000
 supported_sample_rates = [8000, 16000, 22050, 24000, 32000, 44100, 48000]
 channel_mode = "auto"

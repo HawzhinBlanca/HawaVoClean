@@ -301,6 +301,27 @@ MUTATIONS: list[Mutation] = [
             "tests/unit/test_mastering_regression.py::test_published_file_hits_loudness_target_and_structure",
         ),
     ),
+    Mutation(
+        "M13",
+        "auto multipass ships the pass it just judged regressive",
+        "src/hawavoclean/multipass.py",
+        """            if auto and k > 1:
+                keep, reason = auto_pass_verdict(records[-1], record)
+                if not keep:
+                    logger.info(f"Auto mode discards pass {k}: {reason}")
+                    records.append(
+                        record.model_copy(update={"discarded": True, "discard_reason": reason})
+                    )
+                    break
+""",
+        "",
+        # Owner: the discard is auto mode's whole promise — a pass that fails
+        # the criteria must be recorded AND not shipped. Deleting the discard
+        # block makes auto always run to the cap and ship the last pass.
+        owners=(
+            "tests/unit/test_multipass.py::test_auto_discards_regressing_pass_and_ships_previous",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")

@@ -3,15 +3,29 @@
 import json
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import soundfile as sf
 
 from hawavoclean.audio.types import AudioProbeResult
+from hawavoclean.config import InputConfig
 from hawavoclean.errors import InvalidUserInputError, PreflightError
 from hawavoclean.hashing import hash_file
 
-MIN_SUPPORTED_SAMPLE_RATE = 8000
+
+def _declared_supported_rates() -> list[int]:
+    """The rate envelope ``[input]`` declares, straight from the schema."""
+    factory = InputConfig.model_fields["supported_sample_rates"].default_factory
+    assert factory is not None  # declared with a default_factory; see config.py
+    return [int(r) for r in factory()]  # type: ignore[call-arg]
+
+
+#: Floor of the accepted input-rate envelope. Derived from
+#: ``input.supported_sample_rates`` rather than restated here, so the
+#: configuration is the source of truth and the two cannot drift apart. The
+#: ceiling is ``input.max_sample_rate``, passed in by the caller.
+MIN_SUPPORTED_SAMPLE_RATE: int = min(_declared_supported_rates())
 
 
 def _count_samples_by_decoding(file_path: Path, have_ffmpeg: bool) -> int:
@@ -40,8 +54,28 @@ def _count_samples_by_decoding(file_path: Path, have_ffmpeg: bool) -> int:
     return len(res.stdout) // 2
 
 
-def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeResult:
-    """Probe an audio file safely and extract structured metadata."""
+def probe_audio(
+    path: Path | str,
+    max_sample_rate: int = 48000,
+    supported_sample_rates: Sequence[int] | None = None,
+) -> AudioProbeResult:
+    """Probe an audio file safely and extract structured metadata.
+
+    The accepted rate envelope is enforced here, before a single sample is
+    decoded: ``min(supported_sample_rates)`` is the floor and
+    ``max_sample_rate`` the ceiling, both straight from ``[input]``. Passing
+    ``None`` uses the envelope the configuration schema declares by default.
+    """
+    rates = (
+        _declared_supported_rates()
+        if supported_sample_rates is None
+        else list(supported_sample_rates)
+    )
+    if not rates:
+        raise PreflightError(
+            "No supported sample rates configured: input.supported_sample_rates is empty."
+        )
+    rate_floor = min(int(r) for r in rates)
     file_path = Path(path).resolve()
     if not file_path.exists() or not file_path.is_file():
         raise InvalidUserInputError(f"Input audio file does not exist: {file_path}")
@@ -131,10 +165,9 @@ def probe_audio(path: Path | str, max_sample_rate: int = 48000) -> AudioProbeRes
             raise InvalidUserInputError(f"Audio stream in {file_path} has no decodable samples")
         duration_s = samples / sample_rate
 
-    if sample_rate < MIN_SUPPORTED_SAMPLE_RATE:
+    if sample_rate < rate_floor:
         raise InvalidUserInputError(
-            f"Input sample rate {sample_rate} Hz is below the minimum supported "
-            f"{MIN_SUPPORTED_SAMPLE_RATE} Hz."
+            f"Input sample rate {sample_rate} Hz is below the minimum supported {rate_floor} Hz."
         )
     if sample_rate > max_sample_rate:
         raise InvalidUserInputError(

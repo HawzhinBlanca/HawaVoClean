@@ -1,11 +1,18 @@
 """Command-Line Interface for HawaVoClean v1."""
 
 import argparse
+import atexit
 import contextlib
 import json
 import os
+import queue
 import shutil
+import signal
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 import tomllib
 from pathlib import Path
 from typing import Any, NoReturn
@@ -29,6 +36,7 @@ from hawavoclean.finishing.loudness import measure_loudness_and_peaks
 from hawavoclean.guard.calibration import load_calibration_artifact
 from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.logging import get_logger, setup_logging
+from hawavoclean.multipass import MAX_PASSES, run_multipass
 from hawavoclean.paths import models_dir, profile_config_path
 from hawavoclean.pipeline import run_pipeline
 from hawavoclean.progress import ProgressEvent
@@ -189,15 +197,29 @@ def cmd_process(args: argparse.Namespace) -> int:
         def on_progress(event: ProgressEvent) -> None:
             sink.emit(event.to_dict())
 
+    passes: int | str = getattr(args, "passes", 1)
     try:
-        run_pipeline(
-            input_path=args.input,
-            output_path=args.output,
-            config_path=args.config,
-            profile=args.profile,
-            overwrite=args.overwrite,
-            on_progress=on_progress,
-        )
+        if passes == 1:
+            # The default path: byte-identical to a run before --passes
+            # existed, including the progress event stream.
+            run_pipeline(
+                input_path=args.input,
+                output_path=args.output,
+                config_path=args.config,
+                profile=args.profile,
+                overwrite=args.overwrite,
+                on_progress=on_progress,
+            )
+        else:
+            run_multipass(
+                input_path=args.input,
+                output_path=args.output,
+                passes=passes,
+                config_path=args.config,
+                profile=args.profile,
+                overwrite=args.overwrite,
+                on_progress=on_progress,
+            )
         if sink is not None:
             out_path = Path(args.output).resolve()
             sink.emit(
@@ -233,6 +255,23 @@ def cmd_process(args: argparse.Namespace) -> int:
             sink.close()
 
 
+def _passes_arg(value: str) -> int | str:
+    """``--passes``: an integer 1..4 or 'auto'. Anything else is refused."""
+    if value == "auto":
+        return "auto"
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--passes must be an integer 1..{MAX_PASSES} or 'auto', got {value!r}"
+        ) from None
+    if not 1 <= n <= MAX_PASSES:
+        raise argparse.ArgumentTypeError(
+            f"--passes must be an integer 1..{MAX_PASSES} or 'auto', got {value!r}"
+        )
+    return n
+
+
 _AUDIO_SUFFIXES = {".wav", ".mp4", ".m4a", ".mp3", ".aac", ".flac", ".ogg", ".mov", ".aiff"}
 
 
@@ -247,6 +286,237 @@ def _clean_stem(path: Path) -> str:
             return name
 
 
+def cmd_batch_worker(_args: argparse.Namespace) -> int:
+    """The long-lived side of ``batch``. Not for hand use.
+
+    Reads one JSON request per line on stdin, publishes that file, writes one
+    JSON reply per line on a private duplicate of stdout. Everything else —
+    logs, tracebacks, a library banner, anything the spawned enhancement
+    workers print on the fd 1 they inherit — is pushed onto stderr by
+    :class:`_JsonLineSink`, which the parent captures to a file, because a pipe
+    nobody drains is a deadlock waiting for a chatty run. Without that, one
+    stray ``print`` three processes down would arrive as a protocol line.
+
+    It keeps its enhancement pool warm between files (:func:`set_pool_reuse`),
+    which is the whole point: the model is the same object for every file in
+    the batch instead of being loaded 77 times.
+    """
+    from hawavoclean.enhancement.worker import set_pool_reuse, shutdown_pool_cache
+
+    sink = _JsonLineSink()
+    set_pool_reuse(True)
+    try:
+        sink.emit({"event": "ready"})
+        for raw in sys.stdin:
+            raw = raw.strip()
+            if not raw:
+                continue
+            reply: dict[str, Any]
+            try:
+                req = json.loads(raw)
+            except ValueError as e:
+                sink.emit({"ok": False, "code": int(ExitCode.INVALID_USER_INPUT), "error": str(e)})
+                continue
+            if req.get("op") == "quit":
+                break
+            try:
+                run_pipeline(
+                    input_path=req["input"],
+                    output_path=req["output"],
+                    profile=req["profile"],
+                    overwrite=bool(req.get("overwrite", False)),
+                )
+                reply = {"ok": True}
+            except HawaVoCleanError as e:
+                reply = {"ok": False, "code": int(e.exit_code), "error": f"{e}"}
+            except Exception as e:
+                reply = {
+                    "ok": False,
+                    "code": int(ExitCode.PUBLICATION_FAILURE),
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            sink.emit(reply)
+    finally:
+        shutdown_pool_cache()
+        sink.close()
+    return int(ExitCode.SUCCESS)
+
+
+class _BatchChild:
+    """One warm child process, restarted whenever it stops being trustworthy.
+
+    The per-file child existed for isolation — a stuck decoder, a wedged
+    model or a segfault must cost one file, not the batch — and that is kept
+    exactly: every file still runs under a hard deadline in a process the
+    parent can kill, and a breach kills the whole process group and starts a
+    new child. What is dropped is the part isolation never needed, which is
+    reloading the interpreter and the enhancement core for every file
+    (measured at 1.5-2.0 s per file, most of it model load).
+
+    A child is discarded, never reused, after a deadline breach or an
+    unexpected exit: the next file gets a process whose state nobody has to
+    reason about.
+    """
+
+    def __init__(self, env: dict[str, str] | None = None) -> None:
+        self._proc: subprocess.Popen[str] | None = None
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._reader: threading.Thread | None = None
+        self._stderr_path: Path | None = None
+        self._env = env
+        self.spawns = 0
+
+    def _spawn(self) -> None:
+        self.close()
+        self._stderr_path = Path(tempfile.mkstemp(prefix="hawavoclean-batch-", suffix=".log")[1])
+        err = open(self._stderr_path, "w", encoding="utf-8")  # noqa: SIM115 - owned by the child
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, "-m", "hawavoclean.cli", "batch-worker"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=err,
+                text=True,
+                # child_env: a batch killed with SIGKILL cannot reap this
+                # child, so the child is told whose death to watch for.
+                env=child_env(self._env),
+                # Its own process group, so a deadline breach can take the
+                # decoder and the enhancement workers with it rather than
+                # leaving the grandchildren behind.
+                start_new_session=True,
+            )
+        finally:
+            err.close()
+        self.spawns += 1
+        self._lines = queue.Queue()
+        self._reader = threading.Thread(target=self._pump, args=(self._proc,), daemon=True)
+        self._reader.start()
+
+    def _pump(self, proc: subprocess.Popen[str]) -> None:
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                self._lines.put(line)
+        finally:
+            self._lines.put(None)  # EOF sentinel: the child is gone
+
+    def _await_line(self, deadline: float) -> str | None:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                line = self._lines.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                continue
+            if line is None:
+                raise EOFError("batch worker exited")
+            line = line.strip()
+            if line:
+                return line
+
+    def _await_reply(self, deadline: float) -> dict[str, Any] | None:
+        """The next JSON object the child sends, or ``None`` at the deadline.
+
+        Anything on the pipe that is not a JSON object did not come from the
+        protocol — it is output that escaped onto fd 1 somewhere below — and
+        it is dropped rather than allowed to fail the file it arrived during.
+        """
+        while True:
+            line = self._await_line(deadline)
+            if line is None:
+                return None
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                logger.debug("batch worker wrote a non-protocol line: %.120s", line)
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+
+    def stderr_tail(self) -> str:
+        if self._stderr_path is None or not self._stderr_path.exists():
+            return "no output"
+        lines = [
+            ln for ln in self._stderr_path.read_text(errors="replace").splitlines() if ln.strip()
+        ]
+        return lines[-1][-160:] if lines else "no output"
+
+    def run(self, src: Path, dest: Path, profile: str, overwrite: bool, timeout_s: float) -> str:
+        deadline = time.monotonic() + timeout_s
+        try:
+            if self._proc is None or self._proc.poll() is not None:
+                self._spawn()
+                if self._await_reply(deadline) is None:
+                    raise TimeoutError
+            assert self._proc is not None and self._proc.stdin is not None
+            self._proc.stdin.write(
+                json.dumps(
+                    {
+                        "input": str(src),
+                        "output": str(dest),
+                        "profile": profile,
+                        "overwrite": overwrite,
+                    }
+                )
+                + "\n"
+            )
+            self._proc.stdin.flush()
+            reply = self._await_reply(deadline)
+            if reply is None:
+                raise TimeoutError
+        except TimeoutError:
+            self.close()
+            return f"FAILED: timed out after {timeout_s:.0f}s (killed; batch continued)"
+        except (EOFError, BrokenPipeError, OSError):
+            tail = self.stderr_tail()
+            code = self._proc.poll() if self._proc is not None else None
+            self.close()
+            return f"FAILED (exit {code}): {tail}"
+        if not reply.get("ok"):
+            return f"FAILED (exit {reply.get('code')}): {str(reply.get('error', ''))[-160:]}"
+        return _summarize_published(dest)
+
+    def close(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            if proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5.0)
+        reader, self._reader = self._reader, None
+        if reader is not None:
+            reader.join(timeout=2.0)
+        if self._stderr_path is not None:
+            path, self._stderr_path = self._stderr_path, None
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+
+#: The batch's warm child. Module-level so a batch (and the tests that call
+#: ``_run_one_isolated`` directly) share one, and so atexit can end it.
+_batch_child = _BatchChild()
+atexit.register(_batch_child.close)
+
+
+def _summarize_published(dest: Path) -> str:
+    """The one-line status of a file that published successfully."""
+    report_path = dest.parent / f"{dest.stem}.hawavoclean.json"
+    try:
+        rep = json.loads(report_path.read_text(encoding="utf-8"))
+        summ = rep["summary"]
+        return (
+            f"ok: {summ['enhanced']}/{summ['units_total']} units enhanced, "
+            f"{rep['output']['integrated_lufs']:.1f} LUFS"
+        )
+    except Exception as e:
+        return f"FAILED: published but report unreadable ({type(e).__name__})"
+
+
 def _run_one_isolated(
     src: Path, dest: Path, profile: str, overwrite: bool, timeout_s: float
 ) -> str:
@@ -255,43 +525,11 @@ def _run_one_isolated(
     A hung file (stuck decoder, wedged model, unresponsive disk) must never
     take the rest of the batch with it. The child is killed at the deadline
     and the batch moves on; the failure is recorded by name.
-    """
-    import json as _json
-    import subprocess as _sp
-    import sys as _sys
 
-    cmd = [
-        _sys.executable,
-        "-m",
-        "hawavoclean.cli",
-        "process",
-        str(src),
-        "-o",
-        str(dest),
-        "--profile",
-        profile,
-    ]
-    if overwrite:
-        cmd.append("--overwrite")
-    try:
-        # child_env: a batch killed with SIGKILL cannot reap this child, so
-        # the child is told whose death to watch for.
-        proc = _sp.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=child_env())
-    except _sp.TimeoutExpired:
-        return f"FAILED: timed out after {timeout_s:.0f}s (killed; batch continued)"
-    if proc.returncode != 0:
-        tail = [ln for ln in (proc.stderr + proc.stdout).strip().splitlines() if ln.strip()]
-        return f"FAILED (exit {proc.returncode}): {tail[-1][-160:] if tail else 'no output'}"
-    report_path = dest.parent / f"{dest.stem}.hawavoclean.json"
-    try:
-        rep = _json.loads(report_path.read_text(encoding="utf-8"))
-        summ = rep["summary"]
-        return (
-            f"ok: {summ['enhanced']}/{summ['units_total']} units enhanced, "
-            f"{rep['output']['integrated_lufs']:.1f} LUFS"
-        )
-    except Exception as e:
-        return f"FAILED: published but report unreadable ({type(e).__name__})"
+    The child is now shared with the rest of the batch and kept warm between
+    files — see :class:`_BatchChild` for why that costs nothing in isolation.
+    """
+    return _batch_child.run(src, dest, profile, overwrite, timeout_s)
 
 
 def cmd_batch(args: argparse.Namespace) -> int:
@@ -334,19 +572,28 @@ def cmd_batch(args: argparse.Namespace) -> int:
 
     results: list[tuple[str, str]] = []
     failed = 0
-    for i, src in enumerate(inputs, 1):
-        dest = out_dir / f"{_clean_stem(src)}{args.suffix}.wav"
-        if dest.exists() and args.skip_existing:
-            results.append((src.name, "skipped (exists)"))
-            print(f"[{i}/{len(inputs)}] SKIP {src.name} (output exists)")
-            continue
-        print(f"[{i}/{len(inputs)}] {src.name} -> {dest.name}")
-        status = _run_one_isolated(
-            src, dest, args.profile, args.overwrite or args.skip_existing, args.per_file_timeout_s
-        )
-        if not status.startswith("ok"):
-            failed += 1
-        results.append((src.name, status))
+    try:
+        for i, src in enumerate(inputs, 1):
+            dest = out_dir / f"{_clean_stem(src)}{args.suffix}.wav"
+            if dest.exists() and args.skip_existing:
+                results.append((src.name, "skipped (exists)"))
+                print(f"[{i}/{len(inputs)}] SKIP {src.name} (output exists)")
+                continue
+            print(f"[{i}/{len(inputs)}] {src.name} -> {dest.name}")
+            status = _run_one_isolated(
+                src,
+                dest,
+                args.profile,
+                args.overwrite or args.skip_existing,
+                args.per_file_timeout_s,
+            )
+            if not status.startswith("ok"):
+                failed += 1
+            results.append((src.name, status))
+    finally:
+        # The warm child outlives files, never the batch — including when the
+        # batch ends on Ctrl-C.
+        _batch_child.close()
 
     print("================================================================================")
     print(f"BATCH SUMMARY: {len(inputs) - failed}/{len(inputs)} succeeded")
@@ -695,6 +942,19 @@ def _main() -> None:
         action="store_true",
         help="Emit one JSON progress object per line on stdout (logs stay on stderr)",
     )
+    p_proc.add_argument(
+        "--passes",
+        type=_passes_arg,
+        default=1,
+        metavar="N|auto",
+        help=(
+            f"Run the pipeline N times (1..{MAX_PASSES}), each pass re-enhancing the "
+            "previous pass's mastered output; 'auto' adds passes only while the guard "
+            "does not regress and measured speech/floor separation improves by >= 0.5 dB, "
+            "discarding a pass that fails (default: 1). "
+            "process only — batch always runs single-pass jobs."
+        ),
+    )
     p_proc.set_defaults(func=cmd_process)
 
     # batch
@@ -720,6 +980,11 @@ def _main() -> None:
         help="Hard deadline per file; a hung file is killed and the batch continues (default 1800)",
     )
     p_batch.set_defaults(func=cmd_batch)
+
+    # batch-worker: the long-lived child `batch` drives. Registered so it can
+    # be launched by name, hidden because it is a protocol, not a command.
+    p_bw = subparsers.add_parser("batch-worker", help=argparse.SUPPRESS)
+    p_bw.set_defaults(func=cmd_batch_worker)
 
     # serve
     p_serve = subparsers.add_parser(

@@ -28,13 +28,23 @@ from hawavoclean.audio.types import AudioBuffer, AudioProbeResult
 from hawavoclean.config import HawaVoCleanConfig, load_config
 from hawavoclean.enhancement.factory import resolve_core
 from hawavoclean.enhancement.validate import validate_enhancer_output
-from hawavoclean.enhancement.worker import IsolatedEnhancementWorker
+from hawavoclean.enhancement.worker import (
+    EnhancementRun,
+    EnhancementWorkerPool,
+    IsolatedEnhancementWorker,
+    UnitEnhancement,
+    WorkerSpec,
+    acquire_pool,
+    configured_worker_hint,
+    release_pool,
+)
 from hawavoclean.errors import (
     CalibrationError,
     ConfigError,
     HawaVoCleanError,
     PreflightError,
     PublicationError,
+    WorkerCrashError,
 )
 from hawavoclean.finishing.detect import (
     SpeechTiltReport,
@@ -354,27 +364,54 @@ def _run_after_preflight(
     )
     units_total = len(all_units)
 
-    # 6. Models: isolated worker (or in-process core) and the fidelity probe
-    core_registration = resolve_core(config.enhancement.core_id)
-    if config.runtime.isolated_worker:
-        worker: Any = IsolatedEnhancementWorker(
-            core_id=config.enhancement.core_id,
-            sample_rate=config.enhancement.model_sample_rate,
-            timeout_s=config.runtime.worker_timeout_s,
-            enhancer_class=core_registration.enhancer_class,
-            phase_coherent=config.enhancement.phase_coherent,
-        )
-    else:
-        worker = core_registration.enhancer_class(
-            core_id=config.enhancement.core_id,
-            sample_rate=config.enhancement.model_sample_rate,
-            phase_coherent=config.enhancement.phase_coherent,
-        )
+    # Dispatch every speech unit's context window at once. These are numpy
+    # views into the decoded channel, so building the list copies nothing; the
+    # copy happens per request, in the worker's own send, exactly as before.
+    speech_slot: dict[int, int] = {}
+    context_items: list[tuple[np.ndarray[Any, np.dtype[np.float32]], int]] = []
+    for idx, u in enumerate(all_units):
+        if not u.is_speech:
+            continue
+        speech_slot[idx] = len(context_items)
+        ctx = channels_to_process[u.channel_id][u.context_start_sample : u.context_end_sample]
+        context_items.append((ctx, audio_buf.sample_rate))
 
     probe: SpectralProbe = probe_override or SpectralSignatureProbe(
         probe_id=active_guard_cfg.probe_id,
         target_sr=16000,
     )
+
+    # 6. Models: isolated worker pool (or in-process core) and the fidelity probe
+    #
+    # Speech units are independent by construction, so the pool enhances
+    # several at once. Nothing downstream can tell: candidates come back
+    # indexed by unit, the strength ladder is a local blend of the candidate
+    # (policy/strength.py) rather than another core call, and both shipped
+    # cores are stateless across calls — verified by running the same unit
+    # first, second and alone and hashing the output (tests/unit/
+    # test_enhancement_pool.py::test_core_is_stateless_across_calls).
+    core_registration = resolve_core(config.enhancement.core_id)
+    pool: EnhancementWorkerPool | None = None
+    inline_enhancer: Any = None
+    if config.runtime.isolated_worker:
+        pool = acquire_pool(
+            WorkerSpec(
+                core_id=config.enhancement.core_id,
+                sample_rate=config.enhancement.model_sample_rate,
+                timeout_s=config.runtime.worker_timeout_s,
+                enhancer_class=core_registration.enhancer_class,
+                phase_coherent=config.enhancement.phase_coherent,
+            ),
+            max_size=configured_worker_hint(config.runtime.num_threads),
+            prewarm=len(context_items),
+            worker_factory=IsolatedEnhancementWorker,
+        )
+    else:
+        inline_enhancer = core_registration.enhancer_class(
+            core_id=config.enhancement.core_id,
+            sample_rate=config.enhancement.model_sample_rate,
+            phase_coherent=config.enhancement.phase_coherent,
+        )
 
     # 7. Guard-A decisions for every unit (finishing comes after continuity)
     decisions: list[UnitPolicyDecision] = []
@@ -382,8 +419,30 @@ def _run_after_preflight(
     unit_runtimes: list[float] = []
     orig_core_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
+    enh_run: EnhancementRun | None = None
     try:
-        for unit_no, u in enumerate(all_units, 1):
+        if pool is not None:
+            enh_run = pool.begin(context_items)
+    except BaseException:
+        release_pool(pool)
+        raise
+
+    def enhancement_for(slot: int) -> UnitEnhancement:
+        """Unit ``slot``'s candidate: from the pool, or computed here when the
+        run is configured for an in-process core."""
+        if enh_run is not None:
+            return enh_run.result(slot)
+        wave, rate = context_items[slot]
+        t_enh = time.perf_counter()
+        try:
+            res = inline_enhancer.enhance(wave, rate)
+            return UnitEnhancement(res, None, (time.perf_counter() - t_enh) * 1000.0)
+        except Exception as e:
+            return UnitEnhancement(None, e, (time.perf_counter() - t_enh) * 1000.0)
+
+    try:
+        for idx, u in enumerate(all_units):
+            unit_no = idx + 1
             ch_wave = channels_to_process[u.channel_id]
             core_orig = ch_wave[u.start_sample : u.end_sample]
             orig_core_waveforms.append(core_orig)
@@ -424,12 +483,17 @@ def _run_after_preflight(
                     unit_total=units_total,
                 ),
             )
-            context_wave = ch_wave[u.context_start_sample : u.context_end_sample]
+            # Blocks only if this unit is not enhanced yet; the pool carries
+            # on with the later units while the guard below runs.
+            enh = enhancement_for(speech_slot[idx])
+            t_guard_start = time.perf_counter()
 
             enh_core: np.ndarray[Any, np.dtype[np.float32]] | None = None
             cand_sha256: str | None = None
             try:
-                enh_res = worker.enhance(context_wave, audio_buf.sample_rate)
+                if enh.error is not None or enh.result is None:
+                    raise enh.error or WorkerCrashError("no enhancement result")
+                enh_res = enh.result
                 left_ctx = u.left_context_samples
                 core_len = u.core_length_samples
                 enh_trimmed = enh_res.waveform[left_ctx : left_ctx + core_len]
@@ -462,7 +526,9 @@ def _run_after_preflight(
             )
             decisions.append(pol_dec)
             cand_hashes.append(cand_sha256)
-            unit_runtimes.append((time.perf_counter() - t_unit_start) * 1000.0)
+            # Per-unit WORK, not per-unit wall clock: under a pool the two
+            # stop being the same number, and the report is about the unit.
+            unit_runtimes.append(enh.elapsed_ms + (time.perf_counter() - t_guard_start) * 1000.0)
             verdict_label = "ENHANCED" if pol_dec.is_enhanced else pol_dec.guard_verdict.name
             emit_progress(
                 on_progress,
@@ -578,8 +644,12 @@ def _run_after_preflight(
             )
 
     finally:
-        if hasattr(worker, "close"):
-            worker.close()
+        if enh_run is not None:
+            enh_run.join()
+        # A cached pool (batch) stays warm; anything else is stopped here.
+        release_pool(pool)
+        if inline_enhancer is not None and hasattr(inline_enhancer, "close"):
+            inline_enhancer.close()
 
     # 10. Assembly
     assembled_channels: list[np.ndarray[Any, np.dtype[np.float32]]] = []

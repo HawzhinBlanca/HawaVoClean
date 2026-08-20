@@ -12,6 +12,13 @@ tones. On musical material expect aggressive suppression; the fidelity
 guard remains in the loop and reverts units whose spectral content it
 cannot verify. The output is NOT phase-coherent with the input, so the
 policy evaluates only the full-strength candidate (no residual blending).
+
+This is the one core whose inference honours ``runtime.device``. The device is
+resolved by :mod:`hawavoclean.runtime` (``auto`` is CPU today — see that
+module for the measurements), pinned into DeepFilterNet's own device lookup so
+the model and its feature tensors cannot disagree, and recorded in the report.
+It is NOT part of ``STUDIO_PARAMS``: the lockfile pins what the model is, and
+that is the same model on every device.
 """
 
 import sys
@@ -25,6 +32,10 @@ import numpy as np
 from hawavoclean.audio.resample import resample_audio
 from hawavoclean.enhancement.protocol import EnhancementResult, Enhancer, EnhancerMetadata
 from hawavoclean.hashing import hash_file, hash_json_canonical
+from hawavoclean.logging import get_logger
+from hawavoclean.runtime import active_device, check_memory_budget, resolve_device
+
+logger = get_logger("studio-core")
 
 _MODEL_DIR = Path(__file__).resolve().parents[1] / "resources" / "models" / "deepfilternet3"
 
@@ -100,6 +111,7 @@ class StudioVoiceCore(Enhancer):
         core_id: str = "studio-dfn3-48k-v1",
         sample_rate: int = 48000,
         phase_coherent: bool = False,
+        device: str | None = None,
     ) -> None:
         if phase_coherent:
             raise ValueError(
@@ -114,6 +126,13 @@ class StudioVoiceCore(Enhancer):
             )
         self._core_id = core_id
         self._sample_rate = internal_sr
+        # The device is settled here, in whichever process holds the core —
+        # the parent for an in-process run, the spawned worker otherwise —
+        # and both read the same published value, so the report's
+        # environment.compute_device names the device that really ran.
+        self._device = (
+            active_device() if device is None else resolve_device(device, core_id=core_id).resolved
+        )
         self._metadata = EnhancerMetadata(
             core_id=core_id,
             version="1.0.0",
@@ -132,15 +151,49 @@ class StudioVoiceCore(Enhancer):
     def metadata(self) -> EnhancerMetadata:
         return self._metadata
 
+    @property
+    def device(self) -> str:
+        """The compute device this core's inference runs on."""
+        return self._device
+
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
         _install_torchaudio_compat()
+        import torch
+        from df.config import config as df_config
         from df.enhance import init_df
 
         self._model, self._df_state, _ = init_df(
             model_base_dir=str(_MODEL_DIR), log_level="ERROR", log_file=None
         )
+        # init_df picks its own device (CUDA if it sees one) and df.enhance
+        # re-reads that choice for every feature tensor it builds. Pin it to
+        # OUR resolved device instead, in df's in-memory config — never
+        # df.config.save(), which would rewrite the vendored config.ini and
+        # break its locked digest. Pinning matters even for "cpu": without it
+        # a machine that happens to own a CUDA card would silently run on the
+        # GPU and the report would still say cpu.
+        df_config.set("DEVICE", self._device, str, "train")
+        from df.utils import get_device
+
+        effective = str(get_device())
+        if effective != self._device:
+            # df.config reads a bare DEVICE environment variable ahead of its
+            # own file. If something in this process has set it, the model and
+            # its feature tensors would land on different devices and the
+            # report would name the wrong one. Refuse rather than guess.
+            raise ValueError(
+                f"DeepFilterNet resolved device {effective!r} but this run is "
+                f"configured for {self._device!r}; a stray DEVICE environment "
+                f"variable is overriding runtime.device. Unset DEVICE."
+            )
+        self._model = self._model.to(torch.device(self._device))
+        if self._device != "cpu":
+            logger.warning(
+                f"Studio core running on {self._device!r}. GPU arithmetic does not "
+                "match the CPU reference bit-for-bit; the report records the device."
+            )
 
     def warmup(self) -> None:
         self._ensure_model()
@@ -174,6 +227,10 @@ class StudioVoiceCore(Enhancer):
         waveform: np.ndarray[Any, np.dtype[np.float32]],
         sample_rate: int,
     ) -> EnhancementResult:
+        # Before taking the unit, not after: a worker that has already blown
+        # runtime.worker_memory_limit_mb stops accepting work rather than
+        # discarding a result it has already paid for.
+        check_memory_budget("studio")
         t_start = time.perf_counter()
         orig_len = len(waveform)
         if orig_len == 0:

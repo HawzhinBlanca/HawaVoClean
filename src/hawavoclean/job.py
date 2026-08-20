@@ -98,8 +98,8 @@ class JobWorkspace:
                     f"{(required_bytes + safety_margin) / (1024 * 1024):.1f} MB"
                 )
 
+    @staticmethod
     def publish_atomically(
-        self,
         temp_audio_path: Path,
         destination_audio_path: Path,
         json_report_str: str,
@@ -112,6 +112,11 @@ class JobWorkspace:
         DESTINATION FILESYSTEM, so the final renames are always intra-device
         (no EXDEV) and effectively atomic. If any rename fails, the ones that
         already happened are rolled back and nothing partial is left behind.
+
+        A staticmethod on purpose: it touches no workspace state, and the
+        multi-pass orchestrator publishes its amended final report through
+        this exact code path rather than a second implementation of the
+        atomic-publish discipline.
         """
         dest_audio = Path(destination_audio_path).resolve()
         dest_audio.parent.mkdir(parents=True, exist_ok=True)

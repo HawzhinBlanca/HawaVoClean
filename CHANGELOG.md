@@ -7,6 +7,204 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — four config keys that were declared and never read
+
+`runtime.device`, `runtime.num_threads`, `runtime.worker_memory_limit_mb` and
+`input.supported_sample_rates` had zero uses outside `config.py`: four promises
+the configuration made and the code did not keep. All four now do something,
+and making them real moved **no published sample** — the four committed
+reference masters (`test_output/perf-ref-hashes.txt`, Flute 09 and teat1vo
+across the production and studio profiles) reproduce byte for byte, with every
+unit decision and guard verdict unchanged.
+
+- New `hawavoclean/runtime.py` enforces the `[runtime]` section.
+  `load_config()` arms it: loading a profile resolves its device, publishes a
+  per-worker CPU budget when it asks for a pool, and publishes its memory
+  budget. The channel is the process environment because the enhancement core
+  lives in a `spawn`-ed subprocess whose only other inbound channel is a fixed
+  argument tuple — and because `OMP_NUM_THREADS` has to be set before the
+  child imports torch to have any effect at all.
+- **`device`** — resolved for real, `mps` added to the accepted values, and
+  plumbed into the studio core, which pins DeepFilterNet's own device lookup
+  (in memory; the vendored `config.ini` is never rewritten, its digest stays
+  locked) so model and feature tensors cannot land on different devices. An
+  explicitly requested device this machine cannot provide is a **designed
+  error before any audio is touched**, never a silent fall back to the CPU.
+  A classical-DSP core reports `cpu` whatever was asked for, because that is
+  what ran.
+  - `auto` resolves to **cpu**, and that is a measurement, not caution:
+    on this reference machine (torch 2.13, DeepFilterNet3, 20 s unit @ 48 kHz)
+    MPS took 731 ms against the CPU's 339 ms — **2.2x slower** — and its
+    output is not bit-identical (max |Δ| 1.8e-08 at the core, 7.2e-07 through
+    the finishing chain). End to end on Flute 09 (94.6 s, studio profile):
+    CPU 8.20 s (RTF 0.087) vs MPS 12.87 s (RTF 0.136). Guard verdicts, chosen
+    strengths, LUFS and true peak were identical across the two devices;
+    guard scores drifted in the sixth decimal. **MPS is not worth adopting on
+    this hardware.** `AUTO_DEVICE_PREFERENCE` is the single constant a future
+    backend has to earn its way into.
+  - Provenance: `HawaVoCleanReport.environment` gains **`compute_device`** —
+    the device that actually ran. A GPU computes different samples, and two
+    machines running the same config can differ here while sharing a config
+    hash, so a result must never be attributable to the wrong compute path.
+  - The device is deliberately **not** in any core's `params_hash` or
+    lockfile. A lockfile pins *what the model is*, and that is the same model
+    on every device; the device belongs to the environment, which is exactly
+    where BLUEPRINT invariant 8 already scopes reproducibility. Folding it in
+    would fail `audit-models` on a machine merely for owning a GPU and would
+    need one locked hash per device to mean anything. `audit-models` and
+    `doctor` still pass unchanged.
+- **`num_threads`** — defined as what it will actually be used for: the size
+  of the enhancement worker pool (units enhanced concurrently), explicitly
+  *not* an intra-op/BLAS thread count, since conflating the two oversubscribes
+  the machine by `num_threads` squared. `worker_pool_size()` and
+  `threads_per_worker()` are the shared arithmetic; above a pool of one, each
+  worker is given `cores // pool` via `OMP_NUM_THREADS`/`MKL_NUM_THREADS`,
+  never overwriting a value an operator set themselves. At the default of 1
+  nothing is set at all — which is why the reference masters did not move.
+  (Measured separately: a thread budget is numerically safe here — all four
+  reference runs are byte-identical under `OMP_NUM_THREADS=7`.)
+- **`worker_memory_limit_mb`** — enforced, by the core policing itself before
+  it accepts each unit (`runtime.check_memory_budget`, raising the previously
+  unused `WorkerOOMError`): a process that has already blown the budget stops
+  taking work, the parent recycles it, and the refused unit takes the existing
+  fail-closed path to ORIGINAL audio. Not `RLIMIT_AS`, and that is measured
+  too: every memory rlimit is *unsettable* on this project's reference
+  platform (macOS returns `RLIM_INFINITY` and rejects the `setrlimit`, while
+  `RLIMIT_NOFILE` on the same process succeeds), and where it can be set it
+  caps reserved virtual address space — which torch reserves in gigabytes
+  without touching — so it would kill healthy runs rather than runaway ones.
+  Headroom check: the studio worker peaks at ~1.3 GB on a 25 s unit against
+  the shipped 8192 MB budget.
+- **`input.supported_sample_rates`** — enforced as the accepted *envelope*:
+  `min(...)` is the floor the media probe refuses below and `max_sample_rate`
+  the ceiling it refuses above, and `probe_audio` now takes the envelope as a
+  parameter with the schema's declaration as its default, so
+  `audio/probe.py`'s floor is derived from the configuration instead of being
+  a constant that agreed with it by luck. Deliberately not a membership test:
+  every rate between the endpoints is resampled to the core's 48 kHz and
+  processed correctly today, so rejecting 11.025 kHz for being absent from the
+  list would refuse material the engine handles — a capability regression
+  dressed up as rigour. The endpoints are what the UI's advisory rate warning
+  mirrors. The schema also now rejects an empty envelope, non-positive rates,
+  and an envelope whose floor is above `max_sample_rate`.
+- Nothing was deleted, and that was a decision with evidence behind it: the
+  config schema is hashed into `config_hash`, which is hashed into the job id,
+  which seeds the master's deterministic dither. Removing a dead key rewrites
+  the last two LSBs of every published sample (measured: max |Δ| 2.4e-07
+  across all four reference masters). Keys were therefore made to mean
+  something instead. Retiring one is a deliberate act that reissues the
+  reference hashes, and `test_making_these_keys_real_did_not_move_the_config_hash`
+  pins the production profile's hash so it cannot happen by accident.
+
+### Changed — speech units are enhanced concurrently, and a batch stops reloading the model
+
+Two scheduling changes, no arithmetic changes. **All four committed reference
+masters reproduce byte for byte** (`test_output/perf-ref-hashes.txt`, Flute 09
+and teat1vo across production and studio), every unit decision in the four
+committed reference reports is identical, and ten consecutive runs of the same
+file produce one SHA-256.
+
+- **A worker pool instead of one worker.** `pipeline.py` dispatched units one
+  at a time through a single subprocess, though speech units are independent
+  by construction — that independence is what the segmentation architecture
+  is *for*. `EnhancementWorkerPool` now enhances several at once and hands the
+  answers back **indexed by unit**, never by completion order, so scheduling
+  cannot reach the report or a sample. The pipeline consumes them in unit
+  order and guards unit *i* while the pool is still enhancing *i+1*, so
+  guarding and enhancing overlap instead of queueing.
+  Measured, median of 3 interleaved A/B runs against the same tree:
+  Flute 09 (94.6 s, 6 units) **3.29 s -> 2.87 s** on production and
+  (5 units) **6.51 s -> 4.62 s** on studio (RTF 0.069 -> 0.049). A file with a
+  single speech unit is unchanged (1.88 / 2.77 s), which is the point: with
+  one unit the pool starts no threads at all and stays in the caller's thread.
+- **The pool's licence is that both cores are stateless across calls**, which
+  is measured rather than assumed: the same unit run first, second, and alone
+  hashes identically on the Wiener core and on DeepFilterNet3
+  (`tests/unit/test_enhancement_pool.py`). If DFN3 had carried STFT or
+  normalisation state between calls, a pool would have changed the audio.
+- **Sizing.** N = min(configured, cores - 2, memory, units). `runtime.num_threads`
+  is honoured through `runtime.worker_pool_size` when an operator raises it;
+  its default of 1 is read as "unset" rather than "one worker", because that
+  value is hashed into `config_hash` -> job id -> dither seed, so raising it in
+  a shipped profile would move published samples. The memory cap is drawn
+  first from a deliberately pessimistic 1 GB/worker (which is what makes an
+  unmeasured concurrent start safe) and then from the first worker's measured
+  RSS: **500 MB for a warm DeepFilterNet3 worker, 133 MB for a Wiener worker**
+  on the reference machine. `HAWAVOCLEAN_ENHANCE_WORKERS` overrides both.
+- **Fail-closed is per unit, and now tested through the pool.** A SIGKILLed
+  worker fails only the unit it was holding: that unit publishes ORIGINAL
+  audio and records `original_error`, the units queued behind it are
+  untouched, the slot is restaffed, and the job completes
+  (`tests/chaos/test_pool_fail_closed.py`). A slot that cannot start at all
+  hands its unit back to a slot that can, rather than costing it.
+- **`batch` keeps one warm child across files.** The per-file child process
+  existed for isolation — a stuck decoder or a wedged model must cost one
+  file, not the batch — and every file still runs under a hard deadline in a
+  process the parent can kill, now with its own process group so a breach
+  takes the decoder and the workers with it. What is dropped is the part
+  isolation never needed: a fresh interpreter and a fresh model load per file.
+  Measured on 6 files: **11.81 s -> 6.76 s** (production) and
+  **16.99 s -> 8.94 s** (studio), every master byte-identical to the
+  single-file reference.
+- **`close()` stopped pretending.** It put `STOP` on the queue and terminated
+  in the next statement, so no child ever read the message. Both paths are now
+  real, and the default is the signal — because that is what the measurement
+  says: straight to SIGTERM is **2.6 ms** (Wiener) / **8.0 ms** (DFN3) against
+  **43.9 ms / 182.2 ms** for a graceful exit, which has to unwind torch. The
+  worker owns a model and two queues, all of which die with the process, so
+  there is nothing for politeness to buy. `close(grace_s=...)` still asks.
+  (Teardown was never the 0.95 s the perf brief estimated: it measures 2.6-8 ms
+  before this change and after it.)
+- **Guard A was left in the parent, on evidence.** Threads make it *slower*,
+  not faster — 6 units measured 0.585 s sequential against 1.251 s across 6
+  threads (0.47x), because it is GIL-bound. The only route left is another
+  process, and the parent is where the judge belongs: moving it into the
+  process that produced the candidate would put the verdict in the hands of
+  the thing it is judging.
+
+### Added — multi-pass enhancement: `process --passes N|auto`
+- `hawavoclean process IN -o OUT --passes N` (N = 1..4, default 1) runs the
+  full pipeline N times, each pass re-enhancing the previous pass's mastered
+  output; `--passes auto` adds passes (max 4) only while the guard does not
+  regress (enhanced-unit count >= previous pass) AND measured speech/floor
+  separation improves by >= 0.5 dB — a pass that fails is DISCARDED, recorded
+  with its reason, and the previous pass ships. New module
+  `hawavoclean/multipass.py`; the default `--passes 1` path is byte-identical
+  to a run before the flag existed (same code path, same audio bytes, same
+  progress stream). `batch` does not take `--passes` — the flag is refused.
+- Intermediate passes keep FULL finishing including mastering — the measured
+  recipe on the muffled teat1vo lab source (production profile): pass 1
+  clears the guard only at strength 0.50 and its tonal restoration lifts the
+  presence band; that restored output lets pass 2 run at strength 1.00,
+  deepening speech/floor separation 14.9 -> 19.7 -> 23.6 dB (source -> pass 1
+  -> pass 2) with zero musical-noise inflation. A third pass converges
+  (23.6 -> 23.2 dB), so auto stops at 2 kept passes there and records pass 3
+  as discarded.
+- Separation metric: frame RMS (2048/1024), p90 minus p10 in dB, on the mono
+  mix — `multipass.speech_floor_separation_db`, implemented over a cumulative
+  energy sum (memory linear in the signal) and unit-tested identical to the
+  naive framed computation.
+- Provenance: `HawaVoCleanReport` gains `passes: list[PassRecord]`
+  (default `[]`; schema_version stays 1, every pre-existing report still
+  validates and `verify` round-trips). Each `PassRecord` carries pass_index,
+  input/output SHA-256 (chained pass to pass), unit counts, the distinct
+  chosen strengths, separation_db, integrated_lufs, and the discarded flag +
+  reason. The report's `units` remain the FINAL (shipped) pass's records; the
+  `.txt` summary gains a MULTI-PASS AUDIT TRAIL section when more than one
+  pass is on record.
+- Fail-closed: destination preflighted before pass 1 decodes a sample;
+  intermediate outputs live in a `multipass-*` temp dir under the work root,
+  removed on success, error, and SIGINT/SIGTERM (chaos-tested with the
+  SIGSTOP freeze protocol); any pass raising fails the whole run — auto's
+  discard applies only to a completed pass that failed the criteria. The
+  final master + amended report publish through the same atomic staging as a
+  single-pass run (`JobWorkspace.publish_atomically`, now a staticmethod).
+- `--progress-json` with multiple passes: each pass's events are rescaled
+  into its share ([k-1, k]/N; auto treats the current pass as the last until
+  another starts) and carry `"pass":{"index":k,"total":N|null}`. The
+  single-pass stream is unchanged, byte for byte. Mutation gate: M13 deletes
+  the auto discard and must be caught by its owning test.
+
 ### Added — engine bridge for the first UI screen (`docs/ui-contract.md`)
 - `hawavoclean serve --port 0 --token TOKEN [--ui-dir DIR]`: a loopback-only
   FastAPI/uvicorn server (`hawavoclean/server/`). Binds 127.0.0.1 only (any

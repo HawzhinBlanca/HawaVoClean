@@ -5,6 +5,11 @@ noise by per-bin Wiener gains driven by decision-directed a priori SNR
 tracking (Ephraim-Malah / McAulay-Malpass), preserving the original phase
 exactly. It cannot synthesize, substitute, or hallucinate content — it can
 only attenuate spectral magnitude, bounded below by a gain floor.
+
+Device note: this core is numpy and scipy on the CPU. ``runtime.device`` does
+not apply to it, and the registry records that (``device_aware=False``) so a
+production run's report says ``compute_device = "cpu"`` — the device that ran
+— even when the configuration asked for a GPU.
 """
 
 import time
@@ -15,6 +20,7 @@ import numpy as np
 from hawavoclean.audio.resample import resample_audio
 from hawavoclean.enhancement.protocol import EnhancementResult, Enhancer, EnhancerMetadata
 from hawavoclean.hashing import hash_json_canonical
+from hawavoclean.runtime import check_memory_budget
 
 WIENER_PARAMS: dict[str, float | int] = {
     "n_fft": 2048,
@@ -67,6 +73,10 @@ class WienerSpectralEnhancer(Enhancer):
         sample_rate: int,
     ) -> EnhancementResult:
         """Run Wiener spectral filtering on an audio waveform."""
+        # Before taking the unit, not after: a worker that has already blown
+        # runtime.worker_memory_limit_mb stops accepting work rather than
+        # discarding a result it has already paid for.
+        check_memory_budget("production")
         t_start = time.perf_counter()
         orig_len = len(waveform)
 
