@@ -937,3 +937,79 @@ it (the differential-pixel method in iteration 5 is the one that catches those).
 the file was in the OS cache; every cell in the table was captured with `.analyzing-row` on screen.
 (d) The contrast fix above was measured with the CSS-compositing method on the two nodes it changed,
 not with the full differential-pixel walker over every state.
+
+## Second adversarial audit — 2026-08-20 — 6 more boxes unticked (21/27)
+
+Round one's fixes were re-attacked from angles other than the ones that found them, the fix round's
+own 17-file surface was swept for regressions, and a third skeptic hunted ground neither round had
+touched. **A7, B4, B5, B6, B8 and D4 are unticked.** Three round-one fixes were confirmed to hold
+(run-restore artefact truth with zero re-analyze, stranded-clip recovery incl. double-kill and
+32 ms pid-swap variants, the mutation gate's credit rules incl. both negative controls).
+
+### REFUTED
+
+1. **A killed engine leaves its job running to completion — and the UI states the opposite.**
+   Engine SIGKILLed 3.5 s into a run: the job child was reparented to init (ppid 1) and **finished
+   13 s later**, writing a full 13,624,364 B master + report, SHA-256 identical to a normal 5/5 run.
+   The UI meanwhile reconciled to `failed` with *"The engine stopped while this run was in flight, so
+   it never finished. Nothing was written."* — false, with no route to the file that exists.
+   `jobs.py` kills children only from the graceful `shutdown()`; the CLI child has no parent-death
+   watchdog (only `enhancement/worker.py` has one, a level deeper).
+2. **Stereo reports are half-invisible — and every fixture in this entire project is mono.**
+   On a genuine stereo clip the engine emits per-channel units that **overlap in time** (ch0
+   0.000-20.570 / 20.570-40.001, ch1 0.000-20.250 / 20.250-40.001). All four segments are
+   `position:absolute` at the same y in **one lane**; scanning `elementFromPoint` across the 689 px
+   track, channel 1 is topmost on **687 px, channel 0 on 1 px**. Half the report has no tooltip and
+   **cannot be clicked or selected at all**. The waveform is one lane too, so overlapping units of
+   different channels produce an identical highlight.
+3. **The deck-fault plate collapses the spectrum panel** — the fourth gate-invisible layout
+   regression, in a state the fix round *invented and never swept* (iteration 6's 35-screen matrix
+   contains no deck-fault state). The plate takes 69.3 px from the spectrum panel at every size: at
+   960x640 the canvas is **0 px** (was 72) and the legend is **10.9 %** visible, with
+   `elementsFromPoint` returning a metrics tile where each label should be. With the offline banner
+   also up the collapse reaches 1280x800.
+4. **A run can permanently lose its cached analysis.** `onJobStatus`'s done branch guards
+   `setCleaned` against a stale job — correctly — but the same guard also skips the **history**
+   patch, so a run whose analysis returns after the next action reads "— LUFS Δ" for ever and costs
+   a full `POST /api/analyze` on restore. Hit 1 of 12 runs.
+5. **The release gate does not pass, and the mutation gate cannot score.**
+   `tests/chaos/test_interrupt_cleanup.py::test_interrupt_leaves_no_partials_and_no_orphans[2]`
+   still fails — reproduced **five times**, including bare `pytest` on an idle machine
+   (*"SIGINT: partial outputs at destination"*). `run_release_checks.sh` exits 1;
+   `scripts/mutation_gate.py` **aborts with exit 2** on its red baseline without scoring a single
+   mutation. The 12/12 I reported is not currently reproducible on a clean tree. It passes in
+   isolation (3 passed in 4.12 s), so it is ordering/load dependent.
+
+### WEAKER
+
+6. **Two deck-fault holes.** A master truncated to 100 bytes is **not faulted at all** — Chrome
+   accepts the RIFF prefix (duration 0.000396 s), CLEANED stays lit, the transport reads
+   00:00.0/00:00.0, Play does nothing, no message anywhere, run still "Done". And an engine outage
+   during a deck load is **misclassified**: Chromium reports code 4, so the fault records
+   `unreadable` and says "nothing here could decode it" about a healthy file — and since
+   `retryFaultedDecks()` only retries `network`, the deck **stays dead for the rest of the session**.
+   No test in the tree ever produces a real `network` fault from the player.
+7. **Same-profile de-collision is session memory only.** Within a page session studio x3 gives
+   plain/-2/-3, all coexisting,each row's links SHA-256-verified against its own bytes. But
+   `overwrite: true` is always sent and `bumpOutputPath` only avoids paths *this session* used, so
+   after a reload the next run silently destroys the earlier master (measured with a planted
+   sentinel). The SUPERSEDED net is unreachable through the web UI.
+8. **The live run's artefacts are never re-verified** — delete the on-screen run's master and the
+   Master WAV control stays an enabled link whose own href answers 404 (the cleaned deck plays from
+   an in-memory blob, so nothing probes).
+9. **Restoring a run does not restore its profile** — a PRODUCTION row restores with the radiogroup
+   on STUDIO, so the screen asserts both at once and **"PROCESS AGAIN" runs studio, not again**.
+10. **The verdict strip reads "1 UNITS"** where its sibling run list gets the singular right.
+11. **A NUL byte escapes the path policy as a 500** with a raw Python exception
+    (`ValueError: lstat: embedded null character in path`), reachable through the documented
+    `?file=` autoload, though `resolve_client_path` documents 400/403/404 as its only refusals.
+12. **The axe evidence was overstated in this log**: axe declines to judge color-contrast on
+    **55-193 nodes per state** ("background color could not be determined due to a pseudo element").
+    The "1 incomplete" figure I recorded was a count of *rules*, not nodes. The 0-violations result
+    is real; its contrast coverage is much thinner than the log implied. The differential-pixel
+    measurements remain the load-bearing contrast evidence, and an independent re-measurement put
+    `.kv.warn` at 5.17:1 / 12.2:1 against the 5.56:1 / 12.69:1 recorded here — ~7 % optimistic.
+13. **Iteration 6's log entry documents none of that commit's five largest claims** (the deck fault,
+    the three-HEAD artefact verification, the output-path de-collision, the stranded-clip retry and
+    the gate-integrity rewrite). The code was verified behaviourally by the auditor; the log simply
+    did not carry the measurements. Recorded here so the gap is not silent.

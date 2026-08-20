@@ -21,7 +21,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       state transitions (idle→running→done) animated on transform/opacity only; LED pulses.
 - [x] A6 Empty/loading states designed (before any file is loaded the screen must still look
       like a product, not a blank shell); drop-target highlight on drag-over.
-- [x] A7 A/B and verdict strip read instantly: verdict segments with hover tooltip + click to
+- [ ] A7 A/B and verdict strip read instantly: verdict segments with hover tooltip + click to
       seek to the unit; A/B switch visually obvious which deck is live.
 
 ## B. UX completeness (web mode)
@@ -31,15 +31,15 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       upload progress for large files and a clear error for unsupported types.
 - [x] B3 Zoom + scroll in the waveform (wheel/pinch to zoom, drag ruler to pan), with the
       verdict strip staying aligned to the visible window.
-- [x] B4 Per-unit inspection: clicking a verdict segment selects the unit — highlights its
+- [ ] B4 Per-unit inspection: clicking a verdict segment selects the unit — highlights its
       range, shows its guard scores/decision reason in a details panel, seeks the transport.
-- [x] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
+- [ ] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
       re-selectable without re-analyzing.
-- [x] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
+- [ ] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
       (health polling), state preserved; SSE drop mid-job recovers to the correct terminal state.
 - [x] B7 Report access: download master + JSON report + human-readable txt from the UI;
       "copy report summary" one-liner.
-- [x] B8 Responsive from 960×640 up to ultrawide; no overlap, no dead zones, sensible max
+- [ ] B8 Responsive from 960×640 up to ultrawide; no overlap, no dead zones, sensible max
       widths at ≥1920.
 
 ## C. Performance & robustness
@@ -60,7 +60,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       all controls; verdict tooltip content reachable without hover.
 - [x] D2 Contrast ≥ 4.5:1 for all text (checked on the dark theme values actually shipped).
 - [x] D3 `prefers-reduced-motion` honored (disables pulse/glow animation, keeps function).
-- [x] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
+- [ ] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
       (default + fuzz when engine touched) / mutation gate on clean tree / `pnpm typecheck`
       / `pnpm build`. UI logic that can be unit-tested (state machine, SSE client, API client,
       keyboard map) has vitest coverage; the rest is covered by scripted browser verification.
