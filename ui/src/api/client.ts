@@ -119,14 +119,95 @@ export class EngineClient {
     return this.json<{ path: string }>('/api/upload', { method: 'POST', body: form }, signal);
   }
 
+  /**
+   * `POST /api/upload` with real byte-level progress and a real cancel.
+   *
+   * `fetch` cannot report request progress (a `ReadableStream` request body
+   * needs HTTP/2 and full-duplex support, which loopback HTTP/1.1 does not
+   * give us), so the upload path is the one place in this client that still
+   * uses `XMLHttpRequest` — it is the only API that exposes `upload.onprogress`.
+   * `cancel` returns a function that aborts the transfer; the promise then
+   * rejects with an `AbortError`, exactly like an aborted `fetch`.
+   */
+  uploadWithProgress(
+    file: File,
+    opts: {
+      onProgress?: (loaded: number, total: number) => void;
+      onCancelHandle?: (cancel: () => void) => void;
+    } = {},
+  ): Promise<{ path: string }> {
+    return new Promise<{ path: string }>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${this.baseUrl}/api/upload`, true);
+      xhr.setRequestHeader('X-Hawa-Token', this.token);
+      xhr.responseType = 'text';
+      let cancelled = false;
+      opts.onCancelHandle?.(() => {
+        cancelled = true;
+        xhr.abort();
+      });
+      xhr.upload.onprogress = (e: ProgressEvent): void => {
+        opts.onProgress?.(e.loaded, e.lengthComputable ? e.total : file.size);
+      };
+      xhr.onerror = () => reject(new EngineError(0, 'network', 'Engine unreachable'));
+      xhr.ontimeout = () => reject(new EngineError(0, 'timeout', 'Upload timed out'));
+      xhr.onabort = () =>
+        reject(new DOMException(cancelled ? 'Upload cancelled' : 'Aborted', 'AbortError'));
+      xhr.onload = () => {
+        const text = typeof xhr.response === 'string' ? xhr.response : '';
+        let body: Record<string, unknown> = {};
+        try {
+          body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+        } catch {
+          /* non-JSON body */
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && typeof body.path === 'string') {
+          // The bytes are on the wire the moment `upload.onprogress` reaches
+          // 100%, but the engine still has to write them out; hold the bar at
+          // full until the response lands so the two never disagree.
+          opts.onProgress?.(file.size, file.size);
+          resolve({ path: body.path });
+          return;
+        }
+        const code = typeof body.error === 'string' ? body.error : `http_${xhr.status}`;
+        const message =
+          typeof body.message === 'string'
+            ? body.message
+            : `${xhr.status} ${xhr.statusText}`.trim() || 'Upload failed';
+        reject(new EngineError(xhr.status, code, message));
+      };
+      const form = new FormData();
+      form.append('file', file, file.name);
+      xhr.send(form);
+    });
+  }
+
+  /** Plain text of a served file (the human-readable report sidecar). */
+  async fetchText(path: string, signal?: AbortSignal): Promise<string> {
+    const res = await fetch(this.fileUrl(path), { signal: signal ?? null });
+    if (!res.ok) throw await parseError(res);
+    return await res.text();
+  }
+
   shutdown(): Promise<{ ok: boolean }> {
     return this.json<{ ok: boolean }>('/api/shutdown', { method: 'POST' });
   }
 
-  /** URL for `<audio src>` — the token must travel as a query parameter. */
-  audioUrl(path: string): string {
+  /**
+   * URL for any file the engine will serve under its path policy: the audio a
+   * deck plays, and equally the JSON report and its .txt sidecar (`/api/audio`
+   * types the response from the file's own extension, so it serves all three).
+   * The token must travel as a query parameter — an `<audio src>` and a
+   * download anchor cannot carry a header.
+   */
+  fileUrl(path: string): string {
     const q = new URLSearchParams({ path, token: this.token });
     return `${this.baseUrl}/api/audio?${q.toString()}`;
+  }
+
+  /** @deprecated name — `fileUrl` says what it actually does. */
+  audioUrl(path: string): string {
+    return this.fileUrl(path);
   }
 
   /** URL for the job's `EventSource` stream. */

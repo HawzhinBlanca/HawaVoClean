@@ -1,15 +1,47 @@
-/* Spectrum panel chrome — legend + display surface.
+/* Spectrum panel chrome — the key + the display surface.
  *
  * The panel's own grid lives in styles/app.css; everything here belongs to the
  * spectrum component. Colours come from styles/tokens.css with fallbacks so
- * the display still reads correctly if a token is missing. */
+ * the display still reads correctly if a token is missing.
+ *
+ * ONE KEY. Four series are drawn: the two long-term average curves, the band
+ * between them, and the live trace. Each has exactly one entry here — the plot
+ * itself no longer carries a second, differently-styled legend in its corner —
+ * and each swatch is a miniature of the mark it stands for, so the key is read
+ * by matching shapes rather than by reading colour names. */
+
+/* The body becomes a two-track column: the display keeps the flexible track,
+ * the key takes only the 14px it needs. Declared here rather than in the
+ * design-system layer because the second track only exists for this key. */
+.spectrum-panel .spectrum-body {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+}
+
+/* The display carried a `min-height` from the days when it was the body's only
+ * child and could simply overflow the panel. With a second track below it that
+ * floor made the canvas paint straight over the key on a 640px-tall window.
+ * The flexible track is the floor now: the display takes everything the panel
+ * can spare and the key always gets its own 13px. */
+.spectrum-panel .spectrum-display {
+  min-height: 0;
+}
+
+@media (max-height: 720px) {
+  .spectrum-panel .spectrum-body {
+    gap: 5px;
+  }
+}
 
 .spec-legend {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex: none;
   min-width: 0;
+  height: 13px;
+  padding: 0 1px;
 }
 
 .spec-legend .item {
@@ -22,7 +54,7 @@
   letter-spacing: var(--ls-caps, 0.08em);
   text-transform: uppercase;
   white-space: nowrap;
-  color: var(--fg-3, #7c8593);
+  color: var(--fg-3, #949daa);
   transition:
     color var(--dur, 160ms) var(--ease-out, ease),
     opacity var(--dur, 160ms) var(--ease-out, ease);
@@ -33,7 +65,7 @@
   width: 12px;
   height: 2px;
   border-radius: 1px;
-  background: var(--fg-4, #545c69);
+  background: var(--fg-4, #808a99);
   box-shadow: none;
   transition:
     background var(--dur, 160ms) var(--ease-out, ease),
@@ -54,33 +86,87 @@
   box-shadow: 0 0 6px var(--cyan-glow, rgba(57, 208, 255, 0.45));
 }
 
-/* the live overlay is drawn in whichever deck is monitored, so its chip
- * follows the same colour — and it is a thinner, dashed rule to match the
- * lighter stroke used on the canvas */
+/* REMOVED is an area, not a line, so its swatch is an area: the same warm
+ * wash and the same 45° hatch the canvas paints between the two curves. */
+.spec-legend .removed .sw {
+  width: 11px;
+  height: 9px;
+  border-radius: 1.5px;
+  background:
+    repeating-linear-gradient(
+      45deg,
+      rgba(255, 179, 71, 0.55) 0 1px,
+      transparent 1px 3.5px
+    ),
+    rgba(255, 179, 71, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(255, 179, 71, 0.28);
+}
+
+.spec-legend .removed.off .sw {
+  background:
+    repeating-linear-gradient(45deg, rgba(128, 138, 153, 0.4) 0 1px, transparent 1px 3.5px),
+    transparent;
+  box-shadow: inset 0 0 0 1px rgba(128, 138, 153, 0.22);
+}
+
+/* The live overlay is drawn in whichever deck is monitored, so its chip
+ * follows the same colour — but as the thin, near-white hairline the canvas
+ * actually strokes, which is what tells it apart from the LTAS curves. */
 .spec-legend .live .sw {
   height: 0;
-  border-top: 1.5px dashed var(--fg-4, #545c69);
+  border-top: 1px solid var(--fg-4, #808a99);
   border-radius: 0;
   background: none;
 }
 
 .spec-legend .live.on.deck-original .sw {
-  border-top-color: var(--amber-2, #ffd28a);
+  border-top-color: #ffe9c5;
   filter: drop-shadow(0 0 4px var(--amber-glow, rgba(255, 179, 71, 0.45)));
 }
 
 .spec-legend .live.on.deck-cleaned .sw {
-  border-top-color: var(--cyan-2, #9ae8ff);
+  border-top-color: #cdf4ff;
   filter: drop-shadow(0 0 4px var(--cyan-glow, rgba(57, 208, 255, 0.45)));
 }
 
 .spec-legend .item.off {
-  color: var(--fg-4, #545c69);
+  color: var(--fg-4, #808a99);
   opacity: 0.55;
 }
 
 .spec-legend .live.on .sw {
   animation: spec-live-pulse 1.7s var(--ease-out, ease-in-out) infinite;
+}
+
+/* The measurement descriptor is not a series, so it is not a key entry: it
+ * rides at the end of the same row, one step quieter, with a hairline
+ * separating it from the things it does not label. */
+.spec-legend .meta {
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif);
+  font-size: var(--fs-label, 11px);
+  font-weight: var(--fw-medium, 500);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--fg-4, #808a99);
+  white-space: nowrap;
+  padding-left: 8px;
+  margin-left: auto;
+  border-left: 1px solid var(--hair, rgba(255, 255, 255, 0.07));
+  font-variant-numeric: tabular-nums;
+  display: none;
+}
+
+/* The descriptor labels the axis, not a mark, so it is the first thing the
+ * key gives up: it appears only once the column is wide enough that the four
+ * entries plus their words have already been paid for. */
+@media (min-width: 1600px) {
+  .spec-legend {
+    gap: 8px;
+  }
+
+  .spec-legend .meta {
+    display: block;
+  }
 }
 
 @keyframes spec-live-pulse {
@@ -106,12 +192,22 @@
   touch-action: none;
 }
 
-/* When the right column gets narrow the legend gives up its words before the
- * display gives up any pixels; the chips still identify the curves, and the
- * accessible name stays on the item. */
+/* At the supported floor (960px) the four labelled entries need 295px and the
+ * column gives 300 — so the words survive all the way down, on a tighter gap,
+ * rather than being dropped at the first sign of pressure. */
 @media (max-width: 1180px) {
   .spec-legend {
-    gap: 8px;
+    gap: 7px;
+  }
+}
+
+/* Below the floor the words go and the swatches stay: four distinguishable
+ * marks (amber rule, cyan rule, hatched block, bright hairline) still identify
+ * every series, and the accessible name on each item carries the words for
+ * anyone who cannot see them. The display never gives up a pixel for the key. */
+@media (max-width: 900px) {
+  .spec-legend {
+    gap: 9px;
   }
 
   .spec-legend .item .txt {
@@ -120,5 +216,9 @@
 
   .spec-legend .sw {
     width: 14px;
+  }
+
+  .spec-legend .removed .sw {
+    width: 12px;
   }
 }

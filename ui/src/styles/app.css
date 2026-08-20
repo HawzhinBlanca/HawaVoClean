@@ -162,6 +162,13 @@ kbd {
     var(--page);
 }
 
+/* B6 · the offline banner takes a row of its own rather than floating over
+   the chassis. An overlay can cover a control, and the moment something has
+   gone wrong is the moment the controls matter most. */
+.app[data-offline='true'] {
+  grid-template-rows: 46px auto 56px minmax(0, 1fr) 28px;
+}
+
 .main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
@@ -438,16 +445,17 @@ kbd {
   color: var(--fg-2);
 }
 
-.btn:hover:not(:disabled) {
+.btn:hover:not(:disabled):not([aria-disabled='true']) {
   transform: translateY(-1px);
 }
 
-.btn:active:not(:disabled) {
+.btn:active:not(:disabled):not([aria-disabled='true']) {
   transform: translateY(0);
   box-shadow: var(--shadow-pressed);
 }
 
-.btn:disabled {
+.btn:disabled,
+.btn[aria-disabled='true'] {
   opacity: 0.38;
 }
 
@@ -1047,7 +1055,10 @@ kbd {
   align-items: baseline;
   gap: 5px;
   margin-top: 2px;
-  height: 14px;
+  /* The line box of an 11px uppercase run is 15px, so a 14px cell clipped the
+     descenders of the delta row at 960. The cell is the line. */
+  height: 15px;
+  line-height: 15px;
   font-family: var(--font-mono);
   font-size: var(--fs-label);
   font-variant-numeric: tabular-nums;
@@ -1186,15 +1197,16 @@ kbd {
   will-change: transform;
 }
 
-.process:hover:not(:disabled) {
+.process:hover:not(:disabled):not([aria-disabled='true']) {
   transform: translateY(-1px);
 }
 
-.process:active:not(:disabled) {
+.process:active:not(:disabled):not([aria-disabled='true']) {
   transform: translateY(0);
 }
 
-.process:disabled {
+.process:disabled,
+.process[aria-disabled='true'] {
   opacity: 0.45;
 }
 
@@ -1390,19 +1402,32 @@ kbd {
   color: var(--fg-4);
 }
 
-/* the "/ duration" half is secondary, and shedding a step keeps the whole
-   clock inside its column at 1440 without the housing touching the A/B pair */
+/* B8 · the "/ duration" half used to be hidden below 1240, which is exactly
+   where a person most needs to know how long the clip is — the transport was
+   the only clock on screen and it read like a stopwatch with no dial. It is
+   kept at every width; the row pays for it by tightening the A/B key caps and
+   dropping the clock a size, both of which cost nothing legible. */
 .timecode .dur {
   font-size: var(--fs-sm);
 }
 
-.timecode .dur {
-  display: none;
-}
+/* Below 1240 the side column is 320px and the row cannot hold the play key,
+   the A/B pair and a full clock side by side — something had to give, and for
+   two iterations it was the duration. Shrinking the A/B caps instead would
+   fight A7 (which deck is live has to be the loudest thing in the housing),
+   so the clock takes a line of its own under the pair. It reads better large
+   and right-aligned than it ever did squeezed against the housing. */
+@media (max-width: 1239px) {
+  .transport {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    column-gap: var(--pad-3);
+    row-gap: var(--pad-2);
+  }
 
-@media (min-width: 1240px) {
-  .timecode .dur {
-    display: inline;
+  .timecode {
+    grid-column: 1 / -1;
+    justify-self: end;
   }
 }
 
@@ -1507,6 +1532,10 @@ kbd {
     padding: 10px;
   }
 
+  .app[data-offline='true'] {
+    grid-template-rows: 40px auto 48px minmax(0, 1fr) 24px;
+  }
+
   .right {
     gap: 10px;
   }
@@ -1549,7 +1578,9 @@ kbd {
 
   .tile .sub {
     margin-top: 1px;
-    height: 13px;
+    /* 13px clipped the delta row's line box; the saving was one pixel. */
+    height: 15px;
+    line-height: 15px;
   }
 
   .spectrum-body {
@@ -1856,9 +1887,12 @@ kbd {
 
 .insp-finish .chip {
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* A finishing action is a machine token — `dc_subsonic_removed(cutoff=
+     75.0Hz)` — and the tail is the half that carries the number. It wraps
+     rather than ellipsises: two lines lose nothing, an ellipsis loses the
+     value. */
+  overflow-wrap: anywhere;
+  white-space: normal;
   font-family: var(--font-mono);
   font-size: var(--fs-label);
   color: var(--fg-2);
@@ -2014,7 +2048,22 @@ kbd {
   z-index: 2;
 }
 
-@media (max-width: 1380px) {
+/* B8 · the guard tables need ~250 px each before their row heads
+   ("Anchors · high conf") start to clip. Three across only earns its keep once
+   the inspector is at least ~850 px wide, which is 1600 in the two-column
+   shell — below that, and again above 2500 where the inspector moves into its
+   own tall column, it goes two across. */
+@media (max-width: 1599px) {
+  .insp-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .insp-ident {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (min-width: 2500px) {
   .insp-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }

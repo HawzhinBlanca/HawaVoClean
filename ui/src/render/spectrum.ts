@@ -1,18 +1,39 @@
 // Spectrum analyser display — main-thread Canvas 2D, driven by requestAnimationFrame.
 //
-// Three layers, back to front:
-//   1. an inset display ground with a log-frequency / dB grid (hairline, one
-//      device pixel wide, so it never competes with the curves);
-//   2. the long-term average spectra of the two decks (ORIGINAL amber,
-//      CLEANED cyan) as gradient-filled areas with a glow and a bright core
-//      stroke, plus difference shading wherever the cleaned curve sits below
-//      the original — that band *is* the noise this app removed;
-//   3. the live AnalyserNode overlay with proper meter ballistics (fast
-//      attack / slow release) and a peak-hold line that decays over ~1.5 s.
+// Three surfaces, composited back to front:
+//
+//   `base`   an opaque offscreen canvas holding everything that only changes
+//            when the *data* changes: the inset display ground, the log-Hz/dB
+//            grid and its labels, the gradient fills under each deck's
+//            long-term average spectrum, the shaded REMOVED band between them,
+//            the bloom around the curve strokes, and the curve cores. Rebuilt
+//            only on new data / resize / theme change, then blitted once per
+//            frame. That is what pays for the expensive fill and bloom work:
+//            during playback the per-frame cost is one drawImage plus the live
+//            trace, not a full re-render of the analysis.
+//
+//   `fx`     a transparent scratch the size of the display, used to composite
+//            the two deck fills *correctly*: the cleaned deck's area is punched
+//            out of the original's with `destination-out` before the cleaned
+//            fill is laid in, so the overlap is never two washes stacked into
+//            mud. What survives of the amber fill is exactly the band where the
+//            cleaned curve sits below the original — the energy this app
+//            removed — and it gets a hatch so it reads as a difference region
+//            rather than as another deck.
+//
+//   `bloom`  a half-resolution transparent canvas that the curve strokes are
+//            drawn into with widening, fading passes under `lighter`, then
+//            composited additively (and upscaled, which softens it further).
+//            Real bloom, not a halo: energy accumulates where curves overlap.
+//
+// On top of the blit, every frame draws the live AnalyserNode overlay — a
+// thinner, brighter, faster trace than the LTAS curves, with fast-attack /
+// slow-release ballistics and a peak-hold line that falls the full scale in
+// ~1.5 s — and the hover readout.
 //
 // No React state is touched per frame, and a frame allocates nothing: every
-// projection, gradient and label string is rebuilt only when the data, the
-// canvas size or the theme changes.
+// projection, gradient, pattern and label string is rebuilt only when the data,
+// the canvas size or the theme changes.
 
 export interface SpectrumCurve {
   freqs: Float32Array;
@@ -35,13 +56,33 @@ const DB_SPAN = DB_MAX - DB_MIN;
 // long-term spectrum is referenced so that sine reads ≈ 0 dB; compensate.
 const ANALYSER_OFFSET_DB = 13.5;
 
-// Meter ballistics for the live overlay.
-const ATTACK_S = 0.022; // fast attack — transients are visible
-const RELEASE_S = 0.34; // slow release — the curve breathes instead of flickering
-const PEAK_HOLD_S = 0.4; // peak sits still this long before it starts falling
+// Meter ballistics for the live overlay. The LTAS curves are an average over
+// the whole file and never move; the live trace has to be obviously a
+// different *kind* of reading, so it is quick enough to show syllables.
+const ATTACK_S = 0.012; // fast attack — transients are visible
+const RELEASE_S = 0.17; // release fast enough to track speech, slow enough not to strobe
+const PEAK_HOLD_S = 0.35; // peak sits still this long before it starts falling
 const PEAK_FALL_DB_S = DB_SPAN / 1.5; // then it crosses the whole scale in ~1.5 s
-const FADE_IN_S = 0.22;
-const FADE_OUT_S = 0.45;
+const FADE_IN_S = 0.18;
+const FADE_OUT_S = 0.4;
+
+/** Fill "hug": widening, fading strokes clipped to the area under a curve, so
+ *  the wash is strongest against the curve itself and gone by the floor. */
+const HUG: readonly (readonly [number, number])[] = [
+  [2.5, 0.26],
+  [7, 0.16],
+  [17, 0.085],
+  [38, 0.045],
+  [80, 0.022],
+];
+
+/** Bloom passes, drawn into the half-res layer under `lighter`. */
+const BLOOM: readonly (readonly [number, number])[] = [
+  [12, 0.055],
+  [6, 0.095],
+  [2.8, 0.16],
+  [1.3, 0.22],
+];
 
 const MAJOR_HZ = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
 const MINOR_HZ = [
@@ -118,10 +159,20 @@ function rgba(c: RGB, a: number): string {
   return `rgba(${c[0]},${c[1]},${c[2]},${a})`;
 }
 
+function mix(a: RGB, b: RGB, t: number): RGB {
+  return [
+    Math.round((a[0] ?? 0) + ((b[0] ?? 0) - (a[0] ?? 0)) * t),
+    Math.round((a[1] ?? 0) + ((b[1] ?? 0) - (a[1] ?? 0)) * t),
+    Math.round((a[2] ?? 0) + ((b[2] ?? 0) - (a[2] ?? 0)) * t),
+  ];
+}
+
+const WHITE: RGB = [255, 255, 255];
+
 interface Pen {
-  glow: string;
-  halo: string;
+  base: RGB;
   core: string;
+  /** live trace: the deck's hue pushed most of the way to white */
   live: string;
   peak: string;
 }
@@ -163,6 +214,22 @@ interface Projection {
 
 const EMPTY_PROJECTION: Projection = { n: 0, xs: new Float32Array(0), ys: new Float32Array(0) };
 
+/** Does this browser honour `ctx.filter`? Chromium and Safari 17+ do; the
+ *  bloom degrades to the multi-pass strokes alone where it does not. */
+let filterSupport: boolean | null = null;
+function supportsFilter(): boolean {
+  if (filterSupport !== null) return filterSupport;
+  try {
+    const c = document.createElement('canvas').getContext('2d');
+    if (!c) return (filterSupport = false);
+    c.filter = 'blur(2px)';
+    filterSupport = c.filter === 'blur(2px)';
+  } catch {
+    filterSupport = false;
+  }
+  return filterSupport;
+}
+
 export class SpectrumRenderer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -173,6 +240,16 @@ export class SpectrumRenderer {
   private dpr = 1;
   private raf = 0;
   private dirty = true;
+  /** the cached `base` layer no longer matches the data */
+  private staticDirty = true;
+
+  // offscreen layers
+  private base: HTMLCanvasElement | null = null;
+  private baseCtx: CanvasRenderingContext2D | null = null;
+  private fx: HTMLCanvasElement | null = null;
+  private fxCtx: CanvasRenderingContext2D | null = null;
+  private bloom: HTMLCanvasElement | null = null;
+  private bloomCtx: CanvasRenderingContext2D | null = null;
 
   private curves: Record<SpectrumDeck, SpectrumCurve | null> = { original: null, cleaned: null };
   private proj: Record<SpectrumDeck, Projection> = {
@@ -208,7 +285,7 @@ export class SpectrumRenderer {
   private gBg: CanvasGradient | null = null;
   private gVignette: CanvasGradient | null = null;
   private gFill: Record<SpectrumDeck, CanvasGradient | null> = { original: null, cleaned: null };
-  private gDiff: CanvasGradient | null = null;
+  private hatch: CanvasPattern | null = null;
   private strokeOf: Record<SpectrumDeck, Pen>;
 
   // hover readout
@@ -217,6 +294,8 @@ export class SpectrumRenderer {
   // frame instrumentation (read by perf probes; never by React)
   private frames = 0;
   private drawMsTotal = 0;
+  private baseBuilds = 0;
+  private baseMsTotal = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -286,14 +365,15 @@ export class SpectrumRenderer {
   }
 
   private strokeSet(base: RGB, lite: RGB): Pen {
+    // The live trace runs over the averaged one. Same deck, so the same hue —
+    // but pushed most of the way to white and drawn a third thinner, which is
+    // what makes an instantaneous reading read as instantaneous.
+    const live = mix(lite, WHITE, 0.38);
     return {
-      glow: rgba(base, 0.1),
-      halo: rgba(base, 0.2),
+      base,
       core: rgba(base, 0.98),
-      // the live trace runs over the averaged one, so it takes the lighter
-      // tint of the same hue — same deck, obviously a different reading
-      live: rgba(lite, 0.95),
-      peak: rgba(lite, 0.5),
+      live: rgba(live, 0.96),
+      peak: rgba(live, 0.55),
     };
   }
 
@@ -305,11 +385,16 @@ export class SpectrumRenderer {
       cleaned: this.strokeSet(this.paints.cyan, this.paints.cyan2),
     };
     this.rebuildPaints();
+    this.invalidate();
+  }
+
+  private invalidate(): void {
+    this.staticDirty = true;
     this.dirty = true;
   }
 
   private rebuildPaints(): void {
-    const ctx = this.ctx;
+    const ctx = this.baseCtx ?? this.ctx;
     const p = this.plot;
     const bg = ctx.createLinearGradient(0, 0, 0, this.cssH);
     bg.addColorStop(0, this.paints.bgTop);
@@ -326,22 +411,53 @@ export class SpectrumRenderer {
     vig.addColorStop(0, 'rgba(0,0,0,0)');
     vig.addColorStop(1, 'rgba(0,0,0,0.5)');
     this.gVignette = vig;
+    const fx = this.fxCtx ?? ctx;
     this.gFill = {
-      original: this.areaGradient(p, this.paints.amber),
-      cleaned: this.areaGradient(p, this.paints.cyan),
+      original: this.areaGradient(fx, p, this.paints.amber),
+      cleaned: this.areaGradient(fx, p, this.paints.cyan),
     };
-    const d = ctx.createLinearGradient(0, p.y, 0, p.y + p.h);
-    d.addColorStop(0, rgba(this.paints.amber, 0.16));
-    d.addColorStop(1, rgba(this.paints.amber, 0.05));
-    this.gDiff = d;
+    this.hatch = this.makeHatch(fx, this.paints.amber);
   }
 
-  private areaGradient(p: Plot, c: RGB): CanvasGradient {
-    const g = this.ctx.createLinearGradient(0, p.y, 0, p.y + p.h);
+  /** Body wash under a curve: present at the top of the plot, gone at the
+   *  floor. The *hug* passes on top of it supply "strong near the curve". */
+  private areaGradient(ctx: CanvasRenderingContext2D, p: Plot, c: RGB): CanvasGradient {
+    const g = ctx.createLinearGradient(0, p.y, 0, p.y + p.h);
     g.addColorStop(0, rgba(c, 0.34));
-    g.addColorStop(0.45, rgba(c, 0.12));
+    g.addColorStop(0.42, rgba(c, 0.15));
+    g.addColorStop(0.78, rgba(c, 0.05));
     g.addColorStop(1, rgba(c, 0));
     return g;
+  }
+
+  /**
+   * 45° hatch for the REMOVED band. Built at device resolution and handed back
+   * a matrix that undoes the DPR scale, so the lines stay one device pixel
+   * wide instead of turning into a blurred wash on a retina display.
+   */
+  private makeHatch(ctx: CanvasRenderingContext2D, c: RGB): CanvasPattern | null {
+    const d = this.dpr;
+    const tile = Math.max(4, Math.round(7 * d));
+    const cv = document.createElement('canvas');
+    cv.width = tile;
+    cv.height = tile;
+    const g = cv.getContext('2d');
+    if (!g) return null;
+    g.strokeStyle = rgba(c, 0.5);
+    g.lineWidth = Math.max(1, Math.round(d * 0.6));
+    g.beginPath();
+    // two segments so the diagonal tiles seamlessly
+    g.moveTo(-tile, tile);
+    g.lineTo(tile, -tile);
+    g.moveTo(0, 2 * tile);
+    g.lineTo(2 * tile, 0);
+    g.stroke();
+    const pat = ctx.createPattern(cv, 'repeat');
+    if (!pat) return null;
+    if (typeof pat.setTransform === 'function' && typeof DOMMatrix === 'function') {
+      pat.setTransform(new DOMMatrix([1 / d, 0, 0, 1 / d, 0, 0]));
+    }
+    return pat;
   }
 
   // ---- size ---------------------------------------------------------------
@@ -369,9 +485,15 @@ export class SpectrumRenderer {
   }
 
   private syncSize(): void {
-    const rect = this.canvas.getBoundingClientRect();
-    const w = Math.max(1, Math.round(rect.width));
-    const h = Math.max(1, Math.round(rect.height));
+    // `getBoundingClientRect` reports the *painted* box, so a CSS transform
+    // anywhere up the tree (a scaled overlay, a zoom animation, a
+    // `scale()`-based transition on a parent panel) silently inflated the
+    // backing store and left the renderer drawing several times the pixels it
+    // needed. The layout box is what the canvas actually occupies, and
+    // `offsetWidth`/`offsetHeight` report it untouched by any ancestor
+    // transform.
+    const w = Math.max(1, this.canvas.offsetWidth || 1);
+    const h = Math.max(1, this.canvas.offsetHeight || 1);
     const dpr = window.devicePixelRatio || 1;
     if (w === this.cssW && h === this.cssH && dpr === this.dpr) return;
     this.cssW = w;
@@ -379,9 +501,45 @@ export class SpectrumRenderer {
     this.dpr = dpr;
     this.canvas.width = Math.round(w * dpr);
     this.canvas.height = Math.round(h * dpr);
+    this.ensureLayers();
     this.rebuildPaints();
     this.projectAll();
-    this.dirty = true;
+    this.invalidate();
+  }
+
+  /** (Re)allocate the offscreen layers for the current size / DPR. */
+  private ensureLayers(): void {
+    const d = this.dpr;
+    const W = Math.round(this.cssW * d);
+    const H = Math.round(this.cssH * d);
+    if (!this.base) {
+      this.base = document.createElement('canvas');
+      this.baseCtx = this.base.getContext('2d', { alpha: false });
+    }
+    if (!this.fx) {
+      this.fx = document.createElement('canvas');
+      this.fxCtx = this.fx.getContext('2d');
+    }
+    if (!this.bloom) {
+      this.bloom = document.createElement('canvas');
+      this.bloomCtx = this.bloom.getContext('2d');
+    }
+    if (this.base) {
+      this.base.width = W;
+      this.base.height = H;
+    }
+    if (this.fx) {
+      this.fx.width = W;
+      this.fx.height = H;
+    }
+    if (this.bloom) {
+      this.bloom.width = Math.max(1, Math.round(W / 2));
+      this.bloom.height = Math.max(1, Math.round(H / 2));
+    }
+    if (this.baseCtx) {
+      this.baseCtx.imageSmoothingEnabled = true;
+      this.baseCtx.imageSmoothingQuality = 'high';
+    }
   }
 
   // ---- data ---------------------------------------------------------------
@@ -390,13 +548,13 @@ export class SpectrumRenderer {
     this.curves[deck] = curve;
     this.proj[deck] = this.project(curve);
     this.rebuildDiff();
-    this.dirty = true;
+    this.invalidate();
   }
 
   setFocus(deck: SpectrumDeck): void {
     if (this.focus !== deck) {
       this.focus = deck;
-      this.dirty = true;
+      this.invalidate();
     }
   }
 
@@ -413,7 +571,7 @@ export class SpectrumRenderer {
     if (analyser) {
       // Ballistics belong to this renderer, so the node itself smooths only
       // enough to take the edge off bin-to-bin noise.
-      analyser.smoothingTimeConstant = 0.4;
+      analyser.smoothingTimeConstant = 0.25;
       if (!this.liveBuf || this.liveBuf.length !== analyser.frequencyBinCount) {
         this.liveBuf = new Float32Array(analyser.frequencyBinCount);
       }
@@ -427,13 +585,25 @@ export class SpectrumRenderer {
     this.mql?.removeEventListener('change', this.onDprChange);
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerleave', this.onPointerLeave);
+    // release the backing stores rather than waiting for the GC to notice
+    // three canvases per disposed renderer
+    for (const c of [this.base, this.fx, this.bloom]) {
+      if (c) {
+        c.width = 0;
+        c.height = 0;
+      }
+    }
+    this.base = this.fx = this.bloom = null;
+    this.baseCtx = this.fxCtx = this.bloomCtx = null;
   }
 
   /** Mean cost of a drawn frame in ms, and how many frames have been drawn. */
-  get stats(): { frames: number; meanDrawMs: number } {
+  get stats(): { frames: number; meanDrawMs: number; baseBuilds: number; meanBaseMs: number } {
     return {
       frames: this.frames,
       meanDrawMs: this.frames ? this.drawMsTotal / this.frames : 0,
+      baseBuilds: this.baseBuilds,
+      meanBaseMs: this.baseBuilds ? this.baseMsTotal / this.baseBuilds : 0,
     };
   }
 
@@ -556,8 +726,11 @@ export class SpectrumRenderer {
   // ---- pointer ------------------------------------------------------------
 
   private onPointerMove(e: PointerEvent): void {
-    const rect = this.canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
+    // `offsetX` is in the target's own layout coordinates, so — unlike
+    // clientX minus a bounding rect — it survives an ancestor transform.
+    const x = Number.isFinite(e.offsetX)
+      ? e.offsetX
+      : e.clientX - this.canvas.getBoundingClientRect().left;
     const p = this.plot;
     const next = x >= p.x - 2 && x <= p.x + p.w + 2 ? Math.min(p.x + p.w, Math.max(p.x, x)) : null;
     if (next !== this.cursorX) {
@@ -660,7 +833,7 @@ export class SpectrumRenderer {
     this.lastT = ts;
     const animating = this.liveActive || this.liveVisible > 0;
     if (animating) this.step(dt);
-    if (!animating && !this.dirty) return;
+    if (!animating && !this.dirty && !this.staticDirty) return;
     this.dirty = false;
     this.draw();
   }
@@ -669,62 +842,239 @@ export class SpectrumRenderer {
 
   private draw(): void {
     const t0 = performance.now();
+    if (this.staticDirty) this.renderBase();
     const ctx = this.ctx;
     const W = this.cssW;
     const H = this.cssH;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
 
+    if (this.base) ctx.drawImage(this.base, 0, 0, W, H);
+    else {
+      ctx.fillStyle = this.paints.bgBot;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    const p = this.plot;
+    const hasO = this.proj.original.n > 1;
+    const hasC = this.proj.cleaned.n > 1;
+
+    if (this.liveVisible > 0.001) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(p.x, p.y, p.w, p.h);
+      ctx.clip();
+      this.drawLive(p);
+      ctx.restore();
+    }
+
+    if (this.cursorX !== null && (hasO || hasC)) this.drawReadout(p);
+
+    this.frames++;
+    this.drawMsTotal += performance.now() - t0;
+  }
+
+  /** Everything that only changes when the analysis, the size or the theme does. */
+  private renderBase(): void {
+    const ctx = this.baseCtx;
+    if (!ctx || !this.base) {
+      this.staticDirty = false;
+      return;
+    }
+    const t0 = performance.now();
+    this.staticDirty = false;
+    const W = this.cssW;
+    const H = this.cssH;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
     ctx.fillStyle = this.gBg ?? this.paints.bgBot;
     ctx.fillRect(0, 0, W, H);
 
     const p = this.plot;
-    this.drawGrid(p);
+    this.drawGrid(ctx, p);
 
     const o = this.proj.original;
     const c = this.proj.cleaned;
     const hasO = o.n > 1;
     const hasC = c.n > 1;
-    const live = this.liveVisible > 0.001;
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(p.x, p.y, p.w, p.h);
-    ctx.clip();
-
-    // With both decks on screen only the monitored one is filled — two
-    // stacked washes turn the overlap to mud, and the shaded difference band
-    // is the thing that has to read.
-    if (hasO && hasC) this.drawDifference();
-    if (hasO) {
-      const focused = !hasC || this.focus === 'original';
-      this.drawCurve(o, 'original', focused ? 1 : 0.62, focused);
+    if (hasO || hasC) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(p.x, p.y, p.w, p.h);
+      ctx.clip();
+      this.renderFills(p, hasO, hasC);
+      this.renderBloom(hasO, hasC);
+      // crisp cores last, over their own bloom
+      if (hasO) this.strokeCore(ctx, o, 'original', !hasC || this.focus === 'original' ? 1 : 0.66);
+      if (hasC) this.strokeCore(ctx, c, 'cleaned', this.focus === 'cleaned' ? 1 : 0.76);
+      ctx.restore();
     }
-    if (hasC) {
-      const focused = this.focus === 'cleaned';
-      this.drawCurve(c, 'cleaned', focused ? 1 : 0.72, focused);
-    }
-    if (live) this.drawLive(p, hasO || hasC);
-
-    ctx.restore();
 
     ctx.fillStyle = this.gVignette ?? 'rgba(0,0,0,0)';
     ctx.fillRect(0, 0, W, H);
 
-    if (!hasO && !hasC && !live) this.drawEmptyState(p);
-    this.drawCorner(p, hasO || hasC, hasO && hasC);
-    if (this.cursorX !== null && (hasO || hasC)) this.drawReadout(p);
+    if (!hasO && !hasC) this.drawEmptyState(ctx, p);
 
     // inner bevel around the plot
     ctx.lineWidth = 1 / this.dpr;
     ctx.strokeStyle = this.paints.frame;
     ctx.strokeRect(this.snap(p.x), this.snap(p.y), p.w, p.h);
 
-    this.frames++;
-    this.drawMsTotal += performance.now() - t0;
+    this.baseBuilds++;
+    this.baseMsTotal += performance.now() - t0;
   }
 
-  private drawGrid(p: Plot): void {
-    const ctx = this.ctx;
+  // ---- fills --------------------------------------------------------------
+
+  /**
+   * Gradient fill under each curve, composited so the overlap is never two
+   * washes stacked on each other:
+   *
+   *   1. the original's fill goes down over its whole area;
+   *   2. the cleaned deck's area is punched out of it (`destination-out`) —
+   *      so whatever amber survives is exactly the band where cleaned sits
+   *      *below* original, which is the energy this app removed;
+   *   3. the cleaned fill is laid into the hole it just made;
+   *   4. the surviving amber band gets a 45° hatch, so it reads as a
+   *      difference region and not as a third deck.
+   *
+   * All four steps happen on the transparent `fx` layer, because step 2 needs
+   * a real alpha channel; the result is composited onto the opaque base once.
+   */
+  private renderFills(p: Plot, hasO: boolean, hasC: boolean): void {
+    const fx = this.fxCtx;
+    const base = this.baseCtx;
+    if (!fx || !this.fx || !base) return;
+    fx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    fx.globalCompositeOperation = 'source-over';
+    fx.globalAlpha = 1;
+    fx.clearRect(0, 0, this.cssW, this.cssH);
+
+    if (hasO) this.fillDeck(fx, this.proj.original, 'original', p);
+    if (hasC) {
+      if (hasO) {
+        fx.save();
+        fx.globalCompositeOperation = 'destination-out';
+        fx.fillStyle = '#000';
+        this.traceArea(fx, this.proj.cleaned, p);
+        fx.fill();
+        fx.restore();
+      }
+      this.fillDeck(fx, this.proj.cleaned, 'cleaned', p);
+    }
+    if (hasO && hasC) this.hatchRemoved(fx);
+
+    base.drawImage(this.fx, 0, 0, this.cssW, this.cssH);
+  }
+
+  private fillDeck(
+    fx: CanvasRenderingContext2D,
+    proj: Projection,
+    deck: SpectrumDeck,
+    p: Plot,
+  ): void {
+    fx.save();
+    this.traceArea(fx, proj, p);
+    fx.clip();
+    fx.fillStyle = this.gFill[deck] ?? 'rgba(0,0,0,0)';
+    fx.fillRect(p.x, p.y, p.w, p.h);
+    // widening, fading strokes on the curve itself, clipped to the area under
+    // it — the wash is at full strength against the curve and gone by the floor
+    fx.globalCompositeOperation = 'lighter';
+    fx.lineJoin = 'round';
+    fx.lineCap = 'round';
+    const c = this.strokeOf[deck].base;
+    for (const pass of HUG) {
+      this.tracePath(fx, proj.xs, proj.ys, proj.n);
+      fx.lineWidth = pass[0] ?? 1;
+      fx.strokeStyle = rgba(c, pass[1] ?? 0);
+      fx.stroke();
+    }
+    fx.restore();
+  }
+
+  /** 45° hatch over the surviving amber band. */
+  private hatchRemoved(fx: CanvasRenderingContext2D): void {
+    const n = this.diffN;
+    const pat = this.hatch;
+    if (n < 2 || !pat) return;
+    const xs = this.diffX;
+    const yo = this.diffYo;
+    const yc = this.diffYc;
+    fx.save();
+    fx.fillStyle = pat;
+    fx.globalAlpha = 0.5;
+    let i = 0;
+    while (i < n) {
+      while (i < n && (yc[i] ?? 0) - (yo[i] ?? 0) <= 0.6) i++;
+      if (i >= n) break;
+      let s = i;
+      while (s > 0 && (yc[s - 1] ?? 0) - (yo[s - 1] ?? 0) > 0) s--;
+      while (i < n && (yc[i] ?? 0) - (yo[i] ?? 0) > 0) i++;
+      const e = i - 1;
+      if (e - s < 1) continue;
+      fx.beginPath();
+      fx.moveTo(xs[s] ?? 0, yo[s] ?? 0);
+      for (let k = s + 1; k <= e; k++) fx.lineTo(xs[k] ?? 0, yo[k] ?? 0);
+      for (let k = e; k >= s; k--) fx.lineTo(xs[k] ?? 0, yc[k] ?? 0);
+      fx.closePath();
+      fx.fill();
+    }
+    fx.restore();
+  }
+
+  // ---- bloom --------------------------------------------------------------
+
+  /**
+   * Half-resolution additive bloom. The strokes go down in widening, fading
+   * passes under `lighter`, optionally through a real gaussian (`ctx.filter`)
+   * where the browser has one, then the whole layer is composited additively
+   * and upscaled — which softens it once more for free.
+   */
+  private renderBloom(hasO: boolean, hasC: boolean): void {
+    const b = this.bloomCtx;
+    const base = this.baseCtx;
+    if (!b || !this.bloom || !base) return;
+    const s = this.dpr / 2;
+    b.setTransform(s, 0, 0, s, 0, 0);
+    b.globalCompositeOperation = 'source-over';
+    b.globalAlpha = 1;
+    b.filter = 'none';
+    b.clearRect(0, 0, this.cssW, this.cssH);
+    b.globalCompositeOperation = 'lighter';
+    b.lineJoin = 'round';
+    b.lineCap = 'round';
+    if (supportsFilter()) b.filter = 'blur(1.6px)';
+
+    const decks: SpectrumDeck[] = [];
+    if (hasO) decks.push('original');
+    if (hasC) decks.push('cleaned');
+    for (const deck of decks) {
+      const proj = this.proj[deck];
+      const c = this.strokeOf[deck].base;
+      const lit = deck === this.focus || decks.length === 1;
+      const k = lit ? 1 : 0.6;
+      for (const pass of BLOOM) {
+        this.tracePath(b, proj.xs, proj.ys, proj.n);
+        b.lineWidth = pass[0] ?? 1;
+        b.strokeStyle = rgba(c, (pass[1] ?? 0) * k);
+        b.stroke();
+      }
+    }
+    b.filter = 'none';
+
+    base.save();
+    base.globalCompositeOperation = 'lighter';
+    base.drawImage(this.bloom, 0, 0, this.cssW, this.cssH);
+    base.restore();
+  }
+
+  // ---- primitives ---------------------------------------------------------
+
+  private drawGrid(ctx: CanvasRenderingContext2D, p: Plot): void {
     const hair = 1 / this.dpr;
     ctx.lineWidth = hair;
     ctx.font = this.paints.fontTick;
@@ -829,8 +1179,12 @@ export class SpectrumRenderer {
   }
 
   /** Trace a Catmull-Rom-smoothed path through a projection (no allocation). */
-  private tracePath(xs: Float32Array, ys: Float32Array, n: number): void {
-    const ctx = this.ctx;
+  private tracePath(
+    ctx: CanvasRenderingContext2D,
+    xs: Float32Array,
+    ys: Float32Array,
+    n: number,
+  ): void {
     ctx.beginPath();
     ctx.moveTo(xs[0] ?? 0, ys[0] ?? 0);
     for (let i = 0; i < n - 1; i++) {
@@ -854,69 +1208,33 @@ export class SpectrumRenderer {
     }
   }
 
-  private drawCurve(proj: Projection, deck: SpectrumDeck, alpha: number, fill: boolean): void {
-    const ctx = this.ctx;
+  /** The same path, closed down to the floor — the area under the curve. */
+  private traceArea(ctx: CanvasRenderingContext2D, proj: Projection, p: Plot): void {
     const { n, xs, ys } = proj;
-    if (n < 2) return;
-    const p = this.plot;
-    const pen = this.strokeOf[deck];
+    this.tracePath(ctx, xs, ys, n);
+    ctx.lineTo(xs[n - 1] ?? 0, p.y + p.h);
+    ctx.lineTo(xs[0] ?? 0, p.y + p.h);
+    ctx.closePath();
+  }
 
+  private strokeCore(
+    ctx: CanvasRenderingContext2D,
+    proj: Projection,
+    deck: SpectrumDeck,
+    alpha: number,
+  ): void {
+    ctx.save();
     ctx.globalAlpha = alpha;
-    if (fill) {
-      this.tracePath(xs, ys, n);
-      ctx.lineTo(xs[n - 1] ?? 0, p.y + p.h);
-      ctx.lineTo(xs[0] ?? 0, p.y + p.h);
-      ctx.closePath();
-      ctx.fillStyle = this.gFill[deck] ?? 'rgba(0,0,0,0)';
-      ctx.fill();
-    }
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    this.tracePath(xs, ys, n);
-    ctx.strokeStyle = pen.glow;
-    ctx.lineWidth = 6.5;
-    ctx.stroke();
-    ctx.strokeStyle = pen.halo;
-    ctx.lineWidth = 3.2;
-    ctx.stroke();
-    ctx.strokeStyle = pen.core;
+    this.tracePath(ctx, proj.xs, proj.ys, proj.n);
+    ctx.strokeStyle = this.strokeOf[deck].core;
     ctx.lineWidth = 1.5;
     ctx.stroke();
-    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
-  /**
-   * Shade the band where the cleaned curve sits *below* the original — the
-   * energy this app took out. Straight segments between 1/12-octave points
-   * track the smoothed curves to well under a pixel at this scale.
-   */
-  private drawDifference(): void {
-    const n = this.diffN;
-    if (n < 2) return;
-    const ctx = this.ctx;
-    const xs = this.diffX;
-    const yo = this.diffYo;
-    const yc = this.diffYc;
-    ctx.fillStyle = this.gDiff ?? 'rgba(0,0,0,0)';
-    let i = 0;
-    while (i < n) {
-      while (i < n && (yc[i] ?? 0) - (yo[i] ?? 0) <= 0.6) i++;
-      if (i >= n) break;
-      let s = i;
-      while (s > 0 && (yc[s - 1] ?? 0) - (yo[s - 1] ?? 0) > 0) s--;
-      while (i < n && (yc[i] ?? 0) - (yo[i] ?? 0) > 0) i++;
-      const e = i - 1;
-      if (e - s < 1) continue;
-      ctx.beginPath();
-      ctx.moveTo(xs[s] ?? 0, yo[s] ?? 0);
-      for (let k = s + 1; k <= e; k++) ctx.lineTo(xs[k] ?? 0, yo[k] ?? 0);
-      for (let k = e; k >= s; k--) ctx.lineTo(xs[k] ?? 0, yc[k] ?? 0);
-      ctx.closePath();
-      ctx.fill();
-    }
-  }
-
-  private drawLive(p: Plot, hasStatic: boolean): void {
+  private drawLive(p: Plot): void {
     const ctx = this.ctx;
     const n = BANDS.length;
     for (let i = 0; i < n; i++) {
@@ -926,41 +1244,40 @@ export class SpectrumRenderer {
     const pen = this.strokeOf[this.liveDeck];
     const a = this.liveVisible;
 
-    // A filled long-term curve is already washing that area; a second wash
-    // over it only makes mud, so the live trace fills only when it is alone.
-    if (!hasStatic) {
-      ctx.globalAlpha = a * 0.55;
-      this.tracePath(this.liveXs, this.liveYs, n);
-      ctx.lineTo(this.liveXs[n - 1] ?? 0, p.y + p.h);
-      ctx.lineTo(this.liveXs[0] ?? 0, p.y + p.h);
-      ctx.closePath();
-      ctx.fillStyle = this.gFill[this.liveDeck] ?? 'rgba(0,0,0,0)';
-      ctx.fill();
-    }
-
+    ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
+
+    // a tight additive halo so the hairline still reads over a filled curve
+    ctx.globalCompositeOperation = 'lighter';
     ctx.globalAlpha = a;
-    this.tracePath(this.liveXs, this.liveYs, n);
-    ctx.strokeStyle = pen.glow;
-    ctx.lineWidth = 4.5;
+    this.tracePath(ctx, this.liveXs, this.liveYs, n);
+    ctx.strokeStyle = rgba(pen.base, 0.16);
+    ctx.lineWidth = 5;
     ctx.stroke();
+    this.tracePath(ctx, this.liveXs, this.liveYs, n);
+    ctx.strokeStyle = rgba(pen.base, 0.22);
+    ctx.lineWidth = 2.4;
+    ctx.stroke();
+
+    // the trace itself: a third thinner than an LTAS core and near white
+    ctx.globalCompositeOperation = 'source-over';
+    this.tracePath(ctx, this.liveXs, this.liveYs, n);
     ctx.strokeStyle = pen.live;
-    ctx.lineWidth = 1.2;
+    ctx.lineWidth = 1;
     ctx.stroke();
 
     // peak hold
-    ctx.globalAlpha = a * 0.75;
-    this.tracePath(this.liveXs, this.livePeakYs, n);
+    ctx.globalAlpha = a * 0.8;
+    this.tracePath(ctx, this.liveXs, this.livePeakYs, n);
     ctx.strokeStyle = pen.peak;
     // the peak line stays a hair thinner than the live trace
     ctx.lineWidth = this.dpr >= 2 ? 0.75 : 1;
     ctx.stroke();
-    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
-  private drawEmptyState(p: Plot): void {
-    const ctx = this.ctx;
+  private drawEmptyState(ctx: CanvasRenderingContext2D, p: Plot): void {
     const cx = p.x + p.w / 2;
     const cy = p.y + p.h / 2;
     ctx.save();
@@ -990,38 +1307,6 @@ export class SpectrumRenderer {
     ctx.fillText('load a file to analyse', cx, cy + 14);
     ctx.letterSpacing = '0px';
     ctx.restore();
-  }
-
-  /**
-   * Top-right tag: what the curves are, and — when both decks are present —
-   * a key for the shaded band between them, next to the band it explains.
-   */
-  private drawCorner(p: Plot, hasData: boolean, hasBoth: boolean): void {
-    const ctx = this.ctx;
-    ctx.font = this.paints.fontAxis;
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = this.paints.faint;
-    ctx.letterSpacing = '0.8px';
-    const right = p.x + p.w - 6;
-    // the hover readout takes that corner while it is up
-    if (this.cursorX === null) {
-      ctx.fillText(hasData ? 'LTAS · 1/12 OCT' : '1/12 OCT', right, p.y + 8);
-    }
-    if (hasBoth) {
-      const label = 'REMOVED';
-      const y = p.y + 21;
-      ctx.fillText(label, right, y);
-      const w = ctx.measureText(label).width;
-      const sx = right - w - 12;
-      ctx.fillStyle = rgba(this.paints.amber, 0.16);
-      ctx.fillRect(sx, y - 4, 8, 8);
-      ctx.lineWidth = 1 / this.dpr;
-      ctx.strokeStyle = rgba(this.paints.amber, 0.3);
-      ctx.strokeRect(this.snap(sx), this.snap(y - 4), 8, 8);
-      ctx.fillStyle = this.paints.faint;
-    }
-    ctx.letterSpacing = '0px';
   }
 
   private drawReadout(p: Plot): void {

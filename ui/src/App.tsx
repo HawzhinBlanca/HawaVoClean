@@ -2,8 +2,10 @@ import { useEffect, useState } from 'react';
 import { isTerminal } from './api/sse';
 import { getPlayer } from './audio/player';
 import { Actions } from './components/Actions';
+import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
+import { JobHistory } from './components/JobHistory';
 import { MetricsTiles } from './components/MetricsTiles';
 import { ProcessButton } from './components/ProcessButton';
 import { ProfileControl } from './components/ProfileControl';
@@ -13,7 +15,16 @@ import { SpectrumDisplay } from './components/SpectrumDisplay';
 import { Transport } from './components/Transport';
 import { UnitInspector } from './components/UnitInspector';
 import { WaveformDisplay } from './components/WaveformDisplay';
-import { cancelJob, connectEngine, seekTo, setAb, startJob, togglePlay } from './state/actions';
+import {
+  cancelJob,
+  cancelUpload,
+  connectEngine,
+  ingestDataTransfer,
+  seekTo,
+  setAb,
+  startJob,
+  togglePlay,
+} from './state/actions';
 import { clearSelection, stepUnit } from './state/selection';
 import { getState, useStore } from './state/store';
 
@@ -65,7 +76,11 @@ function useKeyboardMap(): void {
       switch (e.key) {
         case 'Escape': {
           e.preventDefault();
-          if (running) void cancelJob();
+          // Esc means "stop the thing that is happening", innermost first:
+          // an upload in flight, then a running job, then the selection.
+          if (st.upload) cancelUpload();
+          else if (running) void cancelJob();
+          else if (st.rejection) st.setRejection(null);
           else if (st.selectedUnit) clearSelection();
           return;
         }
@@ -185,30 +200,69 @@ export default function App() {
   const dragOver = useDragWatch();
   const abMode = useStore((s) => s.abMode);
   const cleanedPath = useStore((s) => s.cleanedPath);
+  const engineStatus = useStore((s) => s.engineStatus);
+  const offlineSince = useStore((s) => s.engineOfflineSince);
   const deck = abMode === 'cleaned' && cleanedPath ? 'cleaned' : 'original';
+  // The banner is a *row* of the shell grid, never an overlay: a bar that
+  // floats over the chassis is a bar that can cover a control, and the one
+  // moment the user most needs to reach the controls is the moment something
+  // has gone wrong.
+  const offline =
+    engineStatus === 'offline' || (engineStatus === 'connecting' && offlineSince !== null);
 
   useEffect(() => {
     void connectEngine();
-    // Swallow drops outside the drop zone so the shell never navigates away.
     const prevent = (e: DragEvent): void => {
       e.preventDefault();
     };
+    // The whole window highlights on drag-over, so the whole window has to
+    // accept the drop — anything else is a target that lies. The source strip
+    // handles its own drop first and marks the event handled; this only picks
+    // up the ones that landed anywhere else, and it still swallows the default
+    // so the shell can never navigate away from the app.
+    const onWindowDrop = (e: DragEvent): void => {
+      const handled = e.defaultPrevented;
+      e.preventDefault();
+      if (handled || !e.dataTransfer) return;
+      const st = getState();
+      const busy =
+        st.engineStatus !== 'ready' ||
+        Boolean(st.upload) ||
+        Boolean(st.job?.status && !isTerminal(st.job.status.state));
+      if (busy) return;
+      void ingestDataTransfer(e.dataTransfer);
+    };
     window.addEventListener('dragover', prevent);
-    window.addEventListener('drop', prevent);
+    window.addEventListener('drop', onWindowDrop);
     return () => {
       window.removeEventListener('dragover', prevent);
-      window.removeEventListener('drop', prevent);
+      window.removeEventListener('drop', onWindowDrop);
     };
   }, []);
 
   return (
-    <div className="app" data-phase={phase} data-deck={deck} data-drag={dragOver ? 'true' : 'false'}>
+    <div
+      className="app"
+      data-phase={phase}
+      data-deck={deck}
+      data-drag={dragOver ? 'true' : 'false'}
+      data-engine={engineStatus}
+      data-offline={offline ? 'true' : 'false'}
+    >
       <Header />
+      <EngineBanner />
       <SourceStrip />
       <main className="main">
         <div className="left">
           <WaveformDisplay />
-          <UnitInspector />
+          {/* The inspector answers "why did this unit go that way"; the run
+              list answers "which pass am I looking at". They share the bottom
+              row because they are the same kind of question about the same
+              report, and neither needs the full width. */}
+          <div className="deskrow">
+            <UnitInspector />
+            <JobHistory />
+          </div>
         </div>
         <aside className="right">
           <section className="panel spectrum-panel">

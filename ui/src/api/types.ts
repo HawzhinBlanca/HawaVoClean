@@ -101,6 +101,17 @@ export interface ApiError {
   message?: string;
 }
 
+/**
+ * The engine publishes three artefacts side by side — `<stem>.wav`,
+ * `<stem>.hawavoclean.json` and `<stem>.hawavoclean.txt` (see
+ * `job.publish_atomically`) — but only the first two appear in `JobStatus`.
+ * The human-readable sidecar is the report path with its extension swapped,
+ * which is a convention of the publisher, not a guess.
+ */
+export function reportTxtPath(reportPath: string): string {
+  return reportPath.replace(/\.json$/i, '.txt');
+}
+
 // ---- HawaVoCleanReport -----------------------------------------------------
 
 export type GuardScoreValue = number | string | boolean;

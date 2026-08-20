@@ -1,0 +1,411 @@
+/* The PROCESS plate.
+ *
+ * This is the one control on the screen that has to look machined, because it
+ * is the only one that *does* anything irreversible. Two things were wrong with
+ * it: the ring was a flat 2D stroke lying in a channel that had no depth, and
+ * the plate's interior was a button with a caption where an instrument face
+ * belongs. Both are answered here.
+ *
+ * THE RING IS A METER.
+ *   · a real channel — an opaque bed with the chassis' own top-lit gradient
+ *     laid into it (shadow spilling in over the upper wall, a lit lip along
+ *     the lower one) and a hairline on each rim;
+ *   · a bezel scale of 48 ticks, every sixth one long, so the arc is read
+ *     against a scale rather than floating;
+ *   · an arc shaded along its own sweep, light at the head and deepening
+ *     toward the tail;
+ *   · a soft glow that rides the head of the arc, driven from the same rAF
+ *     loop that interpolates the arc between SSE frames.
+ *
+ * THE INTERIOR IS A READOUT.
+ *   A sunken display face carrying the stage rail (seven lamps, one per engine
+ *   stage) and three readout cells — stage, unit counter, elapsed clock while
+ *   it runs; profile and chain while it waits; result, count and duration when
+ *   it lands.
+ *
+ * ONE PHASE COLOUR.  `--pb` is registered with @property, so the whole plate —
+ * arc gradient, head glow, stage rail, plate tint — cross-fades from amber to
+ * cyan to green (or red) in a single interpolation instead of four separate
+ * hard swaps. Where @property is unavailable the same variable still resolves;
+ * only the interpolation is lost.
+ *
+ * CASCADE.  Component stylesheets are emitted before styles/app.css and
+ * styles/interaction.css, so every selector here carries the extra `.plate`
+ * class (and, where the design-system layer reaches a class deep, an element
+ * name) to win on specificity rather than on order. */
+
+@property --pb {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #ffb347;
+}
+
+.process.plate {
+  --pb: var(--amber, #ffb347);
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 13px;
+  padding: 0 13px 0 7px;
+  align-items: center;
+  transition:
+    transform var(--ix-mid, 160ms) var(--ease-out),
+    box-shadow var(--ix-slow, 260ms) var(--ease-out),
+    filter var(--ix-slow, 260ms) var(--ease-out),
+    opacity var(--ix-slow, 260ms) var(--ease-out),
+    --pb 320ms var(--ease-out);
+}
+
+.process.plate.running {
+  --pb: var(--cyan, #39d0ff);
+  /* the design-system layer swaps the whole background on `.running`; the
+     plate keeps its metal and lets the phase read through the tint below */
+  background-image: var(--brushed), var(--metal-2);
+}
+
+.process.plate.done {
+  --pb: var(--ok, #4ade80);
+}
+
+.process.plate.failed {
+  --pb: var(--err, #ff5a5f);
+}
+
+.process.plate.cancelled {
+  --pb: var(--fg-3, #949daa);
+}
+
+/* The phase wash. ::before is the sweep (interaction.css), so the tint takes
+   ::after; it sits under both children, which carry z-index 1. Only its
+   opacity animates — the hue rides on --pb. */
+.process.plate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background: radial-gradient(118% 132% at 11% 50%, rgba(255, 179, 71, 0.13), transparent 58%);
+  background: radial-gradient(
+    118% 132% at 11% 50%,
+    color-mix(in srgb, var(--pb) 13%, transparent),
+    transparent 58%
+  );
+  transition: opacity 300ms var(--ease-out);
+}
+
+.process.plate.running::after,
+.process.plate.done::after,
+.process.plate.failed::after {
+  opacity: 1;
+}
+
+/* ------------------------------------------------------------------ ring */
+
+.process.plate .ring {
+  width: 92px;
+  height: 92px;
+}
+
+/* the channel bed: opaque, so the light laid into it has something to sit on */
+.process.plate .ring .chan {
+  stroke: #04050a;
+}
+
+.process.plate .ring .lip-in {
+  stroke: rgba(255, 255, 255, 0.07);
+}
+
+.process.plate .ring .lip-out {
+  stroke: rgba(255, 255, 255, 0.12);
+}
+
+.process.plate .ring .tick {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.14);
+  stroke-linecap: butt;
+}
+
+.process.plate .ring .tick.maj {
+  stroke: rgba(255, 255, 255, 0.32);
+}
+
+/* The arc. The design-system layer paints `.bar` (and `.bar.idle/.done/.err`)
+   a flat stroke; the element selector puts this one class-count ahead so the
+   gradient survives, and the drop-shadow tracks the phase colour. */
+.process.plate .ring circle.bar {
+  stroke: url(#pb-arc);
+  filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.45));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--pb) 55%, transparent));
+  transition:
+    stroke-dashoffset 260ms var(--ease-out),
+    filter var(--ix-slow, 260ms) var(--ease-out);
+}
+
+.process.plate.running .ring circle.bar,
+.process.plate.smooth .ring circle.bar {
+  /* the rAF loop owns the offset frame by frame; a transition would chase it */
+  transition: filter var(--ix-slow, 260ms) var(--ease-out);
+}
+
+.process.plate .ring .arc-a {
+  stop-color: #ffd9a4;
+  stop-color: color-mix(in srgb, var(--pb) 58%, white);
+}
+
+.process.plate .ring .arc-b {
+  stop-color: var(--pb);
+}
+
+.process.plate .ring .arc-c {
+  stop-color: #c98a34;
+  stop-color: color-mix(in srgb, var(--pb) 74%, black);
+}
+
+/* the head of the arc, and the glow that rides it */
+.process.plate .ring .head {
+  opacity: 0;
+  transition: opacity 260ms var(--ease-out);
+}
+
+.process.plate.running .ring .head {
+  opacity: 1;
+}
+
+.process.plate .ring .head-dot {
+  fill: #ffffff;
+  fill: color-mix(in srgb, var(--pb) 35%, white);
+}
+
+.process.plate .ring .head-a {
+  stop-color: var(--pb);
+  stop-opacity: 0.55;
+}
+
+.process.plate .ring .head-b {
+  stop-color: var(--pb);
+  stop-opacity: 0;
+}
+
+.process.plate .ring .center .pct {
+  color: var(--fg);
+}
+
+/* ------------------------------------------------------------- readout */
+
+.process.plate .text {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 6px;
+  align-content: center;
+  min-width: 0;
+}
+
+.process.plate .text .title {
+  font-size: var(--fs-lg, 16px);
+  font-weight: var(--fw-medium, 500);
+  letter-spacing: var(--ls-caps, 0.08em);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.1;
+}
+
+/* a piece of sunken glass, lit exactly like every other display on the
+   chassis, so the readout belongs to the same instrument */
+.process.plate .face {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 6px;
+  padding: 7px 8px;
+  min-width: 0;
+  border-radius: var(--r-sm, 4px);
+  background-image: var(--glass), linear-gradient(180deg, #06080b, #090b0f);
+  box-shadow: var(--shadow-display);
+}
+
+/* ---- stage rail: seven lamps, one per engine stage ----
+   The lamps are `.lamp`, not `.seg`: `.seg` is already the segmented-control
+   class in the design-system layer, and an unscoped collision handed every
+   lamp that control's 28px height, which spilled the rail over the readout
+   cells below it. */
+.process.plate .rail {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+  height: 3px;
+}
+
+.process.plate .rail .lamp {
+  position: relative;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.process.plate .rail .lamp::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--pb);
+  box-shadow: 0 0 5px -1px var(--pb);
+  opacity: 0;
+  transition: opacity 280ms var(--ease-out);
+}
+
+.process.plate .rail .lamp.past::after {
+  opacity: 0.62;
+}
+
+.process.plate .rail .lamp.now::after {
+  opacity: 1;
+  animation: pb-seg 1.5s ease-in-out infinite;
+}
+
+.process.plate .rail.done .lamp::after {
+  opacity: 0.85;
+  animation: none;
+}
+
+.process.plate .rail.failed .lamp.now::after {
+  opacity: 1;
+  animation: none;
+}
+
+@keyframes pb-seg {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ---- readout cells ---- */
+/* Each phase spends its width where that phase's longest value lives, so no
+   readout ever ellipses into `…` while a neighbouring column sits half empty.
+   The three tracks are fixed *within* a phase, so a stage name changing under
+   a running job never shifts the two cells beside it. */
+.process.plate .cells {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr) minmax(0, 1fr);
+  gap: 7px;
+  min-width: 0;
+}
+
+.process.plate.running .cells {
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.66fr) minmax(0, 1.04fr);
+}
+
+.process.plate.done .cells {
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.85fr) minmax(0, 1fr);
+}
+
+.process.plate.failed .cells,
+.process.plate.cancelled .cells {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr);
+}
+
+.process.plate .cell {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.process.plate .cell b {
+  font-family: var(--font-sans);
+  font-size: var(--fs-label, 11px);
+  font-weight: var(--fw-medium, 500);
+  letter-spacing: var(--ls-caps, 0.08em);
+  text-transform: uppercase;
+  color: var(--fg-4);
+  line-height: 1.05;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Words take the text face; quantities take the tabular mono one, so a
+   counter can never reflow as it ticks and a stage name never reads as a
+   serial number. */
+.process.plate .cell em {
+  font-style: normal;
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm, 12px);
+  font-weight: var(--fw-medium, 500);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.process.plate .cell em.num {
+  font-family: var(--font-numeric);
+  font-variant-numeric: tabular-nums;
+}
+
+/* the first cell is the state line, so it carries the phase colour */
+.process.plate.running .cell:first-child em,
+.process.plate.done .cell:first-child em,
+.process.plate.failed .cell:first-child em {
+  color: var(--pb);
+}
+
+.process.plate:disabled .cell em,
+.process.plate[aria-disabled='true'] .cell em {
+  color: var(--fg-2);
+}
+
+/* ------------------------------------------------------- reduced motion */
+/* The behaviour layer strips every animation and transition globally. What is
+   left has to still say which state the plate is in, so the running arc's head
+   and the active stage lamp are restated as static, fully lit marks. */
+@media (prefers-reduced-motion: reduce) {
+  .process.plate .rail .lamp.now::after {
+    animation: none;
+    opacity: 1;
+  }
+
+  .process.plate.running .ring .head {
+    opacity: 1;
+  }
+
+  .process.plate::after {
+    transition: none;
+  }
+}
+
+/* --------------------------------------------------------- compact height */
+/* 960×640-class windows. The design-system layer shrinks `.process` here; the
+   plate is one class deeper, so it has to restate the compact geometry itself
+   rather than silently outranking it. */
+@media (max-height: 720px) {
+  .process.plate {
+    height: 84px;
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 11px;
+    padding: 0 11px 0 6px;
+  }
+
+  .process.plate .ring {
+    width: 74px;
+    height: 74px;
+  }
+
+  .process.plate .text {
+    gap: 4px;
+  }
+
+  .process.plate .face {
+    padding: 5px 7px;
+    gap: 5px;
+  }
+
+  .process.plate .cells {
+    gap: 6px;
+  }
+}

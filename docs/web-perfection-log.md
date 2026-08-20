@@ -126,3 +126,89 @@ CSS). Built worker still a classic script (0 import/export). No engine code touc
 gates are unchanged from iteration 1. Zero console errors across every flow I exercised.
 Iteration-1 features re-verified on this build: zoom 14 steps to 1:1, ruler drag, FIT, overview
 click, verdict click -> unit selection, `[`/`]`, arrows, `?` overlay.
+
+## Iteration 3 — 2026-08-20 — A3, A5, B2, B5, B6, B7, B8, C4, E1, E2 (20/27)
+
+**E1 streaming analyze — the biggest number in the project so far.**
+`POST /api/analyze` no longer decodes the file. Peak RSS on a 3 h / 2073.6 MB input:
+**12,756.8 MB -> 222.3 MB (57x)**, wall 36.1 s -> 32.9 s, and every returned value unchanged.
+Peak RSS is now flat in file length (115 MB file -> +114.8 MB; 346 MB file -> +116.9 MB).
+New additive `iter_decode_audio` streams one ffmpeg pass (stderr to a temp file — a pipe nobody
+drains deadlocks a chatty decoder) and is bit-identical to `decode_audio`. Four accumulators run
+over that single pass, each **proved against the old whole-file implementation** (kept in the test
+as the oracle) over 9 fixtures x 4 chunk sizes: LTAS **1.4e-14 dB**, BS.1770 integrated loudness
+**1.2e-7 LU** (contract was 0.01), true peak and sample peak **exactly 0**. The loudness residue is
+float64-vs-float32 block sums, not a chunking artefact — identical from 977 to 1 Mi chunk sizes.
+Gate-edge cases replicated: <400 ms ungated branch, near-silence, all-blocks-below-gate, >5 channels.
+
+**E2 streaming upload.** 1.07 GB uploaded over real HTTP: **133.8 MB peak RSS vs 127.8 MB idle**.
+Chunked write, configurable cap, 413 on both the Content-Length and chunked paths.
+
+**A3 spectrum (was "the weakest panel").** Rebuilt on three surfaces: a cached opaque base (grid,
+labels, fills, bloom, curve cores) blitted once per frame, a scratch layer that punches the cleaned
+deck's area out of the original's with `destination-out` so the overlap is never two washes stacked
+into mud, and a half-res bloom (4 widening additive passes through a blur filter). The surviving
+amber is exactly `{original > cleaned}` — the REMOVED band is *value-driven, not name-driven* — and
+carries a device-resolution 45 degree hatch with a matching key swatch. Two legends merged into one
+key row; `LTAS` moved into the panel title. Live overlay given real ballistics (attack 22->12 ms,
+release 340->170 ms, peak-hold 0.35 s then full scale in 1.5 s). Measured **0.038 ms/frame**, 100 %
+of available animation frames. The latent trap is fixed: sizing now uses offsetWidth/offsetHeight, so
+an ancestor `transform: scale(2.5)` leaves the backing store at 668x534 instead of inflating it 6.25x.
+
+**A5 process plate (was "the one control that would not pass as a Waves component").** The ring is
+now a modelled meter: opaque channel bed with a top-lit groove, inner/outer rim hairlines, a 48-tick
+bezel scale, an arc with a gradient along its sweep and a glow riding the arc head. The interior is a
+sunken readout — a 7-lamp stage rail plus three cells that change per phase (READY/LENGTH/FORMAT
+idle, STAGE/UNIT/ELAPSED running, RESULT/UNITS/TOOK done, RESULT/REASON/TOOK failed). One
+`@property`-registered colour cross-fades amber -> cyan -> green/red in a single interpolation. Bugs
+caught on the way: the plate claimed "Armed" for a clip whose analysis had failed, and the elapsed
+clock carried the previous run's start into a second run.
+
+**B2/B5/B7 (flow).** Upload has real XHR progress + cancel (measured: 880 MB drop tracked to 100 %;
+cancel at +300 ms on 600 MB left no partial file). Designed rejection sheet, multi-file drop takes
+the first audio file and says so, folder drop has its own wording. Session history keeps 8 runs with
+both analyses cached. Report access: master WAV / JSON / txt / copy summary.
+
+**B6/B8 (resilience).** Offline is a designed row, not a dead LED; health poll backs off
+400->5000 ms while offline; a returning engine reconciles via `GET /api/jobs/{id}` and treats a 404
+from a live engine as "the run died with the process" (`ENGINE_RESTARTED`), which is the case that
+would otherwise hang forever. Controls switched from `disabled` to `aria-disabled` + `title`,
+because a disabled element receives no pointer events and so never shows the explanation.
+
+**My own verification (real engine, real browser):**
+- Two real jobs (studio 5/5, production 0/6). Switching between them in the run list: **`/api/analyze`
+  call count stayed at 3 across the switch** — a pure state restore — while the header retargeted
+  from `UNITS 0/6 LUFS +2.7` to `UNITS 5/5 LUFS +3.2` and the ON SCREEN badge moved.
+- All three artefacts served correctly: `.wav` 200 audio/wav 13,624,364 B, `.hawavoclean.json` 200
+  application/json 11,907 B, `.hawavoclean.txt` 200 text/plain 2,130 B.
+- Copy summary payload: `Flute 09.m4a · studio · 5/5 units enhanced · -24.9 -> -21.7 LUFS · noise
+  floor -48.5 -> -84.7 dB`. Drop rejection: `CANNOT OPEN meeting notes.txt / text/plain is not an
+  audio or video format this tool opens. Accepted: wav · aiff · mp3 · flac · m4a · mp4 · mov.`
+- **Killed the engine with the app fully loaded**: banner appeared with a live retry countdown and
+  the sentence "Nothing on screen was lost — Flute 09.m4a.mp4, its report, 2 runs are still loaded";
+  waveform, spectrum, metrics, history and zoom all preserved; downloads greyed with explanations.
+  Restarted it: banner cleared to "Engine back · v3.2.0", controls re-armed, no reload needed.
+- C4 on a clean tab: **17 requests, all 127.0.0.1, statuses {200, 206, 202}, zero >=400, zero
+  non-loopback.** (Honest caveat: deliberately killing the engine produces browser-level
+  ERR_CONNECTION_REFUSED lines in the console that JavaScript cannot suppress — that is Chromium
+  logging a refused socket, and the UI handles it as designed. One `blob:` abort also remains on
+  large in-memory decks; it is an in-process buffer read with no socket and does not appear in
+  resource timing.)
+- B8 at 960x640, 1440x900 and 2560x1440: no page overflow, no real clipping (I chased an apparent
+  cut on the A/B "CLEANED" label — DOM math showed 50 px of text in a 131 px button with nothing
+  overlapping, so it was screenshot downscaling, not a bug). At 2560 the layout reflows to three
+  columns rather than stretching one panel.
+
+**Orchestrator decision:** the resilience agent had raised the *healthy* health-poll cadence to 5 s
+(the pre-existing value was 10 s). Since `probeSoon()` now reacts instantly to any failed call, I set
+it back to **10 s** — quieter log, no loss of responsiveness.
+
+**Gates:** ruff clean, format 160 files, `mypy --strict` clean, **492 passed** (was 463), fuzz 41
+passed, `pnpm typecheck` + `pnpm build` green (321.29 kB / 100.03 kB gz JS — *smaller* than iteration
+2 despite everything added — 79.76 kB / 15.27 kB gz CSS). Worker still a classic script.
+
+**Known trade-off recorded:** on lossy containers the analyze overview bucket grid is now laid on the
+container timeline (matching `/api/peaks`, the playhead and `<audio>`) instead of the decoder
+timeline. On Flute 09 that shifts buckets by median 0.029 dB / p95 0.29 dB / worst 4.4 dB in one
+quiet bucket. Spectrum, loudness and true peak are unaffected (they see every decoded sample). The
+only exact alternative is spilling the mono signal to disk for a second pass (~2 GB on a 3 h file).

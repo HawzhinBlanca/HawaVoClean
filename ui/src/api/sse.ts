@@ -1,4 +1,4 @@
-import type { EngineClient } from './client';
+import { EngineError, type EngineClient } from './client';
 import type { JobState, JobStatus } from './types';
 
 const TERMINAL: ReadonlySet<JobState> = new Set<JobState>(['done', 'failed', 'cancelled']);
@@ -10,6 +10,14 @@ export function isTerminal(state: JobState): boolean {
 export interface JobStreamHandlers {
   onStatus: (status: JobStatus) => void;
   onEnd: () => void;
+  /**
+   * The engine answered, and it has never heard of this job (404). That is not
+   * a dropped connection: the process that owned the run is gone, so the run
+   * is gone with it. Without this the stream would reopen against a route that
+   * 404s forever and the job would sit at "running" for the rest of the
+   * session (goal box B6).
+   */
+  onGone?: () => void;
   onConnectionChange?: (connected: boolean) => void;
 }
 
@@ -66,8 +74,14 @@ export function followJob(
           if (isTerminal(st.state)) finish();
           else connect();
         })
-        .catch(() => {
-          if (!closed && !finished) connect();
+        .catch((err: unknown) => {
+          if (closed || finished) return;
+          if (err instanceof EngineError && err.status === 404) {
+            handlers.onGone?.();
+            finish();
+            return;
+          }
+          connect();
         });
     }, delay);
   };

@@ -32,6 +32,117 @@ function useSwap(text: string, enabled: boolean): string | null {
   return prev === text ? null : prev;
 }
 
+/** m:ss.d, the same shape the transport and the plate use. */
+function fmtDur(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '—';
+  const m = Math.floor(sec / 60);
+  const r = sec - m * 60;
+  return `${m}:${r.toFixed(1).padStart(4, '0')}`;
+}
+
+function signed(v: number, digits = 1): string {
+  const s = v > 0 ? '+' : v < 0 ? '\u2212' : '\u00b1';
+  return `${s}${Math.abs(v).toFixed(digits)}`;
+}
+
+/**
+ * B8 · the header used to be 46 px of empty chassis between the wordmark and
+ * the engine lamp — at 1920 it was a third of the window wide and said
+ * nothing. It now carries the master readout: what state the whole screen is
+ * in, and the two or three numbers that state is *about*. It is the only
+ * place those numbers appear at a glance-across-the-room size; the footer's
+ * status line is a sentence, the plate's face is per-run, and this is the
+ * headline. Below 1240 there is no room for it and it is not drawn at all.
+ */
+function HeaderNow() {
+  const source = useStore((s) => s.source);
+  const original = useStore((s) => s.original);
+  const cleaned = useStore((s) => s.cleaned);
+  const analyzing = useStore((s) => s.analyzing);
+  const upload = useStore((s) => s.upload);
+  const job = useStore((s) => s.job);
+  const report = useStore((s) => s.report);
+
+  const status = job?.status ?? null;
+  const state = status?.state ?? (job ? 'queued' : null);
+  const running = state === 'running' || state === 'queued';
+
+  let tone = 'idle';
+  let label = 'No clip';
+  const facts: Array<{ k: string; v: string }> = [];
+
+  if (upload) {
+    tone = 'busy';
+    label = 'Uploading';
+    facts.push({
+      k: upload.name,
+      v: `${Math.round((upload.total ? upload.loaded / upload.total : 0) * 100)}%`,
+    });
+  } else if (analyzing) {
+    tone = 'busy';
+    label = 'Analyzing';
+    if (source) facts.push({ k: 'Clip', v: source.name });
+  } else if (running) {
+    tone = 'busy';
+    label = 'Running';
+    facts.push({ k: 'Stage', v: status?.stage ?? 'working' });
+    if (status?.unit) facts.push({ k: 'Unit', v: `${status.unit.index} / ${status.unit.total}` });
+    facts.push({ k: 'Done', v: `${Math.round((status?.progress ?? 0) * 100)}%` });
+  } else if (state === 'failed') {
+    tone = 'fail';
+    label = 'Failed';
+    facts.push({ k: 'Reason', v: status?.error?.code ?? status?.message ?? 'unknown' });
+  } else if (state === 'cancelled') {
+    tone = 'idle';
+    label = 'Cancelled';
+    if (source) facts.push({ k: 'Clip', v: source.name });
+  } else if (state === 'done' && report) {
+    tone = 'done';
+    label = 'Done';
+    const sum = report.summary;
+    facts.push({ k: 'Units', v: `${sum.enhanced ?? 0} / ${sum.units_total ?? 0}` });
+    const li = original?.loudness.integrated_lufs;
+    const lo = cleaned?.loudness.integrated_lufs;
+    if (li !== null && li !== undefined && lo !== null && lo !== undefined) {
+      facts.push({ k: 'LUFS', v: signed(lo - li) });
+    }
+    const ni = original?.noise_floor_db;
+    const no = cleaned?.noise_floor_db;
+    if (ni !== null && ni !== undefined && no !== null && no !== undefined) {
+      facts.push({ k: 'Noise', v: `${signed(no - ni)} dB` });
+    }
+  } else if (source && original) {
+    tone = 'ready';
+    label = 'Armed';
+    facts.push({ k: 'Clip', v: source.name });
+    facts.push({ k: 'Length', v: fmtDur(original.duration_s) });
+    facts.push({
+      k: 'Format',
+      v: `${(original.sample_rate / 1000).toFixed(1)} kHz · ${original.channels === 1 ? 'mono' : original.channels === 2 ? 'stereo' : `${original.channels} ch`}`,
+    });
+  } else if (source) {
+    tone = 'idle';
+    label = 'No analysis';
+    facts.push({ k: 'Clip', v: source.name });
+  }
+
+  return (
+    <div className="hdr-now" data-tone={tone}>
+      <span className="hn-state">{label}</span>
+      {facts.length > 0 ? (
+        <span className="hn-facts">
+          {facts.map((f) => (
+            <span className="hn-kv" key={f.k}>
+              <span className="hn-k">{f.k}</span>
+              <span className="hn-v">{f.v}</span>
+            </span>
+          ))}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function Header() {
   const host = useStore((s) => s.host);
   const engineStatus = useStore((s) => s.engineStatus);
@@ -70,6 +181,7 @@ export function Header() {
         <span className={`badge${host === 'resolve' ? ' accent' : ''}`}>
           {HOST_LABEL[host] ?? 'WEB'}
         </span>
+        <HeaderNow />
       </div>
       <div className="engine" aria-live="polite">
         <Led state={led} />

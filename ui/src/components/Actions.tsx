@@ -1,7 +1,98 @@
+// B7 · getting the run out of the tool: the three artefacts a pass leaves
+// behind, and the one line a person actually pastes into a message.
+
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getBridge } from '../bridge';
-import { baseName, importToResolve, replaceInResolve, revealOutput } from '../state/actions';
+import {
+  artifactsFor,
+  copyReportSummary,
+  importToResolve,
+  replaceInResolve,
+  revealOutput,
+} from '../state/actions';
 import { useStore } from '../state/store';
-import { IconImport, IconReplace, IconReveal } from './Icons';
+import { IconCheck, IconImport, IconReplace, IconReveal } from './Icons';
+
+/**
+ * `download` is ignored across origins, so the anchors also carry
+ * `target="_blank"`: served by `hawavoclean serve --ui-dir` the UI and the
+ * engine share an origin and the attribute wins (nothing opens, the file is
+ * saved); under the Vite dev server they do not, and the tab that opens is the
+ * file itself. Both paths end with the artefact in the user's hands.
+ */
+function ArtifactLink({
+  url,
+  name,
+  label,
+  title,
+}: {
+  url: string | null;
+  name: string;
+  label: string;
+  title: string;
+}) {
+  if (!url) {
+    // `aria-disabled` rather than `disabled`: a disabled control takes no
+    // pointer events, so its `title` — the sentence that says *why* the file
+    // is not there — would never be shown (goal box B6).
+    return (
+      <button className="btn small" type="button" aria-disabled="true" title={title}>
+        <IconImport size={14} />
+        <span>{label}</span>
+      </button>
+    );
+  }
+  return (
+    <a
+      className="btn small"
+      href={url}
+      download={name}
+      target="_blank"
+      rel="noreferrer"
+      title={title}
+    >
+      <IconImport size={14} />
+      <span>{label}</span>
+    </a>
+  );
+}
+
+/** Copies the one-line summary and says so, on the button itself. */
+function CopySummary() {
+  const report = useStore((s) => s.report);
+  const source = useStore((s) => s.source);
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  const enabled = Boolean(report && source);
+
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const onCopy = useCallback(() => {
+    void copyReportSummary().then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), 1800);
+    });
+  }, []);
+
+  return (
+    <button
+      className={`btn small copysum${copied ? ' copied' : ''}`}
+      disabled={!enabled}
+      onClick={onCopy}
+      title="Copy a one-line summary of this run to the clipboard"
+    >
+      {copied ? <IconCheck size={14} /> : <IconReveal size={14} />}
+      <span>{copied ? 'Copied' : 'Copy summary'}</span>
+    </button>
+  );
+}
 
 export function Actions() {
   const bridge = getBridge();
@@ -9,32 +100,44 @@ export function Actions() {
   const isWeb = bridge.host === 'web';
   const cleanedPath = useStore((s) => s.cleanedPath);
   const source = useStore((s) => s.source);
-  const client = useStore((s) => s.client);
+  const job = useStore((s) => s.job);
+  // `client` is read so the artefact URLs recompute when the engine reconnects.
+  useStore((s) => s.client);
+  const engineReady = useStore((s) => s.engineStatus === 'ready');
   const canReplace = hasResolve && !!cleanedPath && source?.origin === 'resolve' && !!source.mediaId;
+  // B6 · the files are served *by* the engine. With it gone the paths are still
+  // known and still on screen — they are simply not fetchable this second, and
+  // saying so beats handing over a link that downloads a connection refusal.
+  const artifacts = engineReady ? artifactsFor(cleanedPath, job?.reportPath ?? null) : null;
+  const offlineNote =
+    'The engine is offline — the file is still on disk and this link comes back when it reconnects.';
+  const missingNote = 'Available once a run has finished';
+  const note = engineReady ? missingNote : offlineNote;
 
   if (!hasResolve && isWeb) {
-    // A browser cannot reveal files; it can download the master instead.
-    const href = cleanedPath && client ? client.audioUrl(cleanedPath) : undefined;
+    // A browser cannot reveal files; it downloads them instead. All three come
+    // down `/api/audio`, which types each response from the file's extension.
     return (
-      <div className="actions">
-        {href ? (
-          <a
-            className="btn small"
-            href={href}
-            download={baseName(cleanedPath ?? 'master.wav')}
-            target="_blank"
-            rel="noreferrer"
-            title="Download the cleaned master"
-          >
-            <IconImport size={14} />
-            <span>Download master</span>
-          </a>
-        ) : (
-          <button className="btn small" disabled>
-            <IconImport size={14} />
-            <span>Download master</span>
-          </button>
-        )}
+      <div className="actions artifacts">
+        <ArtifactLink
+          url={artifacts?.master.url ?? null}
+          name={artifacts?.master.name ?? 'master.wav'}
+          label="Master WAV"
+          title={artifacts ? `Download ${artifacts.master.name}` : note}
+        />
+        <ArtifactLink
+          url={artifacts?.json.url ?? null}
+          name={artifacts?.json.name ?? 'report.json'}
+          label="JSON report"
+          title={artifacts ? `Download ${artifacts.json.name}` : note}
+        />
+        <ArtifactLink
+          url={artifacts?.txt.url ?? null}
+          name={artifacts?.txt.name ?? 'report.txt'}
+          label="Summary .txt"
+          title={artifacts ? `Download ${artifacts.txt.name}` : note}
+        />
+        <CopySummary />
       </div>
     );
   }
@@ -58,10 +161,11 @@ export function Actions() {
           </button>
         </>
       ) : null}
-      <button className="btn small" disabled={!cleanedPath} onClick={() => void revealOutput()} title="Reveal the cleaned master in Finder">
+      <button className="btn small" disabled={!cleanedPath} onClick={() => void revealOutput()} title={cleanedPath ? 'Reveal the cleaned master in Finder' : missingNote}>
         <IconReveal size={14} />
         <span>Reveal in Finder</span>
       </button>
+      <CopySummary />
     </div>
   );
 }

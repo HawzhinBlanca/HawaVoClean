@@ -14,17 +14,20 @@ function toF32(a: number[]): Float32Array {
   return out;
 }
 
+type LegendKind = 'orig' | 'clean' | 'removed' | 'live';
+
 interface LegendItemProps {
-  kind: 'orig' | 'clean' | 'live';
+  kind: LegendKind;
   label: string;
   on: boolean;
   deck?: 'original' | 'cleaned';
+  hint: string;
 }
 
-function LegendItem({ kind, label, on, deck }: LegendItemProps) {
+function LegendItem({ kind, label, on, deck, hint }: LegendItemProps) {
   const cls = `item ${kind} ${on ? 'on' : 'off'}${deck ? ` deck-${deck}` : ''}`;
   return (
-    <span className={cls} role="listitem" aria-label={`${label} curve ${on ? 'shown' : 'not present'}`}>
+    <span className={cls} role="listitem" aria-label={`${label}: ${on ? hint : 'not present'}`}>
       <i className="sw" aria-hidden="true" />
       <span className="txt">{label}</span>
     </span>
@@ -77,21 +80,48 @@ export function SpectrumDisplay() {
     rendererRef.current?.setLive(player.getAnalyser(), player.sampleRate, abMode, playing);
   }, [playing, abMode]);
 
+  const both = original !== null && cleaned !== null;
+
   return (
     <>
       <div className="panel-head">
         <div className="panel-title">
           <span>Spectrum</span>
-        </div>
-        <div className="spec-legend" role="list" aria-label="Spectrum curves">
-          <LegendItem kind="orig" label="Original" on={original !== null} />
-          <LegendItem kind="clean" label="Cleaned" on={cleaned !== null} />
-          <LegendItem kind="live" label="Live" on={playing} deck={abMode} />
+          {/* the same `title · qualifier` head the waveform panel uses: what
+              the panel is showing, said once, where the panel is named */}
+          <span className="sub">· LTAS</span>
         </div>
       </div>
       <div className="spectrum-body">
         <div className="display spectrum-display">
           <canvas ref={canvasRef} className="spectrum-canvas" />
+        </div>
+        {/*
+          ONE key, directly under the picture it explains.
+
+          There used to be two: ORIGINAL / CLEANED / LIVE up in the panel head,
+          and — in a different type size, a different alignment and a different
+          swatch language — the `LTAS · 1/12 OCT` tag plus a REMOVED colour chip
+          floating in the plot's top-right corner. Four marks, explained in two
+          places, neither of them complete. They are now a single row: every
+          series that can appear in the plot has exactly one entry, in the
+          reading order of the picture (the two decks, the band between them,
+          the live trace), and the measurement descriptor rides at the far end
+          as a quiet meta note rather than as a competing legend.
+        */}
+        <div className="spec-legend" role="list" aria-label="Spectrum key">
+          <LegendItem kind="orig" label="Original" on={original !== null} hint="long-term average" />
+          <LegendItem kind="clean" label="Cleaned" on={cleaned !== null} hint="long-term average" />
+          <LegendItem
+            kind="removed"
+            label="Removed"
+            on={both}
+            hint="energy taken out, original minus cleaned"
+          />
+          <LegendItem kind="live" label="Live" on={playing} deck={abMode} hint="playing now" />
+          <span className="meta" aria-hidden="true">
+            1/12 oct
+          </span>
         </div>
       </div>
     </>

@@ -13,11 +13,11 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       soft outer shadow), inset displays with vignette; no flat unstyled surface anywhere.
 - [x] A2 Waveform display: anti-aliased, gradient-filled body with glow pass; original/cleaned
       overlay readable at every zoom; playhead with subtle bloom; time ruler with tick hierarchy.
-- [ ] A3 Spectrum display: log-frequency grid with labeled decades, dB gridlines, filled
+- [x] A3 Spectrum display: log-frequency grid with labeled decades, dB gridlines, filled
       area under curves with gradient + glow, smooth (≥30 fps) live analyser, legend.
 - [x] A4 Typography: strict scale (11/12/13/16 caps-label system), tabular numerals for all
       values, consistent letter-spacing on small caps, no default-font element anywhere.
-- [ ] A5 Micro-interaction: hover/active states on every control; PROCESS press animation;
+- [x] A5 Micro-interaction: hover/active states on every control; PROCESS press animation;
       state transitions (idle→running→done) animated on transform/opacity only; LED pulses.
 - [x] A6 Empty/loading states designed (before any file is loaded the screen must still look
       like a product, not a blank shell); drop-target highlight on drag-over.
@@ -27,19 +27,19 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
 ## B. UX completeness (web mode)
 - [x] B1 Full keyboard map: Space play/pause, A/B decks, ←/→ seek ±5 s, Shift+←/→ ±1 s,
       P process, Esc cancel, ? shows a shortcut overlay. No modifier-key false triggers.
-- [ ] B2 Drag-and-drop AND file picker both work in web mode (upload path), with a visible
+- [x] B2 Drag-and-drop AND file picker both work in web mode (upload path), with a visible
       upload progress for large files and a clear error for unsupported types.
 - [x] B3 Zoom + scroll in the waveform (wheel/pinch to zoom, drag ruler to pan), with the
       verdict strip staying aligned to the visible window.
 - [x] B4 Per-unit inspection: clicking a verdict segment selects the unit — highlights its
       range, shows its guard scores/decision reason in a details panel, seeks the transport.
-- [ ] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
+- [x] B5 Job history within the session (last N runs with profile, outcome, LUFS delta),
       re-selectable without re-analyzing.
-- [ ] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
+- [x] B6 Graceful engine loss: server killed mid-job → clear offline banner, auto-reconnect
       (health polling), state preserved; SSE drop mid-job recovers to the correct terminal state.
-- [ ] B7 Report access: download master + JSON report + human-readable txt from the UI;
+- [x] B7 Report access: download master + JSON report + human-readable txt from the UI;
       "copy report summary" one-liner.
-- [ ] B8 Responsive from 960×640 up to ultrawide; no overlap, no dead zones, sensible max
+- [x] B8 Responsive from 960×640 up to ultrawide; no overlap, no dead zones, sensible max
       widths at ≥1920.
 
 ## C. Performance & robustness
@@ -49,7 +49,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       (excluding fonts — there are none).
 - [ ] C3 No memory growth across 10 consecutive analyze+process cycles (heap snapshot delta
       < 10 MB); audio elements and workers disposed on file switch.
-- [ ] C4 Zero console errors/warnings in all exercised flows; zero failed/404 network
+- [x] C4 Zero console errors/warnings in all exercised flows; zero failed/404 network
       requests; all requests to 127.0.0.1 only.
 - [ ] C5 Adversarial inputs at the UI boundary: 0-byte file, 3-hour file, 192 kHz file,
       corrupt container, filename with quotes/unicode/emoji — every one ends in a designed
@@ -66,8 +66,8 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       keyboard map) has vitest coverage; the rest is covered by scripted browser verification.
 
 ## E. Engine-web seam (only as needed by the UI)
-- [ ] E1 Analyze of a 3-hour file streams/chunks (no multi-GB peak RSS; measured).
-- [ ] E2 Upload path handles ≥1 GB file without buffering it fully in memory.
+- [x] E1 Analyze of a 3-hour file streams/chunks (no multi-GB peak RSS; measured).
+- [x] E2 Upload path handles ≥1 GB file without buffering it fully in memory.
 - [x] E3 Waveform peaks endpoint supports windowed re-query for zoom (`start_s`/`end_s`)
       so deep zoom shows true detail, not interpolated buckets.
 

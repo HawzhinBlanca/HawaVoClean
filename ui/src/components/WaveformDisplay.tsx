@@ -243,7 +243,10 @@ export function WaveformDisplay() {
     const host = hostRef.current;
     const st = getState();
     const client = st.client;
-    if (!host || !client || !peaksSupported()) return;
+    // B6 · with the engine gone the base envelope already in hand still draws
+    // at every zoom; asking for detail we cannot get would only write a
+    // failure into the status line on every wheel event.
+    if (!host || !client || st.engineStatus !== 'ready' || !peaksSupported()) return;
     const v = waveView.view;
     const span = v.end - v.start;
     const dur = waveView.duration;

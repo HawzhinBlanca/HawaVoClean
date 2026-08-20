@@ -89,6 +89,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peak RSS is measured (+5.7 MB for a 5 s window, +154 MB for the whole file
   as one window) and then deleted.
 
+### Changed — `POST /api/analyze` streams the file instead of decoding it (goal box E1)
+- Analyze used to call `decode_audio` on the whole file. Measured before this
+  change: a 3 h / 2073.6 MB recording cost **12,756.8 MB of peak RSS** and
+  36.11 s; a 30 min / 345.6 MB one cost 3039.2 MB and 5.56 s. It is now a
+  single streaming decode pass with four accumulators, and peak RSS is
+  **flat in file length**: 222.3 MB for the 3-hour file (32.94 s) and 227.0 MB
+  for the 30-minute one (5.65 s) — 57x less memory and 9 % less wall time on
+  the long file, with every number it returns unchanged (-14.71 LUFS,
+  -3.71 dBTP, -17.15 dB noise floor, identical spectrum). Nothing about the
+  response shape changed.
+- New `iter_decode_audio(probe, chunk_samples, timeout_s)` in
+  `hawavoclean/audio/decode.py` (additive; `decode_audio` and
+  `decode_audio_window` are untouched): one ffmpeg process, no seek, stdout
+  read in fixed-size blocks, stderr to a temp file so a chatty decoder cannot
+  deadlock on a pipe nobody drains. The sample stream is **bit-identical** to
+  `decode_audio`, verified on PCM, FLAC, 44.1 kHz and the project's AAC-in-mp4
+  test media at four different chunk sizes. Chunk default 512 Ki frames
+  (~11 s at 48 kHz), chosen from a sweep on the 3-hour file: 256 Ki costs
+  88 MB / 33.6 s, 512 Ki 118 MB / 32.1 s, 2 Mi 269 MB / 31.8 s, 4 Mi 366 MB /
+  31.5 s.
+- The four reductions, each written to land on exactly the grid its whole-file
+  counterpart used, and each proved against it in
+  `tests/unit/test_server_analyze_streaming.py` (which keeps the old
+  whole-file implementation as its oracle):
+  - **overview buckets** — running min/max/sum-of-squares per bucket, the same
+    machinery `/api/peaks` already used (`_BucketReducer` is now shared by
+    both). Bit-equal to the whole-file buckets on PCM.
+  - **1/12-octave long-term average spectrum** — a running sum of per-frame
+    power over a running frame count. Identical by construction (same frames,
+    same hop grid, same divisor); measured worst case **1.4e-14 dB**.
+  - **BS.1770 integrated loudness** — the K-weighting biquads keep their
+    filter state across chunks (an IIR split with `lfilter`'s `zi` is exact),
+    one mean square is accumulated per 400 ms gating block per channel, and
+    the absolute (-70 LUFS) and relative (-10 LU) gates are applied at the end
+    exactly as pyloudnorm applies them, from pyloudnorm's own coefficients.
+    Measured worst case over mono / stereo / 6-channel / gate-heavy /
+    sub-400 ms / near-silent / 44.1 kHz / real AAC fixtures at four chunk
+    sizes: **1.2e-7 LU** (contract: 0.01 LU). The residue is float64 block
+    sums against pyloudnorm's float32 ones and does not grow with chunk count.
+  - **true peak** — `oversampled_peak_envelope` fed a rolling buffer that
+    always has `EDGE` (4096) samples of real audio on both sides of every
+    finalised region, against a polyphase FIR whose half-length is ten input
+    samples. Measured difference: **exactly 0.00 dB**, as is sample peak.
+- One behaviour change, deliberate and measured: the overview grid and
+  `duration_s` are now laid on the *container* sample count — the timeline the
+  playhead, `/api/peaks` and the `<audio>` element already use — instead of
+  the decoder's. For PCM/FLAC the two are the same number. For a lossy
+  container they are not: the project's AAC test file decodes 71 samples
+  (1.5 ms) past the length its container declares, so `/api/analyze` and
+  `/api/peaks` used to report durations 1.5 ms apart. They now agree, which
+  closes the discrepancy carried forward from web iteration 1. Spectrum,
+  loudness and true peak still see every decoded sample.
+- `analyze_audio` now goes through the bounded probe cache, so an analyze
+  immediately followed by a burst of zoom queries no longer re-SHA-256s the
+  file (0.8 s on a 2 GB input).
+- `tests/unit/test_server_analyze_streaming.py`: 16 tests. The `@pytest.mark.slow`
+  memory proof generates a 10-minute and a 30-minute file under `test_output/`,
+  measures each in a fresh subprocess (peak RSS is a process-lifetime
+  high-water mark, so an in-process delta would be contaminated), asserts the
+  growth is under 400 MB *and* that the two sizes differ by less than 64 MB —
+  flat, not merely smaller — then deletes them. Observed: 115 MB file →
+  +114.8 MB, 346 MB file → +116.9 MB.
+
+### Added — an upload size cap, and the evidence that uploads never buffer (goal box E2)
+- Verified what Starlette actually does rather than assuming it: each *file*
+  part of a multipart body goes into a `SpooledTemporaryFile(max_size=1 MiB)`,
+  so anything past a megabyte is on disk before the route runs.
+  `MultiPartParser.max_part_size` (also 1 MiB) looks like a cap but applies
+  only to non-file fields. Measured on a live engine with a 1.07 GB file:
+  peak RSS **133.8 MB against an idle 127.8 MB — 6.0 MB of growth**, 1.26 s,
+  and the saved file is byte-exact.
+- `POST /api/upload` now copies with `while chunk := await file.read(
+  UPLOAD_CHUNK_BYTES)` (module constant, 1 MiB) and deletes the partial
+  destination and its directory if anything fails part way through, so a
+  half-written file can never masquerade as audio to the other endpoints.
+- New configurable cap: `DEFAULT_MAX_UPLOAD_BYTES` = 8 GiB, overridable with
+  `HAWAVOCLEAN_MAX_UPLOAD_BYTES` (0 disables it) or
+  `create_app(max_upload_bytes=…)`. A malformed or negative value falls back
+  to the default rather than silently uncapping the endpoint.
+  `UploadSizeLimitMiddleware` refuses an over-sized body twice: from the
+  declared `Content-Length` before a byte is read (measured: 413 in 0.14 s
+  with 1.2 MB of RSS growth and nothing written), and from a running byte
+  count on the receive channel for a client that sends
+  `Transfer-Encoding: chunked` and declares no length (measured: 413 after
+  17.0 MB against a 16 MiB cap, nothing left on disk). It sits inside the
+  token check, so an unauthenticated flood is still 401.
+- `tests/unit/test_server_upload_streaming.py`: 13 tests — the spool
+  threshold, that the part reaches the route already on disk, that the copy
+  loop asks for exactly the configured chunk as many times as it takes, the
+  partial-file cleanup, both 413 paths, the boundary case, the zero-disables
+  case, and the environment parsing including junk values.
+
 ### Fixed — engine bridge review pass
 - `GET /api/audio` 416 responses now carry `Content-Range: bytes */<size>`
   (RFC 9110; Chromium's media stack reads it to recover the resource length

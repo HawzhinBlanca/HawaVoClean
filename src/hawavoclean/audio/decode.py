@@ -2,12 +2,17 @@
 
 :func:`decode_audio` reads a whole file; :func:`decode_audio_window` reads a
 time window only (ffmpeg input seek / ``soundfile`` frame range), so a few
-seconds out of a multi-hour file costs a few megabytes instead of gigabytes.
+seconds out of a multi-hour file costs a few megabytes instead of gigabytes;
+:func:`iter_decode_audio` reads the whole file as a stream of chunks, which is
+what a reduction over a three-hour file needs to stay inside a few hundred MB.
 """
 
 import math
 import shutil
 import subprocess
+import tempfile
+import time
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -15,6 +20,13 @@ import soundfile as sf
 
 from hawavoclean.audio.types import AudioBuffer, AudioProbeResult
 from hawavoclean.errors import InvalidUserInputError
+
+# One chunk of a streamed whole-file decode: 512 Ki frames is ~11 s at 48 kHz,
+# 2 MB of float32 per channel. Swept against a 3-hour file: 256 Ki costs
+# 88 MB / 33.6 s, 512 Ki 118 MB / 32.1 s, 2 Mi 269 MB / 31.8 s, 4 Mi 366 MB /
+# 31.5 s — so this is the knee, where the reduction is already as fast as it
+# gets and the footprint is still small.
+DECODE_CHUNK_SAMPLES = 512 * 1024
 
 # Seeking a lossy stream drops the MDCT overlap the first frame needs, so the
 # first ~2048 decoded samples after a seek are wrong (measured on AAC: peaks
@@ -256,3 +268,124 @@ def decode_audio_window(
     _check_decoded(arr, file_path)
 
     return AudioBuffer(data=arr, sample_rate=probe.sample_rate)
+
+
+def iter_decode_audio(
+    probe: AudioProbeResult,
+    chunk_samples: int = DECODE_CHUNK_SAMPLES,
+    timeout_s: float = 1800.0,
+) -> Iterator[AudioBuffer]:
+    """Decode a whole file as a sequence of contiguous ``AudioBuffer`` chunks.
+
+    The sample stream is *identical* to :func:`decode_audio` — the same ffmpeg
+    command, no seek, so no lossy-container pre-roll question arises — but the
+    consumer never holds more than one chunk, so a reduction over a three-hour
+    file costs a chunk instead of the file. Chunks are back to back and every
+    chunk except the last carries exactly ``chunk_samples`` frames.
+
+    Error semantics match :func:`decode_audio`: a decoder failure, a timeout or
+    a file that yields no samples all raise :class:`InvalidUserInputError`, and
+    every chunk goes through the same NaN/Inf/amplitude sanity check. ffmpeg's
+    stderr goes to a temporary file rather than a pipe, because a pipe nobody
+    drains until the end would deadlock on a file that logs a lot.
+    """
+    if chunk_samples < 1:
+        raise ValueError(f"chunk_samples must be >= 1, got {chunk_samples}")
+    file_path = probe.path
+    ffmpeg_bin = shutil.which("ffmpeg")
+    frame_bytes = probe.channels * 4
+    total = 0
+
+    def _buffer(raw: bytes) -> AudioBuffer:
+        flat = np.frombuffer(raw, dtype=np.float32)
+        arr: np.ndarray[Any, np.dtype[np.float32]] = np.ascontiguousarray(
+            flat.reshape((len(raw) // frame_bytes, probe.channels)).T, dtype=np.float32
+        )
+        _check_decoded(arr, file_path)
+        return AudioBuffer(data=arr, sample_rate=probe.sample_rate)
+
+    if ffmpeg_bin:
+        cmd = [
+            ffmpeg_bin,
+            "-nostdin",  # never read the terminal: a stray 'q' aborted decodes silently
+            "-v",
+            "error",
+            "-i",
+            str(file_path),
+            "-map",
+            f"0:{probe.audio_stream_index}",
+            "-vn",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "-ar",
+            str(probe.sample_rate),
+            "-ac",
+            str(probe.channels),
+            "pipe:1",
+        ]
+        deadline = time.monotonic() + timeout_s
+        want = chunk_samples * frame_bytes
+        with tempfile.TemporaryFile() as errfile:
+            proc = subprocess.Popen(  # noqa: S603 - argv list, no shell
+                cmd, stdout=subprocess.PIPE, stderr=errfile, stdin=subprocess.DEVNULL
+            )
+            try:
+                assert proc.stdout is not None
+                pending = b""
+                while True:
+                    block = proc.stdout.read(want - len(pending))
+                    if time.monotonic() > deadline:
+                        raise InvalidUserInputError(
+                            f"FFmpeg decoding timed out after {timeout_s}s: {file_path}"
+                        )
+                    if not block:
+                        break
+                    pending += block
+                    if len(pending) < want:
+                        continue  # short read from the pipe, not end of stream
+                    total += len(pending) // frame_bytes
+                    yield _buffer(pending)
+                    pending = b""
+                whole = len(pending) - len(pending) % frame_bytes
+                if whole:
+                    total += whole // frame_bytes
+                    yield _buffer(pending[:whole])
+                proc.stdout.close()
+                code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+            finally:
+                if proc.poll() is None:  # pragma: no cover - abandoned generator
+                    proc.kill()
+                    proc.wait()
+                if proc.stdout is not None and not proc.stdout.closed:
+                    proc.stdout.close()
+            if code != 0:
+                errfile.seek(0)
+                detail = errfile.read().decode("utf-8", "replace").strip()[-500:]
+                raise InvalidUserInputError(
+                    f"FFmpeg failed to decode {file_path}: exit {code} {detail}"
+                )
+    else:
+        try:
+            with sf.SoundFile(str(file_path)) as f:
+                if f.samplerate != probe.sample_rate:
+                    raise InvalidUserInputError(
+                        f"Decoded sample rate {f.samplerate} does not match probe "
+                        f"{probe.sample_rate}"
+                    )
+                while True:
+                    data = f.read(chunk_samples, dtype="float32", always_2d=True)
+                    if data.shape[0] == 0:
+                        break
+                    total += int(data.shape[0])
+                    arr = np.ascontiguousarray(data.T, dtype=np.float32)
+                    _check_decoded(arr, file_path)
+                    yield AudioBuffer(data=arr, sample_rate=probe.sample_rate)
+        except InvalidUserInputError:
+            raise
+        except Exception as e:
+            raise InvalidUserInputError(f"Failed to decode audio file {file_path}: {e}") from e
+
+    if total == 0:
+        raise InvalidUserInputError(f"Decoded zero samples from {file_path}")
