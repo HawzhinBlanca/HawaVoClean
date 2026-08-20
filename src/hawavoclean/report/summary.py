@@ -49,6 +49,7 @@ def generate_human_summary(report: HawaVoCleanReport) -> str:
         f"  - Unverified:       {report.summary.unverified}",
         f"  - Error Fallbacks:  {report.summary.error_passthrough}",
         f"  - Continuity Revert: {report.summary.continuity_reverted}",
+        f"  - Continuity Crossfade: {report.summary.continuity_crossfaded}",
         f"  - Non-Speech:       {report.summary.no_speech}",
         f"  - Finish Applied:   {report.summary.finish_applied}",
         f"  - Finish Bypassed:  {report.summary.finish_bypassed}",

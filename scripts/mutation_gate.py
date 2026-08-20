@@ -322,6 +322,68 @@ MUTATIONS: list[Mutation] = [
             "tests/unit/test_multipass.py::test_auto_discards_regressing_pass_and_ships_previous",
         ),
     ),
+    Mutation(
+        "M14",
+        "continuity fade lands on the wrong edge",
+        "src/hawavoclean/policy/continuity.py",
+        """    fade_in = max(0, min(fade_in_samples, n))""",
+        """    fade_in_samples, fade_out_samples = fade_out_samples, fade_in_samples
+    fade_in = max(0, min(fade_in_samples, n))""",
+        # Owner: a fade on the wrong edge satisfies every "something faded"
+        # assertion while leaving the seam exactly where it was. Only a test
+        # that checks WHICH edge went back to the original catches it.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_the_fade_removes_the_step_a_hard_cut_leaves",
+        ),
+    ),
+    Mutation(
+        "M15",
+        "continuity ignores a seam on a unit's left edge",
+        "src/hawavoclean/policy/continuity.py",
+        """        left = i > 0 and forced_cut_between(i - 1, i) and not adjusted[i - 1].is_enhanced""",
+        """        left = False""",
+        # Owner: half the seams are on the left. A unit between two originals
+        # would fade only its right edge and ship a hard step on its left.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_a_unit_between_two_originals_fades_on_both_sides",
+            "tests/unit/test_policy_verdict.py::test_enforce_continuity_fades_cut_speech",
+        ),
+    ),
+    Mutation(
+        "M16",
+        "a unit too short to fade is faded anyway instead of reverting",
+        "src/hawavoclean/policy/continuity.py",
+        """    def can_afford_fade(i: int) -> bool:
+        return taper <= len(orig_core_waveforms[i]) * MAX_TAPER_FRACTION""",
+        """    def can_afford_fade(i: int) -> bool:
+        return True""",
+        # Owner: this is the fail-closed path. Without it a 20 ms unit gets a
+        # 30 ms fade — the whole unit, and then some.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_a_unit_too_short_to_fade_still_reverts",
+            "tests/unit/test_continuity_taper.py::test_a_cascade_of_short_units_terminates",
+        ),
+    ),
+    Mutation(
+        "M17",
+        "the pipeline plans the continuity fade and never applies it",
+        "src/hawavoclean/pipeline.py",
+        """            if taper_in[idx] > 0 or taper_out[idx] > 0:
+                final_wave = apply_continuity_taper(
+                    final_wave, orig_core_waveforms[idx], taper_in[idx], taper_out[idx]
+                )
+                finish_actions = [
+                    *finish_actions,
+                    f"{CONTINUITY_TAPER_ACTION}(in={taper_in[idx]},out={taper_out[idx]})",
+                ]
+""",
+        "",
+        # Owner: every unit test covers what the policy DECIDES. Only an
+        # end-to-end run notices when the decision never reaches the audio.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_a_planned_fade_reaches_the_master_and_the_report",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")

@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — one failing unit no longer discards a whole file of passing ones
+
+The continuity rule forbids enhanced audio from butting against original audio
+across a *forced* cut — a boundary the segmenter made inside continuous speech
+because a speech interval outran the maximum unit length. The remedy was to
+revert the enhanced unit, and reverting is symmetric: it creates a seam on the
+unit's far side. Iterated to a fixed point on a recording whose every boundary
+is forced — continuous speech, no pauses to cut at — **one failing unit
+reverted the entire file**.
+
+Measured on Flute 09 (94.6 s, production profile): five of six units passed the
+guard, and the report read `enhanced: 0/6`, `continuity_reverted: 5`. The
+listener received original audio with loudness normalisation and nothing else.
+
+The remedy is now a fade. An enhanced unit that meets original audio across a
+forced cut fades its own enhancement back to the original recording over the
+30 ms before the joint (and/or after it, when the cut is on its left). At the
+joint both sides are then the original recording **bit for bit**, so the step
+is exactly zero rather than merely small, and the difference between the two
+renderings is spread over 30 ms instead of one sample.
+
+- **Flute 09, production: `enhanced: 0/6` → `5/6`.** Speech/floor separation
+  **27.65 dB → 34.88 dB (+7.23 dB)**; `continuity_reverted: 5 → 0`,
+  `continuity_crossfaded: 0 → 1`; `finish_bypassed: 6 → 1`.
+- **Nothing else moved.** Of the four committed reference masters
+  (`test_output/perf-ref-hashes.txt`), three reproduce **byte for byte** —
+  Flute 09 studio and both teat1vo profiles have no continuity reverts, so
+  they have no seams to fade. Only the one file the rule was damaging changed.
+  No configuration key was added, renamed or removed, so `config_hash` — and
+  with it the dither seed and the last bit of every sample — is untouched.
+
+What the fade costs, and what the seam was actually worth
+(`docs/continuity-taper.md` carries the full evidence):
+
+- Sample step at the joint, hard cut: **4.7% of local RMS**. Faded: **0**.
+- Spectral difference between the two renderings over the final 30 ms:
+  **3.05 dB**, at a local level of **-51 dBFS**. The old remedy spent 7.23 dB
+  of separation to hide it.
+- In the assembled timeline the cut is not even an outlier: mean
+  frame-to-frame spectral change **6.1 dB** across the joint against a
+  file-wide mean of **7.3 dB**. A 5–150 ms sweep of the fade length moved no
+  spectral or separation metric, so 30 ms is set by the one thing that does
+  constrain it — the enhancement residual's fade is an amplitude modulation
+  at ~17 Hz, below where modulation reads as texture rather than transition.
+- The seam is small because it is *placed* small: the segmenter hunts a ±1 s
+  window for the quietest zero crossing, and Flute 09's five forced cuts landed
+  **13.6 to 22.8 dB below the file's median frame RMS**. That search is
+  bounded and 13.6 dB is not silence, so the seam is still guarded — cheaply.
+
+Fail-closed is intact. A unit too short to afford the fade (under 4× its
+length, i.e. 120 ms at 48 kHz) still reverts, and the fixed-point iteration
+still converges. The fade material is the unit's **own** original audio, never
+the enhanced context the pipeline computes and discards: the neighbour across
+the cut ships original *because the guard rejected its candidate*, so
+extending this unit's enhanced context into that neighbour's territory would
+publish audio no guard ever scored for that time range.
+
+- `hawavoclean/policy/continuity.py`: `enforce_source_continuity` becomes
+  `resolve_source_continuity`, returning a `ContinuityResolution` — the
+  decisions, the reverts it still had to make, and a per-unit fade plan. The
+  new `apply_continuity_taper` blends as `(1 - w) * original + w * finished`
+  with a raised-cosine `w` whose endpoints are pinned to exactly 0.0 and 1.0,
+  so the outer sample is the original to the bit and the audio outside the
+  fade windows is untouched.
+- The fade is applied **after** finishing, because the seam is between the
+  *finished* enhanced audio and the original — fading any earlier would leave
+  the finishing EQ's own step sitting at the joint.
+- Report: new `summary.continuity_crossfaded`, and a
+  `continuity_taper(in=…,out=…)` entry in the unit's `finish_actions`. A faded
+  unit's `final_decision` stays `enhanced`, because it is.
+- Mutation gate: **M14–M17** — fade on the wrong edge, left-edge seams
+  ignored, a too-short unit faded instead of reverted, and the pipeline
+  planning a fade it never applies. 17/17 caught, every mutation owner-credited.
+
 ### Fixed — four config keys that were declared and never read
 
 `runtime.device`, `runtime.num_threads`, `runtime.worker_memory_limit_mb` and

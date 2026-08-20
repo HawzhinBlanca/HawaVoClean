@@ -480,6 +480,11 @@
           "title": "Continuity Reverted",
           "type": "integer"
         },
+        "continuity_crossfaded": {
+          "default": 0,
+          "title": "Continuity Crossfaded",
+          "type": "integer"
+        },
         "no_speech": {
           "default": 0,
           "title": "No Speech",

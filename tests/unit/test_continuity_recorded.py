@@ -1,9 +1,18 @@
-"""Continuity enforcement must be channel-aware and visible in the audit trail."""
+"""Continuity enforcement must be channel-aware and visible in the audit trail.
+
+These are regression guards for boundaries the rule got wrong in the field.
+The remedy they check changed in 2026-08-21 from reverting the enhanced unit
+to fading it back to the original before the joint (see
+:mod:`hawavoclean.policy.continuity`), so what each test asserts now is that
+the unit SURVIVES where it should and pays a fade where it must."""
 
 import numpy as np
 
 from hawavoclean.guard.verdict import GuardVerdict
-from hawavoclean.policy.continuity import enforce_source_continuity
+from hawavoclean.policy.continuity import (
+    CONTINUITY_TAPER_MS,
+    resolve_source_continuity,
+)
 from hawavoclean.policy.decision import UnitPolicyDecision
 from hawavoclean.segmentation.types import SpeechUnit
 
@@ -41,7 +50,8 @@ def test_units_on_different_channels_are_never_neighbours() -> None:
     decisions = [_dec(True, n), _dec(False, n)]
     waves = [np.zeros(n, dtype=np.float32), np.zeros(n, dtype=np.float32)]
 
-    adjusted = enforce_source_continuity(units, decisions, waves)
+    res = resolve_source_continuity(units, decisions, waves, SR)
+    adjusted = res.decisions
 
     assert adjusted[0].is_enhanced, (
         "the ch0 unit was reverted because of a ch1 'neighbour'; units on "
@@ -67,7 +77,8 @@ def test_continuity_only_fires_across_a_forced_boundary() -> None:
     decisions = [_dec(False, n), _dec(True, n), _dec(True, n)]
     waves = [np.zeros(n, dtype=np.float32)] * 3
 
-    adjusted = enforce_source_continuity(units, decisions, waves)
+    res = resolve_source_continuity(units, decisions, waves, SR)
+    adjusted = res.decisions
 
     assert adjusted[1].is_enhanced, (
         "unit 1 was reverted because of its LEFT neighbour, but the boundary "
@@ -76,8 +87,9 @@ def test_continuity_only_fires_across_a_forced_boundary() -> None:
 
 
 def test_continuity_fires_when_the_forced_cut_separates_enhanced_from_original() -> None:
-    """The real hazard: a forced cut through speech with enhanced audio on
-    one side and original on the other -> audible timbre seam. Revert."""
+    """The real hazard: a forced cut through speech with enhanced audio on one
+    side and original on the other. The remedy is a fade at that edge, not the
+    loss of the whole unit."""
     n = SR // 2
     units = [
         _unit(0, 0, 0, n, forced=True),  # enhanced; forced cut at its end
@@ -86,5 +98,14 @@ def test_continuity_fires_when_the_forced_cut_separates_enhanced_from_original()
     decisions = [_dec(True, n), _dec(False, n)]
     waves = [np.zeros(n, dtype=np.float32)] * 2
 
-    adjusted = enforce_source_continuity(units, decisions, waves)
-    assert not adjusted[0].is_enhanced, "enhanced/original seam across a forced cut must revert"
+    res = resolve_source_continuity(units, decisions, waves, SR)
+    adjusted = res.decisions
+    assert adjusted[0].is_enhanced, (
+        "the unit was reverted whole; it is long enough to fade back to the "
+        "original at the joint and keep the rest of its enhancement"
+    )
+    assert res.fade_out_samples[0] == int(round(SR * CONTINUITY_TAPER_MS / 1000.0)), (
+        "the seam is on unit 0's RIGHT edge and must be faded there"
+    )
+    assert res.fade_in_samples == [0, 0], "no seam on the left of either unit"
+    assert res.reverted_ids == set()

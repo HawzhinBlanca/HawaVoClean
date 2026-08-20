@@ -157,6 +157,11 @@ export interface UnitSummary {
   unverified?: number;
   error_passthrough?: number;
   continuity_reverted?: number;
+  /** Enhanced units that kept their enhancement across a forced mid-speech cut
+   *  by fading back to the original at the joint, rather than being reverted
+   *  whole. These units are `enhanced` in `final_decision`; the count is here
+   *  so the panel can say what a run paid for continuity. */
+  continuity_crossfaded?: number;
   no_speech?: number;
   finish_applied?: number;
   finish_bypassed?: number;

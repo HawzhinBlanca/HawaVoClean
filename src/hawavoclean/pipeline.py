@@ -63,7 +63,11 @@ from hawavoclean.job import JobWorkspace
 from hawavoclean.journal import JournalEvent
 from hawavoclean.logging import get_logger
 from hawavoclean.paths import models_dir, profile_config_path, resolve_calibration_file
-from hawavoclean.policy.continuity import enforce_source_continuity
+from hawavoclean.policy.continuity import (
+    CONTINUITY_TAPER_ACTION,
+    apply_continuity_taper,
+    resolve_source_continuity,
+)
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from hawavoclean.progress import (
     PROGRESS_DECODE,
@@ -543,13 +547,21 @@ def _run_after_preflight(
 
         # 8. Source continuity — BEFORE records are built and units finished,
         # so a continuity revert is what gets finished, recorded, and stitched.
+        # The fades it plans are applied AFTER finishing instead: the seam a
+        # listener hears is between the *finished* enhanced audio and the
+        # original, so fading any earlier would leave the finishing EQ's own
+        # step sitting at the joint.
         continuity_reverted_ids: set[int] = set()
+        taper_in = [0] * len(all_units)
+        taper_out = [0] * len(all_units)
         if config.policy.enforce_continuity:
-            adjusted = enforce_source_continuity(all_units, decisions, orig_core_waveforms)
-            for u, before, after in zip(all_units, decisions, adjusted, strict=True):
-                if before.is_enhanced and not after.is_enhanced:
-                    continuity_reverted_ids.add(u.unit_id)
-            decisions = adjusted
+            resolution = resolve_source_continuity(
+                all_units, decisions, orig_core_waveforms, audio_buf.sample_rate
+            )
+            decisions = resolution.decisions
+            continuity_reverted_ids = resolution.reverted_ids
+            taper_in = resolution.fade_in_samples
+            taper_out = resolution.fade_out_samples
 
         # 9. Finishing (Guard B) on surviving enhanced units, then records
         emit_progress(
@@ -600,6 +612,15 @@ def _run_after_preflight(
                 finish_actions = finish_res.actions_taken
                 guard_b_verdict = finish_res.guard_b_verdict
                 guard_b_scores = finish_res.guard_b_scores
+
+            if taper_in[idx] > 0 or taper_out[idx] > 0:
+                final_wave = apply_continuity_taper(
+                    final_wave, orig_core_waveforms[idx], taper_in[idx], taper_out[idx]
+                )
+                finish_actions = [
+                    *finish_actions,
+                    f"{CONTINUITY_TAPER_ACTION}(in={taper_in[idx]},out={taper_out[idx]})",
+                ]
 
             final_waveforms.append(final_wave)
             workspace.journal.append(
@@ -753,6 +774,11 @@ def _run_after_preflight(
     continuity_cnt = sum(
         1 for r in unit_decision_records if r.final_decision == "original_continuity"
     )
+    crossfaded_cnt = sum(
+        1
+        for r in unit_decision_records
+        if any(a.startswith(CONTINUITY_TAPER_ACTION) for a in r.finish_actions)
+    )
     reverted_cnt = sum(1 for r in unit_decision_records if r.final_decision == "original_reverted")
     unverified_cnt = sum(
         1 for r in unit_decision_records if r.final_decision == "original_unverified"
@@ -835,6 +861,7 @@ def _run_after_preflight(
             unverified=unverified_cnt,
             error_passthrough=error_cnt,
             continuity_reverted=continuity_cnt,
+            continuity_crossfaded=crossfaded_cnt,
             no_speech=no_speech_cnt,
             finish_applied=finish_app_cnt,
             finish_bypassed=finish_byp_cnt,

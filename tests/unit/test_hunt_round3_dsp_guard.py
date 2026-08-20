@@ -14,7 +14,7 @@ from hawavoclean.finishing.loudness import compute_static_master_gain, measure_l
 from hawavoclean.guard.signal import check_signal_integrity
 from hawavoclean.guard.spectral_probe import SpectralSignatureProbe
 from hawavoclean.guard.verdict import GuardVerdict, evaluate_guard_pass
-from hawavoclean.policy.continuity import enforce_source_continuity
+from hawavoclean.policy.continuity import resolve_source_continuity
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from hawavoclean.segmentation.types import SpeechUnit
 
@@ -158,15 +158,32 @@ def test_continuity_cascade_converges() -> None:
     def d(enh: bool) -> UnitPolicyDecision:
         return UnitPolicyDecision(np.zeros(10, np.float32), enh, 1.0, GuardVerdict.PASS)
 
-    out = enforce_source_continuity(
+    # Ten-sample units cannot carry a 30 ms fade, so the old all-or-nothing
+    # remedy is the only one available and must still converge: unit1 reverts
+    # (seam with unit2 across forced cut 1|2), then unit0 reverts too.
+    out = resolve_source_continuity(
         [u(0, 0, 10, True), u(1, 10, 20, True), u(2, 20, 30, False)],
         [d(True), d(True), d(False)],
         [np.zeros(10, np.float32)] * 3,
+        48000,
     )
-    flags = [x.is_enhanced for x in out]
-    # unit1 reverts (seam with unit2 across forced cut 1|2); then unit0 must
-    # also revert (it now meets reverted unit1 across forced cut 0|1).
+    flags = [x.is_enhanced for x in out.decisions]
     assert flags == [False, False, False], f"cascade left a seam: {flags}"
+
+    # The regression that made this matter: on units of a realistic length the
+    # cascade must not happen at all. One failing unit used to take the whole
+    # file with it (Flute 09: 5 passing units discarded, 7.23 dB of separation).
+    sr, n = 48000, 48000
+    big = [u(i, i * n, (i + 1) * n, True) for i in range(6)]
+    out2 = resolve_source_continuity(
+        big,
+        [d(True)] * 5 + [d(False)],
+        [np.zeros(n, np.float32)] * 6,
+        sr,
+    )
+    flags2 = [x.is_enhanced for x in out2.decisions]
+    assert flags2 == [True] * 5 + [False], f"cascade ate passing units: {flags2}"
+    assert out2.fade_out_samples[4] > 0, "the one real seam was not faded"
 
 
 # 11. stitch declick uses the wrong unit's flag -----------------------------------------------

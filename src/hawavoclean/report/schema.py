@@ -77,6 +77,10 @@ class UnitSummary(ReportBaseModel):
     unverified: int = 0
     error_passthrough: int = 0
     continuity_reverted: int = 0
+    #: Enhanced units that kept their enhancement across a forced mid-speech
+    #: cut by fading back to the original recording at the joint, instead of
+    #: being reverted whole. See :mod:`hawavoclean.policy.continuity`.
+    continuity_crossfaded: int = 0
     no_speech: int = 0
     finish_applied: int = 0
     finish_bypassed: int = 0
