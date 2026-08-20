@@ -56,9 +56,9 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
       error or success state, never a stuck spinner.
 
 ## D. Accessibility & quality gates
-- [ ] D1 Full keyboard operability (tab order, focus rings styled, no traps); ARIA labels on
+- [x] D1 Full keyboard operability (tab order, focus rings styled, no traps); ARIA labels on
       all controls; verdict tooltip content reachable without hover.
-- [ ] D2 Contrast ≥ 4.5:1 for all text (checked on the dark theme values actually shipped).
+- [x] D2 Contrast ≥ 4.5:1 for all text (checked on the dark theme values actually shipped).
 - [x] D3 `prefers-reduced-motion` honored (disables pulse/glow animation, keeps function).
 - [x] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
       (default + fuzz when engine touched) / mutation gate on clean tree / `pnpm typecheck`

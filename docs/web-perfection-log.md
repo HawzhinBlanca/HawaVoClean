@@ -309,3 +309,316 @@ redone. Also recorded, not fixed: at 1:1 zoom on a 90-minute file there is a ~15
 a pan where the display draws from an interpolated base band rather than real samples (frame rate
 unaffected; a fix was attempted, could not be shown to be an improvement, and was reverted rather
 than churn the ticked renderer on a hypothesis).
+
+## Iteration 5 — 2026-08-20 — D1 + D2 (27/27)
+
+**Harness.** The Claude Browser pane cannot do this box. Its tab runs unfocused, so
+`Input.dispatchKeyEvent` never reaches the renderer's focus machinery: 40 dispatched `Tab`
+presses left `document.activeElement` on `<body>`, and `?` did not open the overlay either. Every
+keyboard result below therefore comes from a real headful Chrome driven over CDP from a small
+script (`launch --remote-debugging-port`, own profile, killed afterwards) — the same escape hatch
+iteration 4 used for rAF.
+
+**Inherited state.** The tree already carried a substantial, unfinished D1 pass from the agent that
+died. It was audited rather than reverted: most of it is good and is now verified. One thing it had
+broken is recorded below.
+
+### The bug the accessibility pass itself introduced
+
+`.sr-only` and `.panel > *` have **the same specificity** (0,1,0), and `.panel > * { position:
+relative }` is written later in `app.css`. So inside a panel the visually-hidden recipe lost, and
+the `<p class="sr-only" id="wave-view-help">` that D1 had added to `WaveformDisplay` stopped being
+out of flow. As a real 1px grid item it added a **third row** to `.wavepanel`'s two-row grid
+(measured: `grid-template-rows: 30px 0.148438px 177.844px`), which pushed the panel head out of its
+own row and down onto the ruler. At 960×640 the head's whole contents — the panel title, the clip
+name, the `0.0 s – 94.6 s of 94.6 s` readout, the magnification and the **FIT button, a focus stop**
+— were painted *underneath* the opaque ruler canvas. `elementsFromPoint` on the title returned
+`CANVAS.ruler-canvas` first, and a differential screenshot proved the text contributed **zero**
+pixels to the shipped frame. Fixed with `.panel > .sr-only { position: absolute }`; the panel is
+back to `30px 177.992px` and the head is back at the top of the panel (screenshot re-taken).
+This is also the reason B8 and D2 had both been "verified" over it: a walker that reads computed
+styles cannot see that an element is buried under a canvas.
+
+### D1 — keyboard operability
+
+**Focus path, real Tab dispatch, loaded+done state, identical at 1440×900 and 960×640** — 18 stops,
+cycling cleanly with no trap:
+
+1 Open file… · 2 the drop well (the file input fills it) · 3 FIT · 4 waveform display
+(`role=group`) · 5 overview (`role=scrollbar`) · 6 Previous unit · 7 Next unit · 8 ? KEYS ·
+9 unit detail (`role=group`, the scrolling region) · 10 the run row · 11 STUDIO (the profile
+radiogroup's single stop) · 12 PROCESS AGAIN · 13 Play · 14 CLEANED (the A/B radiogroup's single
+stop) · 15 Master WAV · 16 JSON report · 17 Summary .txt · 18 Copy summary → back to 1.
+
+With a unit selected it is 19 stops (`Clear selection` arms at position 8). While the engine is
+offline it is 18 with `Retry now` first and the artefact buttons still focusable, carrying their own
+"unavailable while the engine is offline" wording. Shift+Tab walks the exact mirror (checked
+stop-by-stop; the only diff in the automated compare was the history row's own label changing
+between the two passes).
+
+Deliberately **not** stops, each with its reason in the source: the verdict segments (`tabindex=-1`
+— a report can carry hundreds of units and they would bury the rest of the screen; they keep
+`button` semantics, a full name and `aria-pressed`, and `[`/`]` is a better sequential route because
+it also seeks and pans), and the non-checked radio in each segmented control (WAI-ARIA roving
+tabindex).
+
+**Focus rings.** One recipe, `outline: 2px solid var(--ix-focus)` with a token offset, drawn only on
+`:focus-visible`. Proved on pixels, not on stylesheets: freeze animations, screenshot with nothing
+focused, Tab to each stop, screenshot again, diff. Every one of the 18 stops matched
+`:focus-visible`, changed pixels, and the **worst indicator contrast across the whole path is
+10.19:1** (WCAG 2.4.11 asks 3:1). Two were fixed to get there:
+
+- the lit A/B segment measured **3.72:1** — a cyan ring on a cyan-filled key. It now takes a dark
+  ring (`rgba(4,20,28,.95)`), the move a real console makes on an illuminated switch: **15.02:1**.
+- the drop well's whole indicator was a 1px border-colour change (the file input that fills it is
+  `opacity: 0`, so its own outline is invisible). It now wears the same 2px ring inside its border:
+  8.31 → **12.11:1**.
+
+**The shortcut dialog still traps deliberately and restores.** Opened with `?` from `Master WAV`:
+six Tabs and three Shift+Tabs all stayed inside the dialog; Esc closed it; focus went back to
+`Master WAV`. One real defect found here by axe and fixed: at 960×640 the shortcut list overflows
+and scrolls, and a scrolling region with no focusable content cannot be scrolled from the keyboard
+(`scrollable-region-focusable`, serious). It is now a named tab stop, so Tab alternates between the
+close key and the list.
+
+**Live regions — what a screen reader is actually told.** Measured with a MutationObserver that
+computes accessible text (aria-hidden subtrees excluded) and only records a region when its text
+changes, across a real 8-second job:
+
+```
+   5 ms [polite] Processing started
+8070 ms [polite] Processing finished. 5 of 5 units enhanced.
+```
+
+Two announcements for the whole run — no per-tick spam, although the header readout, the plate
+face, the footer and the source strip all re-render on every SSE tick. One region was removed to
+get there: the header's engine lamp was `aria-live="polite"` and was narrating ENGINE BUSY →
+ENGINE READY, i.e. the same two events in words that say less. Killing the engine with the app
+loaded produces **exactly one** assertive announcement — "Engine offline. Nothing on screen was
+lost, and the app is reconnecting on its own." — while the retry countdown beside it ticks about
+24 times in the same six seconds without being announced once. `role="alert"` is the right level
+and this is the justification: engine loss changes what every control on the screen can do, so it
+earns the interruption, and it only earns it once; the countdown and the outage clock stay outside
+any live region, readable when you go and look.
+
+**ARIA, read off Chrome's own accessibility tree** (`Accessibility.getFullAXTree`), not off the
+markup: `heading "HAWAVOCLEAN v3.2" level=1`; landmarks `banner / region "Source clip" / region
+"Waveform" / region "Unit inspector" / region "Session runs" / complementary "Analysis and
+controls" / region "Spectrum" / region "Processing controls" / contentinfo`; `group "Waveform,
+showing 0.0 s to 94.6 s of 94.6 seconds" describedby=wave-view-help`; `scrollbar "Visible waveform
+window" orientation=horizontal`; five `button "Unit 0, channel 0, ENHANCED, 00:00.000 to 00:20.569,
+guard A PASS, guard B PASS, strength 1.00, …" pressed=false`; `button "PROCESS AGAIN"
+describedby=process-readout`; `radiogroup "Profile"` / `radiogroup "A/B source"` with
+`radio … checked=true|false`; `list "1 run, newest first"` → `button "Flute 09.m4a.mp4, currently on
+screen, studio, 5/5 units enhanced, LUFS change +3.2, took 8.0 s, at 08:23:47"`;
+`group "Integrated: -21.7 LUFS, from -24.9 LUFS, change +3.2 LUFS"` (and the other two tiles — named
+as the sentence they draw, interior hidden, so they are not read as a pile of loose numbers);
+`image "Long-term average spectrum: original and cleaned, with the removed energy between them"`.
+The guard score tables are real table semantics; the label cell is now `rowheader`, not another
+`cell`.
+
+**Live values really update.** `aria-valuenow` / `aria-valuetext` on the scrubber and the waveform
+region's own name are written imperatively (a zoom must not cost a React render), so they were
+tested by driving them: `0.000` / `"0.0 s to 94.6 s"` → after two `+` zooms `28.827` /
+`"28.83 s to 65.78 s"` → after PageDown `57.654` / `"57.65 s to 94.61 s"`, with the region's label
+tracking every step. Arrow keys on the scrubber correctly do nothing at fit (there is nothing to
+scroll when the whole clip is in view).
+
+**The tooltip is not the only route to a unit's data.** Keyboard only, no pointer: `]` `]` `]` moved
+the selection 0 → 1 → 2 with `aria-pressed` following it, `[` went back to 1, and the inspector
+carried strictly more than the hover card does — `UNIT 01 · 2/5 ENHANCED · CHANNEL 0 · RANGE
+00:20.569 → 00:40.251 · DURATION 19.68 s · SPEECH YES · RUNTIME 940 ms · STRENGTH 1.00 · FINISHING
+gentle, dc_subsonic_removed(cutoff=75.0Hz), dialogue_leveler(gr_max=2.0dB) · REASON Passed Guard A
+with strength s=1.00` — plus both guard score tables below the fold of that region.
+
+**axe-core 4.13.0** (dev dependency, read from `node_modules` and injected as source at run time —
+never imported by the app, `grep -c axe dist/assets/*.js` = 0), run over eight states:
+idle / loaded+done / done with the inspector scrolled to its guard tables / shortcut overlay open,
+each at 1440×900 and 960×640.
+
+| | violations before | violations after |
+|---|---|---|
+| all eight states | **1** — `scrollable-region-focusable`, *serious*, `.sc-body` (keys@960×640) | **0** |
+
+`color-contrast` shows as *incomplete* (1 node) in every state, in both runs: that is axe declining
+to judge the wordmark, whose glyphs are a gradient (`background-clip: text`). It is measured by hand
+below at 10.7:1.
+
+### D2 — contrast on the pixels actually shipped
+
+**Method, stated so the numbers are defensible.** Two independent measurements per text node,
+run over every text node in the document at each state and size.
+
+*(a) CSS layer compositing.* Text colour is the computed `color`, composited over the backdrop if it
+carries alpha. The backdrop is built by walking from `html` down to the element and stacking every
+paint layer in paint order: `background-color`; every `background-image` layer that is a gradient —
+parsed and **evaluated at this text's own position inside that ancestor's box** by projecting the
+text-box point onto the gradient line, finding the bracketing stops and interpolating in
+premultiplied sRGB (linear, radial and repeating-linear; `url()` layers are counted as *unresolved*
+rather than ignored — there were none); `::before`/`::after` fills that cover the box; and
+**covering siblings that paint below the text**, ordered by z-index, then positioned-over-static,
+then document order. Five points per text run (four corners + centre), worst kept. Nodes clipped
+out of a scrolling ancestor, or behind a modal scrim, are counted and excluded — they are not
+shipped pixels.
+
+*(b) Differential pixel truth.* Capture the frame as shipped (A), then capture it again with every
+glyph's fill emptied via `-webkit-text-fill-color: transparent` (B) — which blanks letters without
+disturbing anything that resolves `currentColor` — with animations pinned to their end frame so A
+and B differ *only* by glyphs. A pixel that changed is a pixel a glyph painted; read those same
+pixels **from B** and you have the true backdrop behind that element's own letters, including canvas
+pixels, inset shadows, blurs and gradients, and with no bleed from a bright neighbour that merely
+shares the box. Ratio = the element's specified colour against the worst such pixel.
+
+Threshold per node: **4.5:1**, and 3:1 only where WCAG says large — ≥24px, or ≥18.66px at
+weight ≥700. Nothing on this screen qualified as large: every measured node took the 4.5:1 rule.
+
+**The two "failures" the earlier audits reported were walker artefacts, and both are now handled
+rather than excused.** `.wordmark .name` at 1.08:1 — it uses `background-clip: text` with a
+transparent fill, so the gradient *is* the glyphs; measured properly it is 10.7:1. `.seg.ab
+button.on` at 1.10:1 — the lit A/B label is dark-on-amber/cyan, but the fill comes from a *sibling*
+`.thumb`, which no ancestor-chain walker can see; with covering siblings composited it is 7.9:1, and
+the differential pixel pass independently reads 8.11:1.
+That is the same false positive iteration 2 recorded and could not resolve.
+
+**Real failures, before → after** (differential pixel truth; the CSS method agreed within 0.4):
+
+| node | before | after | rule |
+|---|---|---|---|
+| `.pc-sub` "DFN3 restoration core" @1440×900 | **4.49:1** | 4.86:1 | 4.5 |
+| `.pc-sub` "DFN3 restoration core" @960×640 | **4.42:1** | 4.78:1 | 4.5 |
+
+It is still the worst text on the screen after the fix, which is the right shape for a bottom-of-ramp
+token: the whole-screen worst case is now 4.78:1 (done @960×640), then `1.0×` at 4.97:1 and the clip
+`Duration`/`Rate`/`Channels` keys at 5.12:1.
+
+One text on the whole screen, and the fix is a token, not a font size: `--fg-4` #808a99 → **#86909f**.
+The old value was cut against the flat panel tokens (5.1:1 on `--panel`), but the raised controls
+panel paints its interior around rgb(30 36 40) on the real pixels, and there the bottom step of the
+ramp fell 0.08 short. The new value measures 5.6:1 on `--panel`, 5.2:1 on `--panel-2` and 4.8:1 on
+the controls panel, and the four greys are still four visibly separate greys.
+
+**Final numbers — 0 failures in every state, by both methods:**
+
+| state | nodes measured | CSS-composited fails | pixel fails | notes |
+|---|---|---|---|---|
+| idle @1440×900 | 87 | 0 | 0 | 3 over a canvas |
+| idle @960×640 | 82 | 0 | 0 | 3 over a canvas |
+| done @1440×900 | 139 | 0 | 0 | 12 clipped out of the inspector's scroll |
+| done @960×640 | 114 | 0 | 0 | 10 clipped |
+| done, inspector scrolled @1440×900 | 162 | 0 | 0 | the guard tables |
+| done, inspector scrolled @960×640 | 115 | 0 | 0 | |
+| shortcut overlay @1440×900 | 115 | 0 | 0 | 187 nodes behind the modal, excluded |
+| shortcut overlay @960×640 | 65 | 0 | 0 | 176 behind the modal |
+| engine offline @1440×900 | 131 | 0 | 0 | the banner, its clock and its refusals |
+
+The 122 text nodes the previous audit had to skip because they sit on gradients are all measured
+here; **0 unresolved layers** in every run. The one node the pixel method declines is the wordmark
+(its glyphs are its background, so blanking them changes nothing to diff) — the CSS method covers
+it at 10.7:1. Elements over a `<canvas>` are the case that only the pixel method can judge, and
+they pass on it: e.g. the "Overview" hint at 5.95:1 read off the drawn overview canvas, and the whole
+wave panel head, which is only measurable at all since the grid bug above was fixed (its title reads
+7.21:1 on pixels at 960×640, against 7.14:1 predicted from CSS).
+
+**Also fixed while in here:** the run list said "1 runs".
+
+**Gates:** `pnpm typecheck` clean, `pnpm build` green (334.57 kB / 104.22 kB gz JS, 82.32 kB /
+15.68 kB gz CSS), `pnpm test:run` **222 passed in 9 files**, worker still a classic script
+(`grep -cE '\bimport\b|\bexport\b'` = **0**). No Python touched, so the engine gates are unchanged
+from iteration 4. Re-verified on the final build: zoom/pan, the view-linked verdict strip, the unit
+inspector, the keyboard map and the `?` overlay, the analyser, the modelled process meter, and the
+offline banner. History restore re-measured rather than eyeballed: two real runs (studio 5/5 and
+production 0/6), then switching between them twice left the `/api/analyze` call count at **2** while
+the header retargeted `UNITS 5/5 LUFS +3.2` ↔ `UNITS 0/6 LUFS +2.7` and the verdict strip repopulated
+to 6 segments. Zero console errors through all of it.
+
+**Honest gaps:** (a) the *running* phase was not put through the contrast walker as its own state —
+the job is ~8 s and one audit pass takes longer than that; its text (`STAGE Enhancing`, `UNIT 4 / 5`,
+`ELAPSED`) uses tokens measured in the other states, and `aria-busy` and the readout were verified
+live instead. (b) 13 shortcut-list rows below the fold at 960×640 are counted as clipped rather than
+measured; they are `.sc-row`s identical in class to the visible ones, which pass. (c) The modal marks
+itself with `aria-modal="true"` and traps Tab, but does not set `inert` on the rest of the app, so a
+screen reader in browse mode can still walk the background. (d) No real screen reader was run —
+VoiceOver cannot be driven from here; the announcements above are what the DOM would hand one, not
+a recording of one speaking.
+
+## Iteration 5 — 2026-08-20 — D1, D2 (27/27)
+
+The first accessibility agent lost its connection mid-run and left a large partial pass in the tree.
+That partial work was **committed in `dedd59e` and pushed** before anyone noticed what it contained.
+The retry audited it rather than reverting it — and found a real, shipped regression:
+
+**The accessibility pass had broken the layout.** `.sr-only` and `.panel > *` have identical
+specificity (0,1,0) and `.panel > * { position: relative }` is written later in app.css, so inside a
+panel the visually-hidden recipe lost. The `<p class="sr-only" id="wave-view-help">` added to
+WaveformDisplay stopped being out of flow, became a real 1 px grid item, and added a third row to
+`.wavepanel`'s two-row grid (measured `grid-template-rows: 30px 0.148438px 177.844px`). That pushed
+the panel head out of its row and **under the opaque ruler canvas**: at 960x640 the panel title, the
+clip name, the `0.0 s – 94.6 s of 94.6 s` readout, the magnification and the FIT button (a focus
+stop) painted behind the ruler — `elementsFromPoint` returned `CANVAS.ruler-canvas` first and a
+differential screenshot proved the text contributed zero pixels. Fixed with
+`.panel > .sr-only { position: absolute }`.
+**Orchestrator re-verified after the fix:** `grid-template-rows: 30px 177.992px` (two rows again),
+head at y 119–149 against a ruler starting at y 157 — no overlap — and the top element at the head's
+own position is the text SPAN, not the canvas. Screenshot at 960x640 confirms.
+Worth recording plainly: `ruff`, `mypy`, `pytest`, `tsc` and 222 vitest tests were all green while
+this was broken. A CSS layout regression is invisible to every gate in this project.
+
+**D1 — keyboard and ARIA.** The Claude Browser pane cannot test this: its tab runs unfocused, so
+`Input.dispatchKeyEvent` never reaches the renderer's focus machinery (40 Tab presses left
+`activeElement` on `<body>`). Measured instead in a real headful Chrome over CDP.
+- **Focus path: 18 stops**, clean cycle, no trap, Shift+Tab an exact mirror, identical at 1440x900
+  and 960x640. 19 with a unit selected (Clear selection arms), 18 while offline with Retry now first.
+  Deliberate non-stops, justified in source: verdict segments (`tabindex=-1` — there can be hundreds;
+  they keep button semantics, `aria-pressed` and full names, and `[`/`]` is the better sequential
+  route) and the unchecked radio of each segmented control (roving tabindex).
+- **Focus rings proved on pixels**, not on CSS: animations frozen, screenshot unfocused, Tab to each
+  stop, screenshot, diff. All 18 stops matched `:focus-visible` and changed pixels; worst indicator
+  contrast **10.19:1** against WCAG 2.4.11's 3:1. Two were fixed to get there — the lit A/B segment
+  was a cyan ring on a cyan key (3.72:1 -> 15.02:1), and the drop well's whole indicator was a 1 px
+  border-colour change because its file input is `opacity: 0` (8.31 -> 12.11:1).
+- **axe-core 4.13.0** run over 8 states (idle / done / done+guard tables scrolled / shortcut overlay,
+  each at 1440x900 and 960x640). Before: **1 serious violation** — `scrollable-region-focusable` on
+  the shortcut list at 960x640, which scrolls but had no focusable content, so a keyboard user could
+  not scroll it. After: **0 violations in all 8 states.** axe is a devDependency injected at run
+  time; `grep -c axe dist/assets/*.js` = **0**.
+- **Live regions, measured over a real 8 s job** with a MutationObserver on accessible text: exactly
+  **two** announcements — "Processing started" at 5 ms, "Processing finished. 5 of 5 units enhanced."
+  at 8070 ms — even though the header, plate, footer and source strip all re-render on every SSE
+  tick. One region was removed to achieve that: the header lamp was `aria-live="polite"` and narrated
+  the same two events in words that said less. Killing the engine produced exactly **one** assertive
+  announcement while the retry countdown ticked ~24 times in the same 6 s without being announced.
+
+**D2 — contrast measured two independent ways**, because the previous audits skipped 122
+gradient-backed nodes:
+(a) *CSS layer compositing* — backdrop built from `html` down, stacking every background-color and
+every gradient `background-image` layer **evaluated at that text's own position** (projected onto the
+gradient line, stops bracketed, interpolated in premultiplied sRGB), plus ::before/::after fills and
+covering siblings resolved by paint order.
+(b) *Differential pixel truth* — capture as shipped, then capture again with every glyph emptied via
+`-webkit-text-fill-color: transparent` and animations pinned; the changed pixels are glyph pixels,
+and reading those same pixels from the second capture gives the true backdrop behind the letters —
+canvas pixels, inset shadows, blurs and all.
+- The two "failures" earlier audits reported were **artefacts, now explained rather than excused**:
+  the wordmark at 1.08:1 uses `background-clip: text`, so the gradient *is* the glyphs (really
+  10.7:1), and the A/B lit label at 1.10:1 is filled by a sibling `.thumb` no ancestor walker can see
+  (7.9:1 by CSS, 8.11:1 by pixels — the same false positive I recorded in iteration 2 and could not
+  resolve then).
+- **One real failure, findable only by the pixel method:** `.pc-sub` "DFN3 restoration core" at
+  **4.49:1** (1440x900) and **4.42:1** (960x640) — the raised controls panel paints its interior
+  near rgb(30 36 40), which no flat-token audit models. Fixed **by token, not by font size**:
+  `--fg-4` #808a99 -> #86909f. After: 4.86 / 4.78:1.
+- **Final: 0 failures by both methods across 9 states** — idle, done, done+scrolled and overlay at
+  both sizes, plus engine-offline (87/82/139/114/162/115/115/65/131 nodes). 0 unresolved layers.
+  Whole-screen worst case now **4.78:1**. Text over canvases passes on pixels (waveform panel head
+  7.21:1 measured vs 7.14:1 predicted — only measurable at all because of the grid fix).
+
+**Gates:** ruff clean, format clean, `mypy --strict` clean, 492 pytest, 41 fuzz, `pnpm typecheck` +
+`pnpm build` green, **222 vitest passed**, worker grep 0, axe absent from the bundle.
+
+**Honest gaps carried out of the loop** (see the closing report): the running phase was not put
+through the contrast walker as its own frame (its tokens are measured elsewhere); the modal traps Tab
+but does not set `inert`, so a screen reader in browse mode can still walk background content; no
+real screen reader was run — the announcement log is what the DOM would hand an AT, not a recording;
+contrast was measured at 1440x900 and 960x640 but not re-measured at ultrawide where the layout
+reflows to three columns; and 13 below-the-fold shortcut rows at 960x640 were measured by class
+equivalence rather than directly.

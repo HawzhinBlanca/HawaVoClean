@@ -46,9 +46,16 @@
    * #1a1e24) that put --fg-4 at 2.66:1 — every unit suffix, every kv key, the
    * file-type list and the footer job id were below the 4.5:1 floor and read
    * as switched-off rather than as quiet. The ramp is re-cut so all four steps
-   * clear 4.5:1 on --panel-2 and stay four visibly separate greys. */
+   * clear 4.5:1 on --panel-2 and stay four visibly separate greys.
+   *
+   * D2 re-cut the bottom step once more. Those figures were taken against the
+   * flat panel tokens; measured on the shipped pixels the raised controls
+   * panel paints its interior around rgb(30 36 40) — lighter than --panel-2 —
+   * and there --fg-4 came out at 4.42:1, the one text on the whole screen
+   * still under the floor. #86909f clears it on the real surface with margin
+   * and keeps four visibly separate greys. */
   --fg-3: #949daa; /* 6.4:1 on --panel  ·  5.9:1 on --panel-2 */
-  --fg-4: #808a99; /* 5.1:1 on --panel  ·  4.8:1 on --panel-2 */
+  --fg-4: #86909f; /* 5.6:1 on --panel  ·  5.2:1 on --panel-2  ·  4.8:1 on the raised controls panel */
 
   /* -------------------------------------------------------------- accents */
   --amber: #ffb347;

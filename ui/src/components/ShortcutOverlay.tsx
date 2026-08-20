@@ -166,7 +166,13 @@ export function ShortcutOverlay() {
             <IconCancel size={12} />
           </button>
         </div>
-        <div className="sc-body">
+        {/* D1 · at 960x640 this list is taller than the dialog and scrolls,
+            and a scrolling region with no focusable content is unreachable
+            from the keyboard — axe `scrollable-region-focusable`, serious.
+            One tab stop, named, is the whole fix: Tab now alternates between
+            the close key and the list, and the list takes the arrow and page
+            keys the browser gives any focused scroller. */}
+        <div className="sc-body" role="group" aria-label="Shortcut list" tabIndex={0}>
           {GROUPS.map((g) => (
             <section className="sc-group" key={g.title}>
               <h3 className="caps">{g.title}</h3>

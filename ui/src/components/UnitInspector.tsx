@@ -111,7 +111,10 @@ function ScoreTable({ title, verdict, scores }: ScoreTableProps) {
             const frac = barFraction(value, meta.kind);
             return (
               <div className="insp-score" role="row" key={key}>
-                <span className="k" role="cell" title={key}>
+                {/* D1 · the label is the row's header, not another cell —
+                    a screen reader reading down the value column then has
+                    something to say each value *is*. */}
+                <span className="k" role="rowheader" title={key}>
                   {meta.label}
                 </span>
                 <span className="bar" role="cell" aria-hidden="true">

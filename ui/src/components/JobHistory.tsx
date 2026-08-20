@@ -164,7 +164,10 @@ export function JobHistory() {
             </p>
           </div>
         ) : (
-          <ul className="hist-list" aria-label={`${history.length} runs, newest first`}>
+          <ul
+            className="hist-list"
+            aria-label={`${history.length} run${history.length === 1 ? '' : 's'}, newest first`}
+          >
             {history.map((e) => (
               <li key={e.jobId}>
                 <Row entry={e} current={e.jobId === currentRunId} blocked={blocked} />

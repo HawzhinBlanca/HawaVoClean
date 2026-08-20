@@ -236,6 +236,18 @@ kbd {
   position: relative;
 }
 
+/* D1 · ...except the visually-hidden helper. `.panel > *` and `.sr-only` have
+   the same specificity, and this one is written later, so inside a panel it
+   was winning and turning an assistive-technology-only paragraph into a real
+   1px in-flow box. In `.wavepanel` — a two-row grid — that produced a *third*
+   implicit row, which pushed the panel head down onto the ruler and hid its
+   title, the clip name, the zoom readout and the FIT button under the ruler
+   canvas. A visually-hidden element has to stay out of flow wherever it is
+   used, so it is restated here at a specificity the panel rule cannot tie. */
+.panel > .sr-only {
+  position: absolute;
+}
+
 .panel-head {
   display: flex;
   align-items: center;

@@ -74,9 +74,25 @@ input:focus-visible,
   outline-offset: -2px;
 }
 
+/* The file input is a transparent overlay filling the drop well, so its own
+   outline is invisible (`opacity: 0` takes the outline with it). The well
+   therefore wears the ring: the same 2px token every other control uses, drawn
+   inside its border so the layout does not move. A 1px border-colour change
+   was the whole indicator before, which is thinner than the ring everywhere
+   else and thinner than WCAG 2.4.11 asks for. */
 .dropzone:has(input[type='file']:focus-visible) {
+  outline: 2px solid var(--ix-focus);
+  outline-offset: -2px;
   border-color: var(--ix-focus);
   color: var(--fg-2);
+}
+
+/* The lit A/B segment is filled with its deck's colour, and a cyan ring on a
+   cyan key is the one focus indicator on the screen that nearly disappears —
+   measured at 3.72:1 against 8.3–11.3:1 everywhere else. On an illuminated key
+   the ring goes dark, which is the same move a real console makes. */
+.seg.ab button.on:focus-visible {
+  outline-color: rgba(4, 20, 28, 0.95);
 }
 
 /* ===================================================== A5 · GENERIC CONTROLS

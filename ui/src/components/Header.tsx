@@ -185,10 +185,17 @@ export function Header() {
         </span>
         <HeaderNow />
       </div>
-      {/* The lamp's word changes at most a few times a session (connecting →
-          ready → busy), so it is a safe polite region: no counter, no clock,
-          nothing that ticks. */}
-      <div className="engine" aria-live="polite">
+      {/* D1 · not a live region, deliberately. It was one, and a measured run
+          showed the cost: an eight-second job produced four announcements, and
+          two of them were this lamp saying ENGINE BUSY and then ENGINE READY —
+          the same two events the job's own status region had already announced
+          in words that actually say what happened ("Processing started",
+          "Processing finished. 5 of 5 units enhanced."). Two regions narrating
+          one event is the spam D1 exists to prevent. The lamp stays in the
+          accessibility tree, readable whenever the user browses the header;
+          the one engine transition that is *not* covered elsewhere — the
+          engine going away — is announced assertively by the offline banner. */}
+      <div className="engine">
         <Led state={led} />
         <span className="txt">
           {prev ? (
