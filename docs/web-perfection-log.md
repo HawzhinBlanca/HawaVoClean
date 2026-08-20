@@ -67,3 +67,62 @@ C4's "zero failed requests" needs it addressed or explicitly struck; (c) `/api/a
 `/api/peaks` differ by up to 1.5 ms on lossy containers (container vs decoder timeline) — peaks is
 the correct one for the playhead; (d) no vitest yet, so D4's UI-unit-test clause is unmet;
 (e) `/api/health` polls very frequently — worth a look during the perf pass.
+
+## Iteration 2 — 2026-08-20 — visual grade (A1, A2, A4, A6, A7, D3 ticked; A3, A5 deliberately not)
+
+Five agents: waveform renderer, spectrum renderer, chrome/typography, micro-interaction, then an
+independent design critique that judged the result against Waves / FabFilter Pro-Q 4 / Gullfoss /
+RX 11 and found **21 defects, fixed 21**.
+
+**A2 waveform (ticked).** WebGL2 renderer rewritten around *analytic coverage in the fragment
+shader* (`antialias:false` — AA is computed, not sampled), 7 instanced programs, zero per-frame
+allocations. Vertical gradient fill core->edge, RMS body as a denser core, half-res two-pass bloom
+fed only by the focused deck, playhead with a 56 px leading ramp + gaussian halo + pixel-snapped
+1 px core. The non-focused deck now draws as a contour *on top* of the filled focused deck, so the
+amber original no longer vanishes under cyan. **Headline: at 1:1 zoom it switches from min/max bars
+to a continuous anti-aliased sample trace** — verified by me at 68.08 s, both decks overlaid.
+Palette is read from CSS custom properties through a probe element and re-posted on theme change.
+Measured: 120 wheel events = 0.134 ms each on the main thread, rAF median 8.3 ms / p95 10.4 ms.
+
+**A1 panel depth + A4 typography (ticked).** One lighting model (top-lit): raised panels get inner
+top highlight + hairline + outer shadow, inset displays get the inverse plus vignette; elevation and
+radii are now tokens. My audit: **2 font stacks total, 0 elements falling back to a browser default,
+14 numeric readouts and 0 without tabular figures.** Contrast audit over 89 leaf text nodes: 1 hit,
+investigated and confirmed a false positive (active A/B button is filled by a pseudo-element, so my
+walker read the panel behind it; it is dark-on-cyan and clearly legible). The critique's own audit
+found 15 real failures before its fix (worst 2.66:1) and 0 after — the `--fg-3`/`--fg-4` ramp was
+recut for it.
+
+**A6 empty states + A7 A/B/verdict (ticked).** Verified myself: the pre-file screen is a designed
+product (drop well, placeholder tiles with em-dashes, spectrum "NO SIGNAL" grid); drag-over toggles
+`.dropzone.over` and reverts cleanly on leave; the verdict tooltip carries real data
+(`Unit 0 · ch 0 / ENHANCED / 00:00.000 -> 00:20.569 / GUARDS A PASS B PASS / STRENGTH 1.00`).
+The verdict strip was the worst thing on screen (full-saturation cyan slabs for a *status* band, and
+selection only 1.2x brighter than neighbours) — recut as a recessed hue-over-black recipe with the
+selected segment the single lit bar (~3x luminance separation).
+
+**D3 reduced motion (ticked).** Global `animation/transition: none !important` under the media
+query, plus static restatement of the states that were carried by animation alone (busy LED, error
+LED, analyzing scan, drop glyph, skeleton, running plate) so nothing becomes unreadable.
+
+**Not ticked, on the critique's own honest assessment:**
+- **A3 spectrum** — the frequency ladder, Hz placement, difference shading and legend were all
+  fixed, but the fill is still "a faint blue-grey wash" with a halo rather than real bloom; beside
+  Pro-Q 4 it reads thin. Carried to iteration 3.
+- **A5 micro-interaction** — hover/active/focus states, LED cadences and press animation are in, but
+  the PROCESS plate's interior is mostly empty and its ring is a flat 2D stroke rather than a
+  modelled meter: "the one control that would not pass as a Waves component". Carried to iteration 3.
+
+Other critique fixes worth recording: `WebGL2 · worker` debug text removed from the panel head;
+spectrum axis had a hole (10k lost by 1.2 px) now an all-or-decades rule; `Hz` moved off the dB axis
+to the frequency baseline; metric sub-row `-24.9 -> +3.2` (read as before->after) changed to a delta
+operator; transport's three different control heights unified at 28 px; the timecode's stripped
+leading space fixed; playhead clock and deck legend given smoked-glass plates instead of floating on
+the waveform; right column widened to 400 px at >=1600 so the full 1-2-5 ladder fits; 960x640
+inspector scrollbar restored (`scrollbar-width: thin` was making Chromium ignore the styled bar).
+
+**Gates:** `pnpm typecheck` + `pnpm build` green (413.89 kB / 131.11 kB gz JS, 58.94 kB / 11.88 kB gz
+CSS). Built worker still a classic script (0 import/export). No engine code touched, so the Python
+gates are unchanged from iteration 1. Zero console errors across every flow I exercised.
+Iteration-1 features re-verified on this build: zoom 14 steps to 1:1, ruler drag, FIT, overview
+click, verdict click -> unit selection, `[`/`]`, arrows, `?` overlay.

@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useStore } from '../state/store';
 import { IconCancel, IconWarn } from './Icons';
 import { Led } from './Led';
@@ -9,6 +9,7 @@ export function Footer() {
   const setError = useStore((s) => s.setError);
   const job = useStore((s) => s.job);
   const engineStatus = useStore((s) => s.engineStatus);
+  const reduced = useReducedMotion() === true;
 
   const led = error
     ? 'err'
@@ -39,7 +40,7 @@ export function Footer() {
             initial={{ opacity: 0, transform: 'translateY(8px)' }}
             animate={{ opacity: 1, transform: 'translateY(0px)' }}
             exit={{ opacity: 0, transform: 'translateY(8px)' }}
-            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+            transition={reduced ? { duration: 0 } : { duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
           >
             <IconWarn />
             <span className="text" title={error}>

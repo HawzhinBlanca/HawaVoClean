@@ -90,15 +90,28 @@
 }
 
 /* ---------------------------------------------------------- overview scrubber */
+/* The scrubber is the instrument's second display: same inset glass treatment
+   as the main one, so the pair reads as one machined panel. */
 .wave-overview {
   position: relative;
   height: 26px;
   border-radius: var(--r-sm);
-  background: var(--display-2);
+  background: linear-gradient(180deg, var(--display-2) 0%, var(--display) 100%);
   box-shadow: var(--shadow-display);
   overflow: hidden;
   cursor: pointer;
   touch-action: none;
+}
+
+/* Glass: a top sheen and a floor vignette over the painted envelope. */
+.wave-overview::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, transparent 38%),
+    radial-gradient(120% 160% at 50% 50%, transparent 45%, rgba(0, 0, 0, 0.4) 100%);
 }
 
 .wave-overview.dragging {
@@ -119,12 +132,35 @@
   bottom: 0;
   min-width: 3px;
   border-radius: 2px;
-  background: rgba(57, 208, 255, 0.12);
+  background: rgba(57, 208, 255, 0.1);
+  background: color-mix(in srgb, var(--cyan) 10%, transparent);
   box-shadow:
-    inset 0 0 0 1px rgba(57, 208, 255, 0.5),
-    0 0 10px rgba(57, 208, 255, 0.25);
+    inset 0 0 0 1px rgba(57, 208, 255, 0.45),
+    0 0 10px rgba(57, 208, 255, 0.22);
   cursor: grab;
   will-change: left, width;
+  z-index: 1;
+}
+
+/* Grab rails: the window reads as a draggable object, not a tinted rectangle. */
+.wave-overview-win::before,
+.wave-overview-win::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--cyan, #39d0ff);
+  opacity: 0.55;
+}
+
+.wave-overview-win::before {
+  left: 0;
+}
+
+.wave-overview-win::after {
+  right: 0;
 }
 
 .wave-overview.dragging .wave-overview-win {
@@ -132,8 +168,14 @@
 }
 
 .wave-overview-win.full {
-  background: rgba(255, 255, 255, 0.04);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.wave-overview-win.full::before,
+.wave-overview-win.full::after {
+  background: rgba(255, 255, 255, 0.5);
+  opacity: 0.25;
 }
 
 .wave-overview-hint {
@@ -152,6 +194,17 @@
   .wave-overview-win {
     box-shadow: inset 0 0 0 1px rgba(57, 208, 255, 0.5);
   }
+}
+
+/* ------------------------------------------------------------- ruler polish */
+/* The ruler shares the display's top edge, so it gets the same hairline
+   highlight instead of sitting on the panel as a separate strip. */
+.ruler::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03) 0%, transparent 60%);
 }
 
 /* ------------------------------------------- verdict segments, view-anchored */

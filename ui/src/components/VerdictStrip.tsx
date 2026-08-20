@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
-import { classifyDecision, decisionLabel, type UnitDecisionRecord, type VerdictClass } from '../api/types';
+import { classifyDecision, decisionLabel, type UnitDecisionRecord } from '../api/types';
 import { formatTime } from '../render/ticks';
 import { waveView } from '../render/viewWindow';
 import { selectUnit, unitKey } from '../state/selection';
@@ -24,12 +24,14 @@ function fmtScore(v: number | string | boolean): string {
   return String(v);
 }
 
-const PILL_BG: Record<VerdictClass, string> = {
-  enhanced: 'var(--cyan)',
-  reverted: 'var(--amber)',
-  passthrough: 'var(--fg-3)',
-  error: 'var(--err)',
-};
+/** PASS / FAIL / not-run, as a class the tooltip can colour. */
+function guardTone(v: string | null | undefined): 'pass' | 'fail' | 'none' {
+  if (!v) return 'none';
+  const s = v.toLowerCase();
+  if (s.includes('pass')) return 'pass';
+  if (s.includes('fail') || s.includes('revert')) return 'fail';
+  return 'none';
+}
 
 interface Hover {
   unit: UnitDecisionRecord;
@@ -95,16 +97,31 @@ export function VerdictStrip() {
     }
   }, [report, setHighlight]);
 
-  // Keep the tooltip on-screen.
+  // Keep the tooltip on-screen, and tell it where its arrow goes.
+  //
+  // The card is centred over the cursor and sits above the strip; when there
+  // is no room above it flips below, and when it would run off either edge it
+  // slides back in. The arrow is then placed at the cursor's offset *inside*
+  // the card, clamped away from the rounded corners, so it points at the
+  // segment however far the card had to slide.
   useEffect(() => {
     const tip = tipRef.current;
     if (!tip || !hover) return;
     const r = tip.getBoundingClientRect();
-    let x = hover.x + 14;
-    let y = hover.y - r.height - 14;
-    if (x + r.width > window.innerWidth - 8) x = hover.x - r.width - 14;
-    if (y < 8) y = hover.y + 18;
+    const M = 8; // viewport margin
+    const GAP = 13; // clearance for the arrow
+    let x = hover.x - r.width / 2;
+    x = Math.max(M, Math.min(x, window.innerWidth - r.width - M));
+    let y = hover.y - r.height - GAP;
+    let place: 'top' | 'bottom' = 'top';
+    if (y < M) {
+      y = hover.y + GAP;
+      place = 'bottom';
+    }
     tip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    tip.dataset.place = place;
+    const arrow = Math.max(14, Math.min(hover.x - x, r.width - 14));
+    tip.style.setProperty('--tip-arrow', `${Math.round(arrow)}px`);
   }, [hover]);
 
   const enhanced = units.filter((u) => u.final_decision === 'enhanced').length;
@@ -172,7 +189,8 @@ export function VerdictStrip() {
               Unit {hover.unit.unit_id}
               <span style={{ color: 'var(--fg-3)' }}> · ch {hover.unit.channel}</span>
             </span>
-            <span className="pill" style={{ background: PILL_BG[classifyDecision(hover.unit.final_decision)] }}>
+            {/* same badge recipe as the inspector and the strip itself */}
+            <span className={`pill ${classifyDecision(hover.unit.final_decision)}`}>
               {decisionLabel(hover.unit.final_decision)}
             </span>
           </div>
@@ -183,10 +201,14 @@ export function VerdictStrip() {
             </span>
           </div>
           <div className="row">
-            <span className="k">Guard A</span>
-            <span className="v">
-              {hover.unit.guard_a_verdict}
-              {hover.unit.guard_b_verdict ? ` · B ${hover.unit.guard_b_verdict}` : ''}
+            <span className="k">Guards</span>
+            <span className="verdicts">
+              <span className={`gv ${guardTone(hover.unit.guard_a_verdict)}`}>
+                A <b>{hover.unit.guard_a_verdict ?? '—'}</b>
+              </span>
+              <span className={`gv ${guardTone(hover.unit.guard_b_verdict)}`}>
+                B <b>{hover.unit.guard_b_verdict ?? '—'}</b>
+              </span>
             </span>
           </div>
           {typeof hover.unit.chosen_strength === 'number' && hover.unit.chosen_strength > 0 ? (

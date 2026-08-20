@@ -128,14 +128,17 @@ export function WaveformDisplay() {
     for (const t of ticks) {
       const x = ((t.time - v.start) / span) * rect.width;
       const px = Math.round(x);
-      ctx.fillStyle = t.major ? 'rgba(255,255,255,0.32)' : 'rgba(255,255,255,0.18)';
+      ctx.fillStyle = t.major ? 'rgba(255,255,255,0.42)' : 'rgba(255,255,255,0.2)';
       const th = t.major ? 7 : 4;
       ctx.fillRect(px, rect.height - th, 1, th);
       if (!t.major) continue;
       const label = tickLabel(t.time, step, v.end);
       const tw = ctx.measureText(label).width;
       if (px + 3 + tw > rect.width - 2) continue;
-      ctx.fillStyle = '#6f7886';
+      // #6f7886 measured 4.5:1 on the display floor — legal, and still ghostly
+      // at 9.5px. The ruler is the panel's navigation reference; it has to be
+      // the second thing you read after the waveform itself.
+      ctx.fillStyle = '#8e97a5';
       ctx.fillText(label, px + 3, 2);
     }
   }, []);
@@ -652,7 +655,12 @@ export function WaveformDisplay() {
               FIT
             </button>
           </span>
-          <span className="caps">{glOk ? 'WebGL2 · worker' : 'Renderer unavailable'}</span>
+          {/* The renderer backend is a build detail, not a readout: shipping
+              `WebGL2 · worker` in the panel head is the single most
+              debug-build-looking thing on the screen, and it was also what
+              pushed the head into an ellipsis at 960px. Only the *failure* is
+              user-facing information, so only the failure is shown. */}
+          {glOk ? null : <span className="caps warn">Renderer unavailable</span>}
         </div>
       </div>
       <div className="wave-body">

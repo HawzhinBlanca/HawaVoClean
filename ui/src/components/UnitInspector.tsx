@@ -9,7 +9,6 @@ import {
   decisionLabel,
   type GuardScoreValue,
   type UnitDecisionRecord,
-  type VerdictClass,
 } from '../api/types';
 import { formatTime } from '../render/ticks';
 import { clearSelection, orderedUnits, selectedIndex, stepUnit } from '../state/selection';
@@ -136,13 +135,6 @@ function ScoreTable({ title, verdict, scores }: ScoreTableProps) {
   );
 }
 
-const PILL_BG: Record<VerdictClass, string> = {
-  enhanced: 'var(--cyan)',
-  reverted: 'var(--amber)',
-  passthrough: 'var(--fg-3)',
-  error: 'var(--err)',
-};
-
 function Row({ k, v, title }: { k: string; v: string; title?: string }) {
   return (
     <div className="insp-row">
@@ -238,9 +230,10 @@ function Detail({ unit, index, total }: { unit: UnitDecisionRecord; index: numbe
             UNIT {String(unit.unit_id).padStart(2, '0')}
             <span className="of"> · {index + 1}/{total}</span>
           </span>
-          <span className="pill" style={{ background: PILL_BG[cls] }}>
-            {decisionLabel(unit.final_decision)}
-          </span>
+          {/* The decision badge is the same object as a verdict-strip segment,
+              so it is drawn from the same `--seg` recipe rather than from an
+              inline full-saturation swatch. */}
+          <span className={`pill ${cls}`}>{decisionLabel(unit.final_decision)}</span>
         </div>
         <Row k="Channel" v={String(unit.channel)} />
         <Row

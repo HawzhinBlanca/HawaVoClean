@@ -9,19 +9,19 @@ Never re-batch the user's Desktop folders; test media is `test_output/ui-smoke/F
 engine, with evidence (screenshot or measurement) recorded in `docs/web-perfection-log.md`.
 
 ## A. Visual grade (Waves / FabFilter / pro-2026 bar)
-- [ ] A1 Panel depth: every panel has consistent bevel lighting (1px top inner highlight,
+- [x] A1 Panel depth: every panel has consistent bevel lighting (1px top inner highlight,
       soft outer shadow), inset displays with vignette; no flat unstyled surface anywhere.
-- [ ] A2 Waveform display: anti-aliased, gradient-filled body with glow pass; original/cleaned
+- [x] A2 Waveform display: anti-aliased, gradient-filled body with glow pass; original/cleaned
       overlay readable at every zoom; playhead with subtle bloom; time ruler with tick hierarchy.
 - [ ] A3 Spectrum display: log-frequency grid with labeled decades, dB gridlines, filled
       area under curves with gradient + glow, smooth (≥30 fps) live analyser, legend.
-- [ ] A4 Typography: strict scale (11/12/13/16 caps-label system), tabular numerals for all
+- [x] A4 Typography: strict scale (11/12/13/16 caps-label system), tabular numerals for all
       values, consistent letter-spacing on small caps, no default-font element anywhere.
 - [ ] A5 Micro-interaction: hover/active states on every control; PROCESS press animation;
       state transitions (idle→running→done) animated on transform/opacity only; LED pulses.
-- [ ] A6 Empty/loading states designed (before any file is loaded the screen must still look
+- [x] A6 Empty/loading states designed (before any file is loaded the screen must still look
       like a product, not a blank shell); drop-target highlight on drag-over.
-- [ ] A7 A/B and verdict strip read instantly: verdict segments with hover tooltip + click to
+- [x] A7 A/B and verdict strip read instantly: verdict segments with hover tooltip + click to
       seek to the unit; A/B switch visually obvious which deck is live.
 
 ## B. UX completeness (web mode)
@@ -59,7 +59,7 @@ engine, with evidence (screenshot or measurement) recorded in `docs/web-perfecti
 - [ ] D1 Full keyboard operability (tab order, focus rings styled, no traps); ARIA labels on
       all controls; verdict tooltip content reachable without hover.
 - [ ] D2 Contrast ≥ 4.5:1 for all text (checked on the dark theme values actually shipped).
-- [ ] D3 `prefers-reduced-motion` honored (disables pulse/glow animation, keeps function).
+- [x] D3 `prefers-reduced-motion` honored (disables pulse/glow animation, keeps function).
 - [ ] D4 Gates stay green every iteration: ruff / ruff format / mypy --strict / pytest
       (default + fuzz when engine touched) / mutation gate on clean tree / `pnpm typecheck`
       / `pnpm build`. UI logic that can be unit-tested (state machine, SSE client, API client,

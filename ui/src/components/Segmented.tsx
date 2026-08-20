@@ -1,4 +1,3 @@
-import { motion } from 'motion/react';
 import { useLayoutEffect, useRef, useState } from 'react';
 
 export interface SegOption<T extends string> {
@@ -47,12 +46,16 @@ export function Segmented<T extends string>({
   return (
     <div ref={ref} className={`seg${className ? ` ${className}` : ''}`} role="radiogroup" aria-label={ariaLabel}>
       {thumb ? (
-        <motion.span
+        // The thumb's resting place is written straight into the style and
+        // CSS carries it there (interaction.css). A frame-loop animation was
+        // wrong for this one control: it is the only thing that says which
+        // segment is on, and a loop that stops — a hidden tab, a reduced-motion
+        // preference — would leave it parked between the two, reading as
+        // neither. A committed style is always correct; the travel is a
+        // bonus the compositor adds when it can.
+        <span
           className={`thumb${thumbClassName ? ` ${thumbClassName}` : ''}`}
-          initial={false}
-          animate={{ x: thumb.x, width: thumb.w }}
-          transition={{ type: 'spring', stiffness: 520, damping: 38, mass: 0.6 }}
-          style={{ left: 0 }}
+          style={{ left: 0, width: thumb.w, transform: `translateX(${thumb.x}px)` }}
         />
       ) : null}
       {options.map((o) => (

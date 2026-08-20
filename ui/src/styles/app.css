@@ -7,6 +7,10 @@
   box-sizing: border-box;
 }
 
+/* Typography lives on the root so that *every* element inherits a stack we
+   chose. Nothing is left to the UA default — see the DOM font audit in
+   docs/web-perfection-log.md. Numerals are tabular everywhere by inheritance,
+   so no readout can ever reflow while it counts. */
 html,
 body,
 #root {
@@ -14,11 +18,21 @@ body,
   margin: 0;
 }
 
+html {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-regular);
+  letter-spacing: var(--ls-body);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
 body {
   background: var(--page);
   color: var(--fg);
-  font-family: var(--font-ui);
-  font-size: var(--fs-md);
+  font: inherit;
+  font-variant-numeric: inherit;
+  font-feature-settings: inherit;
   line-height: 1.35;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -27,10 +41,58 @@ body {
   -webkit-user-select: none;
 }
 
+/* The elements a user agent would otherwise re-font behind our back. */
 button,
-input {
-  font: inherit;
+input,
+select,
+textarea,
+optgroup,
+label,
+legend,
+audio,
+video {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  font-style: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  font-variant-numeric: inherit;
+  font-feature-settings: inherit;
   color: inherit;
+}
+
+code,
+kbd,
+samp,
+pre,
+tt {
+  font-family: var(--font-mono);
+  font-variant-numeric: inherit;
+  font-feature-settings: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+b,
+strong,
+small,
+em,
+i {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  font-style: normal;
+}
+
+b,
+strong {
+  font-weight: var(--fw-medium);
 }
 
 button {
@@ -45,7 +107,9 @@ button:disabled {
 }
 
 button:focus-visible,
-[tabindex]:focus-visible {
+[tabindex]:focus-visible,
+input:focus-visible,
+a:focus-visible {
   outline: 1px solid rgba(57, 208, 255, 0.7);
   outline-offset: 1px;
 }
@@ -54,15 +118,30 @@ button:focus-visible,
   background: rgba(57, 208, 255, 0.3);
 }
 
-.mono {
-  font-family: var(--font-mono);
+/* Every readout: the numeric stack, tabular figures, no ligature surprises. */
+.mono,
+.timecode,
+.tile .vals,
+.tile .sub,
+.tile .delta,
+.wave-time,
+.ruler .lbl,
+.clipinfo .kv .v,
+.footer .meta,
+.insp-stats .stat b,
+.process .ring .center .pct,
+.process .text .units,
+.tooltip .row .v,
+kbd {
+  font-family: var(--font-numeric);
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
+  font-variant-ligatures: none;
 }
 
 .caps {
-  font-size: var(--fs-xs);
-  font-weight: 600;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--fg-3);
@@ -96,33 +175,34 @@ button:focus-visible,
   }
 }
 
-/* ---------------------------------------------------------------- panels */
+/* ---------------------------------------------------------------- panels
+ * elev-1. A plate on the chassis: lit along its top edge, hairlined all round,
+ * casting downwards. The finish is the shallow metal ramp plus brushed
+ * micro-lines; the fractal grain rides on ::before purely to stop the ramp
+ * banding across a 900px panel. */
 .panel {
   position: relative;
   border-radius: var(--r-lg);
-  background: var(--metal);
-  box-shadow: var(--shadow-panel);
-  border: 1px solid rgba(0, 0, 0, 0.6);
+  background-color: var(--panel);
+  background-image: var(--brushed), var(--metal);
+  box-shadow: var(--elev-1);
+  border: 1px solid var(--hair-dark);
+  /* keep the grain's blend inside the plate: it must modulate this panel's own
+     finish, never the page behind it */
+  isolation: isolate;
   min-width: 0;
   min-height: 0;
 }
 
 .panel::before {
-  /* brushed-metal grain: very fine horizontal lines */
   content: '';
   position: absolute;
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
-  background: repeating-linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.012) 0px,
-    rgba(255, 255, 255, 0.012) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-  mix-blend-mode: screen;
-  opacity: 0.8;
+  background-image: var(--grain);
+  opacity: var(--grain-opacity);
+  mix-blend-mode: overlay;
 }
 
 .panel > * {
@@ -133,11 +213,12 @@ button:focus-visible,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--pad-4);
   height: 30px;
-  padding: 0 12px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.55);
-  box-shadow: 0 1px 0 var(--bevel-hi);
+  padding: 0 var(--pad-5);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent);
+  border-bottom: 1px solid var(--hair-dark);
+  box-shadow: 0 1px 0 var(--hair-hi);
 }
 
 .panel-title {
@@ -147,39 +228,49 @@ button:focus-visible,
   white-space: nowrap;
   min-width: 0;
   overflow: hidden;
-  font-size: var(--fs-xs);
-  font-weight: 700;
-  letter-spacing: var(--ls-wide);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--fg-2);
 }
 
 .panel-title .sub {
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* elev-0 — glass sunk into the plate. The inverse of .panel: shadow spills in
+ * from the top edge, a light line catches the bottom, and the corners fall off
+ * into a vignette. The whole treatment rides on ::after so that it also sits
+ * over a canvas child, which an inset box-shadow could not. */
 .display {
   position: relative;
   border-radius: var(--r);
-  background: var(--display);
-  box-shadow: var(--shadow-display);
+  background:
+    radial-gradient(130% 130% at 50% 0%, #0b0d11 0%, var(--display) 62%),
+    var(--display);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.045);
   overflow: hidden;
   min-height: 0;
   min-width: 0;
 }
 
 .display::after {
-  /* glass reflection */
   content: '';
   position: absolute;
   inset: 0;
+  z-index: 3;
   pointer-events: none;
   border-radius: inherit;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 22%);
+  background: var(--glass), var(--vignette);
+  box-shadow:
+    inset 0 2px 5px -1px rgba(0, 0, 0, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.055),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.75);
 }
 
 /* ---------------------------------------------------------------- LEDs */
@@ -240,8 +331,8 @@ button:focus-visible,
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
-  gap: 16px;
-  padding: 0 14px;
+  gap: var(--pad-6);
+  padding: 0 var(--pad-5);
 }
 
 .wordmark {
@@ -251,9 +342,9 @@ button:focus-visible,
 }
 
 .wordmark .name {
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: 0.24em;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-wide);
   color: var(--fg);
   background: linear-gradient(180deg, #ffffff, #b9c1cc);
   -webkit-background-clip: text;
@@ -264,9 +355,9 @@ button:focus-visible,
 
 .wordmark .ver {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg-3);
-  letter-spacing: 0.04em;
+  letter-spacing: var(--ls-body);
 }
 
 .header-mid {
@@ -282,16 +373,13 @@ button:focus-visible,
   gap: 6px;
   height: 20px;
   padding: 0 8px;
-  border-radius: 4px;
-  font-size: var(--fs-xs);
-  font-weight: 700;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-2);
-  background: linear-gradient(180deg, #20252c, #171b21);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.5),
-    0 1px 1px rgba(0, 0, 0, 0.6);
+  background-image: var(--brushed), linear-gradient(180deg, #23282f, #171b21);
+  box-shadow: var(--elev-2);
 }
 
 .badge.accent {
@@ -303,17 +391,17 @@ button:focus-visible,
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: var(--fs-xs);
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-2);
 }
 
 .engine .ver {
   font-family: var(--font-mono);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   color: var(--fg-3);
-  letter-spacing: 0.02em;
+  letter-spacing: var(--ls-body);
 }
 
 /* ---------------------------------------------------------------- source strip */
@@ -321,8 +409,8 @@ button:focus-visible,
   display: grid;
   grid-template-columns: auto auto minmax(180px, 1fr) minmax(0, auto);
   align-items: center;
-  gap: 10px;
-  padding: 0 12px;
+  gap: var(--pad-4);
+  padding: 0 var(--pad-5);
 }
 
 .btn {
@@ -334,11 +422,11 @@ button:focus-visible,
   padding: 0 12px;
   border-radius: var(--r);
   font-size: var(--fs-sm);
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-body);
   color: var(--fg);
-  background: var(--metal-raised);
-  box-shadow: var(--shadow-raised);
+  background-image: var(--brushed), var(--metal-raised);
+  box-shadow: var(--elev-2);
   white-space: nowrap;
   transition:
     transform var(--dur) var(--ease-out),
@@ -380,7 +468,7 @@ button:focus-visible,
 .btn.small {
   height: 26px;
   padding: 0 10px;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
 }
 
 .dropzone {
@@ -391,9 +479,9 @@ button:focus-visible,
   height: 36px;
   padding: 0 12px;
   border-radius: var(--r);
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-  background: rgba(0, 0, 0, 0.22);
-  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.6);
+  border: 1px dashed var(--hair-strong);
+  background: var(--glass), linear-gradient(180deg, rgba(0, 0, 0, 0.32), rgba(0, 0, 0, 0.16));
+  box-shadow: var(--shadow-display), var(--vignette-sm);
   color: var(--fg-3);
   font-size: var(--fs-sm);
   min-width: 0;
@@ -412,7 +500,7 @@ button:focus-visible,
   border-color: var(--cyan);
   color: var(--cyan);
   box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.6),
+    var(--shadow-display),
     0 0 0 1px rgba(57, 208, 255, 0.35),
     0 0 18px rgba(57, 208, 255, 0.25);
 }
@@ -433,7 +521,7 @@ button:focus-visible,
 }
 
 .clipinfo .name {
-  font-weight: 600;
+  font-weight: var(--fw-medium);
   color: var(--fg);
   max-width: 260px;
   white-space: nowrap;
@@ -455,8 +543,8 @@ button:focus-visible,
 }
 
 .clipinfo .kv .k {
-  font-size: 9px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-4);
 }
@@ -469,12 +557,12 @@ button:focus-visible,
 }
 
 .clipinfo .origin {
-  font-size: 9px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--amber);
   border: 1px solid rgba(255, 179, 71, 0.35);
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   padding: 1px 5px;
 }
 
@@ -488,8 +576,8 @@ button:focus-visible,
 .wave-body {
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
-  gap: 8px;
-  padding: 10px 12px 12px;
+  gap: var(--pad-3);
+  padding: var(--pad-4) var(--pad-5) var(--pad-5);
   min-height: 0;
 }
 
@@ -501,8 +589,9 @@ button:focus-visible,
 
 .ruler {
   position: relative;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.015);
+  border-bottom: 1px solid var(--hair-dark);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.038), rgba(255, 255, 255, 0.008));
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.045);
   overflow: hidden;
 }
 
@@ -525,7 +614,7 @@ button:focus-visible,
   top: 2px;
   transform: translateX(3px);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -556,9 +645,9 @@ button:focus-visible,
 
 .wave-empty .big {
   font-size: var(--fs-lg);
-  font-weight: 600;
+  font-weight: var(--fw-medium);
   color: var(--fg-3);
-  letter-spacing: 0.02em;
+  letter-spacing: var(--ls-body);
 }
 
 .wave-legend {
@@ -574,8 +663,8 @@ button:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 9px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
 }
@@ -584,7 +673,7 @@ button:focus-visible,
   display: inline-block;
   width: 14px;
   height: 3px;
-  border-radius: 2px;
+  border-radius: var(--r-xxs);
 }
 
 .wave-legend .orig i {
@@ -633,7 +722,7 @@ button:focus-visible,
 
 .verdict .label .count {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg-3);
 }
 
@@ -641,42 +730,55 @@ button:focus-visible,
   position: relative;
   height: 22px;
   border-radius: var(--r-sm);
-  background: var(--display);
-  box-shadow: var(--shadow-display);
+  background: var(--glass), var(--display);
+  box-shadow: var(--shadow-display), var(--vignette-sm);
   overflow: hidden;
 }
 
+/* One recipe, four hues. A segment is a bar of coloured light seen *through*
+ * the track's glass, not a slab of paint sitting on top of it: the fill is the
+ * hue at part strength over the near-black well, and the illumination reads
+ * from the 1px lit edge and the bloom, not from the mass. That matters for
+ * hierarchy — the strip spans the whole window, and at full saturation it was
+ * the brightest object on the screen while being only a status band. It also
+ * leaves the selected segment somewhere to go: `.sel` is the *fully* lit
+ * version of the same bar, so the unit under inspection now separates from its
+ * neighbours by roughly 3x in luminance instead of 1.2x. */
 .verdict-seg {
   position: absolute;
   top: 4px;
   bottom: 4px;
-  border-radius: 2px;
-  opacity: 0.85;
+  border-radius: var(--r-xxs);
+  --seg: 91, 100, 115;
+  --seg-bloom: 0.22;
+  background: linear-gradient(
+    180deg,
+    rgba(var(--seg), 0.62),
+    rgba(var(--seg), 0.42) 52%,
+    rgba(var(--seg), 0.3)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(var(--seg), 0.95),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.45),
+    0 0 9px -2px rgba(var(--seg), var(--seg-bloom));
   transition: opacity var(--dur) var(--ease-out);
 }
 
-.verdict-seg:hover,
-.verdict-seg.hot {
-  opacity: 1;
-}
-
 .verdict-seg.enhanced {
-  background: linear-gradient(180deg, #7fe3ff, var(--cyan) 60%, #1ea9d6);
-  box-shadow: 0 0 8px rgba(57, 208, 255, 0.45);
+  --seg: 57, 208, 255;
 }
 
 .verdict-seg.reverted {
-  background: linear-gradient(180deg, #ffd28a, var(--amber) 60%, #d98a1f);
-  box-shadow: 0 0 8px rgba(255, 179, 71, 0.4);
+  --seg: 255, 179, 71;
 }
 
 .verdict-seg.passthrough {
-  background: linear-gradient(180deg, #3a414b, #2a3038);
+  --seg: 122, 133, 150;
+  --seg-bloom: 0;
 }
 
 .verdict-seg.error {
-  background: linear-gradient(180deg, #ff8a8d, var(--err) 60%, #c0393d);
-  box-shadow: 0 0 8px rgba(255, 90, 95, 0.45);
+  --seg: 255, 90, 95;
 }
 
 .verdict-empty {
@@ -685,9 +787,9 @@ button:focus-visible,
   display: flex;
   align-items: center;
   padding: 0 10px;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg-4);
-  letter-spacing: 0.02em;
+  letter-spacing: var(--ls-body);
 }
 
 .verdict-legend {
@@ -700,8 +802,8 @@ button:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 9px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
 }
@@ -711,7 +813,7 @@ button:focus-visible,
   display: inline-block;
   width: 10px;
   height: 6px;
-  border-radius: 2px;
+  border-radius: var(--r-xxs);
   opacity: 0.9;
 }
 
@@ -729,11 +831,8 @@ button:focus-visible,
   width: 280px;
   padding: 10px 12px;
   border-radius: var(--r);
-  background: rgba(20, 23, 28, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 10px 30px rgba(0, 0, 0, 0.6);
+  background-image: var(--brushed), linear-gradient(180deg, rgba(31, 36, 43, 0.97), rgba(18, 21, 26, 0.97));
+  box-shadow: var(--elev-3);
   pointer-events: none;
   backdrop-filter: blur(6px);
 }
@@ -763,21 +862,21 @@ button:focus-visible,
   align-items: center;
   margin-bottom: 6px;
   padding-bottom: 6px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--hair);
 }
 
 .tooltip .head .pill {
-  font-size: 9px;
-  font-weight: 800;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   color: #0b0d10;
 }
 
 .tooltip .reason {
   margin-top: 6px;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg-2);
   line-height: 1.45;
   white-space: normal;
@@ -792,7 +891,7 @@ button:focus-visible,
 }
 
 .tooltip .scores .row {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
 }
 
 /* ---------------------------------------------------------------- right column */
@@ -813,7 +912,7 @@ button:focus-visible,
 }
 
 .spectrum-body {
-  padding: 10px 12px 8px;
+  padding: var(--pad-4) var(--pad-5) var(--pad-3);
   min-height: 0;
 }
 
@@ -838,8 +937,8 @@ button:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 9px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
 }
@@ -847,7 +946,7 @@ button:focus-visible,
 .spectrum-legend i {
   width: 10px;
   height: 2px;
-  border-radius: 1px;
+  border-radius: var(--r-xxs);
 }
 
 .spectrum-legend .orig i {
@@ -871,33 +970,33 @@ button:focus-visible,
 .metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  padding: 0 12px 12px;
+  gap: var(--pad-3);
+  padding: 0 var(--pad-5) var(--pad-5);
   min-width: 0;
 }
 
 @media (max-width: 1120px) {
   .metrics {
-    gap: 6px;
-    padding: 0 10px 10px;
+    gap: var(--pad-1);
+    padding: 0 var(--pad-3) var(--pad-3);
   }
 
   .tile {
-    padding: 7px 8px;
+    padding: var(--pad-2);
   }
 }
 
 .tile {
   border-radius: var(--r);
-  background: var(--display);
-  box-shadow: var(--shadow-display);
-  padding: 8px 10px 8px;
+  background: var(--glass), linear-gradient(180deg, #060709, var(--display) 72%);
+  box-shadow: var(--shadow-display), var(--vignette-sm);
+  padding: var(--pad-3) var(--pad-3);
   min-width: 0;
 }
 
 .tile .k {
-  font-size: 9px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
   white-space: nowrap;
@@ -917,28 +1016,28 @@ button:focus-visible,
 }
 
 .tile .clean {
-  font-size: 17px;
-  font-weight: 600;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   color: var(--cyan);
   text-shadow: 0 0 10px rgba(57, 208, 255, 0.35);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ls-body);
 }
 
 .tile .single {
-  font-size: 17px;
-  font-weight: 600;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   color: var(--amber);
   text-shadow: 0 0 10px rgba(255, 179, 71, 0.3);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ls-body);
 }
 
 .tile .none {
-  font-size: 17px;
+  font-size: var(--fs-lg);
   color: var(--fg-4);
 }
 
 .tile .unit {
-  font-size: 9px;
+  font-size: var(--fs-label);
   color: var(--fg-4);
   margin-left: 1px;
 }
@@ -950,7 +1049,7 @@ button:focus-visible,
   margin-top: 2px;
   height: 14px;
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
@@ -961,22 +1060,22 @@ button:focus-visible,
   opacity: 0.85;
 }
 
-.tile .sub .arrow {
+.tile .sub .op {
   color: var(--fg-4);
 }
 
 .tile .sub .tag {
   color: var(--fg-4);
   font-family: var(--font-ui);
-  font-size: 8.5px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   text-transform: uppercase;
 }
 
 .tile .delta {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   font-variant-numeric: tabular-nums;
   color: var(--fg-3);
   white-space: nowrap;
@@ -995,8 +1094,8 @@ button:focus-visible,
   display: grid;
   grid-template-rows: auto auto auto auto;
   grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-  padding: 12px;
+  gap: var(--pad-4);
+  padding: var(--pad-5);
   min-width: 0;
 }
 
@@ -1014,10 +1113,8 @@ button:focus-visible,
   height: 28px;
   padding: 2px;
   border-radius: var(--r);
-  background: rgba(0, 0, 0, 0.45);
-  box-shadow:
-    inset 0 1px 3px rgba(0, 0, 0, 0.7),
-    0 1px 0 rgba(255, 255, 255, 0.04);
+  background: var(--glass), linear-gradient(180deg, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0.34));
+  box-shadow: var(--shadow-display), var(--vignette-sm);
   position: relative;
 }
 
@@ -1025,9 +1122,9 @@ button:focus-visible,
   position: relative;
   z-index: 1;
   padding: 0 12px;
-  border-radius: 4px;
-  font-size: var(--fs-xs);
-  font-weight: 700;
+  border-radius: var(--r-sm);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
   transition: color var(--dur) var(--ease-out);
@@ -1045,9 +1142,9 @@ button:focus-visible,
   position: absolute;
   top: 2px;
   bottom: 2px;
-  border-radius: 4px;
-  background: var(--metal-raised);
-  box-shadow: var(--shadow-raised);
+  border-radius: var(--r-sm);
+  background-image: var(--brushed), var(--metal-raised);
+  box-shadow: var(--elev-2);
   z-index: 0;
 }
 
@@ -1080,8 +1177,8 @@ button:focus-visible,
   height: 104px;
   padding: 0 14px 0 10px;
   border-radius: var(--r-lg);
-  background: var(--metal-2);
-  box-shadow: var(--shadow-raised);
+  background-image: var(--brushed), var(--metal-2);
+  box-shadow: var(--elev-2);
   text-align: left;
   transition:
     transform var(--dur) var(--ease-out),
@@ -1112,12 +1209,21 @@ button:focus-visible,
   transform: rotate(-90deg);
 }
 
+/* The arc used to float on the plate: its track was a 60%-black stroke over a
+ * surface that is already almost black, so there was nothing for the light to
+ * sit in. It is now a genuine channel — an opaque sunken bed with a lit lower
+ * lip and a hairline collar — which is what makes the ring read as machined
+ * rather than as a web progress spinner. */
 .process .ring .track {
-  stroke: rgba(0, 0, 0, 0.6);
+  stroke: #05060a;
+}
+
+.process .ring .track-lip {
+  stroke: rgba(255, 255, 255, 0.07);
 }
 
 .process .ring .track-hi {
-  stroke: rgba(255, 255, 255, 0.05);
+  stroke: rgba(255, 255, 255, 0.06);
 }
 
 .process .ring .bar {
@@ -1153,15 +1259,15 @@ button:focus-visible,
 
 .process .ring .center .pct {
   font-family: var(--font-mono);
-  font-size: 17px;
-  font-weight: 600;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   color: var(--fg);
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--ls-body);
 }
 
 .process .ring .center .pct small {
-  font-size: 9px;
+  font-size: var(--fs-label);
   color: var(--fg-3);
   margin-left: 1px;
 }
@@ -1180,23 +1286,15 @@ button:focus-visible,
 }
 
 .process .text .title {
-  font-size: 16px;
-  font-weight: 800;
-  letter-spacing: 0.14em;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
   color: var(--fg);
 }
 
-.process .text .title.amber {
-  color: var(--amber);
-}
-
-.process .text .title.cyan {
-  color: var(--cyan);
-}
-
 .process .text .stage {
-  font-size: var(--fs-xs);
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
   white-space: nowrap;
@@ -1226,12 +1324,20 @@ button:focus-visible,
   color: var(--fg);
 }
 
+.process.done .text .stage {
+  color: var(--ok);
+}
+
+.process.failed .text .stage {
+  color: var(--err);
+}
+
 /* transport */
 .transport {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
-  gap: 10px;
+  gap: var(--pad-3);
 }
 
 .playbtn {
@@ -1241,8 +1347,8 @@ button:focus-visible,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--metal-raised);
-  box-shadow: var(--shadow-raised);
+  background-image: var(--brushed), var(--metal-raised);
+  box-shadow: var(--elev-2);
   color: var(--fg);
   transition:
     transform var(--dur) var(--ease-out),
@@ -1271,7 +1377,7 @@ button:focus-visible,
 
 .timecode {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-md);
   color: var(--fg-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -1282,6 +1388,12 @@ button:focus-visible,
 
 .timecode .dim {
   color: var(--fg-4);
+}
+
+/* the "/ duration" half is secondary, and shedding a step keeps the whole
+   clock inside its column at 1440 without the housing touching the A/B pair */
+.timecode .dur {
+  font-size: var(--fs-sm);
 }
 
 .timecode .dur {
@@ -1318,8 +1430,8 @@ button:focus-visible,
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
-  padding: 0 12px;
+  gap: var(--pad-4);
+  padding: 0 var(--pad-5);
   font-size: var(--fs-sm);
   color: var(--fg-3);
 }
@@ -1333,7 +1445,7 @@ button:focus-visible,
 
 .footer .meta {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg-4);
   white-space: nowrap;
 }
@@ -1352,10 +1464,7 @@ button:focus-visible,
   border-radius: var(--r);
   background: linear-gradient(180deg, rgba(70, 22, 25, 0.96), rgba(52, 16, 19, 0.96));
   border: 1px solid rgba(255, 90, 95, 0.45);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 10px 30px rgba(0, 0, 0, 0.6),
-    0 0 0 1px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--elev-3);
   color: #ffd5d6;
   font-size: var(--fs-sm);
 }
@@ -1371,9 +1480,9 @@ button:focus-visible,
 }
 
 .errbar .text b {
-  font-weight: 700;
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   margin-right: 8px;
   color: #ff9a9d;
 }
@@ -1382,7 +1491,7 @@ button:focus-visible,
   color: #ffb3b5;
   display: inline-flex;
   padding: 2px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
 }
 
 /* ------------------------------------------------------- compact height */
@@ -1424,32 +1533,18 @@ button:focus-visible,
     height: 62px;
   }
 
-  .process .ring .center .pct {
-    font-size: 13px;
-  }
-
   .process .ring .center svg.icon {
     width: 20px;
     height: 20px;
   }
 
-  .process .text .title {
-    font-size: 14px;
-  }
-
   .metrics {
-    gap: 6px;
-    padding: 0 10px 10px;
+    gap: var(--pad-1);
+    padding: 0 var(--pad-3) var(--pad-3);
   }
 
   .tile {
-    padding: 6px 8px;
-  }
-
-  .tile .clean,
-  .tile .single,
-  .tile .none {
-    font-size: 15px;
+    padding: var(--pad-2);
   }
 
   .tile .sub {
@@ -1492,7 +1587,7 @@ button:focus-visible,
 }
 
 .insp-body {
-  padding: 10px 12px 12px;
+  padding: var(--pad-4) var(--pad-5) var(--pad-5);
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
@@ -1510,8 +1605,8 @@ button:focus-visible,
 }
 
 .insp-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+  background: var(--hair-strong);
+  border-radius: var(--r-sm);
 }
 
 /* head tools */
@@ -1531,12 +1626,12 @@ button:focus-visible,
   height: 18px;
   padding: 0 6px;
   border-radius: var(--r-sm);
-  background: var(--metal-2);
-  box-shadow: var(--shadow-raised);
+  background-image: var(--brushed), var(--metal-2);
+  box-shadow: var(--elev-2);
   color: var(--fg-3);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 700;
+  font-family: var(--font-numeric);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   line-height: 1;
   transition:
     color var(--dur) var(--ease-out),
@@ -1546,12 +1641,12 @@ button:focus-visible,
 .insp-keys {
   font-family: var(--font-ui);
   letter-spacing: var(--ls-caps);
-  font-size: 9px;
+  font-size: var(--fs-label);
 }
 
 .insp-keys .qm {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--cyan-2);
 }
 
@@ -1597,7 +1692,7 @@ button:focus-visible,
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg-4);
 }
 
@@ -1615,21 +1710,21 @@ button:focus-visible,
   flex-direction: column;
   gap: 1px;
   min-width: 62px;
-  padding: 6px 10px;
+  padding: var(--pad-2) var(--pad-4);
   border-radius: var(--r-sm);
-  background: var(--display-2);
-  box-shadow: var(--shadow-display);
+  background: var(--glass), linear-gradient(180deg, #06070a, var(--display-2) 72%);
+  box-shadow: var(--shadow-display), var(--vignette-sm);
 }
 
 .insp-stats .stat b {
-  font-size: 17px;
-  font-weight: 600;
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-medium);
   line-height: 1.15;
   color: var(--fg);
 }
 
 .insp-stats .stat .caps {
-  font-size: 9px;
+  font-size: var(--fs-label);
   color: var(--fg-4);
 }
 
@@ -1669,23 +1764,23 @@ button:focus-visible,
 
 .insp-idhead .uid {
   font-size: var(--fs-md);
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
   color: var(--fg);
   white-space: nowrap;
 }
 
 .insp-idhead .uid .of {
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   color: var(--fg-3);
 }
 
 .insp-idhead .pill {
-  font-size: 9px;
-  font-weight: 800;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   color: #0b0d10;
   white-space: nowrap;
 }
@@ -1719,18 +1814,16 @@ button:focus-visible,
   flex: 1;
   min-width: 32px;
   height: 5px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   background: var(--display);
-  box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.8),
-    inset 0 0 0 1px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--shadow-display);
   overflow: hidden;
 }
 
 .strength-bar i {
   display: block;
   height: 100%;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   background: linear-gradient(90deg, rgba(57, 208, 255, 0.4), var(--cyan));
   box-shadow: 0 0 8px var(--cyan-glow);
 }
@@ -1745,10 +1838,10 @@ button:focus-visible,
 
 .insp-finish .preset {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--cyan-2);
   padding: 1px 6px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   background: rgba(57, 208, 255, 0.1);
   box-shadow: inset 0 0 0 1px rgba(57, 208, 255, 0.22);
 }
@@ -1767,10 +1860,10 @@ button:focus-visible,
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   color: var(--fg-2);
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   background: rgba(255, 255, 255, 0.04);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
@@ -1794,10 +1887,10 @@ button:focus-visible,
 /* ---- guard score tables */
 .insp-guard {
   min-width: 0;
-  padding: 8px 10px 9px;
+  padding: var(--pad-3) var(--pad-4) var(--pad-3);
   border-radius: var(--r);
-  background: var(--display-2);
-  box-shadow: var(--shadow-display);
+  background: var(--glass), linear-gradient(180deg, #06070a, var(--display-2) 72%);
+  box-shadow: var(--shadow-display), var(--vignette-sm);
 }
 
 .insp-guard-head {
@@ -1812,11 +1905,11 @@ button:focus-visible,
 
 .insp-verdict {
   font-family: var(--font-ui);
-  font-size: 9px;
-  font-weight: 800;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   padding: 2px 6px;
-  border-radius: 3px;
+  border-radius: var(--r-xs);
   color: var(--fg-3);
   background: rgba(255, 255, 255, 0.05);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
@@ -1849,7 +1942,7 @@ button:focus-visible,
 }
 
 .insp-score .k {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg-3);
   white-space: nowrap;
   overflow: hidden;
@@ -1859,16 +1952,19 @@ button:focus-visible,
 .insp-score .bar {
   position: relative;
   height: 4px;
-  border-radius: 2px;
-  background: rgba(0, 0, 0, 0.5);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  border-radius: var(--r-xxs);
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.9),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.6);
   overflow: hidden;
 }
 
 .insp-score .bar i.fill {
   position: absolute;
   inset: 0 auto 0 0;
-  border-radius: 2px;
+  border-radius: var(--r-xxs);
   background: linear-gradient(90deg, rgba(57, 208, 255, 0.35), var(--cyan));
 }
 
@@ -1894,14 +1990,14 @@ button:focus-visible,
 }
 
 .insp-score .v {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   color: var(--fg);
   text-align: right;
   white-space: nowrap;
 }
 
 .insp-none {
-  font-size: var(--fs-xs);
+  font-size: var(--fs-label);
   line-height: 1.5;
   color: var(--fg-4);
 }
@@ -1948,12 +2044,10 @@ button:focus-visible,
   display: grid;
   grid-template-rows: 30px minmax(0, 1fr) auto;
   grid-template-columns: minmax(0, 1fr);
-  background: var(--metal-2);
-  box-shadow:
-    inset 0 1px 0 var(--bevel-hi),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.35),
-    0 1px 0 rgba(0, 0, 0, 0.6),
-    0 24px 70px rgba(0, 0, 0, 0.62);
+  border-radius: var(--r-xl);
+  background-color: var(--panel-2);
+  background-image: var(--brushed), var(--metal-2);
+  box-shadow: var(--elev-3);
   animation: sc-rise 160ms var(--ease-out);
 }
 
@@ -1991,8 +2085,8 @@ button:focus-visible,
   margin: 0 0 5px;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--line);
-  font-size: var(--fs-xs);
-  font-weight: 600;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--fg-3);
@@ -2023,7 +2117,7 @@ button:focus-visible,
 .sc-combo .sep,
 .kwrap .plus {
   color: var(--fg-4);
-  font-size: 9px;
+  font-size: var(--fs-label);
 }
 
 .sc-what {
@@ -2042,10 +2136,10 @@ kbd {
   min-width: 19px;
   padding: 3px 5px;
   border-radius: var(--r-sm);
-  background: var(--metal-raised);
-  box-shadow: var(--shadow-raised);
-  font-family: var(--font-mono);
-  font-size: 10px;
+  background-image: var(--brushed), var(--metal-raised);
+  box-shadow: var(--elev-2);
+  font-family: var(--font-numeric);
+  font-size: var(--fs-label);
   line-height: 1;
   text-align: center;
   color: var(--fg);
@@ -2054,22 +2148,22 @@ kbd {
 
 .sc-foot {
   padding: 8px 14px 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.55);
-  box-shadow: inset 0 1px 0 var(--bevel-hi);
-  font-size: var(--fs-xs);
+  border-top: 1px solid var(--hair-dark);
+  box-shadow: inset 0 1px 0 var(--hair-hi);
+  font-size: var(--fs-label);
   color: var(--fg-3);
 }
 
 .sc-foot kbd {
   min-width: 0;
   padding: 2px 4px;
-  font-size: 9px;
+  font-size: var(--fs-label);
 }
 
 .insp-empty-lead .keys kbd {
   min-width: 0;
   padding: 2px 4px;
-  font-size: 9px;
+  font-size: var(--fs-label);
 }
 
 @keyframes sc-fade {
@@ -2115,7 +2209,181 @@ kbd {
     padding: 5px 8px;
   }
 
-  .insp-stats .stat b {
-    font-size: 15px;
-  }
+}
+
+/* ================================================================= A1 / A4
+ * The design-system layer: one lighting model, one type scale. Everything
+ * below either finishes a surface the component tree cannot reach or pulls a
+ * stray value back onto the scale. Nothing here needs a class that does not
+ * already exist in the markup.
+ * ======================================================================== */
+
+/* ------------------------------------------------------ small-caps labels
+ * One treatment — 11px / 500 / 0.08em / uppercase — for every panel header,
+ * tile key, legend, table header and column head in the product. */
+.caps,
+.panel-title,
+.tile .k,
+.tile .sub .tag,
+.badge,
+.engine,
+.clipinfo .kv .k,
+.clipinfo .origin,
+.wave-legend span,
+.verdict-legend span,
+.spectrum-legend span,
+.insp-stats .stat .caps,
+.insp-verdict,
+.insp-idhead .pill,
+.tooltip .head .pill,
+.sc-group h3,
+.process .text .stage,
+.errbar .text b {
+  font-family: var(--font-sans);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Unit names and version strings carry meaning in their case — dBTP is not
+   DBTP — so they take the label's metrics without the transform. */
+.tile .unit,
+.engine .ver,
+.wordmark .ver,
+.clipinfo .kv .v {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: none;
+}
+
+.clipinfo .kv .v,
+.tile .unit {
+  font-family: var(--font-numeric);
+}
+
+/* The wordmark is a logotype, not a label: the only wide tracking in the UI. */
+.wordmark .name {
+  letter-spacing: var(--ls-wide);
+}
+
+/* Guard-table row heads read as table headers, so they take the label
+   treatment; the key column widens to carry them at the new size. */
+.insp-score .k {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.insp-score {
+  grid-template-columns: minmax(0, 150px) minmax(18px, 1fr) 56px;
+}
+
+/* ------------------------------------------------- head tools, laid out
+ * .wave-legend-head has no rule of its own in the component's stylesheet, so
+ * its children were relying on inline flow to stay on the head's baseline. */
+.wave-legend-head {
+  display: flex;
+  align-items: center;
+  gap: var(--pad-4);
+  min-width: 0;
+}
+
+.wave-legend-head .caps {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The zoom chips are chrome, so they answer to the label scale like the rest
+   of the head. (Higher specificity than render/waveZoom.css by design — that
+   file belongs to the renderer, this one owns the type scale.) */
+.panel-head .wave-zoom .mag,
+.panel-head .wave-fit {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+}
+
+.panel-head .wave-zoom .mag {
+  font-family: var(--font-numeric);
+  border-radius: var(--r-xs);
+}
+
+.panel-head .wave-fit {
+  font-family: var(--font-sans);
+  background-image: var(--brushed), var(--metal-2);
+  box-shadow: var(--elev-2);
+}
+
+/* The overview scrubber's glass overlay is owned by render/waveZoom.css; its
+ * inset lighting arrives through --shadow-display, so nothing is needed here.
+ */
+
+/* The transport clock is a readout, so it gets a readout's housing. */
+.timecode {
+  display: inline-flex;
+  align-items: baseline;
+  padding: 3px var(--pad-2) 4px;
+  border-radius: var(--r-sm);
+  background: var(--glass), linear-gradient(180deg, #06070a, var(--display-2) 72%);
+  box-shadow: var(--shadow-display), var(--vignette-sm);
+}
+
+/* Scroll chrome is a surface too. */
+.insp-body::-webkit-scrollbar-track,
+.sc-body::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: var(--r-sm);
+}
+
+.sc-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.sc-body::-webkit-scrollbar-thumb {
+  background: var(--hair-strong);
+  border-radius: var(--r-sm);
+}
+
+/* ---------------------------------------------- the selected verdict bar
+ * The one segment under inspection is the only one allowed to run at full
+ * illumination: the same hue, but lit rather than tinted, with the machined
+ * ring around it. Everything above it is the resting recipe (see the
+ * `--seg` block near the strip's own rules). */
+.verdict-seg.sel {
+  opacity: 1;
+  top: 2px;
+  bottom: 2px;
+  background: linear-gradient(
+    180deg,
+    rgba(var(--seg), 1),
+    rgba(var(--seg), 0.86) 58%,
+    rgba(var(--seg), 0.62)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 0 0 1px rgba(11, 13, 16, 0.9),
+    0 0 0 2px rgba(230, 233, 238, 0.9),
+    0 0 14px -1px rgba(var(--seg), 0.55);
+  z-index: 2;
+}
+
+/* ------------------------------------------------------------ stragglers
+ * Two meter wells were carrying an inset shadow over a flat colour; they get
+ * the same top-edge glass as every other piece of sunken chrome. */
+.strength-bar,
+.insp-score .bar {
+  background-image: var(--glass);
+}
+
+/* The spectrum legend is defined in render/spectrum.css, which picked a 10px
+   label — one step off the scale. Corrected from the design-system layer
+   rather than by reaching into another component's stylesheet. */
+.panel-head .spec-legend .item {
+  font-size: var(--fs-label);
 }

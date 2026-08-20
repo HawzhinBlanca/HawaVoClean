@@ -1,0 +1,1322 @@
+/* ================================================================ A5/A6/A7/D3
+ * The behaviour layer: what the chassis does when you touch it, what it shows
+ * when it has nothing to show, and how it tells you which deck is live.
+ *
+ * This file sits on top of `app.css` (the lighting + type system) and never
+ * restates a surface that file already owns. Three rules govern it:
+ *
+ *  1. NOTHING ANIMATES A LAYOUT PROPERTY. Every state change here rides on
+ *     `transform`, `opacity` or `filter` — the three the compositor can do
+ *     without a reflow — plus `box-shadow` on small objects where the shadow
+ *     *is* the state (a pressed key, a focus ring).
+ *  2. EVERY CONTROL ANSWERS ON THREE CHANNELS: hover (it can be pressed),
+ *     active (it is being pressed), focus-visible (the keyboard is on it).
+ *     A control that answers on fewer than three is a bug.
+ *  3. EVERY ANIMATION IS OPTIONAL. The last block in this file removes all of
+ *     them under `prefers-reduced-motion: reduce` — the *motion*, never the
+ *     state: a busy LED still reads busy, a selected segment still reads
+ *     selected, the progress ring still shows its arc.
+ * ======================================================================== */
+
+:root {
+  /* Interaction-only tokens. Prefixed so they cannot collide with the design
+     system in tokens.css, which this file consumes but never redefines. */
+  --ix-focus: rgba(120, 222, 255, 0.95);
+  --ix-focus-soft: rgba(57, 208, 255, 0.4);
+  --ix-fast: 90ms; /* press — must feel mechanical, not eased */
+  --ix-mid: var(--dur); /* hover / selection */
+  --ix-slow: 300ms; /* phase changes: idle → running → done */
+  --ix-ease-io: cubic-bezier(0.45, 0, 0.55, 1); /* breathing, both ends soft */
+}
+
+/* ========================================================== A5 · FOCUS RING
+ * One ring, drawn with `outline` so it never enters the box-shadow stack that
+ * carries a control's elevation (a focus state must not flatten a key). The
+ * halo rides on `filter`, which costs no layout. Inset controls take a
+ * negative offset so the ring stays inside its well. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--ix-focus);
+  outline-offset: 2px;
+}
+
+.btn:focus-visible,
+.playbtn:focus-visible,
+.process:focus-visible,
+.wave-fit:focus-visible,
+.sc-close:focus-visible,
+.insp-keys:focus-visible,
+.errbar .dismiss:focus-visible {
+  filter: drop-shadow(0 0 7px var(--ix-focus-soft));
+}
+
+/* Controls that live *inside* a well: the ring goes in with them. */
+.seg button:focus-visible,
+.dropzone input[type='file']:focus-visible {
+  outline-offset: -2px;
+}
+
+.dropzone:has(input[type='file']:focus-visible) {
+  border-color: var(--ix-focus);
+  color: var(--fg-2);
+}
+
+/* ===================================================== A5 · GENERIC CONTROLS
+ * `.btn` and `.playbtn` already rise on hover and sink on press (app.css).
+ * What they were missing is the light: a real key brightens under the cursor
+ * because it tilts toward the lamp. `filter` does that for free. */
+.btn,
+.playbtn,
+.wave-fit,
+.sc-close,
+.insp-keys {
+  transition:
+    transform var(--ix-mid) var(--ease-out),
+    box-shadow var(--ix-mid) var(--ease-out),
+    filter var(--ix-mid) var(--ease-out),
+    opacity var(--ix-mid) var(--ease-out);
+}
+
+.btn:hover:not(:disabled),
+.playbtn:hover:not(:disabled),
+.wave-fit:hover:not(:disabled),
+.insp-keys:hover:not(:disabled) {
+  filter: brightness(1.14);
+}
+
+/* A press is a fast event; easing it over 160 ms makes the key feel spongy. */
+.btn:active:not(:disabled),
+.playbtn:active:not(:disabled),
+.wave-fit:active:not(:disabled),
+.insp-keys:active:not(:disabled) {
+  filter: brightness(0.94);
+  transition-duration: var(--ix-fast);
+}
+
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.08) saturate(1.05);
+}
+
+.sc-close:hover,
+.errbar .dismiss:hover {
+  filter: brightness(1.3);
+  transform: scale(1.08);
+}
+
+.sc-close:active,
+.errbar .dismiss:active {
+  transform: scale(0.94);
+  transition-duration: var(--ix-fast);
+}
+
+.errbar .dismiss {
+  transition:
+    transform var(--ix-mid) var(--ease-out),
+    filter var(--ix-mid) var(--ease-out);
+}
+
+/* Segmented controls: the thumb is animated by `motion`, so the buttons only
+   have to answer on colour and light. An unselected segment brightens toward
+   the selected colour; the selected one cannot brighten further. */
+.seg button {
+  transition:
+    color var(--ix-mid) var(--ease-out),
+    text-shadow var(--ix-mid) var(--ease-out),
+    filter var(--ix-mid) var(--ease-out);
+}
+
+.seg button:not(.on):not(:disabled):hover {
+  color: var(--fg-2);
+}
+
+.seg button:not(:disabled):active {
+  filter: brightness(0.92);
+  transition-duration: var(--ix-fast);
+}
+
+/* The thumb's travel. `width` is a layout property, but the thumb is out of
+   flow inside the pill, so animating it repaints exactly one box and reflows
+   nothing. The curve overshoots a hair — a physical switch does too. */
+.seg .thumb {
+  transition:
+    transform 240ms cubic-bezier(0.2, 0.94, 0.3, 1),
+    width 240ms cubic-bezier(0.2, 0.94, 0.3, 1),
+    box-shadow var(--ix-mid) var(--ease-out),
+    filter var(--ix-mid) var(--ease-out);
+}
+
+.seg:hover .thumb {
+  filter: brightness(1.08);
+}
+
+/* Readout tiles are not controls, but they are inspectable objects: the
+   cursor resting on one lifts it out of the glass just enough to read as
+   "this one". No transform — a tile that moves under the pointer reads as a
+   button, which it is not. */
+.tile {
+  transition:
+    filter var(--ix-mid) var(--ease-out),
+    box-shadow var(--ix-mid) var(--ease-out);
+}
+
+.tile:hover {
+  filter: brightness(1.1);
+  box-shadow:
+    var(--shadow-display),
+    var(--vignette-sm),
+    0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+/* ================================================== A5 · THE PROCESS BUTTON
+ * The one control in the product with three lives — idle, running, done — and
+ * therefore the one that has to transition rather than swap. It gets:
+ *   · a real press (scale + the pressed inner shadow, over 90 ms)
+ *   · a phase tint that cross-fades on ::before instead of swapping a gradient
+ *     (gradients do not interpolate; opacity does)
+ *   · a sweep while it works, so a long stage still reads as alive
+ *   · a one-shot settle when it lands on done.
+ * The progress arc itself is interpolated in JS (ProcessButton.tsx) — SSE
+ * arrives in steps of whole stages and a CSS transition can only chase the
+ * last one it was given. */
+.process {
+  position: relative;
+  isolation: isolate;
+  transition:
+    transform var(--ix-mid) var(--ease-out),
+    box-shadow var(--ix-slow) var(--ease-out),
+    filter var(--ix-slow) var(--ease-out),
+    opacity var(--ix-slow) var(--ease-out);
+}
+
+.process > * {
+  position: relative;
+  z-index: 1;
+}
+
+.process::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 34%,
+    rgba(255, 179, 71, 0.07) 44%,
+    rgba(255, 210, 138, 0.16) 50%,
+    rgba(255, 179, 71, 0.07) 56%,
+    transparent 66%
+  );
+  background-size: 260% 100%;
+  background-position: 130% 0;
+  transition: opacity var(--ix-slow) var(--ease-out);
+}
+
+.process:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.process:active:not(:disabled) {
+  transform: scale(0.985);
+  box-shadow: var(--shadow-pressed);
+  filter: brightness(0.95);
+  transition-duration: var(--ix-fast);
+}
+
+/* Running: the plate warms, the sweep runs, the ring is driven from JS. */
+.process.running::before {
+  opacity: 1;
+  animation: ix-proc-sweep 2.6s linear infinite;
+}
+
+.process.running {
+  box-shadow:
+    var(--shadow-raised),
+    0 0 18px -2px rgba(255, 179, 71, 0.22);
+}
+
+/* While the arc is being interpolated frame by frame, a CSS transition on the
+   same property would chase it and add ~200 ms of lag. */
+.process.running .ring .bar,
+.process.smooth .ring .bar {
+  transition: none;
+}
+
+.process .ring .bar {
+  transition:
+    stroke-dashoffset 260ms var(--ease-out),
+    stroke var(--ix-slow) var(--ease-out),
+    filter var(--ix-slow) var(--ease-out);
+}
+
+.process .ring .center {
+  /* the glyph swap (bolt → % → check) cross-fades in place */
+  overflow: hidden;
+}
+
+/* Four glyphs, stacked on the ring's centre, one visible at a time. The phase
+   class on the button picks it; everything else sits at scale(0.7)/opacity 0
+   waiting its turn. No element is ever unmounted, so there is no blank frame
+   in the middle of a state change. */
+.process .ring .center .glyph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.7);
+  pointer-events: none;
+  transition:
+    opacity 220ms var(--ease-out),
+    transform 220ms var(--ease-out);
+}
+
+/* Specificity matches the base rule above, one class deeper, so the phase
+   always wins the cascade rather than tying with it. */
+.process .ring .center .glyph.g-idle {
+  opacity: 1;
+  transform: none;
+}
+
+.process.running .ring .center .glyph.g-idle,
+.process.done .ring .center .glyph.g-idle,
+.process.failed .ring .center .glyph.g-idle {
+  opacity: 0;
+  transform: scale(0.7);
+}
+
+.process.running .ring .center .glyph.g-run,
+.process.done .ring .center .glyph.g-done,
+.process.failed .ring .center .glyph.g-fail {
+  opacity: 1;
+  transform: none;
+}
+
+.process.done {
+  box-shadow:
+    var(--shadow-raised),
+    0 0 20px -3px rgba(74, 222, 128, 0.3);
+  animation: ix-proc-settle 720ms var(--ease-out) 1;
+}
+
+.process.failed {
+  box-shadow:
+    var(--shadow-raised),
+    0 0 20px -3px rgba(255, 90, 95, 0.32);
+}
+
+/* Stage text is replaced on every SSE frame; a hard swap flickers. */
+.process .text .stage,
+.process .text .units {
+  transition: color var(--ix-slow) var(--ease-out);
+}
+
+@keyframes ix-proc-sweep {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -130% 0;
+  }
+}
+
+/* The settle rides on the independent `scale` property, not on `transform`.
+   `transform` is the button's interaction channel (hover lifts it, a press
+   scales it) and a running animation outranks the cascade for whatever
+   property it touches — so a settle written as `transform: scale()` would
+   swallow hover and press for as long as it ran. `scale` composes with
+   `transform` instead of replacing it. */
+@keyframes ix-proc-settle {
+  0% {
+    scale: 1;
+  }
+  32% {
+    scale: 1.012;
+  }
+  100% {
+    scale: 1;
+  }
+}
+
+/* =============================================================== A5 · LEDs
+ * A hardware LED does not blink its die on and off; the die stays lit and the
+ * halo around it breathes. So the dot keeps its gradient (app.css owns that)
+ * and the cadence lives entirely on a halo element behind it:
+ *   ready → steady, a fixed soft corona
+ *   busy  → breathing, 2.4 s, both ends eased
+ *   error → alarm, two fast flashes then a hold, 1.4 s
+ * Because the halo is a separate element the cadence is pure transform +
+ * opacity, and the state change itself cross-fades instead of snapping. */
+.led {
+  transition:
+    box-shadow var(--ix-slow) var(--ease-out),
+    background-color var(--ix-slow) var(--ease-out),
+    filter var(--ix-slow) var(--ease-out);
+}
+
+.led .halo {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.7);
+  background: radial-gradient(circle, var(--ix-led, transparent) 0%, transparent 66%);
+  transition:
+    opacity var(--ix-slow) var(--ease-out),
+    transform var(--ix-slow) var(--ease-out);
+}
+
+.led.ok .halo {
+  --ix-led: var(--ok-glow);
+  opacity: 0.55;
+  transform: scale(1);
+}
+
+.led.busy .halo {
+  --ix-led: var(--busy-glow);
+  opacity: 0.8;
+  transform: scale(1);
+  animation: ix-led-breathe 2.4s var(--ix-ease-io) infinite;
+}
+
+.led.err .halo {
+  --ix-led: var(--err-glow);
+  opacity: 0.9;
+  transform: scale(1);
+  animation: ix-led-alarm 1.4s linear infinite;
+}
+
+/* app.css pulses `.led.busy`'s opacity 1 → 0.55, which reads as a fault, not
+   as work. The die stays lit; the halo carries the cadence. */
+.led.busy {
+  animation: ix-led-die-breathe 2.4s var(--ix-ease-io) infinite;
+}
+
+.led.err {
+  animation: ix-led-die-alarm 1.4s linear infinite;
+}
+
+@keyframes ix-led-breathe {
+  0%,
+  100% {
+    opacity: 0.34;
+    transform: scale(0.82);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale(1.14);
+  }
+}
+
+@keyframes ix-led-die-breathe {
+  0%,
+  100% {
+    filter: brightness(0.82);
+  }
+  50% {
+    filter: brightness(1.18);
+  }
+}
+
+@keyframes ix-led-alarm {
+  0% {
+    opacity: 1;
+    transform: scale(1.24);
+  }
+  10% {
+    opacity: 0.12;
+    transform: scale(0.86);
+  }
+  20% {
+    opacity: 1;
+    transform: scale(1.24);
+  }
+  30%,
+  100% {
+    opacity: 0.12;
+    transform: scale(0.86);
+  }
+}
+
+@keyframes ix-led-die-alarm {
+  0% {
+    filter: brightness(1.35);
+  }
+  10% {
+    filter: brightness(0.7);
+  }
+  20% {
+    filter: brightness(1.35);
+  }
+  30%,
+  100% {
+    filter: brightness(0.7);
+  }
+}
+
+/* The engine readout next to the LED changes wording as the state changes;
+   the words cross-fade with it (Header.tsx drives the presence). */
+/* The readout is a fixed-width slot with the two words stacked inside it, so
+   the outgoing and incoming states overlap for the length of the cross-fade
+   and the version chip beside them never moves. */
+.engine .txt {
+  position: relative;
+  display: inline-block;
+  min-width: 138px;
+  height: 1.35em;
+  vertical-align: middle;
+}
+
+.engine .txt > span {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: inline-block;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+
+.engine .txt > .in {
+  animation: ix-txt-in 240ms var(--ease-out) both;
+}
+
+.engine .txt > .out {
+  animation: ix-txt-out 240ms var(--ease-out) both;
+}
+
+@keyframes ix-txt-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ix-txt-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+/* ==================================================== A6 · THE DROP TARGET
+ * Before a file exists this is the only thing on screen with a job, so it is
+ * built like a piece of hardware: a dashed well sunk into the plate, a lit
+ * icon in a bezel, two lines of copy that say what to do and what is
+ * accepted. On drag-over it lifts, glows and goes solid — and reverts on
+ * leave, drop and cancel alike, because the counter that drives it is
+ * window-level (App.tsx), not element-level. */
+.dropzone {
+  gap: 11px;
+  height: 40px;
+  padding: 0 14px;
+  transition:
+    transform var(--ix-mid) var(--ease-out),
+    box-shadow var(--ix-mid) var(--ease-out),
+    border-color var(--ix-mid) var(--ease-out),
+    color var(--ix-mid) var(--ease-out),
+    opacity var(--ix-mid) var(--ease-out);
+}
+
+.dropzone .glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  color: var(--fg-3);
+  background-image: var(--brushed), var(--metal-raised);
+  box-shadow: var(--elev-2);
+  transition:
+    color var(--ix-mid) var(--ease-out),
+    box-shadow var(--ix-mid) var(--ease-out),
+    transform var(--ix-mid) var(--ease-out);
+}
+
+.dropzone .copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.dropzone .hint {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--fg-2);
+  transition: color var(--ix-mid) var(--ease-out);
+}
+
+.dropzone .types {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--fg-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color var(--ix-mid) var(--ease-out);
+}
+
+.dropzone:hover:not(.disabled) {
+  border-color: var(--hair-strong);
+  color: var(--fg-2);
+}
+
+.dropzone:hover:not(.disabled) .glyph {
+  color: var(--fg-2);
+  transform: translateY(-1px);
+}
+
+.dropzone.disabled {
+  opacity: 0.4;
+}
+
+/* Nothing loaded yet: the well is the subject of the screen, so it carries a
+   warm dashed edge and a slow breath — the product idling, not waiting. */
+.app[data-phase='idle'] .dropzone {
+  border-color: rgba(255, 179, 71, 0.3);
+}
+
+.app[data-phase='idle'] .dropzone .glyph {
+  color: var(--amber);
+  box-shadow:
+    var(--shadow-raised),
+    0 0 12px -2px rgba(255, 179, 71, 0.4);
+  animation: ix-idle-breathe 3.6s var(--ix-ease-io) infinite;
+}
+
+.app[data-phase='idle'] .dropzone .hint {
+  color: var(--fg);
+}
+
+/* Dragging anywhere over the window: the whole strip answers, so the target
+   is findable without hunting for its 40 px of well. */
+.app[data-drag='true'] .source {
+  box-shadow:
+    var(--elev-1),
+    0 0 0 1px rgba(57, 208, 255, 0.32),
+    0 0 34px -6px rgba(57, 208, 255, 0.35);
+}
+
+.app[data-drag='true'] .dropzone {
+  border-style: dashed;
+  border-color: rgba(57, 208, 255, 0.6);
+  color: var(--cyan-2);
+  transform: scale(1.008);
+  box-shadow:
+    var(--shadow-display),
+    0 0 0 1px rgba(57, 208, 255, 0.3),
+    0 0 22px -4px rgba(57, 208, 255, 0.4);
+}
+
+.app[data-drag='true'] .dropzone .glyph {
+  color: var(--cyan);
+  animation: none;
+  box-shadow:
+    var(--shadow-raised),
+    0 0 12px -2px rgba(57, 208, 255, 0.5);
+}
+
+.app[data-drag='true'] .dropzone .hint,
+.app .dropzone.over .hint {
+  color: var(--cyan-2);
+}
+
+.app .dropzone.over .types {
+  color: rgba(154, 232, 255, 0.75);
+}
+
+/* …and directly over the well itself: solid edge, full glow, the copy
+   switches to "Release to load" (SourceStrip.tsx). */
+/* Scoped through `.app` so it carries the same specificity as the two
+   `[data-*]` states above and, coming last, outranks both: the pointer being
+   *on* the well is the strongest signal there is. */
+.app .dropzone.over {
+  border-style: solid;
+  border-color: rgba(57, 208, 255, 0.9);
+  color: var(--cyan-2);
+  transform: scale(1.02);
+  box-shadow:
+    var(--shadow-display),
+    0 0 0 1px rgba(57, 208, 255, 0.55),
+    0 0 30px -4px rgba(57, 208, 255, 0.6);
+}
+
+.app .dropzone.over .glyph {
+  /* the idle breath animates box-shadow, which is this state's whole point */
+  animation: none;
+  color: #04161d;
+  background-image: var(--brushed), linear-gradient(180deg, #9ae8ff, var(--cyan) 60%, #1ea9d6);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.45),
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 0 16px rgba(57, 208, 255, 0.5);
+  transform: translateY(-1px) scale(1.06);
+}
+
+@keyframes ix-idle-breathe {
+  0%,
+  100% {
+    box-shadow:
+      var(--shadow-raised),
+      0 0 8px -3px rgba(255, 179, 71, 0.3);
+  }
+  50% {
+    box-shadow:
+      var(--shadow-raised),
+      0 0 15px -1px rgba(255, 179, 71, 0.55);
+  }
+}
+
+/* ================================================ A6 · PLACEHOLDER READOUTS
+ * A meter with no signal still has to look like a meter: the key dims, the
+ * value holds an em-dash at full size so the tile keeps its height, and the
+ * delta row carries a skeleton bar where a number will land. */
+.tile[data-state='empty'] .k {
+  color: var(--fg-4);
+}
+
+.tile[data-state='empty'] .unit {
+  opacity: 0.65;
+}
+
+.tile .skel {
+  display: block;
+  width: 62%;
+  height: 5px;
+  align-self: center;
+  border-radius: var(--r-xxs);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.055));
+  background-size: 220% 100%;
+  background-position: 0 0;
+}
+
+/* Analyzing: the placeholders shimmer, so the gap between "file dropped" and
+   "waveform drawn" is occupied rather than blank. */
+.app[data-phase='analyzing'] .tile .skel {
+  animation: ix-shimmer 1.5s linear infinite;
+}
+
+@keyframes ix-shimmer {
+  from {
+    background-position: 140% 0;
+  }
+  to {
+    background-position: -140% 0;
+  }
+}
+
+/* ============================================== A6 · THE ANALYZING TREATMENT
+ * A scanning line crossing the waveform plate, drawn on the panel's own
+ * ::after so neither canvas below it is touched (the waveform and spectrum
+ * renderers are owned elsewhere). Below the 30 px head, above everything the
+ * panel draws, pointer-transparent. */
+.wavepanel::after {
+  content: '';
+  position: absolute;
+  inset: 30px 1px 1px;
+  z-index: 6;
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 42%,
+    rgba(57, 208, 255, 0.05) 47%,
+    rgba(154, 232, 255, 0.22) 50%,
+    rgba(57, 208, 255, 0.05) 53%,
+    transparent 58%
+  );
+  background-size: 240% 100%;
+  background-position: 120% 0;
+  transition: opacity var(--ix-slow) var(--ease-out);
+}
+
+.app[data-phase='analyzing'] .wavepanel::after {
+  opacity: 1;
+  animation: ix-scan 1.7s linear infinite;
+}
+
+@keyframes ix-scan {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -130% 0;
+  }
+}
+
+/* ================================================== A7 · WHICH DECK IS LIVE
+ * Two signals, both unmissable and both cheap:
+ *   1. the A/B thumb is *filled* with the deck's colour and its label goes
+ *      dark on it — an illuminated key, not a grey key with coloured text;
+ *   2. the waveform plate's header rule and title dot take the same colour,
+ *      so the panel you are listening to is tinted at its edge. */
+.seg.ab .thumb.orig {
+  background-image: var(--brushed), linear-gradient(180deg, #ffd9a0, var(--amber) 58%, #e2941f);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 0 16px -1px rgba(255, 179, 71, 0.55);
+}
+
+.seg.ab .thumb.clean {
+  background-image: var(--brushed), linear-gradient(180deg, #b6efff, var(--cyan) 58%, #12a2cf);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.5),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 0 16px -1px rgba(57, 208, 255, 0.55);
+}
+
+.seg.ab button.on.orig {
+  color: #22160a;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+.seg.ab button.on.clean {
+  color: #04222d;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+/* The A/B pair is the one segmented control whose *state* is the point, so it
+   gets a housing that says so. */
+.seg.ab {
+  box-shadow:
+    var(--shadow-display),
+    var(--vignette-sm),
+    0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+
+.wavepanel > .panel-head {
+  transition:
+    border-bottom-color var(--ix-slow) var(--ease-out),
+    box-shadow var(--ix-slow) var(--ease-out);
+}
+
+.wavepanel > .panel-head > .panel-title::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--fg-4);
+  box-shadow: none;
+  transition:
+    background var(--ix-slow) var(--ease-out),
+    box-shadow var(--ix-slow) var(--ease-out);
+}
+
+.app[data-deck='original'] .wavepanel > .panel-head {
+  border-bottom-color: rgba(255, 179, 71, 0.4);
+  box-shadow: 0 1px 0 rgba(255, 179, 71, 0.16);
+}
+
+.app[data-deck='original'] .wavepanel > .panel-head > .panel-title::before {
+  background: var(--amber);
+  box-shadow: 0 0 7px var(--amber-glow);
+}
+
+.app[data-deck='cleaned'] .wavepanel > .panel-head {
+  border-bottom-color: rgba(57, 208, 255, 0.42);
+  box-shadow: 0 1px 0 rgba(57, 208, 255, 0.18);
+}
+
+.app[data-deck='cleaned'] .wavepanel > .panel-head > .panel-title::before {
+  background: var(--cyan);
+  box-shadow: 0 0 7px var(--cyan-glow);
+}
+
+/* ============================================== A7 · VERDICT STRIP CLARITY
+ * Resting opacity used to be 0.85 on the track and 0.9 on the legend, so a
+ * legend chip was never quite the colour of the bar it explained. Both are
+ * now opaque and the hover/selection response moved onto `filter`, which
+ * means chip and segment are the same pixels by construction. */
+.verdict-seg {
+  opacity: 1;
+  transition:
+    filter var(--ix-mid) var(--ease-out),
+    transform var(--ix-mid) var(--ease-out);
+}
+
+/* A 10x6 chip has no room for a tint to read as a hue, so the key is drawn at
+   the lit end of the same ramp — it names the colour, it is not a sample of a
+   28px bar. */
+.verdict-legend i.verdict-seg {
+  opacity: 1;
+  background: linear-gradient(180deg, rgba(var(--seg), 1), rgba(var(--seg), 0.72));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* `brightness()` on a translucent fill over a black well pushes the composite
+   towards white, so the hovered bar went pale instead of hot. Hover raises the
+   *alpha* of the same hue, which is what "more light through the glass" means
+   physically and what it looks like on screen. */
+.verdict-seg:not(.sel):hover,
+.verdict-seg.hot:not(.sel) {
+  opacity: 1;
+  background: linear-gradient(
+    180deg,
+    rgba(var(--seg), 0.9),
+    rgba(var(--seg), 0.68) 55%,
+    rgba(var(--seg), 0.48)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.38),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.45),
+    0 0 12px -2px rgba(var(--seg), 0.45);
+}
+
+/* The track itself answers to the cursor, so the strip reads as scrubbable. */
+.verdict-track {
+  transition: box-shadow var(--ix-mid) var(--ease-out);
+}
+
+.verdict-track:hover {
+  box-shadow:
+    var(--shadow-display),
+    var(--vignette-sm),
+    0 0 0 1px rgba(255, 255, 255, 0.07);
+}
+
+.verdict-seg:not(:disabled) {
+  cursor: pointer;
+}
+
+/* The legend is a key, not decoration: hovering a chip is how you find out
+   which bars it names, so it dims everything else on the track. */
+.verdict-legend span {
+  transition: color var(--ix-mid) var(--ease-out);
+  cursor: default;
+}
+
+/* ------------------------------------------------------------- the tooltip
+ * A dark card with a real arrow, laid out as a table: keys left in the label
+ * treatment, values right in tabular figures, one hairline between the head
+ * and the body. Placement is decided in VerdictStrip.tsx and handed here as
+ * data-place + --tip-arrow, so the arrow always points at the segment. */
+.tooltip {
+  width: 292px;
+  padding: 9px 11px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.75);
+  background-image: var(--brushed), linear-gradient(180deg, rgba(26, 31, 38, 0.985), rgba(13, 16, 20, 0.985));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.075),
+    0 2px 10px rgba(0, 0, 0, 0.5),
+    0 22px 56px -14px rgba(0, 0, 0, 0.85);
+}
+
+.tooltip::after {
+  content: '';
+  position: absolute;
+  left: var(--tip-arrow, 50%);
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  transform: rotate(45deg);
+  background: rgba(15, 18, 23, 0.985);
+  border: 1px solid rgba(0, 0, 0, 0.75);
+}
+
+.tooltip[data-place='top']::after {
+  bottom: -6px;
+  border-top: 0;
+  border-left: 0;
+}
+
+.tooltip[data-place='bottom']::after {
+  top: -6px;
+  border-bottom: 0;
+  border-right: 0;
+  background: rgba(26, 31, 38, 0.985);
+}
+
+.tooltip .head {
+  margin-bottom: 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--hair);
+  box-shadow: 0 1px 0 var(--hair-hi);
+}
+
+.tooltip .row {
+  line-height: 1.55;
+}
+
+.tooltip .row .k {
+  color: var(--fg-3);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.tooltip .row .v {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The score grid is the reason this card is 292 px wide: eight keys and eight
+   values that must line up in two columns, values flush right. */
+.tooltip .scores {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--hair);
+  box-shadow: inset 0 1px 0 var(--hair-hi);
+  gap: 1px 14px;
+}
+
+.tooltip .scores .row .v {
+  color: var(--fg-2);
+}
+
+.tooltip .reason {
+  margin-top: 7px;
+  color: var(--fg-3);
+}
+
+.tooltip .verdicts {
+  display: flex;
+  gap: 6px;
+}
+
+.tooltip .gv {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  color: var(--fg-3);
+}
+
+.tooltip .gv b {
+  font-family: var(--font-numeric);
+  letter-spacing: 0;
+}
+
+.tooltip .gv.pass b {
+  color: var(--ok);
+}
+
+.tooltip .gv.fail b {
+  color: var(--err);
+}
+
+.tooltip .gv.none b {
+  color: var(--fg-4);
+}
+
+/* =========================================================== D3 · NO MOTION
+ * `prefers-reduced-motion: reduce` removes every animation in the product and
+ * collapses every transition to a single frame. Nothing else changes: the
+ * busy LED keeps its halo (it just stops breathing), the drop target keeps
+ * its glow (it just stops scaling in), the progress ring keeps its arc (it is
+ * snapped instead of interpolated — see ProcessButton.tsx), and every hover /
+ * focus / selected state is still exactly as legible as before.
+ *
+ * `none` rather than a near-zero duration is deliberate on both properties:
+ * it takes every animation and transition off `document.getAnimations()`
+ * entirely, so the guarantee is checkable rather than merely fast. It is safe
+ * here because nothing in the app listens for `transitionend`/`animationend` —
+ * no state machine depends on an animation completing. JS-driven motion
+ * (`motion/react` in the error bar, and the progress-ring interpolator) reads
+ * the same preference in code. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* Two states were carried by the animation alone; restate them statically
+     so "busy" and "error" still read at a glance. */
+  .led.busy .halo {
+    opacity: 0.9;
+    transform: scale(1.05);
+  }
+
+  .led.err .halo {
+    opacity: 1;
+    transform: scale(1.16);
+  }
+
+  .app[data-phase='analyzing'] .wavepanel::after {
+    background: linear-gradient(90deg, rgba(57, 208, 255, 0.05), rgba(57, 208, 255, 0.09));
+    background-size: 100% 100%;
+  }
+
+  .app[data-phase='idle'] .dropzone .glyph {
+    box-shadow:
+      var(--shadow-raised),
+      0 0 12px -2px rgba(255, 179, 71, 0.4);
+  }
+
+  .tile .skel {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .process.running::before {
+    opacity: 0.55;
+    background: linear-gradient(100deg, transparent, rgba(255, 179, 71, 0.1), transparent);
+    background-size: 100% 100%;
+  }
+}
+
+/* =========================================================================
+ * DESIGN CRITIQUE PASS
+ * -------------------------------------------------------------------------
+ * A fresh-eyes review of the built screen at 1440x900 / 1920x1080 / 960x640,
+ * judged against Waves, FabFilter Pro-Q, Gullfoss and RX. Everything below is
+ * a specific measured defect and its correction; the rules live here, last in
+ * the cascade, so each one sits next to the reason it exists.
+ * ===================================================================== */
+
+/* --- 1. One sub-head treatment ------------------------------------------
+ * Every panel head states its subject the same way — WAVEFORM · FLUTE
+ * 09.M4A.MP4, UNIT INSPECTOR · UNIT 3 OF 5 — except the verdict strip, which
+ * ran `5 units · 5 enhanced` in sentence case at body metrics. Three heads,
+ * three sub-styles, and the odd one out was the only one that is a count. */
+.verdict .label .count {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+/* --- 2. A scrollable panel has to look scrollable -----------------------
+ * At 960x640 the inspector body is capped at 34vh and its content is ~520px,
+ * so the guard tables live below the fold. The panel did scroll — but
+ * `scrollbar-width: thin` makes Chromium ignore the ::-webkit-scrollbar rules
+ * underneath it and fall back to an overlay bar that is invisible until you
+ * are already scrolling, so the tables read as simply missing. Dropping the
+ * standard property hands the styled 8px bar back, and the track makes the
+ * channel visible at rest. */
+.insp-body {
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+.insp-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.insp-body::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.8);
+}
+
+.insp-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: var(--r-sm);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.insp-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: padding-box;
+}
+
+/* --- 3. The side column at 1920 -----------------------------------------
+ * The right column was pinned at 360px at every width, so on a 1920 screen the
+ * waveform took 1500px while the analyser — the other half of the read — stayed
+ * a sliver, and its frequency ladder never had room for the full 1-2-5 series.
+ * One step up at 1600 keeps the proportion sane without letting the column
+ * turn into a second content area. */
+@media (min-width: 1600px) {
+  .main {
+    grid-template-columns: minmax(0, 1fr) 400px;
+  }
+}
+
+/* --- 4. Overlay readouts need a housing ---------------------------------
+ * The playhead clock and the deck key were set straight onto the waveform with
+ * nothing behind them, so at 11-12px over a bright cyan transient they were
+ * both hard to read and visibly un-designed — the one place in the UI where
+ * type floated on a surface instead of sitting in one. They now get the same
+ * smoked-glass plate the rest of the chrome uses. */
+.wave-time,
+.wave-legend {
+  padding: 3px var(--pad-2);
+  border-radius: var(--r-xs);
+  background: linear-gradient(180deg, rgba(10, 12, 15, 0.82), rgba(6, 7, 10, 0.72));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 2px 6px -2px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(3px);
+}
+
+.wave-time {
+  left: 8px;
+  top: 7px;
+  color: var(--fg);
+}
+
+.wave-legend {
+  top: 7px;
+  right: 8px;
+  gap: var(--pad-4);
+}
+
+/* The deck you are *not* listening to is a reference, not a reading. */
+.wave-legend .off {
+  opacity: 0.45;
+}
+
+/* --- 5. One height for one row ------------------------------------------
+ * The transport ran a 34px round key, a 28px A/B pair and a 24.5px clock side
+ * by side: three controls, three top edges, three bottom edges, held together
+ * only by their shared centre line. Pro transports share a band. */
+.transport .playbtn {
+  width: 28px;
+  height: 28px;
+}
+
+.transport .playbtn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.transport .timecode {
+  height: 28px;
+  align-items: center;
+  padding: 0 var(--pad-3);
+}
+
+/* --- 6. Readout wells that are actually sunk ----------------------------
+ * The metric tiles carried --shadow-display over a floor that starts at
+ * #060709: an inset black shadow on near-black has nothing to darken, so all
+ * that survived was a hairline and the tiles read flat next to the analyser
+ * above them. Lifting the floor a couple of values gives the same shadow
+ * something to bite, and the lit lower lip closes the bevel. */
+.tile {
+  background:
+    var(--glass),
+    linear-gradient(180deg, #070a0d 0%, #0c1014 62%, #0e1216 100%);
+  box-shadow:
+    inset 0 2px 6px -1px rgba(0, 0, 0, 0.95),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.8),
+    var(--vignette-sm),
+    0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* --- 7. The delta operator ----------------------------------------------
+ * `Δ` is an operator, not a label: it takes the numeric stack so it sits on the
+ * same rhythm as the two figures it stands between. */
+.tile .sub .op {
+  font-family: var(--font-numeric);
+  padding: 0 1px;
+}
+
+/* --- 8. One badge language ----------------------------------------------
+ * The decision badge was painted with a raw `background: var(--cyan)` inline
+ * style: a full-saturation slab with near-black text, sitting two lines above
+ * PASS chips that are tinted, outlined and set in the accent. Two badge styles
+ * for the same kind of statement. The badge now uses the verdict strip's
+ * recipe, so a unit's decision looks the same wherever it is stated. */
+.insp-idhead .pill,
+.tooltip .head .pill {
+  --seg: 122, 133, 150;
+  color: rgb(var(--seg));
+  background: linear-gradient(180deg, rgba(var(--seg), 0.2), rgba(var(--seg), 0.12));
+  box-shadow:
+    inset 0 0 0 1px rgba(var(--seg), 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  text-shadow: 0 0 10px rgba(var(--seg), 0.35);
+}
+
+.insp-idhead .pill.enhanced,
+.tooltip .head .pill.enhanced {
+  --seg: 154, 232, 255;
+}
+
+.insp-idhead .pill.reverted,
+.tooltip .head .pill.reverted {
+  --seg: 255, 210, 138;
+}
+
+.insp-idhead .pill.error,
+.tooltip .head .pill.error {
+  --seg: 255, 138, 141;
+}
+
+/* --- 9. Two label styles in one panel -----------------------------------
+ * The inspector's left column set its keys as 12px sentence case while the
+ * guard tables beside it — the same kind of row, the same kind of key — used
+ * the 11px small-caps treatment the rest of the product uses for table heads.
+ * Reading across the panel, the eye had to change gear at the column break. */
+.insp-row .k {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+}
+
+/* --- 10. The clock lost its space ---------------------------------------
+ * `.timecode` is an inline-flex box, so the leading space in the ` / 01:34.6`
+ * text node is stripped as leading whitespace on the item's first line and the
+ * clock rendered `00:40.2/ 01:34.6`. The gap has to be geometry, not a space
+ * character that the formatting context is entitled to eat. */
+.timecode .dur {
+  margin-left: 0.45ch;
+}
+
+/* --- 11. One case for one word ------------------------------------------
+ * ORIGINAL and CLEANED are set in small caps in the waveform legend and in the
+ * spectrum legend, and in title case on the A/B switch — the same two words,
+ * three times on one screen, in two cases. Segmented controls already carry the
+ * label's size, weight and tracking; they were missing only the transform. */
+.seg button {
+  text-transform: uppercase;
+  /* Uppercase costs about 8% of the run, and the profile row had no slack: the
+     wider pair pushed `DFN3 restoration core` into an ellipsis at 1440. The
+     12px side pad was off the 4px rhythm anyway; --pad-3 buys back 16px across
+     the pair, which is more than the transform spends. */
+  padding: 0 var(--pad-3);
+}
+
+/* --- 12. A call to action for something already done --------------------
+ * Once a clip is loaded the drop well still ran its full pitch — a 12px hint
+ * plus the uppercase format list — right next to the file it is asking you to
+ * load. The well stays live (you can always drop a replacement) but it stops
+ * selling: one quiet line, and the loaded file keeps the strip's attention. */
+.app:not([data-phase='idle']) .dropzone .hint {
+  color: var(--fg-3);
+  font-weight: var(--fw-regular);
+}
+
+.app:not([data-phase='idle']) .dropzone .types {
+  display: none;
+}

@@ -1,27 +1,56 @@
-/* HawaVoClean design tokens — graphite hardware, amber ORIGINAL, cyan CLEANED. */
+/* HawaVoClean design tokens — graphite hardware, amber ORIGINAL, cyan CLEANED.
+ *
+ * Two rules govern this file:
+ *
+ *  1. LIGHT COMES FROM THE TOP, ONCE.  Every raised surface therefore carries a
+ *     1px inner highlight on its top edge, a dark hairline all round, and a soft
+ *     shadow cast downwards.  Every inset surface carries the exact inverse: a
+ *     shadow spilling in from the top edge, a 1px light line on its bottom edge,
+ *     and a vignette that pulls the corners into the glass.  Nothing in the UI
+ *     invents its own lighting; it picks an elevation token.
+ *
+ *  2. FOUR TYPE SIZES, TWO WEIGHTS.  11px small-caps labels, 12px secondary,
+ *     13px body, 16px display values; 400 for prose and 500 for everything that
+ *     carries emphasis.  Numbers are always tabular.
+ */
 :root {
   color-scheme: dark;
 
-  /* Surfaces */
+  /* ------------------------------------------------------------- surfaces */
   --page: #0e1013;
   --panel: #14171c;
   --panel-2: #1a1e24;
   --panel-3: #20252c;
   --display: #07080a;
   --display-2: #0a0c0f;
-  --line: rgba(255, 255, 255, 0.06);
-  --line-strong: rgba(255, 255, 255, 0.1);
-  --line-dark: rgba(0, 0, 0, 0.55);
-  --bevel-hi: rgba(255, 255, 255, 0.07);
+
+  /* --------------------------------------------------------- hairlines
+   * One hairline colour per role, used everywhere. `--hair` divides two lit
+   * surfaces, `--hair-dark` is the shadow side of an edge, `--hair-hi` the lit
+   * side. `--line*` are the historical aliases. */
+  --hair: rgba(255, 255, 255, 0.07);
+  --hair-strong: rgba(255, 255, 255, 0.11);
+  --hair-dark: rgba(0, 0, 0, 0.62);
+  --hair-hi: rgba(255, 255, 255, 0.08);
+  --line: var(--hair);
+  --line-strong: var(--hair-strong);
+  --line-dark: var(--hair-dark);
+  --bevel-hi: var(--hair-hi);
   --bevel-lo: rgba(0, 0, 0, 0.6);
 
-  /* Text */
+  /* ----------------------------------------------------------------- text */
   --fg: #e6e9ee;
   --fg-2: #aab2bf;
-  --fg-3: #6f7886;
-  --fg-4: #454c58;
+  /* The bottom two steps used to sit at #7c8593 / #545c69. Measured against
+   * the surfaces they are actually painted on (--panel #14171c, --panel-2
+   * #1a1e24) that put --fg-4 at 2.66:1 — every unit suffix, every kv key, the
+   * file-type list and the footer job id were below the 4.5:1 floor and read
+   * as switched-off rather than as quiet. The ramp is re-cut so all four steps
+   * clear 4.5:1 on --panel-2 and stay four visibly separate greys. */
+  --fg-3: #949daa; /* 6.4:1 on --panel  ·  5.9:1 on --panel-2 */
+  --fg-4: #808a99; /* 5.1:1 on --panel  ·  4.8:1 on --panel-2 */
 
-  /* Accents */
+  /* -------------------------------------------------------------- accents */
   --amber: #ffb347;
   --amber-2: #ffd28a;
   --amber-dim: rgba(255, 179, 71, 0.35);
@@ -31,7 +60,7 @@
   --cyan-dim: rgba(57, 208, 255, 0.35);
   --cyan-glow: rgba(57, 208, 255, 0.45);
 
-  /* Status */
+  /* --------------------------------------------------------------- status */
   --ok: #4ade80;
   --ok-glow: rgba(74, 222, 128, 0.55);
   --busy: #ffb347;
@@ -41,48 +70,112 @@
   --err-bg: rgba(255, 90, 95, 0.12);
   --neutral: #5b6473;
 
-  /* Type */
-  --font-ui:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', 'Helvetica Neue', Helvetica, Arial,
-    sans-serif;
+  /* =================================================================== TYPE
+   * Three stacks, all system fonts — no webfont is ever downloaded.
+   * `--font-numeric` is the one used for values; it is the mono stack with the
+   * numeric features pinned on, so a counter can never reflow as it ticks. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI Variable Text', 'Segoe UI',
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
   --font-mono:
     'SF Mono', ui-monospace, Menlo, Monaco, 'Cascadia Mono', 'Roboto Mono', Consolas,
     'Liberation Mono', monospace;
-  --fs-xs: 10px;
-  --fs-sm: 11px;
-  --fs-md: 12.5px;
-  --fs-lg: 14px;
-  --fs-xl: 18px;
-  --fs-2xl: 24px;
-  --fs-3xl: 30px;
-  --ls-caps: 0.12em;
-  --ls-wide: 0.18em;
+  --font-numeric: var(--font-mono);
+  /* historical alias — `--font-ui` is still referenced by render/waveZoom.css */
+  --font-ui: var(--font-sans);
 
-  /* Geometry */
-  --r: 6px;
-  --r-sm: 4px;
-  --r-lg: 8px;
-  --gap: 12px;
-  --gap-lg: 16px;
-  --pad: 14px;
+  /* The whole scale. Anything not on it is a bug. */
+  --fs-label: 11px; /* small caps: panel heads, tile keys, table heads, legends */
+  --fs-sm: 12px; /* secondary: hints, captions, sub-values */
+  --fs-md: 13px; /* body / default */
+  --fs-lg: 16px; /* display values: tile readouts, PROCESS, wordmark, clocks */
+  --fs-xs: var(--fs-label); /* alias for render/waveZoom.css + ProfileControl */
 
-  /* Lighting */
+  --fw-regular: 400;
+  --fw-medium: 500;
+
+  /* Small-caps label treatment — one definition, applied everywhere. */
+  --ls-caps: 0.08em;
+  --ls-body: 0.005em;
+  /* The wordmark is a logotype, not a label; it gets the only wide tracking. */
+  --ls-wide: 0.22em;
+
+  /* ============================================================== GEOMETRY */
+  --r-xxs: 2px; /* meter fills, ticks */
+  --r-xs: 3px; /* pills, chips */
+  --r-sm: 4px; /* small controls, wells */
+  --r: 6px; /* buttons, displays */
+  --r-lg: 8px; /* panels */
+  --r-xl: 10px; /* overlays */
+
+  /* Padding rhythm — 4px grid, six steps, nothing in between. */
+  --pad-1: 4px;
+  --pad-2: 6px;
+  --pad-3: 8px;
+  --pad-4: 10px;
+  --pad-5: 12px;
+  --pad-6: 16px;
+  --pad: var(--pad-5); /* the canonical panel inset */
+  --gap: var(--pad-5);
+  --gap-lg: var(--pad-6);
+
+  /* ============================================================== LIGHTING
+   * Chrome gradients: a top-lit vertical ramp, deliberately shallow (≈6% of
+   * value across the whole run) so it reads as machined metal, not as plastic. */
   --metal: linear-gradient(180deg, #1b1f26 0%, #15181e 45%, #12151a 100%);
   --metal-2: linear-gradient(180deg, #22272f 0%, #1a1e25 50%, #161a20 100%);
   --metal-raised: linear-gradient(180deg, #2a3038 0%, #1f242b 55%, #1a1e25 100%);
-  --shadow-panel:
-    inset 0 1px 0 var(--bevel-hi), inset 0 -1px 0 rgba(0, 0, 0, 0.35),
-    0 1px 0 rgba(0, 0, 0, 0.6), 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  /* 1.5% monochrome fractal noise, inline so it works offline and from
+   * file://. It exists to break up the banding in the ramps above. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
+  /* Layer alpha, not perceived strength: with `overlay` compositing this
+   * lands at roughly ±1.5% luminance on the graphite ramp. */
+  --grain-opacity: 0.045;
+  /* brushed-metal micro-lines, one device pixel on, two off */
+  --brushed: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.014) 0px,
+    rgba(255, 255, 255, 0.014) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+
+  /* -------------------------------------------------------- elevation scale
+   * --elev-0  ground / inset      (light falls *into* the surface)
+   * --elev-1  panel               (a plate screwed onto the chassis)
+   * --elev-2  control             (a key standing proud of the plate)
+   * --elev-3  overlay             (floating above everything)                */
   --shadow-display:
-    inset 0 2px 6px rgba(0, 0, 0, 0.85), inset 0 0 0 1px rgba(0, 0, 0, 0.7),
-    0 1px 0 rgba(255, 255, 255, 0.04);
+    inset 0 2px 5px -1px rgba(0, 0, 0, 0.9), inset 0 -1px 0 rgba(255, 255, 255, 0.055),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.72), 0 1px 0 rgba(255, 255, 255, 0.045);
+  --shadow-panel:
+    inset 0 1px 0 var(--hair-hi), inset 0 -1px 0 rgba(0, 0, 0, 0.4),
+    0 1px 2px rgba(0, 0, 0, 0.5), 0 10px 26px -8px rgba(0, 0, 0, 0.55);
   --shadow-raised:
     inset 0 1px 0 rgba(255, 255, 255, 0.09), inset 0 -1px 0 rgba(0, 0, 0, 0.45),
-    0 1px 2px rgba(0, 0, 0, 0.6), 0 4px 10px rgba(0, 0, 0, 0.35);
+    0 0 0 1px var(--hair-dark), 0 1px 1px rgba(0, 0, 0, 0.5),
+    0 3px 8px -3px rgba(0, 0, 0, 0.5);
+  --shadow-overlay:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09), 0 0 0 1px rgba(0, 0, 0, 0.62),
+    0 4px 14px rgba(0, 0, 0, 0.45), 0 26px 70px -14px rgba(0, 0, 0, 0.78);
   --shadow-pressed:
-    inset 0 2px 4px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(0, 0, 0, 0.5);
+    inset 0 2px 4px rgba(0, 0, 0, 0.72), inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04);
 
-  /* Motion */
+  --elev-0: var(--shadow-display);
+  --elev-1: var(--shadow-panel);
+  --elev-2: var(--shadow-raised);
+  --elev-3: var(--shadow-overlay);
+
+  /* Vignettes for inset glass. Two sizes, matched to the surface: a meter tile
+   * cannot take the same 30px falloff as a full-width waveform. */
+  --vignette: radial-gradient(125% 110% at 50% 42%, transparent 52%, rgba(0, 0, 0, 0.5) 100%);
+  --vignette-sm: inset 0 0 14px -2px rgba(0, 0, 0, 0.55);
+  /* the sheen every piece of inset glass gets along its top edge */
+  --glass: linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent 22%);
+
+  /* ---------------------------------------------------------------- motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   --dur: 160ms;
 }

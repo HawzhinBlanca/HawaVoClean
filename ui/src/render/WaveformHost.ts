@@ -1,11 +1,82 @@
 // Main-thread side of the waveform renderer: owns the Worker, transfers the
 // OffscreenCanvas, and exposes imperative setters. No React here.
 
-import type { WaveKind, WaveMsg, WaveOutMsg, WaveSlot } from './waveformProtocol';
+import { mixRgb, parseCssRgb } from './glutil';
+import {
+  DEFAULT_WAVE_PALETTE,
+  type WaveDeckColors,
+  type WaveKind,
+  type WaveMsg,
+  type WaveOutMsg,
+  type WavePalette,
+  type WaveRgb,
+  type WaveSlot,
+} from './waveformProtocol';
 
 export interface WaveformHostOptions {
   onReady?: (webgl2: boolean) => void;
   onError?: (message: string) => void;
+}
+
+const WHITE: WaveRgb = [1, 1, 1];
+
+/**
+ * Resolve the display palette from CSS custom properties.
+ *
+ * The worker has no DOM, so every colour it draws with is read here and posted
+ * across. A hidden probe element is used rather than reading the raw token
+ * text because the browser only resolves `var()` chains and non-hex colour
+ * syntaxes when they are used as a real property value.
+ */
+function readPalette(anchor: Element): WavePalette {
+  const doc = anchor.ownerDocument;
+  const view = doc.defaultView;
+  const host = anchor.parentElement ?? doc.body;
+  if (!view || !host) return DEFAULT_WAVE_PALETTE;
+  const probe = doc.createElement('span');
+  probe.setAttribute('aria-hidden', 'true');
+  probe.style.cssText =
+    'position:absolute;left:0;top:0;width:0;height:0;opacity:0;pointer-events:none;contain:strict';
+  host.appendChild(probe);
+  try {
+    const cs = view.getComputedStyle(probe);
+    const read = (expr: string, fb: WaveRgb): WaveRgb => {
+      probe.style.color = expr;
+      return parseCssRgb(cs.color, fb);
+    };
+    const defined = (name: string): boolean => cs.getPropertyValue(name).trim() !== '';
+    const deck = (
+      name: string,
+      edgeFallback: string,
+      coreFallback: string,
+      dflt: WaveDeckColors,
+    ): WaveDeckColors => {
+      const edge = read(`var(--wave-${name}, ${edgeFallback})`, dflt.edge);
+      const core = read(`var(--wave-${name}-core, ${coreFallback})`, dflt.core);
+      const rmsVar = `--wave-${name}-rms`;
+      const rms = defined(rmsVar) ? read(`var(${rmsVar})`, dflt.rms) : mixRgb(core, WHITE, 0.2);
+      return { core, edge, rms };
+    };
+    const d = DEFAULT_WAVE_PALETTE;
+    return {
+      bgTop: read('var(--wave-bg-top, var(--display-2, #0a0c0f))', d.bgTop),
+      bgBottom: read('var(--wave-bg-bottom, var(--display, #07080a))', d.bgBottom),
+      grid: read('var(--wave-grid, var(--fg, #e6e9ee))', d.grid),
+      unit: read('var(--wave-unit, var(--fg-2, #aab2bf))', d.unit),
+      highlight: read('var(--wave-highlight, var(--fg, #e6e9ee))', d.highlight),
+      playhead: read('var(--wave-playhead, var(--fg, #e6e9ee))', d.playhead),
+      original: deck('original', 'var(--amber, #ffb347)', 'var(--amber-2, #ffd28a)', d.original),
+      cleaned: deck('cleaned', 'var(--cyan, #39d0ff)', 'var(--cyan-2, #9ae8ff)', d.cleaned),
+    };
+  } catch {
+    return DEFAULT_WAVE_PALETTE;
+  } finally {
+    probe.remove();
+  }
+}
+
+function samePalette(a: WavePalette, b: WavePalette): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 export class WaveformHost {
@@ -16,12 +87,18 @@ export class WaveformHost {
   private lastH = 0;
   private lastDpr = 0;
   private mql: MediaQueryList | null = null;
+  private scheme: MediaQueryList | null = null;
+  private themeObs: MutationObserver | null = null;
+  private themeRaf = 0;
+  private palette: WavePalette;
   private readonly onMql = (): void => this.syncSize();
+  private readonly onTheme = (): void => this.scheduleThemeSync();
 
   constructor(canvas: HTMLCanvasElement, opts: WaveformHostOptions = {}) {
     this.canvas = canvas;
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
+    this.palette = readPalette(canvas);
     const offscreen = canvas.transferControlToOffscreen();
     // Dev: Vite serves the worker as an ES module (it has imports). Build: the
     // worker is bundled into one classic script, which also loads from file://
@@ -41,12 +118,20 @@ export class WaveformHost {
     this.lastH = Math.max(1, Math.round(rect.height));
     this.lastDpr = dpr;
     this.worker.postMessage(
-      { type: 'init', canvas: offscreen, width: this.lastW, height: this.lastH, dpr } satisfies WaveMsg,
+      {
+        type: 'init',
+        canvas: offscreen,
+        width: this.lastW,
+        height: this.lastH,
+        dpr,
+        palette: this.palette,
+      } satisfies WaveMsg,
       [offscreen],
     );
     this.ro = new ResizeObserver(() => this.syncSize());
     this.ro.observe(canvas);
     this.watchDpr();
+    this.watchTheme();
   }
 
   private watchDpr(): void {
@@ -54,6 +139,43 @@ export class WaveformHost {
     const dpr = window.devicePixelRatio || 1;
     this.mql = window.matchMedia(`(resolution: ${dpr}dppx)`);
     this.mql.addEventListener('change', this.onMql);
+  }
+
+  /**
+   * Re-read the palette when the theme can have changed: a class/attribute flip
+   * on <html> (how a theme switch is normally expressed) or the OS scheme
+   * preference. Reads are coalesced to one per frame and only posted when the
+   * resolved colours actually differ.
+   */
+  private watchTheme(): void {
+    this.scheme = window.matchMedia('(prefers-color-scheme: dark)');
+    this.scheme.addEventListener('change', this.onTheme);
+    this.themeObs = new MutationObserver(this.onTheme);
+    this.themeObs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class', 'style', 'data-theme', 'data-appearance'],
+    });
+  }
+
+  private scheduleThemeSync(): void {
+    if (this.themeRaf) return;
+    this.themeRaf = window.requestAnimationFrame(() => {
+      this.themeRaf = 0;
+      this.syncTheme();
+    });
+  }
+
+  private syncTheme(): void {
+    if (!this.worker) return;
+    const next = readPalette(this.canvas);
+    if (samePalette(next, this.palette)) return;
+    this.palette = next;
+    this.post({ type: 'theme', palette: next });
+  }
+
+  /** Force a palette re-read (e.g. after a stylesheet swap). */
+  refreshTheme(): void {
+    this.syncTheme();
   }
 
   private syncSize(): void {
@@ -134,6 +256,12 @@ export class WaveformHost {
     this.ro = null;
     if (this.mql) this.mql.removeEventListener('change', this.onMql);
     this.mql = null;
+    if (this.scheme) this.scheme.removeEventListener('change', this.onTheme);
+    this.scheme = null;
+    this.themeObs?.disconnect();
+    this.themeObs = null;
+    if (this.themeRaf) window.cancelAnimationFrame(this.themeRaf);
+    this.themeRaf = 0;
     this.worker?.terminate();
     this.worker = null;
   }

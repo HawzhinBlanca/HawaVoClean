@@ -42,7 +42,14 @@ export function SourceStrip() {
     setOver(true);
   }, []);
 
-  const onDragLeave = useCallback(() => setOver(false), []);
+  // `dragleave` also fires when the pointer crosses from the strip into one of
+  // its own children, which would flicker the highlight off and on. Only a
+  // leave whose destination is outside the strip is a real leave.
+  const onDragLeave = useCallback((e: DragEvent) => {
+    const to = e.relatedTarget as Node | null;
+    if (to && e.currentTarget.contains(to)) return;
+    setOver(false);
+  }, []);
 
   const onOpen = useCallback(() => {
     if (isWeb) inputRef.current?.click();
@@ -63,10 +70,27 @@ export function SourceStrip() {
         <IconFolder />
         <span>Open file…</span>
       </button>
-      <div className={`dropzone${over ? ' over' : ''}`}>
-        <IconDrop />
-        <span className="hint">
-          {over ? 'Release to load' : 'Drop an audio or video file here'}
+      <div className={`dropzone${over ? ' over' : ''}${disabled ? ' disabled' : ''}`}>
+        <span className="glyph" aria-hidden="true">
+          <IconDrop size={13} />
+        </span>
+        <span className="copy">
+          <span className="hint">
+            {over
+              ? 'Release to load'
+              : disabled
+                ? running
+                  ? 'Busy — finish or cancel the job first'
+                  : 'Waiting for the engine'
+                : 'Drop an audio or video file here'}
+          </span>
+          <span className="types">
+            {over
+              ? 'Analysis starts immediately'
+              : isWeb
+                ? 'or click to browse · wav aiff mp3 flac m4a mp4 mov'
+                : 'wav · aiff · mp3 · flac · m4a · mp4 · mov'}
+          </span>
         </span>
         {isWeb ? (
           <input

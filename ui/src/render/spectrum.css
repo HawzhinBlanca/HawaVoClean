@@ -1,0 +1,124 @@
+/* Spectrum panel chrome — legend + display surface.
+ *
+ * The panel's own grid lives in styles/app.css; everything here belongs to the
+ * spectrum component. Colours come from styles/tokens.css with fallbacks so
+ * the display still reads correctly if a token is missing. */
+
+.spec-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  min-width: 0;
+}
+
+.spec-legend .item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif);
+  font-size: var(--fs-label, 11px);
+  font-weight: var(--fw-medium, 500);
+  letter-spacing: var(--ls-caps, 0.08em);
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--fg-3, #7c8593);
+  transition:
+    color var(--dur, 160ms) var(--ease-out, ease),
+    opacity var(--dur, 160ms) var(--ease-out, ease);
+}
+
+/* the swatch is a 2px rule the colour of the curve it stands for */
+.spec-legend .sw {
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--fg-4, #545c69);
+  box-shadow: none;
+  transition:
+    background var(--dur, 160ms) var(--ease-out, ease),
+    box-shadow var(--dur, 160ms) var(--ease-out, ease);
+}
+
+.spec-legend .item.on {
+  color: var(--fg-2, #aab2bf);
+}
+
+.spec-legend .orig.on .sw {
+  background: var(--amber, #ffb347);
+  box-shadow: 0 0 6px var(--amber-glow, rgba(255, 179, 71, 0.45));
+}
+
+.spec-legend .clean.on .sw {
+  background: var(--cyan, #39d0ff);
+  box-shadow: 0 0 6px var(--cyan-glow, rgba(57, 208, 255, 0.45));
+}
+
+/* the live overlay is drawn in whichever deck is monitored, so its chip
+ * follows the same colour — and it is a thinner, dashed rule to match the
+ * lighter stroke used on the canvas */
+.spec-legend .live .sw {
+  height: 0;
+  border-top: 1.5px dashed var(--fg-4, #545c69);
+  border-radius: 0;
+  background: none;
+}
+
+.spec-legend .live.on.deck-original .sw {
+  border-top-color: var(--amber-2, #ffd28a);
+  filter: drop-shadow(0 0 4px var(--amber-glow, rgba(255, 179, 71, 0.45)));
+}
+
+.spec-legend .live.on.deck-cleaned .sw {
+  border-top-color: var(--cyan-2, #9ae8ff);
+  filter: drop-shadow(0 0 4px var(--cyan-glow, rgba(57, 208, 255, 0.45)));
+}
+
+.spec-legend .item.off {
+  color: var(--fg-4, #545c69);
+  opacity: 0.55;
+}
+
+.spec-legend .live.on .sw {
+  animation: spec-live-pulse 1.7s var(--ease-out, ease-in-out) infinite;
+}
+
+@keyframes spec-live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spec-legend .live.on .sw {
+    animation: none;
+  }
+}
+
+/* the canvas is a measuring instrument: crosshair on hover, no text drag */
+.spectrum-panel .spectrum-canvas {
+  cursor: crosshair;
+  user-select: none;
+  touch-action: none;
+}
+
+/* When the right column gets narrow the legend gives up its words before the
+ * display gives up any pixels; the chips still identify the curves, and the
+ * accessible name stays on the item. */
+@media (max-width: 1180px) {
+  .spec-legend {
+    gap: 8px;
+  }
+
+  .spec-legend .item .txt {
+    display: none;
+  }
+
+  .spec-legend .sw {
+    width: 14px;
+  }
+}

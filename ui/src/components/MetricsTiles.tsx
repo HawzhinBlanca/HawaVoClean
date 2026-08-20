@@ -28,8 +28,13 @@ function Tile({ label, unit, orig, clean, hasCleaned, better, digits = 1 }: Tile
   }
   const deltaText =
     delta !== null ? `${delta > 0 ? '+' : delta < 0 ? '−' : '±'}${Math.abs(delta).toFixed(digits)}` : null;
+  // A meter with no signal is still a meter: the key dims, the value holds an
+  // em-dash at full size so the tile keeps its height, and the delta row
+  // carries a skeleton bar where the number will land (it shimmers while the
+  // clip is being analyzed — see interaction.css).
+  const dataState = hasClean ? 'ab' : hasOrig ? 'single' : 'empty';
   return (
-    <div className="tile">
+    <div className="tile" data-state={dataState}>
       <div className="k">{label}</div>
       <div className="vals">
         {hasClean ? (
@@ -44,16 +49,24 @@ function Tile({ label, unit, orig, clean, hasCleaned, better, digits = 1 }: Tile
       <div className="sub">
         {hasClean ? (
           <>
+            {/* This row used to read `−24.9 → +3.2`, which every reader parses
+                as before → after — and +3.2 is not the after value, it is the
+                change. The arrow is replaced by the delta operator, which can
+                only be read one way. */}
             <span className="orig" title="Original">
               {fmt(orig, digits)}
             </span>
-            <span className="arrow">→</span>
+            <span className="op" aria-hidden="true">
+              Δ
+            </span>
             <span className={`delta${deltaCls}`} title="Change after cleaning">
               {deltaText ?? '—'}
             </span>
           </>
+        ) : hasOrig ? (
+          <span className="tag">original</span>
         ) : (
-          <span className="tag">{hasOrig ? 'original' : ''}</span>
+          <span className="skel" aria-hidden="true" />
         )}
       </div>
     </div>

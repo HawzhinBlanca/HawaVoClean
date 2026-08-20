@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { isTerminal } from './api/sse';
 import { getPlayer } from './audio/player';
 import { Actions } from './components/Actions';
@@ -15,7 +15,7 @@ import { UnitInspector } from './components/UnitInspector';
 import { WaveformDisplay } from './components/WaveformDisplay';
 import { cancelJob, connectEngine, seekTo, setAb, startJob, togglePlay } from './state/actions';
 import { clearSelection, stepUnit } from './state/selection';
-import { getState } from './state/store';
+import { getState, useStore } from './state/store';
 
 const SEEK_S = 5;
 const SEEK_FINE_S = 1;
@@ -123,8 +123,69 @@ function useKeyboardMap(): void {
   }, []);
 }
 
+/** What the whole screen is doing, as one word the stylesheet can key on. */
+export type Phase = 'idle' | 'analyzing' | 'ready' | 'running' | 'done' | 'failed';
+
+function usePhase(): Phase {
+  const source = useStore((s) => s.source);
+  const original = useStore((s) => s.original);
+  const analyzing = useStore((s) => s.analyzing);
+  const state = useStore((s) => s.job?.status?.state ?? (s.job ? 'queued' : null));
+  if (state === 'running' || state === 'queued') return 'running';
+  if (analyzing) return 'analyzing';
+  if (state === 'failed') return 'failed';
+  if (state === 'done') return 'done';
+  if (!source || !original) return 'idle';
+  return 'ready';
+}
+
+/**
+ * A drag has to be tracked at the window, not at the drop zone: `dragleave`
+ * fires every time the pointer crosses into a child element, so an
+ * element-level flag flickers, and a drag that ends outside the window fires
+ * no `drop` at all. A depth counter over dragenter/dragleave, reset on drop
+ * and on dragend, is the only version that always reverts.
+ */
+function useDragWatch(): boolean {
+  const [over, setOver] = useState(false);
+  useEffect(() => {
+    let depth = 0;
+    const isFiles = (e: DragEvent): boolean =>
+      Array.from(e.dataTransfer?.types ?? []).includes('Files');
+    const enter = (e: DragEvent): void => {
+      if (!isFiles(e)) return;
+      depth += 1;
+      if (depth === 1) setOver(true);
+    };
+    const leave = (): void => {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setOver(false);
+    };
+    const end = (): void => {
+      depth = 0;
+      setOver(false);
+    };
+    window.addEventListener('dragenter', enter);
+    window.addEventListener('dragleave', leave);
+    window.addEventListener('drop', end);
+    window.addEventListener('dragend', end);
+    return () => {
+      window.removeEventListener('dragenter', enter);
+      window.removeEventListener('dragleave', leave);
+      window.removeEventListener('drop', end);
+      window.removeEventListener('dragend', end);
+    };
+  }, []);
+  return over;
+}
+
 export default function App() {
   useKeyboardMap();
+  const phase = usePhase();
+  const dragOver = useDragWatch();
+  const abMode = useStore((s) => s.abMode);
+  const cleanedPath = useStore((s) => s.cleanedPath);
+  const deck = abMode === 'cleaned' && cleanedPath ? 'cleaned' : 'original';
 
   useEffect(() => {
     void connectEngine();
@@ -141,7 +202,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app">
+    <div className="app" data-phase={phase} data-deck={deck} data-drag={dragOver ? 'true' : 'false'}>
       <Header />
       <SourceStrip />
       <main className="main">
