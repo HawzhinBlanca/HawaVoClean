@@ -50,16 +50,52 @@ unit is 0.19% of the unit. A unit too short to afford the fade still reverts --
 the fail-closed path is not removed, only made the exception instead of the
 rule.
 
-Because the two renderings are phase-coherent (the candidate is GCC-PHAT
-aligned to the original, and the strength ladder already blends them linearly),
-``(1 - w) * original + w * enhanced`` is not a crossfade between two signals at
-all. It is the same signal with its enhancement *residual* scaled by ``w``, so
-nothing can cancel; the only artefact available is the amplitude modulation of
-the residual itself, whose rate at a 30 ms fade is ~17 Hz -- below the ~20 Hz
-where modulation starts to be heard as texture rather than as a transition.
-That, and not a spectral measurement, is why the fade is 30 ms: a sweep of
-5-150 ms moved none of the metrics above, so the length is chosen by the one
-thing that does constrain it.
+Can the blend cancel?
+---------------------
+Not for a phase-coherent core, and a little for an incoherent one. This was
+first asserted here and then measured, because the assertion was only half
+true. Method: run each shipped core on 8 s of real speech, align it as
+:mod:`hawavoclean.pipeline` does, and for every 30 ms window compare the
+1/6-octave band energy of the ``w = 0.5`` blend against ``min(original,
+enhanced)`` -- a floor a blend of two coherent renderings cannot cross.
+
+===================================== ======= ====== =======
+core                                  median  p1     worst
+===================================== ======= ====== =======
+``wiener-dd-48k-v1`` (coherent)       +0.00   -0.00  -0.02
+``studio-dfn3-48k-v1`` (incoherent)   +0.07   -0.28  -3.63
+===================================== ======= ====== =======
+
+For the production core the floor holds to the numerical noise: the candidate
+is GCC-PHAT aligned to the original, the strength ladder already blends the two
+linearly, and the blend is the same signal with its *residual* scaled by ``w``.
+Nothing can cancel, and the only artefact available is the amplitude modulation
+of the residual, at ~17 Hz for a 30 ms fade -- below where modulation is heard
+as texture rather than as a transition.
+
+The studio core declares ``phase_coherent = false`` (which is why
+:func:`~hawavoclean.policy.strength.generate_strength_candidates` refuses to
+blend *it* at all), so there the fade is a real crossfade and it does cancel.
+The measured cost is small: whole-file correlation with the input is still
++0.9896, the median window *gains* 0.07 dB, and the worst case above sits in a
+-46 dBFS window. Restricted to windows above -40 dBFS the worst dip is
+**-1.87 dB**, in one 1/6-octave band at 848 Hz, inside 30 ms.
+
+The fade is applied to both cores anyway, deliberately. The alternative for an
+incoherent core is the old revert, and studio's ``strength_ladder = [1.0]``
+gives the guard no partial rung to fall back on, so a revert there costs the
+unit's whole enhancement — measured at 7.23 dB on Flute 09-shaped material
+against at most 1.87 dB in one band for part of 30 ms. A core substantially
+less correlated with its input than DeepFilterNet3 would change that
+arithmetic; ``tests/integration/test_continuity_blend_cannot_cancel.py`` pins
+the bound so such a core cannot arrive unnoticed.
+
+Why the fade is 30 ms: no measurement picks it. A 5-150 ms sweep moved no
+spectral or separation metric, and neither did disabling the fade entirely (see
+``docs/continuity-taper.md``, which reports that). 30 ms is the length that is
+long enough to put the coherent case's residual modulation below the texture
+threshold and short enough to keep the incoherent case's crossfade brief. It is
+a reasoned choice, not a measured optimum, and it is recorded as one.
 
 Why the fade material is this unit's own original audio, and not the enhanced
 context the pipeline computes and throws away: the neighbour across the cut is
@@ -77,9 +113,10 @@ import numpy as np
 from hawavoclean.policy.decision import UnitPolicyDecision
 from hawavoclean.segmentation.types import SpeechUnit
 
-#: Length of the fade from enhanced back to original at a forced cut. See the
-#: module docstring: a 5-150 ms sweep moved no spectral or separation metric,
-#: so the length is set by the residual's modulation rate (~17 Hz at 30 ms).
+#: Length of the fade from enhanced back to original at a forced cut. No
+#: measurement picks it — a 5-150 ms sweep moved nothing. See the module
+#: docstring: long enough for the coherent case's ~17 Hz residual modulation,
+#: short enough to keep the incoherent case's crossfade brief.
 CONTINUITY_TAPER_MS = 30.0
 
 #: The fade may not spend more than this share of a unit at either edge, so a

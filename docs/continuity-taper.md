@@ -117,15 +117,65 @@ hard-cut control (the fade disabled but the unit kept enhanced):
 distinguishes a fade from a hard cut.** Reported rather than hidden: the length
 cannot be chosen by these measurements.
 
-What does constrain it: because the candidate is GCC-PHAT aligned to the
-original and the strength ladder already blends the two linearly,
-`(1 − w)·original + w·enhanced` is not a crossfade between two signals. It is
-the same signal with its enhancement *residual* scaled by `w`, so nothing can
-cancel and no comb filtering is available. The only artefact on offer is the
-amplitude modulation of the residual itself, at a rate of roughly `1/(2T)` —
-**~17 Hz at 30 ms**, below the ~20 Hz where modulation is heard as texture
-rather than as a transition. A 5 ms fade would modulate at ~100 Hz, squarely
-in the roughness band.
+What constrains it, for the **production** core: the candidate is GCC-PHAT
+aligned to the original and the strength ladder already blends the two
+linearly, so `(1 − w)·original + w·enhanced` is not a crossfade between two
+signals. It is the same signal with its enhancement *residual* scaled by `w`.
+The only artefact on offer is the amplitude modulation of the residual itself,
+at a rate of roughly `1/(2T)` — **~17 Hz at 30 ms**, below the ~20 Hz where
+modulation is heard as texture rather than as a transition. A 5 ms fade would
+modulate at ~100 Hz, squarely in the roughness band.
+
+That argument does **not** carry to the studio core, which ships
+`phase_coherent = false` — see the next section, which measures what happens
+there. What survives both cores is the same choice for a different reason:
+30 ms is long enough for the coherent case's residual modulation and short
+enough to keep the incoherent case's crossfade brief. A reasoned choice, not a
+measured optimum.
+
+## Can the blend cancel? (audit finding, 2026-08-21)
+
+The first version of this document claimed the blend "cannot cancel" because
+the two renderings are phase-coherent. **That is true for the production core
+and false for the studio one**, which ships `phase_coherent = false` —
+`policy/strength.py` refuses to residual-blend it for exactly that reason,
+while the taper was blending it anyway for 30 ms. An adversarial audit found
+the contradiction; the measurement below is the independent re-derivation.
+
+Method: run each shipped core on the 8 s real-speech fixture
+(`tests/fixtures/sample_sorani_podcast.wav`), align it with GCC-PHAT as
+`pipeline.py` does, then for every 30 ms window compare the 1/6-octave band
+energy of the `w = 0.5` blend against `min(original, enhanced)` — a floor a
+blend of two coherent renderings cannot cross. Windows where the two
+renderings differ in level by more than 3 dB are excluded (that is a level
+change, not cancellation), as are bands more than 25 dB below the window peak.
+
+| core | windows | median | p1 | worst |
+|---|---|---|---|---|
+| `wiener-dd-48k-v1` (`phase_coherent = true`) | 435 | +0.00 dB | −0.00 dB | **−0.02 dB** |
+| `studio-dfn3-48k-v1` (`phase_coherent = false`) | 368 | +0.07 dB | −0.28 dB | **−3.63 dB** |
+
+The production core holds the floor to numerical noise. The studio core does
+cancel — but modestly: its whole-file correlation with the input is still
+**+0.9896**, the median window *gains* 0.07 dB, and the −3.63 dB worst case
+sits in a **−46 dBFS** window. Restricted to windows above −40 dBFS the worst
+dip is **−1.87 dB**, in one 1/6-octave band at 848 Hz, inside 30 ms.
+
+**The fade is applied to both cores anyway, deliberately.** The alternative for
+an incoherent core is the old revert, and studio's `strength_ladder = [1.0]`
+leaves the guard no partial rung, so a revert costs the unit's entire
+enhancement — 7.23 dB on Flute 09-shaped material, against at most 1.87 dB in
+one band for part of 30 ms. A core substantially less correlated with its input
+than DeepFilterNet3 would invert that arithmetic, so the bound is now a test:
+`tests/integration/test_continuity_blend_cannot_cancel.py` fails if the
+coherent core ever crosses the floor, or if the studio core's median drops
+below −0.5 dB or its audible worst case below −4 dB.
+
+This also removes the original rationale for 30 ms, which rested on the
+coherent-only residual-modulation argument. The honest statement is in the
+module docstring: 30 ms is long enough for the coherent case's ~17 Hz residual
+modulation and short enough to keep the incoherent case's crossfade brief. It
+is a reasoned choice, not a measured optimum.
 
 ## What the fade costs
 

@@ -251,6 +251,16 @@ def test_the_fade_weight_is_monotone_across_the_window() -> None:
     assert np.all(np.diff(out[-TAPER_N:]) <= 0.0), "fade-out is not monotone"
     assert out.min() >= 0.0 and out.max() <= 1.0
 
+    # Monotone is not enough: a hard step is monotone too, and it is WORSE than
+    # the seam it replaces — it moves the whole discontinuity 15 ms upstream,
+    # off the low-energy zero crossing the segmenter chose, and measured 7.6x
+    # the residual of a plain hard cut. Bound the slope: a raised cosine peaks
+    # at pi/2n and a linear ramp at 1/n, so 4/n admits either and refuses any
+    # step or corner.
+    max_slope = 4.0 / TAPER_N
+    assert np.max(np.abs(np.diff(out[:TAPER_N]))) <= max_slope, "fade-in has a step in it"
+    assert np.max(np.abs(np.diff(out[-TAPER_N:]))) <= max_slope, "fade-out has a step in it"
+
 
 @pytest.mark.unit
 def test_a_left_edge_fade_alone_touches_only_the_head() -> None:

@@ -77,9 +77,69 @@ publish audio no guard ever scored for that time range.
 - Report: new `summary.continuity_crossfaded`, and a
   `continuity_taper(in=…,out=…)` entry in the unit's `finish_actions`. A faded
   unit's `final_decision` stays `enhanced`, because it is.
-- Mutation gate: **M14–M17** — fade on the wrong edge, left-edge seams
-  ignored, a too-short unit faded instead of reverted, and the pipeline
-  planning a fade it never applies. 17/17 caught, every mutation owner-credited.
+- Mutation gate: **M14–M21** — fade on the wrong edge, left-edge seams
+  ignored, a too-short unit faded instead of reverted, the pipeline planning a
+  fade it never applies, the ramp becoming a hard step, the fade resolving to
+  the candidate instead of the original, the fade planned at the wrong sample
+  rate, and a continuity revert filed under the guard's own REVERT. 21/21
+  caught, every mutation owner-credited.
+
+**Adversarial audit, and what it broke.** Seven independent auditors attacked
+the change and every finding was handed to a second agent whose job was to
+refute it; 4 of 16 survived. All four are now closed, and each was re-derived
+here before being acted on rather than taken on report:
+
+- **The "nothing can cancel" justification was false for the `studio`
+  profile.** The fade was defended on the grounds that the two renderings are
+  phase-coherent, so the blend is the original with its residual scaled and
+  cannot cancel. That holds for `wiener-dd-48k-v1` (measured worst dip below
+  `min(original, enhanced)`: **−0.02 dB** over 435 windows) and not for
+  `studio-dfn3-48k-v1`, which ships `phase_coherent = false` — the very reason
+  `policy/strength.py` refuses to residual-blend it — where the measured worst
+  is **−3.63 dB** (**−1.87 dB** restricted to windows above −40 dBFS; median
+  **+0.07 dB**, whole-file correlation with the input +0.9896). The fade is
+  still applied to both, deliberately: studio's `strength_ladder = [1.0]`
+  leaves the guard no partial rung, so reverting costs the unit's whole
+  enhancement — 7.23 dB — against at most 1.87 dB in one band for part of
+  30 ms. The docstring and `docs/continuity-taper.md` now carry the measured
+  distribution instead of the false premise, the 30 ms rationale that rested on
+  it has been rewritten as the reasoned choice it is, and
+  `test_continuity_blend_cannot_cancel.py` pins the bound so a core that made
+  the fade destructive could not arrive unnoticed.
+- **A hard step passed the whole suite.** Replacing the raised cosine with
+  `w = (t >= 0.5)` kept the joint sample original, stayed monotone and bounded,
+  and shipped a discontinuity 15 ms upstream of the low-energy zero crossing
+  the segmenter chose — worse than the seam the fade exists to remove. The
+  monotonicity test now bounds the ramp's slope (M18).
+- **The joint sample was never asserted where it can be violated.** Fading
+  toward `dec.selected_waveform` instead of the original, and applying the fade
+  before finishing rather than after, both passed everything. Neither could be
+  caught by a fixture with no forced cuts, and no shipped fixture can have one
+  — every fixture is 8 s while `hard_max_group_s` has a schema floor of 10.0.
+  `test_the_joint_of_a_real_forced_cut_is_the_original_recording` tiles a real
+  fixture into an unbroken 24 s speech interval so the **segmenter** makes the
+  cut and the **policy** plans the fade, then asserts the joint sample of the
+  assembled pre-master timeline is the decoded original bit for bit (M19). It
+  also pins the fade's absolute length, so passing a wrong sample rate at the
+  call site — which silently ships a 10 ms fade — now fails (M20).
+- **Pre-existing: a continuity revert could be filed under the guard's own
+  REVERT** and nothing noticed. They are different events and only the second
+  is a cost this rule is accountable for; conflating them is how the cascade
+  stayed invisible as long as it did (M21).
+
+Refuted and recorded as such: the reference-hash reproducibility complaint (all
+four reproduced first try by two independent auditors, and again here), the
+report schema/UI compatibility complaints, the `MAX_TAPER_FRACTION` bound
+complaint (unreachable — the shortest real unit adjacent to a forced cut in a
+full segmenter sweep was 11.1 s, 93× the threshold), and three documentation
+arithmetic complaints.
+
+Still unproven rather than disproven, and stated as such in
+`docs/continuity-taper.md`: **the fade's audible benefit**. Every spectral and
+separation metric is identical for a hard cut, 5 ms, 30 ms, 150 ms, and for
+deleting the continuity rule outright. All measured benefit belongs to removing
+the cascade. The fade is justified by argument; only the cascade removal is
+justified by measurement.
 
 ### Fixed — four config keys that were declared and never read
 

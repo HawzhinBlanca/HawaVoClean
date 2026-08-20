@@ -384,6 +384,63 @@ MUTATIONS: list[Mutation] = [
             "tests/integration/test_continuity_taper_pipeline.py::test_a_planned_fade_reaches_the_master_and_the_report",
         ),
     ),
+    Mutation(
+        "M18",
+        "the continuity fade's ramp becomes a hard step",
+        "src/hawavoclean/policy/continuity.py",
+        "    w = (0.5 - 0.5 * np.cos(np.pi * t)).astype(np.float32)",
+        "    w = (t >= 0.5).astype(np.float32)",
+        # Owner: a step is monotone, bounded in [0,1], and still lands the
+        # original at the joint — so every obvious assertion passes. It is
+        # WORSE than the seam it replaces: it moves the whole discontinuity
+        # 15 ms upstream, off the low-energy zero crossing the segmenter chose.
+        # Only a bound on the ramp's slope tells them apart.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_the_fade_weight_is_monotone_across_the_window",
+        ),
+    ),
+    Mutation(
+        "M19",
+        "the continuity fade resolves to the candidate, not the original",
+        "src/hawavoclean/pipeline.py",
+        "final_wave, orig_core_waveforms[idx], taper_in[idx], taper_out[idx]",
+        "final_wave, dec.selected_waveform, taper_in[idx], taper_out[idx]",
+        # Owner: the whole promise is that the joint sample IS the original
+        # recording. Fading toward the guard-approved candidate still fades,
+        # still changes the hash, still concentrates the change in the window —
+        # and leaves a step at the joint bigger than applying no fade at all.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_the_joint_of_a_real_forced_cut_is_the_original_recording",
+        ),
+    ),
+    Mutation(
+        "M20",
+        "the continuity fade is planned at the wrong sample rate",
+        "src/hawavoclean/pipeline.py",
+        "all_units, decisions, orig_core_waveforms, audio_buf.sample_rate",
+        "all_units, decisions, orig_core_waveforms, 16000",
+        # Owner: ships a 10 ms fade instead of 30 ms. Every self-consistent
+        # assertion still holds — a fade happened, in the right place, on the
+        # right unit — so only the ABSOLUTE length in the audit trail catches it.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_the_joint_of_a_real_forced_cut_is_the_original_recording",
+        ),
+    ),
+    Mutation(
+        "M21",
+        "a continuity revert is filed under the guard's own REVERT",
+        "src/hawavoclean/pipeline.py",
+        "continuity_reverted_ids = resolution.reverted_ids",
+        "continuity_reverted_ids = set()",
+        # Owner: the guard rejecting audio and this rule spending good audio to
+        # protect a seam are different events, and only the second is a cost
+        # the rule is accountable for. Conflating them hides the rule's price
+        # in a number that means something else — which is how the cascade
+        # stayed invisible for as long as it did.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_a_continuity_revert_is_recorded_as_one",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
