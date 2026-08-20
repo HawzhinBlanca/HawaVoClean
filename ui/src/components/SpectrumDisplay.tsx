@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getPlayer } from '../audio/player';
 import { SpectrumRenderer } from '../render/spectrum';
 import '../render/spectrum.css';
@@ -22,12 +22,18 @@ interface LegendItemProps {
   on: boolean;
   deck?: 'original' | 'cleaned';
   hint: string;
+  /** What "off" means for this series, when "not present" is too thin. */
+  offHint?: string;
 }
 
-function LegendItem({ kind, label, on, deck, hint }: LegendItemProps) {
+function LegendItem({ kind, label, on, deck, hint, offHint }: LegendItemProps) {
   const cls = `item ${kind} ${on ? 'on' : 'off'}${deck ? ` deck-${deck}` : ''}`;
   return (
-    <span className={cls} role="listitem" aria-label={`${label}: ${on ? hint : 'not present'}`}>
+    <span
+      className={cls}
+      role="listitem"
+      aria-label={`${label}: ${on ? hint : (offHint ?? 'not present')}`}
+    >
       <i className="sw" aria-hidden="true" />
       <span className="txt">{label}</span>
     </span>
@@ -41,6 +47,7 @@ export function SpectrumDisplay() {
   const cleaned = useStore((s) => s.cleaned);
   const abMode = useStore((s) => s.abMode);
   const playing = useStore((s) => s.playing);
+  const [removedCoverage, setRemovedCoverage] = useState(0);
 
   useEffect(() => {
     const canvas = canvasRef.current as SpectrumCanvas | null;
@@ -69,6 +76,21 @@ export function SpectrumDisplay() {
     );
   }, [cleaned]);
 
+  /**
+   * Honesty · the REMOVED band is drawn by subtraction, so whether it exists
+   * is a property of the two curves and not of the fact that two curves are
+   * loaded. This asks the renderer for the coverage it will actually paint —
+   * it was possible, and it happened on a production run that enhanced no
+   * units, for the key to read REMOVED lit and the canvas to promise "the
+   * removed energy between them" over a plot with no amber in it anywhere.
+   *
+   * `setCurve` rebuilds the diff synchronously, and this effect is declared
+   * after both of the effects that call it, so it reads a settled renderer.
+   */
+  useEffect(() => {
+    setRemovedCoverage(rendererRef.current?.removedCoverage() ?? 0);
+  }, [original, cleaned]);
+
   useEffect(() => {
     rendererRef.current?.setFocus(abMode);
   }, [abMode]);
@@ -81,6 +103,9 @@ export function SpectrumDisplay() {
   }, [playing, abMode]);
 
   const both = original !== null && cleaned !== null;
+  // The band is lit by the pixels it will have, not by the pair of curves.
+  const hasRemoved = both && removedCoverage > 0;
+  const removedPct = Math.round(removedCoverage * 100);
 
   return (
     <>
@@ -103,11 +128,13 @@ export function SpectrumDisplay() {
             className="spectrum-canvas"
             role="img"
             aria-label={
-              both
-                ? 'Long-term average spectrum: original and cleaned, with the removed energy between them'
-                : original !== null
-                  ? 'Long-term average spectrum of the original clip'
-                  : 'Long-term average spectrum: no signal yet'
+              hasRemoved
+                ? `Long-term average spectrum: original and cleaned, with the removed energy between them across ${removedPct}% of the band`
+                : both
+                  ? 'Long-term average spectrum: original and cleaned. Nothing was removed — the cleaned curve does not sit below the original anywhere, so there is no band between them.'
+                  : original !== null
+                    ? 'Long-term average spectrum of the original clip'
+                    : 'Long-term average spectrum: no signal yet'
             }
           />
         </div>
@@ -130,8 +157,13 @@ export function SpectrumDisplay() {
           <LegendItem
             kind="removed"
             label="Removed"
-            on={both}
-            hint="energy taken out, original minus cleaned"
+            on={hasRemoved}
+            hint={`energy taken out, original minus cleaned, across ${removedPct}% of the band`}
+            offHint={
+              both
+                ? 'nothing taken out — the cleaned curve does not sit below the original anywhere'
+                : 'not present'
+            }
           />
           <LegendItem kind="live" label="Live" on={playing} deck={abMode} hint="playing now" />
           <span className="meta" aria-hidden="true">

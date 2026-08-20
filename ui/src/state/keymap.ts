@@ -110,7 +110,12 @@ export function handleKeyDown(e: KeyboardEvent): void {
       if (hasAudio) setAb('original');
       break;
     case 'b':
-      if (st.cleanedPath) setAb('cleaned');
+      // Same condition the A/B control draws itself with: a path is not a deck,
+      // and a master the engine can no longer serve is not switchable to by
+      // keyboard either.
+      if (st.cleanedPath && st.artifacts?.master !== false && st.deckFault?.deck !== 'cleaned') {
+        setAb('cleaned');
+      }
       break;
     case 'p': {
       const canStart =

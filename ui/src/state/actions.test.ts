@@ -17,11 +17,17 @@ import type {
 
 const player = vi.hoisted(() => ({
   time: 0,
+  // The deck the player says is audible. `actions` mirrors this onto the store
+  // whenever a deck falls out of service, so the A/B control cannot drift.
+  activeDeck: 'original' as 'original' | 'cleaned',
   pause: vi.fn(),
   load: vi.fn(),
   setActive: vi.fn(),
   seek: vi.fn(),
   toggle: vi.fn(),
+  hasDeck: vi.fn((_deck: 'original' | 'cleaned') => true),
+  deckFault: vi.fn((_deck: 'original' | 'cleaned') => null as { kind: string } | null),
+  onFault: vi.fn((_fn: (f: unknown) => void) => () => undefined),
 }));
 vi.mock('../audio/player', () => ({ getPlayer: () => player }));
 
@@ -147,6 +153,7 @@ interface FakeClient {
   getJob: ReturnType<typeof vi.fn>;
   cancelJob: ReturnType<typeof vi.fn>;
   peaks: ReturnType<typeof vi.fn>;
+  exists: ReturnType<typeof vi.fn>;
   fileUrl: (p: string) => string;
   eventsUrl: (id: string) => string;
 }
@@ -168,6 +175,9 @@ function makeClient(): FakeClient {
     getJob: vi.fn(),
     cancelJob: vi.fn(async () => ({ ok: true })),
     peaks: vi.fn(),
+    // `HEAD /api/audio` — the artefact existence check a restore now makes.
+    // Everything is there unless a test says otherwise.
+    exists: vi.fn(async (_path: string) => true),
     fileUrl: (p: string) => `http://127.0.0.1:8765/api/audio?path=${encodeURIComponent(p)}`,
     eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events?token=devtok`,
   };
@@ -216,6 +226,10 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-08-20T10:00:20Z'));
   player.time = 0;
+  player.activeDeck = 'original';
+  player.hasDeck.mockReturnValue(true);
+  player.deckFault.mockReturnValue(null);
+  player.onFault.mockClear();
 });
 
 afterEach(() => {
@@ -724,5 +738,544 @@ describe('report access and helpers (B7)', () => {
     expect(actions.isAcceptedFile(f('notes.txt', 'text/plain'))).toBe(false);
     expect(actions.extensionOf('Flute 09.m4a.mp4')).toBe('mp4');
     expect(actions.extensionOf('noext')).toBe('');
+  });
+});
+
+// B2 · what a drop is allowed to do. Iteration 3 of the web perfection log
+// claims three designed refusals here — a folder, a drop with nothing openable,
+// and a multi-file drop that takes the first audio file "and says so". None of
+// them was pinned; all three are early returns that never reach `ingestFile`,
+// so they are cheap to hold. The *kind* is asserted rather than the sentence,
+// so rewording the copy stays free while losing the refusal does not.
+describe('B2 · drop routing', () => {
+  function dt(
+    files: File[],
+    dirs: string[] = [],
+  ): DataTransfer {
+    const items = [
+      ...dirs.map((name) => ({
+        kind: 'file' as const,
+        webkitGetAsEntry: () => ({ isDirectory: true, name }),
+      })),
+      ...files.map(() => ({
+        kind: 'file' as const,
+        webkitGetAsEntry: () => ({ isDirectory: false, name: 'f' }),
+      })),
+    ];
+    return { items, files } as unknown as DataTransfer;
+  }
+  const wav = (name = 'take.wav'): File => new File(['x'], name, { type: 'audio/wav' });
+
+  it('refuses a dropped folder without trying to open it', async () => {
+    const { actions, store, client } = await boot();
+    await actions.ingestDataTransfer(dt([], ['Takes']));
+    const r = store.useStore.getState().rejection;
+    expect(r?.kind).toBe('folder');
+    expect(r?.name).toBe('Takes');
+    expect(client.analyze).not.toHaveBeenCalled();
+  });
+
+  it('says how many folders when several are dropped at once', async () => {
+    const { actions, store } = await boot();
+    await actions.ingestDataTransfer(dt([], ['A', 'B', 'C']));
+    expect(store.useStore.getState().rejection?.detail).toContain('3 folders');
+  });
+
+  it('an empty drop is a designed refusal, not a silent nothing', async () => {
+    const { actions, store } = await boot();
+    await actions.ingestDataTransfer(dt([]));
+    expect(store.useStore.getState().rejection?.kind).toBe('empty');
+  });
+
+  it('a drop with nothing openable names the type it refused', async () => {
+    const { actions, store, client } = await boot();
+    await actions.ingestDataTransfer(dt([new File(['x'], 'notes.txt', { type: 'text/plain' })]));
+    const r = store.useStore.getState().rejection;
+    expect(r?.kind).toBe('type');
+    expect(r?.name).toBe('notes.txt');
+    expect(r?.detail).toContain('text/plain');
+    expect(client.analyze).not.toHaveBeenCalled();
+  });
+
+  it('a multi-file drop takes the first audio file and says which one', async () => {
+    const { actions, store } = await boot();
+    await actions.ingestDataTransfer(
+      dt([new File(['x'], 'notes.txt', { type: 'text/plain' }), wav('second.wav')]),
+    );
+    await settle(0);
+    const r = store.useStore.getState().rejection;
+    expect(r?.kind).toBe('multi');
+    expect(r?.name).toBe('second.wav');
+  });
+
+  it('a clean single-file drop raises no rejection at all', async () => {
+    const { actions, store } = await boot();
+    store.useStore.getState().setRejection({ kind: 'type', name: 'old', detail: 'stale' });
+    await actions.ingestDataTransfer(dt([wav()]));
+    await settle(0);
+    expect(store.useStore.getState().rejection).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The three P0 correctness defects the adversarial audit found. Each one made
+// the UI state something untrue, so each one gets a test that fails if the lie
+// comes back.
+
+/** A finished run, as `recordRun` would have left it. */
+function done(
+  store: StoreMod,
+  over: {
+    jobId: string;
+    inputPath?: string;
+    profile?: 'studio' | 'production';
+    outputPath: string;
+  },
+): void {
+  const outputPath = over.outputPath;
+  store.useStore.getState().pushHistory({
+    jobId: over.jobId,
+    profile: over.profile ?? 'studio',
+    inputPath: over.inputPath ?? '/a.wav',
+    inputName: 'a.wav',
+    outcome: 'done',
+    durationMs: 8000,
+    at: Date.now(),
+    enhanced: 5,
+    unitsTotal: 5,
+    lufsIn: -24.9,
+    lufsOut: -21.7,
+    noiseIn: -48.5,
+    noiseOut: -84.7,
+    outputPath,
+    reportPath: outputPath.replace(/\.wav$/, '.hawavoclean.json'),
+    report: report(),
+    status: jobStatus('done'),
+    original: analysis(),
+    cleaned: analysis({ path: outputPath }),
+    error: null,
+  });
+}
+
+describe('A7/B5 · the A/B control cannot claim a deck the player is not on', () => {
+  /** Hand `actions` the fault listener the player would have called. */
+  async function faultListener(actions: ActionsMod): Promise<(f: unknown) => void> {
+    await actions.connectEngine();
+    await settle();
+    const fn = player.onFault.mock.calls[0]?.[0];
+    if (!fn) throw new Error('actions never subscribed to deck faults');
+    return fn;
+  }
+
+  it('mirrors the player’s fallback onto the store, and says what happened', async () => {
+    const { actions, store, client } = await boot();
+    const fire = await faultListener(actions);
+    const st = store.useStore.getState();
+    st.setSource({ path: '/a.wav', name: 'a.wav', origin: 'file' });
+    st.setCleaned(analysis(), '/out/a.wav');
+    st.setAbMode('cleaned');
+    // The player has already fallen back — that is what it is reporting.
+    player.activeDeck = 'original';
+
+    fire({
+      deck: 'cleaned',
+      url: client.fileUrl('/out/a.wav'),
+      kind: 'missing',
+      status: 404,
+      fellBackTo: 'original',
+    });
+
+    const after = store.useStore.getState();
+    expect(after.abMode).toBe('original');
+    expect(after.deckFault?.deck).toBe('cleaned');
+    expect(after.deckFault?.detail).toContain('cleaned master could not be loaded');
+    expect(after.deckFault?.detail).toContain('playing the original');
+    // The same fact reaches the artefact row: a master that cannot be played
+    // is a master that cannot be downloaded.
+    expect(after.artifacts?.master).toBe(false);
+    // …and the analysis goes with it, so nothing keeps drawing a cleaned deck
+    // or asking /api/peaks for a path that answers 404.
+    expect(after.cleaned).toBeNull();
+    expect(after.cleanedPath).toBe('/out/a.wav');
+  });
+
+  it('does not blame the current clip for a fault about a file that has left the screen', async () => {
+    const { actions, store, client } = await boot();
+    const fire = await faultListener(actions);
+    const st = store.useStore.getState();
+    st.setCleaned(analysis(), '/out/current.wav');
+    st.setAbMode('cleaned');
+    player.activeDeck = 'original';
+
+    fire({
+      deck: 'cleaned',
+      url: client.fileUrl('/out/stale.wav'),
+      kind: 'missing',
+      status: 404,
+      fellBackTo: 'original',
+    });
+
+    const after = store.useStore.getState();
+    // The switch still follows the player — that is always the truth …
+    expect(after.abMode).toBe('original');
+    // … but nothing is said about a clip this is not about.
+    expect(after.deckFault).toBeNull();
+    expect(after.cleaned).not.toBeNull();
+  });
+
+  it('an engine that could not be reached is not a file that was deleted', async () => {
+    const { actions, store, client } = await boot();
+    const fire = await faultListener(actions);
+    const st = store.useStore.getState();
+    st.setCleaned(analysis(), '/out/a.wav');
+    player.activeDeck = 'original';
+
+    fire({
+      deck: 'cleaned',
+      url: client.fileUrl('/out/a.wav'),
+      kind: 'network',
+      status: null,
+      fellBackTo: 'original',
+    });
+
+    const after = store.useStore.getState();
+    expect(after.deckFault?.detail).toContain('engine could not be reached');
+    // Nothing is condemned: the file is still on disk, the engine is not there.
+    expect(after.artifacts).toBeNull();
+    expect(after.cleaned).not.toBeNull();
+  });
+});
+
+describe('B5 · restoring a run whose files are gone tells the truth', () => {
+  it('checks the artefacts on restore — with HEAD, never /api/analyze', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    client.analyze.mockClear();
+    client.exists.mockClear();
+
+    await actions.selectRun('j1');
+    await settle();
+
+    expect(client.analyze).not.toHaveBeenCalled();
+    expect(client.exists.mock.calls.map((c) => c[0]).sort()).toEqual([
+      '/out/j1.hawavoclean.json',
+      '/out/j1.hawavoclean.txt',
+      '/out/j1.wav',
+    ]);
+    const st = store.useStore.getState();
+    expect(st.artifacts).toEqual({ master: true, json: true, txt: true, reason: '' });
+    expect(st.abMode).toBe('cleaned');
+    expect(st.deckFault).toBeNull();
+  });
+
+  it('a run whose master was deleted does not restore as a playable run', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    client.analyze.mockClear();
+    player.load.mockClear();
+    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
+
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    // The restore itself is still free.
+    expect(client.analyze).not.toHaveBeenCalled();
+    // No deck is offered that cannot be played …
+    expect(st.abMode).toBe('original');
+    expect(st.cleaned).toBeNull();
+    expect(player.load).toHaveBeenCalledWith('cleaned', null);
+    // … the artefact row knows which file is gone …
+    expect(st.artifacts?.master).toBe(false);
+    expect(st.artifacts?.json).toBe(true);
+    expect(st.artifacts?.reason).toContain('cleaned master');
+    // … the answer is on the run's own row, so the list stops offering it …
+    expect(st.history.find((h) => h.jobId === 'j1')?.artifacts?.master).toBe(false);
+    // … and the screen says so instead of reporting a complete run.
+    expect(st.deckFault?.deck).toBe('cleaned');
+    expect(st.statusLine).toContain('no longer on disk');
+    // The path is kept: the disabled link still has to name what it cannot give.
+    expect(st.cleanedPath).toBe('/out/j1.wav');
+  });
+
+  it('artefacts that are all still there are not annotated', async () => {
+    const { actions, store } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    await actions.selectRun('j1');
+    await settle();
+    const a = actions.artifactsFor(
+      '/out/j1.wav',
+      '/out/j1.hawavoclean.json',
+      store.useStore.getState().artifacts,
+    );
+    expect(a?.master.url).toBeTruthy();
+    expect(a?.master.note).toBeNull();
+  });
+
+  it('a link whose file is gone loses its href and keeps its reason', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
+    await actions.selectRun('j1');
+    await settle();
+    const a = actions.artifactsFor(
+      '/out/j1.wav',
+      '/out/j1.hawavoclean.json',
+      store.useStore.getState().artifacts,
+    );
+    expect(a?.master.url).toBeNull();
+    expect(a?.master.note).toContain('no longer on disk');
+    expect(a?.master.name).toBe('j1.wav');
+    expect(a?.json.url).toBeTruthy();
+  });
+
+  it('a flagged run can be opened again to look for its files once more', async () => {
+    const { actions, store, client } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    client.exists.mockImplementation(async (p: string) => p !== '/out/j1.wav');
+    await actions.selectRun('j1');
+    await settle();
+    expect(store.useStore.getState().artifacts?.master).toBe(false);
+
+    // The file comes back — a volume remounted, an undo in Finder. Re-opening
+    // the run already on screen is the gesture that means "look again", and it
+    // is the only one: nothing else re-checks a run that is already showing.
+    client.exists.mockImplementation(async () => true);
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    expect(st.artifacts?.master).toBe(true);
+    expect(st.abMode).toBe('cleaned');
+    expect(st.deckFault).toBeNull();
+    expect(client.analyze).not.toHaveBeenCalled();
+  });
+
+  it('an outage is not a deletion: nothing is condemned when the check cannot be made', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    done(store, { jobId: 'j1', outputPath: '/out/j1.wav' });
+    done(store, { jobId: 'j2', outputPath: '/out/j2.wav' });
+    client.exists.mockRejectedValue(new EngineError(0, 'network', 'Engine unreachable'));
+
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    expect(st.artifacts).toBeNull();
+    expect(st.abMode).toBe('cleaned'); // the run restores as it always did
+    expect(st.deckFault).toBeNull();
+  });
+});
+
+describe('B5 · two runs of the same profile do not overwrite each other', () => {
+  it('the first run of a profile keeps the engine’s own naming', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledWith({
+      input_path: '/a.wav',
+      profile: 'studio',
+      overwrite: true,
+    });
+  });
+
+  it('the second run of the same profile is given its own output path', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledWith({
+      input_path: '/a.wav',
+      profile: 'studio',
+      overwrite: true,
+      output_path: '/dir/a_studio-2.wav',
+    });
+  });
+
+  it('a third run counts on rather than stacking suffixes', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
+    done(store, { jobId: 'j2', outputPath: '/dir/a_studio-2.wav' });
+    await actions.startJob();
+    expect(client.createJob.mock.calls[0]?.[0]).toMatchObject({
+      output_path: '/dir/a_studio-3.wav',
+    });
+  });
+
+  it('a different profile on the same clip writes its own name, untouched', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setProfile('production');
+    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledWith({
+      input_path: '/a.wav',
+      profile: 'production',
+      overwrite: true,
+    });
+  });
+
+  it('a run that did not finish claims no name', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
+    store.useStore.getState().patchHistory('j1', { outcome: 'failed' });
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledWith({
+      input_path: '/a.wav',
+      profile: 'studio',
+      overwrite: true,
+    });
+  });
+
+  it('a run whose file a later run took over says so instead of serving it', async () => {
+    const { actions, store, client } = await boot();
+    // The net under the naming: two *different* clips whose names clean to the
+    // same stem still collide, and the engine will happily overwrite.
+    done(store, { jobId: 'j1', inputPath: '/a.m4a', outputPath: '/dir/a_studio.wav' });
+    done(store, { jobId: 'j2', inputPath: '/a.wav', outputPath: '/dir/a_studio.wav' });
+    expect(store.useStore.getState().history.find((h) => h.jobId === 'j1')?.supersededBy).toBe('j2');
+
+    client.exists.mockClear();
+    await actions.selectRun('j1');
+    await settle();
+
+    const st = store.useStore.getState();
+    // Nothing is asked of the engine: the files are known not to be this run's.
+    expect(client.exists).not.toHaveBeenCalled();
+    expect(st.artifacts).toMatchObject({ master: false, json: false, txt: false });
+    expect(st.artifacts?.reason).toContain('later run');
+    expect(st.abMode).toBe('original');
+    expect(st.cleaned).toBeNull();
+  });
+});
+
+// B6 · the health heartbeat, which every "engine loss" claim in the log rests
+// on and which nothing pinned. Iteration 3 records a deliberate decision — the
+// healthy cadence was put BACK to 10 s after an agent had raised it to 5 s —
+// and iteration 3's B6 entry records the 400→5000 ms offline ladder. Both were
+// verified by killing a real engine and watching; here they are numbers.
+describe('B6 · health cadence', () => {
+  it('polls a healthy engine every 10 s, not faster', async () => {
+    const { actions, client } = await boot();
+    await actions.connectEngine();
+    expect(client.health).toHaveBeenCalledTimes(1);
+
+    await settle(9999);
+    expect(client.health).toHaveBeenCalledTimes(1); // still one: no early beat
+    await settle(1);
+    expect(client.health).toHaveBeenCalledTimes(2);
+    await settle(10000);
+    expect(client.health).toHaveBeenCalledTimes(3);
+  });
+
+  it('chases a dead engine hard, then backs off to the same 10 s beat', async () => {
+    const { actions, store, client } = await boot();
+    client.health.mockRejectedValue(new TypeError('Failed to fetch'));
+    await actions.connectEngine();
+    expect(store.useStore.getState().engineStatus).toBe('offline');
+
+    // 400 · 800 · 1600 · 3000 · 5000, then 5000 for as long as it stays down.
+    const ladder = [400, 800, 1600, 3000, 5000, 5000];
+    let calls = client.health.mock.calls.length;
+    for (const delay of ladder) {
+      await settle(delay - 1);
+      expect(client.health.mock.calls.length, `no probe before ${delay} ms`).toBe(calls);
+      await settle(1);
+      calls += 1;
+      expect(client.health.mock.calls.length, `probe at ${delay} ms`).toBe(calls);
+    }
+  });
+
+  it('a returning engine resets the ladder to the healthy beat', async () => {
+    const { actions, store, client } = await boot();
+    client.health.mockRejectedValue(new TypeError('Failed to fetch'));
+    await actions.connectEngine();
+    await settle(400);
+    await settle(800); // two rungs down the ladder
+    expect(store.useStore.getState().engineStatus).toBe('offline');
+
+    client.health.mockResolvedValue({
+      ok: true,
+      version: '3.2.0',
+      profiles: ['studio'],
+      engine_pid: 4242,
+    });
+    await settle(1600);
+    expect(store.useStore.getState().engineStatus).toBe('ready');
+
+    const calls = client.health.mock.calls.length;
+    await settle(9999);
+    expect(client.health.mock.calls.length).toBe(calls); // back on the slow beat
+    await settle(1);
+    expect(client.health.mock.calls.length).toBe(calls + 1);
+  });
+
+  it('a clip stranded by an outage is re-analysed when the engine returns', async () => {
+    const { actions, store, client } = await boot();
+    await actions.connectEngine();
+
+    // Analyze dies the way a killed engine kills it: a bare TypeError.
+    client.analyze.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await actions.loadSource({ path: '/a.wav', name: 'a.wav', origin: 'file' });
+    expect(store.useStore.getState().original).toBeNull();
+    const analyzeCalls = client.analyze.mock.calls.length;
+
+    // The engine goes away and comes back under a new pid.
+    client.health.mockRejectedValue(new TypeError('Failed to fetch'));
+    await settle(10000);
+    expect(store.useStore.getState().engineStatus).toBe('offline');
+    client.health.mockResolvedValue({
+      ok: true,
+      version: '3.2.0',
+      profiles: ['studio'],
+      engine_pid: 4242,
+    });
+    await settle(5000);
+
+    // The promise the failure sentence makes — "this comes back on its own
+    // when it reconnects" — is actually kept.
+    expect(client.analyze.mock.calls.length).toBeGreaterThan(analyzeCalls);
+    expect(store.useStore.getState().original).not.toBeNull();
+  });
+
+  it('a refused clip is NOT retried on reconnect — a refusal is not an outage', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    await actions.connectEngine();
+
+    client.analyze.mockRejectedValueOnce(new EngineError(400, 'bad_request', 'unsupported'));
+    await actions.loadSource({ path: '/bad.wav', name: 'bad.wav', origin: 'file' });
+    const analyzeCalls = client.analyze.mock.calls.length;
+
+    client.health.mockResolvedValue({
+      ok: true,
+      version: '3.2.0',
+      profiles: ['studio'],
+      engine_pid: 4242,
+    });
+    await settle(10000);
+    expect(client.analyze.mock.calls.length).toBe(analyzeCalls);
+    expect(store.useStore.getState().original).toBeNull();
+  });
+
+  it('a different pid behind the same port is a different engine', async () => {
+    const { actions, store, client } = await boot();
+    await actions.connectEngine();
+    expect(store.useStore.getState().statusLine).toContain('Engine ready');
+
+    client.health.mockResolvedValue({
+      ok: true,
+      version: '3.2.0',
+      profiles: ['studio'],
+      engine_pid: 9999, // restarted underneath us; nothing ever looked offline
+    });
+    await settle(10000);
+    expect(store.useStore.getState().statusLine).toContain('Engine back');
   });
 });

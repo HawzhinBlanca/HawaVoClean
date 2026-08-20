@@ -45,6 +45,13 @@ function useReservedStrip(active: boolean): (el: HTMLDivElement | null) => void 
 export function Footer() {
   const statusLine = useStore((s) => s.statusLine);
   const error = useStore((s) => s.error);
+  // Honesty · the label said ENGINE ERROR over everything that ever reached
+  // this bar. It was measured saying it over a clipboard permission the
+  // browser refused, which named the wrong culprit in the largest type on the
+  // screen. Each failure now arrives with its own source (state/errors.ts,
+  // `failureSource`); anything that somehow arrives without one says the
+  // neutral thing rather than inventing an engine to blame.
+  const errorLabel = useStore((s) => s.errorLabel);
   const setError = useStore((s) => s.setError);
   const job = useStore((s) => s.job);
   const engineStatus = useStore((s) => s.engineStatus);
@@ -84,7 +91,7 @@ export function Footer() {
         <div className="errbar" role="alert" ref={reserve}>
           <IconWarn />
           <span className="text" title={error}>
-            <b>Engine error</b>
+            <b>{errorLabel ?? 'Error'}</b>
             {error}
           </span>
           <button className="dismiss" onClick={() => setError(null)} aria-label="Dismiss error">

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { isTerminal } from './api/sse';
 import { Actions } from './components/Actions';
 import { EngineBanner } from './components/EngineBanner';
@@ -36,7 +36,9 @@ function useJobAnnouncer(): string {
   const state = useStore((s) => s.job?.status?.state ?? (s.job ? 'queued' : null));
   const report = useStore((s) => s.report);
   const errCode = useStore((s) => s.job?.status?.error?.code ?? null);
+  const deckFault = useStore((s) => s.deckFault);
   const [msg, setMsg] = useState('');
+  const saidFault = useRef<string | null>(null);
 
   useEffect(() => {
     if (analyzing) {
@@ -66,6 +68,21 @@ function useJobAnnouncer(): string {
     }
     if (sourceName) setMsg(`${sourceName} ready`);
   }, [analyzing, sourceName, state, report, errCode]);
+
+  // A deck falling out of service changes what the transport can do, so it is
+  // told — once, on the transition into the fault, never again while it stands.
+  // It rides the same single polite region as everything else: a second live
+  // region for one sentence would be a second voice for no gain.
+  useEffect(() => {
+    const detail = deckFault?.detail ?? null;
+    if (!detail) {
+      saidFault.current = null;
+      return;
+    }
+    if (detail === saidFault.current) return;
+    saidFault.current = detail;
+    setMsg(detail);
+  }, [deckFault]);
 
   return msg;
 }

@@ -14,6 +14,37 @@ export type EngineStatus = 'connecting' | 'ready' | 'offline';
 export type SourceOrigin = 'resolve' | 'file' | 'drop' | 'upload';
 export type AbMode = 'original' | 'cleaned';
 
+/**
+ * What the engine can still serve of the run that is on screen.
+ *
+ * A finished run leaves three files behind, and nothing in this app owns them:
+ * they can be moved, deleted or — before this iteration — written over by a
+ * second run of the same profile. A cached report is therefore not evidence
+ * that the files are there, so a restored run is checked (three HEADs, no
+ * decode) and the answer is kept here. `null` means "not checked", which is
+ * the honest state for a run whose files were written a second ago.
+ */
+export interface ArtifactState {
+  master: boolean;
+  json: boolean;
+  txt: boolean;
+  /** The one sentence the disabled links and the run row explain themselves with. */
+  reason: string;
+}
+
+/**
+ * A deck that was asked for and could not be played, in the words the screen
+ * uses. Written from the player's own fault event, so the A/B control and the
+ * player can never disagree about which deck is live.
+ */
+export interface DeckFaultInfo {
+  deck: AbMode;
+  /** Small-caps label, e.g. `CLEANED DECK UNAVAILABLE`. */
+  headline: string;
+  /** The sentence: what failed, why, and what you are hearing instead. */
+  detail: string;
+}
+
 export interface SourceInfo {
   path: string;
   name: string;
@@ -88,6 +119,14 @@ export interface HistoryEntry {
   cleaned: AudioAnalysis | null;
   /** Why the run ended badly, when it did. */
   error: string | null;
+  /**
+   * The job id of a later run that wrote to this run's output path. Two runs
+   * cannot own the same file: once this is set, the files beside this row are
+   * somebody else's and the row says so instead of handing them over.
+   */
+  supersededBy?: string | null;
+  /** What the engine could still serve the last time this run was opened. */
+  artifacts?: ArtifactState | null;
 }
 
 /** How many runs the session keeps. */
@@ -122,6 +161,16 @@ export interface AppState {
   cleanedPath: string | null;
 
   abMode: AbMode;
+  /**
+   * A deck that could not be played, and what is playing instead. Set from the
+   * player's fault event, cleared when a deck is asked for again.
+   */
+  deckFault: DeckFaultInfo | null;
+  /**
+   * Which of the on-screen run's three files can still be served, or null when
+   * nothing has been checked.
+   */
+  artifacts: ArtifactState | null;
   playing: boolean;
   currentTime: number;
   duration: number;
@@ -157,6 +206,14 @@ export interface AppState {
 
   statusLine: string;
   error: string | null;
+  /**
+   * What the error bar's own label should say — i.e. *where* this failure came
+   * from. The bar hardcoded `Engine error`, which was right for most of what
+   * lands here and wrong for the rest: a clipboard permission the browser
+   * refused was published to the user as ENGINE ERROR. Every caller of
+   * `setError` names its source; nothing else infers one.
+   */
+  errorLabel: string | null;
   dragOver: boolean;
 
   // actions
@@ -172,6 +229,8 @@ export interface AppState {
   patchJob(patch: Partial<JobInfo>): void;
   setReport(r: HawaVoCleanReport | null): void;
   setAbMode(m: AbMode): void;
+  setDeckFault(f: DeckFaultInfo | null): void;
+  setArtifacts(a: ArtifactState | null): void;
   setPlaying(v: boolean): void;
   setTime(t: number): void;
   setDuration(d: number): void;
@@ -182,7 +241,7 @@ export interface AppState {
   setSelectedUnit(u: UnitDecisionRecord | null): void;
   setShortcutsOpen(v: boolean): void;
   setStatus(line: string): void;
-  setError(msg: string | null): void;
+  setError(msg: string | null, label?: string): void;
   setDragOver(v: boolean): void;
   setUpload(u: UploadInfo | null): void;
   setRejection(r: DropRejection | null): void;
@@ -213,6 +272,8 @@ export const useStore = create<AppState>((set) => ({
   cleanedPath: null,
 
   abMode: 'original',
+  deckFault: null,
+  artifacts: null,
   playing: false,
   currentTime: 0,
   duration: 0,
@@ -233,6 +294,7 @@ export const useStore = create<AppState>((set) => ({
 
   statusLine: 'Connecting to engine',
   error: null,
+  errorLabel: null,
   dragOver: false,
 
   setHost: (host) => set({ host }),
@@ -262,6 +324,8 @@ export const useStore = create<AppState>((set) => ({
   // A new report invalidates any selection made against the previous one.
   setReport: (report) => set({ report, selectedUnit: null, highlightRange: null }),
   setAbMode: (abMode) => set({ abMode }),
+  setDeckFault: (deckFault) => set({ deckFault }),
+  setArtifacts: (artifacts) => set({ artifacts }),
   setPlaying: (playing) => set({ playing }),
   setTime: (currentTime) => set({ currentTime }),
   setDuration: (duration) => set({ duration }),
@@ -286,16 +350,35 @@ export const useStore = create<AppState>((set) => ({
     }),
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setStatus: (statusLine) => set({ statusLine }),
-  setError: (error) => set({ error }),
+  setError: (error, label) => set({ error, errorLabel: error ? (label ?? null) : null }),
   setDragOver: (dragOver) => set({ dragOver }),
   setUpload: (upload) => set({ upload }),
   // A new refusal replaces the old one; nothing queues up.
   setRejection: (rejection) => set({ rejection }),
+  // Two runs cannot own the same file. If this run wrote where an older one
+  // did, the older row's artefacts are no longer its own — the report on
+  // screen and the bytes behind its links would disagree — so the older row
+  // is marked superseded rather than left to hand over the newer file. The
+  // UI avoids the collision in the first place by naming the second run's
+  // output uniquely (state/actions.ts, `uniqueOutputPath`); this is the net
+  // under that, and the only thing that catches two *different* clips whose
+  // names clean to the same stem.
   pushHistory: (entry) =>
-    set((s) => ({
-      history: [entry, ...s.history.filter((h) => h.jobId !== entry.jobId)].slice(0, HISTORY_LIMIT),
-      currentRunId: entry.jobId,
-    })),
+    set((s) => {
+      const rest = s.history.filter((h) => h.jobId !== entry.jobId);
+      const collides = entry.outcome === 'done' && Boolean(entry.outputPath);
+      const marked = collides
+        ? rest.map((h) =>
+            h.outputPath === entry.outputPath && h.outcome === 'done'
+              ? { ...h, supersededBy: entry.jobId }
+              : h,
+          )
+        : rest;
+      return {
+        history: [entry, ...marked].slice(0, HISTORY_LIMIT),
+        currentRunId: entry.jobId,
+      };
+    }),
   patchHistory: (jobId, patch) =>
     set((s) => ({
       history: s.history.map((h) => (h.jobId === jobId ? { ...h, ...patch } : h)),
@@ -309,6 +392,8 @@ export const useStore = create<AppState>((set) => ({
       job: null,
       report: null,
       abMode: 'original',
+      deckFault: null,
+      artifacts: null,
       playing: false,
       currentTime: 0,
       duration: 0,
@@ -316,6 +401,7 @@ export const useStore = create<AppState>((set) => ({
       highlightRange: null,
       selectedUnit: null,
       error: null,
+      errorLabel: null,
       view: { start: 0, end: 0 },
       // The run list survives a new clip — it is the session's memory — but
       // nothing in it is on screen any more.

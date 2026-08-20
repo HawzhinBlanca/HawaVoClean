@@ -731,3 +731,209 @@ it only matters if you zoom to 1:1 exactly on a unit boundary near the end of a 
 and the display is coherent. The cross-timeline gap is recorded here as a known, bounded limitation
 rather than claimed away, and the log's earlier "bit-exact against the full decode" wording was
 overstated: it is bit-exact *after* a position-dependent shift.
+
+## Iteration 6 — 2026-08-20 — the refuted A6 layout defect, and four honesty gaps
+
+Ports and browsers for this pass: engine on 8797, the Claude browser pane for layout/ARIA
+measurement (its tab is hidden — fine for layout, useless for focus and for frame timing) and a
+real headful Chrome over CDP for anything that needs a live renderer's own clock or a real
+network log.
+
+### 1. The keycap row the loop shipped broken (A6, refuted)
+
+Measured before the fix, and it reproduces exactly as the audit reported: the unit inspector's
+hint row (`[ ] step units · ? all shortcuts`) is laid out by `.insp-empty`, which was
+`grid-template-columns: minmax(0, 1fr) auto`. The stat tiles take their whole min-content width
+and the lead column gets what is left — **114px at 1280x800, 102px at 2560x1440** against a hint
+that needs ~190. Every `<kbd>` was shrunk to `clientWidth 8` around an `scrollWidth 11` glyph (a
+37% overflow: "[", "]" and "?" spilled out of crushed pills) and "step units" was squeezed from
+52.2px to 25.9 and wrapped into them. 1440 and 1920 were fine, which is exactly how a shrink bug
+hides from a sweep that only looks at two widths.
+
+The fix is at the cause, not on the keycap: `.insp-empty` is now a wrapping flex row whose lead
+half has `flex: 1 1 200px` (the hint's natural width), so the stat row drops to its own line at the
+point where the pair stops fitting, and nothing inside either half can shrink below its content. A
+keycap and the words it means are also now one `<span class="chunk">` — an inline-flex,
+`white-space: nowrap`, `flex: none` unit — so the row can only ever wrap *between* chunks.
+After, at both bad widths: lead 546px / 534px, `keys` scrollWidth == clientWidth, every kbd
+`15/15`, both labels `52/52` and `66/66`, row height 15px (one line).
+
+### 2. The audit that says it stays fixed
+
+A programmatic sweep over **7 widths x 5 states = 35 screens**. For every element that owns text:
+
+- `scrollWidth <= clientWidth + 1` and `scrollHeight <= clientHeight + 1`. Clipped overflow
+  (`hidden`/`clip`) and *visible* overflow are counted separately — the second bucket is the one
+  that catches the keycap bug, whose glyphs spilled rather than being cut. Text cut by a clipping
+  *ancestor* is a third bucket, measured from the text's own client rects, and `text-overflow:
+  ellipsis` (designed truncation, always paired with a `title`) is counted apart from failure.
+- Occlusion at the text's own centre via `elementsFromPoint`, with two corrections the naive
+  version needs: pointer-events are forced on for the probe (a `pointer-events: none` overlay must
+  not be able to hide from the test what it hides on screen), and a candidate blocker only counts
+  if it really paints above — decided by z-index, then positioned-over-static, then document order
+  between the two branches under the common ancestor. Blockers with an opacity-0 or
+  visibility-hidden *ancestor* are not blockers (this is what the plate's four stacked state
+  glyphs are).
+- Skipped and counted rather than judged: `.sr-only` subtrees, text scrolled out of a scrolling
+  ancestor, text off-viewport, and nodes behind the modal scrim.
+
+**Falsification first**: with one keycap forced back to `width: 8px`, the sweep reports
+`spill: 1 — kbd "[" cw 8 sw 11`; restored, 0. The instrument catches the defect it is here for.
+
+| state | 960x640 | 1280x800 | 1440x900 | 1680x1050 | 1920x1080 | 2560x1440 | 3440x1440 |
+|---|---|---|---|---|---|---|---|
+| idle | 82 / **0** | 87 / **0** | 87 / **0** | 88 / **0** | 88 / **0** | 88 / **0** | 88 / **0** |
+| analyzing | 84 / **0** | 91 / **0** | 91 / **0** | 92 / **0** | 92 / **0** | 92 / **0** | 92 / **0** |
+| done | 104 / **0** | 115 / **0** | 115 / **0** | 116 / **0** | 116 / **0** | 116 / **0** | 116 / **0** |
+| offline | 105 / **0** | 121 / **0** | 121 / **0** | 122 / **0** | 122 / **0** | 122 / **0** | 122 / **0** |
+| overlay open | 141 / **0** | 189 / **0** | 189 / **0** | 190 / **0** | 190 / **0** | 190 / **0** | 190 / **0** |
+
+(text nodes checked / failures, all buckets. The overlay rows also carry 84-88 nodes behind the
+scrim, excluded. `analyzing` needed a 90-minute synthetic file — 16.8 s of real decode — to hold
+the state open long enough to resize into it; it was captured live in three passes, never faked.)
+
+**One state the matrix did not include found a sixth failure, so it is recorded here rather than
+being left for the next audit**: with the error bar up at 960x640, the desk gives back the strip it
+reserves (`--errbar-h` + 14) and the wave display lands at **33.5px**. The playhead readout and the
+deck legend are positioned against that floor and are cut by it — 9.5px and 8px of clipped glyphs.
+The panel's furniture gives up first, which is the rule this stylesheet already applies to the
+scrubber and the verdict gutter at short heights, and nothing becomes unknowable: the transport
+shows the same playhead time and the A/B switch names the same two decks. After: 0 failures with
+the bar up, and both readouts return the moment it is dismissed (display back to 85.5px).
+
+### 3. An 8-channel file no longer leaks a knob that does not exist here (C5)
+
+Built a real 7.1 WAV (`ffmpeg … pan=7.1`, 6 s, 48 kHz), loaded it, ran it, deleted it.
+
+Before: CHANNELS `8 ch` on a plain cell, PROCESS armed, and ten seconds later the engine's own
+sentence — *"Multi-channel audio with 8 channels is not supported without explicit split_speakers
+declaration."* `split_speakers` is a `channel_mode` value in the engine's config file, and the web
+API's `JobRequest` carries `input_path`, `profile` and `overwrite` and nothing else: there is no
+control on that screen, and no request the page could send, that would satisfy it. It was also long
+enough to be cut mid-word in both the status line and the run list.
+
+After, measured on the running engine:
+
+- the CHANNELS cell warns the moment the analysis lands, exactly as the sample-rate cell does:
+  `class="kv warn"`, a 10px glyph, and *"8 channels — this tool reads the file, but a run will be
+  refused. It cleans one voice at a time; fold the file down to mono or stereo first."*
+- the refusal is a designed kind (`channels`): status line **"Processing failed · 8-channel audio
+  is more than this tool takes"** (a whole thought, no ellipsis), error bar **CLIP REFUSED** +
+  *"“fixture-71.wav” carries 8 channels. This tool cleans one voice at a time — fold the file down
+  to mono or stereo and load that."*, run list **"8-channel audio is more than this tool takes"**.
+  The sentence fits uncut even at 960x640 (`.errbar .text` scrollWidth == clientWidth == 856).
+  The engine's words stay in `raw` for a bug report and nowhere else.
+- the ambiguous-stereo refusal, which leaks the same knob (`'dual_mono_same'`, `channel_mode`), is
+  answered the same way rather than left for the next audit to find.
+- PROCESS is **not** blocked, deliberately: the flag is advisory, like the rate flag, so a future
+  engine that folds 7.1 itself makes this a stale note rather than a wall.
+
+**A contrast failure this uncovered**, and it is the honest kind — the warn treatment was never on
+screen in any state the D2 sweeps captured, because every one of them had a 48 kHz mono clip in it.
+Measured on the shipped pixels: `.clipinfo .kv.warn .k` (the word "Channels") **2.29:1**, and the
+same shape on `.kv.bad .k` at **2.57:1**. Both keys now use the ramp colour every other key in that
+row already uses — **5.56:1** measured, against values at 12.69:1 (amber) and 5.88:1 (red) — and the
+state keeps being carried by the value's colour and the glyph beside it.
+
+### 4. A dead engine mid-job is now noticed in 9 ms, not 11 s (B6)
+
+The stream's death was evidence nobody was reading: `followJob` reported the disconnect, the store
+dimmed `streamConnected`, and then nothing happened until the 10 s heartbeat came round — a job in
+flight makes no other request, so there is no `TypeError` for `probeSoon` to classify. The SSE error
+path now calls a `probeNow()` that re-measures liveness on the spot. The healthy cadence is
+untouched at 10 s.
+
+Measured in a real headful Chrome (the pane's hidden tab aligns timers to ~1 s and cannot answer
+this question), instrumenting `EventSource`, `fetch` and the DOM, with the engine **SIGKILL**ed 3 s
+into a studio run:
+
+```
++8 ms   EventSource error, readyState 0
++8 ms   GET /api/health   (the probe this fix adds)
++9 ms   data-offline=true · offline banner painted · "Engine offline — Engine unreachable"
+```
+
+The previous health probe had gone out at **-4120 ms**, so the old path's next look would have been
+at +5880 ms — and the audit's ~11 s was the same mechanism with worse luck on the phase. (With a
+graceful `SIGTERM` the same run takes ~1.1 s end to end, because uvicorn keeps the stream open while
+it shuts down; that is the engine's exit taking the time, not the UI's noticing.)
+
+Terminal reconciliation is unchanged and was re-verified: bringing the engine back reconciles the
+phantom run to `failed` — plate reads **RETRY / Failed / Engine gone**, run list keeps it — and the
+error bar now reads **ENGINE GONE**, *"The engine stopped while this run was in flight, so it never
+finished. Nothing was written; press PROCESS to run it again."* That last string had no designed
+`kind`, so it fell to the generic branch that builds a headline by cutting the detail at 89
+characters: the status line and the run row both used to end on *"Nothing was writte…"*.
+
+### 5. The three smaller honesty fixes
+
+**The spectrum's REMOVED key was name-driven while the fill is value-driven.** The amber band is
+whatever survives a `destination-out` punch — the frequencies where the cleaned curve sits below the
+original — so a run that took nothing out paints no amber at all, while the key stayed lit and the
+canvas's accessible name kept promising "the removed energy between them". The renderer now answers
+`removedCoverage()` (measured in dB on the curves, so it is answerable before the panel is laid out;
+0.32 dB is the 0.6 px the hatch uses at the shipped plot height), and both the key and the name
+follow it. Measured on two real runs of the same clip:
+
+| run | coverage | key | canvas name |
+|---|---|---|---|
+| studio, 5/5 enhanced | 0.08 | `item removed on` | "…with the removed energy between them across 8% of the band" |
+| production, 0/6 enhanced | **0** | `item removed off` | "…Nothing was removed — the cleaned curve does not sit below the original anywhere…" |
+
+**The overview scrubber had no hover state at all** — `.dragging` and the focus ring, and zero
+pixels at rest, so its only affordance was `cursor: pointer`, which a keyboard or touch user never
+sees. Rule 2 at the top of `interaction.css` calls that a bug. It now takes the same answer as the
+verdict track directly beneath it (same kind of object: an inset well you drag along): one hairline
+of extra light around the glass, and the window you grab lifts. Measured in a real Chrome, hover on
+vs off — `.wave-overview` box-shadow gains `rgba(255,255,255,0.07) 0 0 0 1px`; the fit window's fill
+goes 0.03 → 0.06 and its ring 0.08 → 0.16; the zoomed (cyan) window goes fill 0.10 → 0.16, ring 0.45
+→ 0.62, glow 0.22/10px → 0.30/12px.
+
+**The error bar called everything an engine error.** `<b>Engine error</b>` was hardcoded, and the
+audit caught it publishing a *clipboard* permission failure as ENGINE ERROR. Every failure now
+arrives with its own source (`failureSource`, driven by the classification that already knew):
+Engine offline / Engine gone / Engine error / Engine refused / Clip refused / Version mismatch /
+Access refused / Clipboard blocked / Busy / Waveform renderer / App error. Verified live: the copy
+button in an unfocused tab now reads **CLIPBOARD BLOCKED** *"The browser refused clipboard access."*;
+a corrupt WAV reads **CLIP REFUSED**; an 8-channel run reads **CLIP REFUSED**; an interrupted run
+reads **ENGINE GONE**.
+
+**The favicon 404 was real, and the browser pane is why C4 missed it.** Proved rather than assumed,
+with two static servers on two origins serving the same page, one with the icon link stripped:
+
+```
+no icon declared →  "GET /favicon.ico HTTP/1.1" 404      (real Chrome, cold load)
+icon declared    →  zero favicon requests
+```
+
+The icon is an inline SVG data URI in `index.html` — five bars in the product's two colours, amber
+ORIGINAL running into cyan CLEANED — so the build stays one folder of self-contained assets with no
+extra request to make. It decodes (`new Image()` resolves, 150x150 intrinsic).
+
+### Gates and non-regression
+
+`pnpm typecheck` clean, `pnpm build` green (343.42 kB / 107.06 kB gz JS, 83.87 kB / 15.96 kB gz CSS),
+`pnpm test:run` **292 passed in 12 files** (13 of them new, in `src/state/preflight.test.ts`, pinning
+the channel pre-flight, the two channel refusals, the interrupted-run headline and the error-bar
+source labels; with the `channels` branch removed 4 of them fail, so they bite), worker still a
+classic script (`grep -cE '\bimport\b|\bexport\b'` = **0**), axe-core 4.13.0 injected at run time
+over idle / overlay / done / done+scrolled / offline / 8-channel-warned / 8-channel-refused at 1440x900
+and 960x640: **0 violations**, the one `color-contrast` *incomplete* being the gradient wordmark as
+before, and axe absent from the bundle.
+
+Re-verified by measurement, not by eye: the view-linked verdict strip is still pixel-exact — the
+track shares the canvas's x and width to 0.000 px, segment geometry at 1:1 is within **0.04 px** of
+`(t - view.start)/(view.end - view.start)` and within **0.089 px** at 18x zoom after a wheel zoom;
+zoom/pan, FIT, the unit inspector, the `?` overlay, the analyser, the process meter, streaming
+analyze and the offline banner all still work; the focus ring set is unchanged (19 stops in a
+two-run done state = the audit's 18 plus the second history row, no positive `tabindex`).
+
+**Honest gaps from this pass.** (a) The focus *order* was re-counted structurally, not re-walked with
+real Tab presses — nothing in this pass adds or removes a focusable element, but the 18-stop cycle
+itself was last proved in iteration 5. (b) The occlusion test cannot see `::before`/`::after` fills,
+which `elementsFromPoint` never returns; a decorative pseudo painting over text would be missed by
+it (the differential-pixel method in iteration 5 is the one that catches those). (c) `analyzing` at
+1440 and 1920 needed a second and third pass because the 90-minute analyse finished mid-sweep once
+the file was in the OS cache; every cell in the table was captured with `.analyzing-row` on screen.
+(d) The contrast fix above was measured with the CSS-compositing method on the two nodes it changed,
+not with the full differential-pixel walker over every state.

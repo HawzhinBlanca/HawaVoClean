@@ -182,12 +182,21 @@ function Summary() {
       <div className="insp-empty-lead">
         <span className="caps">Run summary</span>
         <span className="msg">{hint}</span>
+        {/* B8 · each keycap travels with the words that explain it. Loose
+            children of one flex row could be split at any point and, worse,
+            shrunk: at 1280 and 2560 the lead column falls to ~102px and the
+            caps were crushed to 8px around an 11px glyph. A chunk is an
+            unbreakable, unshrinkable unit; the row wraps between chunks. */}
         <span className="keys">
-          <kbd>[</kbd>
-          <kbd>]</kbd>
-          <span>step units</span>
-          <kbd>?</kbd>
-          <span>all shortcuts</span>
+          <span className="chunk">
+            <kbd>[</kbd>
+            <kbd>]</kbd>
+            <span>step units</span>
+          </span>
+          <span className="chunk">
+            <kbd>?</kbd>
+            <span>all shortcuts</span>
+          </span>
         </span>
       </div>
       <div className="insp-stats">

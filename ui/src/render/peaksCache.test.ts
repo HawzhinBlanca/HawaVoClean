@@ -197,6 +197,24 @@ describe('capability probe', () => {
     expect(mod.peaksSupported()).toBe(false);
   });
 
+  // REGRESSION GUARD. The latch is one-way *within one engine*, but the cache is
+  // cleared when the page is pointed at a different clip/engine — and that engine
+  // may well have the route. An earlier build cleared the maps and left the latch
+  // down, so a single 404 disabled windowed peaks for the life of the page.
+  it('clearPeaksCache re-arms the latch so the next engine is probed again', async () => {
+    const dead = vi.fn().mockRejectedValue(new EngineError(404, 'not_found', 'no such route'));
+    const deadClient = { peaks: dead } as unknown as EngineClient;
+    expect(await mod.loadPeaks(deadClient, '/a.wav', 0, 1, 800)).toBeNull();
+    expect(mod.peaksSupported()).toBe(false);
+
+    mod.clearPeaksCache();
+    expect(mod.peaksSupported()).toBe(true);
+
+    const { client, peaks } = stubClient();
+    expect(await mod.loadPeaks(client, '/b.wav', 0, 1, 800)).not.toBeNull();
+    expect(peaks).toHaveBeenCalledTimes(1); // it really asked, not just flipped a flag
+  });
+
   it('does not disable itself on a server fault or an abort', async () => {
     const abort = new DOMException('Aborted', 'AbortError');
     const peaks = vi.fn().mockRejectedValue(abort);

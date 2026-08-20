@@ -368,7 +368,9 @@ export function WaveformDisplay() {
     canvasRef.current = canvas;
     const host = new WaveformHost(canvas, {
       onReady: (ok) => setGlOk(ok),
-      onError: (m) => setError(`Waveform renderer: ${m}`),
+      // The label is the source, not a prefix inside the sentence: this one
+      // is the renderer in this page, not the engine.
+      onError: (m) => setError(m, 'Waveform renderer'),
       // C1 · the renderer's own cost, on the panel next to the view state, so
       // "60 fps interaction" can be read off the running app instead of
       // inferred from a profiler trace taken once.

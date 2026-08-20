@@ -1410,6 +1410,47 @@ kbd {
   gap: var(--pad-3);
 }
 
+/* A deck that could not be played, said under the switch it is about.
+ *
+ * It is not the red error bar. Nothing has just gone wrong with the engine —
+ * a file this run left behind is not there any more — so this is a standing
+ * caution about what the transport can offer, drawn as an inset amber plate
+ * and kept until a deck is asked for again. It spans the transport's three
+ * columns rather than living in one of them, because the sentence is about
+ * the whole control and a wrapped column would push the clock off the row. */
+.deckfault {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: linear-gradient(180deg, rgba(255, 179, 71, 0.1), rgba(255, 179, 71, 0.06));
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 179, 71, 0.26),
+    inset 0 1px 0 0 rgba(0, 0, 0, 0.35);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--fg-2);
+}
+
+.deckfault svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--amber);
+}
+
+.deckfault b {
+  display: block;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--amber-2);
+  margin-bottom: 2px;
+}
+
 .playbtn {
   width: 34px;
   height: 34px;
@@ -1761,15 +1802,31 @@ kbd {
 }
 
 /* ---- empty state: the run at a glance */
+/* B8 · the two halves wrap as wholes instead of crushing each other.
+ *
+ * This was `grid-template-columns: minmax(0, 1fr) auto`, which hands the stat
+ * row its whole min-content width and gives the lead whatever is left. At
+ * 1280x800 and at 2560x1440 what was left measured 114px and 102px against a
+ * hint that needs ~190: the keycaps were shrunk to clientWidth 8 around an
+ * 11px glyph, so "[", "]" and "?" spilled out of their pills, and "step units"
+ * (52px of text) was squeezed to 26 and wrapped into them. The widths in
+ * between were fine, which is exactly how a shrink bug hides.
+ *
+ * Flex with a basis equal to the hint's natural width makes the stats drop to
+ * their own line at the point where the pair stops fitting, and nothing inside
+ * either half ever shrinks below its content.
+ */
 .insp-empty {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
+  justify-content: space-between;
+  gap: 10px 14px;
 }
 
 .insp-empty-lead {
   display: flex;
+  flex: 1 1 200px;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
@@ -1782,18 +1839,29 @@ kbd {
 
 .insp-empty-lead .keys {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: 3px 12px;
   font-size: var(--fs-label);
   color: var(--fg-4);
 }
 
-.insp-empty-lead .keys span {
-  margin-right: 6px;
+/* A keycap and the words it means are one object: they wrap together, they
+   never wrap *between* themselves, and neither of them shrinks. */
+.insp-empty-lead .keys .chunk {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.insp-empty-lead .keys .chunk > * {
+  flex: none;
 }
 
 .insp-stats {
   display: flex;
+  flex: 0 0 auto;
   gap: 8px;
 }
 

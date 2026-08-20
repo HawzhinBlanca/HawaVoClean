@@ -5,11 +5,25 @@ import { EngineClient, EngineError } from '../api/client';
 import { followJob, isTerminal } from '../api/sse';
 import type { AudioAnalysis, JobStatus, Profile } from '../api/types';
 import { reportTxtPath } from '../api/types';
-import { getPlayer } from '../audio/player';
+import { getPlayer, type DeckFault } from '../audio/player';
 import { getBridge } from '../bridge';
 import { waveView } from '../render/viewWindow';
-import { classifyFailure, installFailureNet, isCancellation, type UiFailure } from './errors';
-import { getState, useStore, type HistoryEntry, type JobInfo, type SourceInfo } from './store';
+import {
+  classifyFailure,
+  failureSource,
+  installFailureNet,
+  isCancellation,
+  type UiFailure,
+} from './errors';
+import {
+  getState,
+  useStore,
+  type ArtifactState,
+  type DeckFaultInfo,
+  type HistoryEntry,
+  type JobInfo,
+  type SourceInfo,
+} from './store';
 
 /**
  * B6 · health cadence.
@@ -50,7 +64,9 @@ function describeError(e: unknown, name?: string): string {
 function reportFailure(f: UiFailure, statusPrefix?: string): void {
   if (isCancellation(f)) return;
   const st = getState();
-  st.setError(f.detail);
+  // The bar's label is the failure's own source, never a constant: see
+  // `failureSource` in state/errors.ts.
+  st.setError(f.detail, failureSource(f));
   st.setStatus(statusPrefix ? `${statusPrefix} · ${f.headline}` : f.headline);
 }
 
@@ -123,6 +139,29 @@ export function rateWarning(sampleRate: number): string | null {
     return `${khz(sampleRate)} is below this tool’s range — it reads the file, but a run will be refused. ${khz(PIPELINE_MIN_RATE_HZ)} is the minimum.`;
   }
   return null;
+}
+
+/**
+ * C5 · the channel layouts the *pipeline* will take, which — exactly like the
+ * sample rates above — are not the layouts `/api/analyze` will take.
+ *
+ * Measured against the running engine: a 7.1 WAV analyses happily (200,
+ * `channels: 8`) and the run then fails with "Multi-channel audio with 8
+ * channels is not supported without explicit split_speakers declaration."
+ * The sample-rate case had a warning on its cell and this one did not, so an
+ * eight-channel file looked ordinary all the way up to a refusal it could not
+ * have predicted. `classifyFailure` owns the refusal (state/errors.ts); this
+ * owns the warning that comes ten seconds earlier.
+ *
+ * Advisory only, like the rate flag: it never blocks PROCESS, so if the engine
+ * ever learns to fold a 7.1 mix down itself the worst case is a stale note.
+ */
+export const PIPELINE_MAX_CHANNELS = 2;
+
+/** Why this clip's channel count will be refused, or null if it will not. */
+export function channelWarning(channels: number): string | null {
+  if (!Number.isFinite(channels) || channels <= PIPELINE_MAX_CHANNELS) return null;
+  return `${channels} channels — this tool reads the file, but a run will be refused. It cleans one voice at a time; fold the file down to mono or stereo first.`;
 }
 
 export function baseName(path: string): string {
@@ -205,6 +244,8 @@ async function probeEngine(): Promise<void> {
       getState().setStatus(`Engine ready · v${health.version}`);
     } else if (wasDown || restarted) {
       getState().setStatus(`Engine back · v${health.version}`);
+      retryFaultedDecks();
+      retryStrandedAnalysis();
     }
     autoloadFromQuery();
     if (wasDown || restarted) await resumeAfterReconnect(client);
@@ -228,6 +269,19 @@ function probeSoon(e: unknown): void {
   const looksDead =
     e instanceof TypeError || (e instanceof EngineError && (e.status === 0 || e.status >= 500));
   if (!looksDead) return;
+  probeNow();
+}
+
+/**
+ * The same re-measurement, for evidence that is not an exception.
+ *
+ * A job in flight makes no requests of its own — the SSE stream is the only
+ * thing on the wire — so when the engine dies mid-run there is no `TypeError`
+ * for `probeSoon` to classify. The stream simply ends. That is evidence, and
+ * this is how it gets used: probe now, on the beat the stream died, instead of
+ * waiting out the heartbeat.
+ */
+function probeNow(): void {
   if (getState().engineStatus !== 'ready') return;
   probeStep = 0;
   clearHealthTimer();
@@ -262,6 +316,7 @@ function installEngineWatchers(): void {
   // C5 · the net under every flow: anything that escapes a `catch` still ends
   // in the designed error bar rather than in a console nobody has open.
   installFailureNet((f) => reportFailure(f));
+  installDeckFaultNet();
   const wake = (): void => {
     if (getState().engineStatus !== 'ready') retryEngineNow();
   };
@@ -361,12 +416,144 @@ function requireClient(): EngineClient {
 }
 
 // ---------------------------------------------------------------------------
+// The A/B control is not allowed to state something untrue
+//
+// A deck that cannot be played used to be handled entirely inside the player:
+// it fell back to the other deck and said nothing. The store never heard about
+// it, so the A/B switch stayed lit on CLEANED with `aria-checked="true"` while
+// the ORIGINAL element was the one making sound — the screen asserting a fact
+// about the audio that was the opposite of the truth, with no error anywhere.
+// Every fallback is now an event, and these three lines are what happens to it:
+// the switch follows the player, the screen carries a sentence, and any
+// artefact the same failure condemns is marked unavailable with it.
+
+/** A deck's name, in the words the screen uses. */
+function deckName(deck: 'original' | 'cleaned'): string {
+  return deck === 'cleaned' ? 'cleaned master' : 'original';
+}
+
+/** The player's fault, as the sentence the transport shows. */
+function describeDeckFault(f: DeckFault): DeckFaultInfo {
+  const why =
+    f.kind === 'missing'
+      ? 'it is not on disk any more'
+      : f.kind === 'forbidden'
+        ? 'the engine refused to serve it'
+        : f.kind === 'network'
+          ? 'the engine could not be reached'
+          : 'nothing here could decode it';
+  const fell = f.fellBackTo ? `, so the A/B is playing the ${deckName(f.fellBackTo)}` : '';
+  return {
+    deck: f.deck,
+    headline: f.deck === 'cleaned' ? 'CLEANED DECK UNAVAILABLE' : 'ORIGINAL DECK UNAVAILABLE',
+    detail: `The ${deckName(f.deck)} could not be loaded — ${why}${fell}.`,
+  };
+}
+
+/** Is this fault about the file the screen is currently showing? */
+function faultIsCurrent(f: DeckFault): boolean {
+  const st = getState();
+  const client = st.client;
+  if (!client) return false;
+  const path = f.deck === 'cleaned' ? st.cleanedPath : (st.source?.path ?? null);
+  return Boolean(path) && client.fileUrl(path as string) === f.url;
+}
+
+let deckFaultNetInstalled = false;
+function installDeckFaultNet(): void {
+  if (deckFaultNetInstalled) return;
+  deckFaultNetInstalled = true;
+  getPlayer().onFault((f) => {
+    // The switch follows the player unconditionally — even for a fault about a
+    // clip that is no longer on screen, `activeDeck` is the truth about what
+    // is audible and the control renders exactly that.
+    getState().setAbMode(getPlayer().activeDeck);
+    if (!faultIsCurrent(f)) return;
+    const st = getState();
+    const said = describeDeckFault(f);
+    st.setDeckFault(said);
+    st.setStatus(said.detail);
+    if (f.deck !== 'cleaned') return;
+    // A cleaned deck the engine says is not there is a master that cannot be
+    // downloaded either: the same fact, told once. The analysis goes with it —
+    // it describes a file that is not there, and leaving it in place would keep
+    // the waveform asking `/api/peaks` for a path that 404s.
+    if (f.kind === 'missing' || f.kind === 'forbidden') {
+      const reason =
+        f.kind === 'missing'
+          ? 'The cleaned master is no longer on disk — it was moved or deleted after the run.'
+          : 'The engine refused to serve the cleaned master.';
+      st.setCleaned(null, st.cleanedPath);
+      markArtifacts({ master: false, reason });
+    }
+  });
+}
+
+/**
+ * Patch the on-screen run's artefact availability, and record the same answer
+ * on its history row so the run list stops offering what is not there.
+ */
+function markArtifacts(patch: Partial<ArtifactState> & { reason: string }): void {
+  const st = getState();
+  const cur = st.artifacts;
+  const next: ArtifactState = {
+    master: patch.master ?? cur?.master ?? true,
+    json: patch.json ?? cur?.json ?? true,
+    txt: patch.txt ?? cur?.txt ?? true,
+    reason: patch.reason,
+  };
+  st.setArtifacts(next);
+  if (st.currentRunId) st.patchHistory(st.currentRunId, { artifacts: next });
+}
+
+/**
+ * B6 · a deck that failed because the engine was not answering is not a deck
+ * that is gone. When the engine comes back, ask for it again rather than
+ * leaving the switch greyed for the rest of the session.
+ */
+/**
+ * B6 · a clip stranded by an outage has to come back on its own.
+ *
+ * `classifyFailure` tells the user, in as many words, that a failed analysis
+ * "comes back on its own when it reconnects". Nothing made that true: the
+ * reconnect path resumed *jobs* only, so a clip whose analyze died with the
+ * engine sat at NO ANALYSIS for ever with PROCESS disabled and that sentence
+ * still on screen. Now the promise is kept.
+ */
+function retryStrandedAnalysis(): void {
+  const st = getState();
+  const source = st.source;
+  if (!source) return;
+  if (st.original) return; // already analysed — nothing stranded
+  if (isAnalyzing()) return; // a retry is already in flight
+  if (lastSourceFailure?.retryable !== true) return; // a refusal is not an outage
+  void loadSource(source);
+}
+
+function retryFaultedDecks(): void {
+  const st = getState();
+  const client = st.client;
+  if (!client) return;
+  const player = getPlayer();
+  let retried = false;
+  if (player.deckFault('original')?.kind === 'network' && st.source) {
+    player.load('original', client.fileUrl(st.source.path));
+    retried = true;
+  }
+  if (player.deckFault('cleaned')?.kind === 'network' && st.cleanedPath && st.cleaned) {
+    player.load('cleaned', client.fileUrl(st.cleanedPath));
+    retried = true;
+  }
+  if (retried) st.setDeckFault(null);
+}
+
+// ---------------------------------------------------------------------------
 // Source selection + analysis
 
 export async function loadSource(source: SourceInfo): Promise<void> {
   const st = getState();
   if (st.job && st.job.status && !isTerminal(st.job.status.state)) {
-    st.setError('A job is still running — cancel it before loading another clip.');
+    st.setError('A job is still running — cancel it before loading another clip.', 'Busy');
     return;
   }
   stopFollow?.();
@@ -741,7 +928,7 @@ function onJobStatus(status: JobStatus): void {
       new EngineError(400, status.error?.code ?? 'job_failed', jobFailureMessage(status)),
       st.source?.name ?? baseName(status.input_path || ''),
     );
-    st.setError(f.detail);
+    st.setError(f.detail, failureSource(f));
     st.setStatus(`Processing failed · ${f.headline}`);
     recordRun(status, 'failed');
   } else if (status.state === 'cancelled') {
@@ -816,8 +1003,53 @@ function followFrom(client: EngineClient, jobId: string): void {
     onConnectionChange: (connected) => {
       const cur = getState();
       if (cur.job && cur.job.id === jobId) cur.patchJob({ streamConnected: connected });
+      // B6 · a stream that drops mid-job is the earliest evidence there is
+      // that the engine may be gone — earlier than any request we would
+      // otherwise make, because a running job makes none. Measured before
+      // this line: killing the engine 3 s into a run left RUNNING / 22% /
+      // "Enhancing unit 2/5" on screen for ~11 s, because the only thing that
+      // noticed was the 10 s heartbeat. The stream's own death now re-measures
+      // liveness on the spot; if the engine is in fact fine (a proxy hiccup,
+      // a laptop lid) the probe answers `ok`, nothing changes, and `followJob`
+      // reconnects as it always did. The healthy cadence is untouched.
+      if (!connected) probeNow();
     },
   });
+}
+
+/**
+ * `…_studio.wav` -> `…_studio-2.wav`, and never onto a name this session has
+ * already used. A trailing `-N` is replaced rather than stacked, so a fourth
+ * run is `-4`, not `-2-3-4`.
+ */
+function bumpOutputPath(base: string, taken: ReadonlySet<string>): string {
+  const stem = base.replace(/\.wav$/i, '').replace(/-\d+$/, '');
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${stem}-${n}.wav`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${stem}-${Date.now()}.wav`;
+}
+
+/**
+ * The output path this run should be given, or null to let the engine name it.
+ *
+ * The engine's default is `<clip>_studio.wav` / `<clip>_clean.wav` beside the
+ * input, which is the right name and the one the first run of a profile keeps —
+ * so the common case sends no `output_path` at all and the naming rule stays
+ * the engine's, with no copy of it here to drift. Only when *this session* has
+ * already finished a run of the same profile on the same clip is a name chosen,
+ * and it is derived from that run's real output path (the engine's own answer,
+ * not a guess) with a suffix that avoids every path the session has used.
+ *
+ * Runs that did not finish claim nothing: a failed pass writes no master, so
+ * re-running after one gets the plain name back.
+ */
+function uniqueOutputPath(inputPath: string, profile: Profile): string | null {
+  const done = getState().history.filter((h) => h.outcome === 'done' && h.outputPath);
+  const prior = done.find((h) => h.inputPath === inputPath && h.profile === profile);
+  if (!prior) return null;
+  return bumpOutputPath(prior.outputPath, new Set(done.map((h) => h.outputPath)));
 }
 
 export async function startJob(): Promise<void> {
@@ -828,16 +1060,24 @@ export async function startJob(): Promise<void> {
   st.setCleaned(null, null);
   st.setReport(null);
   st.setCurrentRun(null);
+  st.setDeckFault(null);
+  st.setArtifacts(null);
   getPlayer().load('cleaned', null);
   getPlayer().setActive('original');
   st.setAbMode('original');
   const profile: Profile = st.profile;
   try {
     const client = requireClient();
+    // B5 · a second run of the same profile must not land on the first run's
+    // files. Left to the engine's default naming both write `<clip>_studio.wav`,
+    // and the older history row then shows its own cached report beside
+    // download links that hand over the newer run's bytes.
+    const output = uniqueOutputPath(st.source.path, profile);
     const res = await client.createJob({
       input_path: st.source.path,
       profile,
       overwrite: true,
+      ...(output ? { output_path: output } : {}),
     });
     const job = {
       id: res.job_id,
@@ -886,11 +1126,16 @@ export async function cancelJob(): Promise<void> {
  */
 export async function selectRun(jobId: string): Promise<void> {
   const st = getState();
-  if (st.currentRunId === jobId) return;
+  // Re-selecting the run already on screen is a no-op — except when its files
+  // were found missing, where it is the one gesture that means "look again".
+  // A file that came back (a volume remounted, an undo in Finder) otherwise
+  // needs the user to leave the run and return to it for no reason at all.
+  const recheck = Boolean(st.artifacts && !st.artifacts.master);
+  if (st.currentRunId === jobId && !recheck) return;
   const entry = st.history.find((h) => h.jobId === jobId);
   if (!entry) return;
   if (st.job && st.job.status && !isTerminal(st.job.status.state)) {
-    st.setError('A job is still running — cancel it before opening another run.');
+    st.setError('A job is still running — cancel it before opening another run.', 'Busy');
     return;
   }
   stopFollow?.();
@@ -909,10 +1154,28 @@ export async function selectRun(jobId: string): Promise<void> {
   });
   st.setReport(entry.report);
   st.setCurrentRun(entry.jobId);
+  st.setDeckFault(null);
+  st.setArtifacts(null);
   st.resetView();
 
   const client = st.client;
-  const restored = entry.outcome === 'done' && Boolean(entry.outputPath);
+  const doneRun = entry.outcome === 'done' && Boolean(entry.outputPath);
+
+  // B5 · a cached analysis is not proof that the file behind it is still
+  // there. Before this check a restore reported "RESULT Complete 5/5" with an
+  // enabled Master WAV link that 404s, because `entry.cleaned` was present and
+  // nothing ever asked the engine about the *file*. Three HEADs answer that —
+  // no decode, no `/api/analyze`, so the zero-analyze property of a restore is
+  // untouched.
+  const avail = await verifyArtifacts(client, entry);
+  if (getState().currentRunId !== entry.jobId) return; // the user moved on
+  if (avail) {
+    getState().setArtifacts(avail);
+    getState().patchHistory(entry.jobId, { artifacts: avail });
+  }
+  // A run whose master is gone is not a run with a cleaned deck. Everything
+  // else about it — its report, its numbers, its units — is still true.
+  const restored = doneRun && (avail?.master ?? true);
 
   // Only the missing halves are re-fetched.
   let original = entry.original;
@@ -951,7 +1214,11 @@ export async function selectRun(jobId: string): Promise<void> {
 
   const cur = getState();
   cur.setOriginal(original);
-  cur.setCleaned(restored ? cleaned : null, restored ? entry.outputPath : null);
+  // The path is kept even when the master is gone — the artefact row still has
+  // to be able to name the file it cannot hand over — but the analysis is not,
+  // because that is what puts a cleaned deck on the waveform and keeps it
+  // asking `/api/peaks` for a path that answers 404.
+  cur.setCleaned(restored ? cleaned : null, doneRun ? entry.outputPath : null);
   if (client) {
     player.load('original', client.fileUrl(entry.inputPath));
     if (restored) {
@@ -964,9 +1231,79 @@ export async function selectRun(jobId: string): Promise<void> {
       cur.setAbMode('original');
     }
   }
+  // A run that finished but has no master left is not an error — the pass
+  // really did happen — so it is stated where the missing deck is, not in the
+  // red bar reserved for things that went wrong just now.
+  if (doneRun && !restored && avail) {
+    cur.setDeckFault({
+      deck: 'cleaned',
+      headline: 'CLEANED DECK UNAVAILABLE',
+      detail: avail.reason,
+    });
+  }
   // A re-read failure has already claimed the status line with the reason;
   // do not paper over it with the run's happy summary.
-  if (!cur.error) cur.setStatus(runStatusLine(entry));
+  if (cur.error) return;
+  cur.setStatus(doneRun && !restored && avail ? avail.reason : runStatusLine(entry));
+}
+
+/**
+ * B5 · which of a finished run's three files the engine can still serve.
+ *
+ * `HEAD /api/audio` is the whole check: same status as the GET, no body, no
+ * decode, and a 404 is a fact rather than a guess. Nothing here calls
+ * `/api/analyze`, so restoring a run stays free.
+ *
+ * Returns null when no answer could be had — no engine, or a run that never
+ * produced anything. Silence beats a false accusation, and an outage is
+ * already explained everywhere else on the screen.
+ */
+async function verifyArtifacts(
+  client: EngineClient | null,
+  entry: HistoryEntry,
+): Promise<ArtifactState | null> {
+  if (entry.outcome !== 'done' || !entry.outputPath) return null;
+  // A superseded run's files are not its own: a later run wrote over them, so
+  // its report and the bytes behind its links describe two different passes.
+  // That answer costs no request at all.
+  if (entry.supersededBy) {
+    return {
+      master: false,
+      json: false,
+      txt: false,
+      reason:
+        'A later run wrote over this run’s files — what is on disk now belongs to that run, not to this report.',
+    };
+  }
+  if (!client) return null;
+  const jsonPath = entry.reportPath || '';
+  const txtPath = jsonPath ? reportTxtPath(jsonPath) : '';
+  try {
+    const [master, json, txt] = await Promise.all([
+      client.exists(entry.outputPath),
+      jsonPath ? client.exists(jsonPath) : Promise.resolve(false),
+      txtPath ? client.exists(txtPath) : Promise.resolve(false),
+    ]);
+    if (master && json && txt) return { master, json, txt, reason: '' };
+    const gone = [
+      !master ? 'the cleaned master' : null,
+      !json ? 'the JSON report' : null,
+      !txt ? 'the .txt summary' : null,
+    ].filter((x): x is string => x !== null);
+    const list =
+      gone.length > 1 ? `${gone.slice(0, -1).join(', ')} and ${gone[gone.length - 1]}` : gone[0];
+    return {
+      master,
+      json,
+      txt,
+      reason: `This run’s files are not all where it left them — ${list} ${
+        gone.length > 1 ? 'are' : 'is'
+      } no longer on disk. The report on screen is this session’s own copy of the run.`,
+    };
+  } catch {
+    // The engine did not answer at all. That is an outage, not a deletion.
+    return null;
+  }
 }
 
 function runStatusLine(e: HistoryEntry): string {
@@ -1086,14 +1423,24 @@ export async function copyReportSummary(): Promise<boolean> {
   if (!line) return false;
   const ok = await writeClipboard(line);
   getState().setStatus(ok ? `Copied · ${line}` : 'Could not reach the clipboard');
-  if (!ok) getState().setError('The browser refused clipboard access.');
+  // Not an engine failure in any sense — the permission is the browser's, and
+  // the bar used to publish it as ENGINE ERROR.
+  if (!ok) getState().setError('The browser refused clipboard access.', 'Clipboard blocked');
   return ok;
 }
 
+export interface ArtifactLink {
+  /** null when this file cannot be handed over; `note` then says why. */
+  url: string | null;
+  name: string;
+  /** The explanation a disabled link carries, or null when it is live. */
+  note: string | null;
+}
+
 export interface Artifacts {
-  master: { url: string; name: string };
-  json: { url: string; name: string };
-  txt: { url: string; name: string };
+  master: ArtifactLink;
+  json: ArtifactLink;
+  txt: ArtifactLink;
 }
 
 /**
@@ -1101,17 +1448,31 @@ export interface Artifacts {
  * one file-serving route and it types each response from the file's own
  * extension, so the JSON report and the .txt sidecar come down it exactly like
  * the master does.
+ *
+ * `avail` is what the engine last said about those files (state/store.ts,
+ * `ArtifactState`). A link whose file is gone loses its `href` and keeps its
+ * name and its reason: a button that downloads a 404 is worse than a button
+ * that says why it cannot.
  */
-export function artifactsFor(outputPath: string | null, reportPath: string | null): Artifacts | null {
+export function artifactsFor(
+  outputPath: string | null,
+  reportPath: string | null,
+  avail?: ArtifactState | null,
+): Artifacts | null {
   const client = getState().client;
   if (!client || !outputPath) return null;
   const json = reportPath || '';
   const txt = json ? reportTxtPath(json) : '';
   if (!json) return null;
+  const link = (path: string, ok: boolean): ArtifactLink => ({
+    url: ok ? client.fileUrl(path) : null,
+    name: baseName(path),
+    note: ok ? null : (avail?.reason || 'This file is no longer where the run left it.'),
+  });
   return {
-    master: { url: client.fileUrl(outputPath), name: baseName(outputPath) },
-    json: { url: client.fileUrl(json), name: baseName(json) },
-    txt: { url: client.fileUrl(txt), name: baseName(txt) },
+    master: link(outputPath, avail?.master ?? true),
+    json: link(json, avail?.json ?? true),
+    txt: link(txt, avail?.txt ?? true),
   };
 }
 
@@ -1160,7 +1521,9 @@ export async function revealOutput(): Promise<void> {
 
 export function setAb(mode: 'original' | 'cleaned'): void {
   const player = getPlayer();
-  if (mode === 'cleaned' && !player.hasDeck('cleaned')) return;
+  // A deck that is out of service cannot be switched to, and asking for one is
+  // not an error — it is a control the screen has already greyed out.
+  if (!player.hasDeck(mode)) return;
   player.setActive(mode);
   getState().setAbMode(mode);
 }

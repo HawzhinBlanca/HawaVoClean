@@ -53,6 +53,20 @@ function Row({
   // LUFS Δ 4.2 s took 06:37:31"). The row is a button, so it gets one name
   // that is a sentence, and the fragments are marked as the decoration of that
   // sentence.
+  // A row that no longer owns its files says so on its face. Without this the
+  // list's worst failure is silent: the row shows its own cached report while
+  // its download links hand over a later run's bytes, so the screen and the
+  // file disagree and nothing on either says which one is the run.
+  const flag = entry.supersededBy
+    ? 'SUPERSEDED'
+    : entry.artifacts && !entry.artifacts.master
+      ? 'FILE GONE'
+      : null;
+  const flagWhy = entry.supersededBy
+    ? 'A later run wrote over this run’s files. The report here is this session’s own copy; the files on disk belong to that later run.'
+    : entry.artifacts?.reason
+      ? `${entry.artifacts.reason} Open this run again to check for them once more.`
+      : null;
   const say = [
     entry.inputName || 'clip',
     current ? 'currently on screen' : null,
@@ -63,6 +77,7 @@ function Row({
         ? `failed: ${entry.error || 'unknown error'}`
         : 'cancelled',
     `at ${clockOf(entry.at)}`,
+    flagWhy,
     blocked ? 'unavailable while the engine is offline' : null,
   ]
     .filter(Boolean)
@@ -73,6 +88,7 @@ function Row({
       className="hist-row"
       data-current={current ? 'true' : 'false'}
       data-outcome={entry.outcome}
+      data-flag={flag ? 'true' : undefined}
       aria-label={say}
       aria-current={current ? 'true' : undefined}
       aria-disabled={blocked ? 'true' : undefined}
@@ -82,6 +98,7 @@ function Row({
       }}
       title={
         blocked ??
+        flagWhy ??
         (entry.outcome === 'failed' && entry.error
           ? `${entry.inputName} — ${entry.error}`
           : `${entry.inputName} → ${entry.outputPath || 'no output'}`)
@@ -98,6 +115,7 @@ function Row({
             at the end of line 2. */}
         <span className="hist-name">{entry.inputName || 'clip'}</span>
         {current ? <span className="hist-now">ON SCREEN</span> : null}
+        {flag ? <span className="hist-flag">{flag}</span> : null}
       </span>
       <span className="hist-line2">
         <span className="hist-profile">{entry.profile}</span>

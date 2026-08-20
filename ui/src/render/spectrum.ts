@@ -51,6 +51,17 @@ const DB_MAX = 0;
 const LOG_SPAN = Math.log2(F_MAX / F_MIN);
 const DB_SPAN = DB_MAX - DB_MIN;
 
+/**
+ * How far below the original the cleaned curve has to sit before the REMOVED
+ * band is something you can actually see.
+ *
+ * The hatch pass uses 0.6 px of vertical separation. On the shipped plate the
+ * plot is ~180 px tall over a 96 dB range, so 0.6 px is ~0.32 dB — expressed
+ * in dB here because `removedCoverage()` is asked before the panel has
+ * necessarily been laid out, and the answer must not depend on that.
+ */
+const REMOVED_MIN_DB = 0.32;
+
 // AnalyserNode reports |X[k]| of a Blackman-windowed frame (coherent gain
 // ≈ 0.42, one-sided), so a full-scale sine lands near −13.5 dB. The engine's
 // long-term spectrum is referenced so that sine reads ≈ 0 dB; compensate.
@@ -549,6 +560,50 @@ export class SpectrumRenderer {
     this.proj[deck] = this.project(curve);
     this.rebuildDiff();
     this.invalidate();
+  }
+
+  /**
+   * How much of the frequency axis the REMOVED band actually covers, 0..1.
+   *
+   * The band is not a series anyone decides to draw: it is whatever survives
+   * the `destination-out` punch in `renderFills`, i.e. the frequencies where
+   * the cleaned curve sits below the original. A run that took nothing out —
+   * or one that came back louder everywhere, which is what a normalise-only
+   * pass looks like — paints no amber at all. The key beside the plot and the
+   * canvas's accessible name ask this, so that what they claim and what the
+   * pixels show are the same fact rather than two independent guesses.
+   *
+   * Measured in dB on the curves themselves rather than in pixels on the
+   * projection, so it is answerable the moment the data lands.
+   */
+  removedCoverage(): number {
+    const o = this.curves.original;
+    const c = this.curves.cleaned;
+    if (!o || !c) return 0;
+    const n = Math.min(o.freqs.length, o.db.length);
+    if (n < 2) return 0;
+    const sameGrid = c.freqs.length === o.freqs.length;
+    const at = (i: number): number => {
+      const dbO = o.db[i] ?? DB_MIN;
+      const dbC = sameGrid
+        ? (c.db[i] ?? DB_MIN)
+        : SpectrumRenderer.sampleAt(c, o.freqs[i] ?? F_MIN);
+      return dbO - dbC;
+    };
+    // Coverage is width on the log-frequency axis the plot draws, so a decade
+    // of removed hiss up top does not count for less than a decade down low.
+    let span = 0;
+    let prev = at(0);
+    for (let i = 1; i < n; i++) {
+      const cur = at(i);
+      if (prev > REMOVED_MIN_DB && cur > REMOVED_MIN_DB) {
+        const f0 = Math.max(F_MIN, Math.min(F_MAX, o.freqs[i - 1] ?? F_MIN));
+        const f1 = Math.max(F_MIN, Math.min(F_MAX, o.freqs[i] ?? F_MIN));
+        if (f1 > f0) span += Math.log2(f1 / f0);
+      }
+      prev = cur;
+    }
+    return Math.max(0, Math.min(1, span / LOG_SPAN));
   }
 
   setFocus(deck: SpectrumDeck): void {

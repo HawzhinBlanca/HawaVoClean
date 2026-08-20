@@ -204,6 +204,27 @@ export class EngineClient {
     });
   }
 
+  /**
+   * Is this file still where the run left it?
+   *
+   * `HEAD /api/audio` is the cheapest true answer the engine can give: same
+   * status and headers as the GET, no body, no decode. 404 means the file is
+   * gone; anything else that is not an error means it is there. A thrown
+   * `fetch` (the engine is not answering at all) is *not* an answer and is
+   * re-raised, because "the engine is offline" and "your master was deleted"
+   * are two different things and the UI says two different things about them.
+   */
+  async exists(path: string, signal?: AbortSignal): Promise<boolean> {
+    const res = await fetch(this.fileUrl(path), {
+      method: 'HEAD',
+      cache: 'no-store',
+      signal: signal ?? null,
+    });
+    if (res.status === 404) return false;
+    if (res.status >= 400) throw await parseError(res);
+    return true;
+  }
+
   /** Plain text of a served file (the human-readable report sidecar). */
   async fetchText(path: string, signal?: AbortSignal): Promise<string> {
     const res = await fetch(this.fileUrl(path), { signal: signal ?? null });

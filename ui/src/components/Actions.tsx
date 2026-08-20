@@ -101,18 +101,22 @@ export function Actions() {
   const cleanedPath = useStore((s) => s.cleanedPath);
   const source = useStore((s) => s.source);
   const job = useStore((s) => s.job);
+  // What the engine last said it can still serve of this run (state/store.ts).
+  const avail = useStore((s) => s.artifacts);
   // `client` is read so the artefact URLs recompute when the engine reconnects.
   useStore((s) => s.client);
   const engineReady = useStore((s) => s.engineStatus === 'ready');
-  const canReplace = hasResolve && !!cleanedPath && source?.origin === 'resolve' && !!source.mediaId;
+  const masterServed = !!cleanedPath && avail?.master !== false;
+  const canReplace = hasResolve && masterServed && source?.origin === 'resolve' && !!source.mediaId;
   // B6 · the files are served *by* the engine. With it gone the paths are still
   // known and still on screen — they are simply not fetchable this second, and
   // saying so beats handing over a link that downloads a connection refusal.
-  const artifacts = engineReady ? artifactsFor(cleanedPath, job?.reportPath ?? null) : null;
+  const artifacts = engineReady ? artifactsFor(cleanedPath, job?.reportPath ?? null, avail) : null;
   const offlineNote =
     'The engine is offline — the file is still on disk and this link comes back when it reconnects.';
   const missingNote = 'Available once a run has finished';
   const note = engineReady ? missingNote : offlineNote;
+  const goneNote = avail?.reason || 'This file is no longer where the run left it.';
 
   if (!hasResolve && isWeb) {
     // A browser cannot reveal files; it downloads them instead. All three come
@@ -123,19 +127,23 @@ export function Actions() {
           url={artifacts?.master.url ?? null}
           name={artifacts?.master.name ?? 'master.wav'}
           label="Master WAV"
-          title={artifacts ? `Download ${artifacts.master.name}` : note}
+          title={
+            artifacts
+              ? (artifacts.master.note ?? `Download ${artifacts.master.name}`)
+              : note
+          }
         />
         <ArtifactLink
           url={artifacts?.json.url ?? null}
           name={artifacts?.json.name ?? 'report.json'}
           label="JSON report"
-          title={artifacts ? `Download ${artifacts.json.name}` : note}
+          title={artifacts ? (artifacts.json.note ?? `Download ${artifacts.json.name}`) : note}
         />
         <ArtifactLink
           url={artifacts?.txt.url ?? null}
           name={artifacts?.txt.name ?? 'report.txt'}
           label="Summary .txt"
-          title={artifacts ? `Download ${artifacts.txt.name}` : note}
+          title={artifacts ? (artifacts.txt.note ?? `Download ${artifacts.txt.name}`) : note}
         />
         <CopySummary />
       </div>
@@ -146,7 +154,7 @@ export function Actions() {
     <div className="actions">
       {hasResolve ? (
         <>
-          <button className="btn small" disabled={!cleanedPath} onClick={() => void importToResolve()} title="Import the cleaned master into the media pool">
+          <button className="btn small" disabled={!masterServed} onClick={() => void importToResolve()} title={masterServed ? 'Import the cleaned master into the media pool' : cleanedPath ? goneNote : missingNote}>
             <IconImport size={14} />
             <span>Import to Resolve</span>
           </button>
@@ -161,7 +169,7 @@ export function Actions() {
           </button>
         </>
       ) : null}
-      <button className="btn small" disabled={!cleanedPath} onClick={() => void revealOutput()} title={cleanedPath ? 'Reveal the cleaned master in Finder' : missingNote}>
+      <button className="btn small" disabled={!masterServed} onClick={() => void revealOutput()} title={masterServed ? 'Reveal the cleaned master in Finder' : cleanedPath ? goneNote : missingNote}>
         <IconReveal size={14} />
         <span>Reveal in Finder</span>
       </button>

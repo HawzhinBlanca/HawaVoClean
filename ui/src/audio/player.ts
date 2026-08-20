@@ -36,9 +36,43 @@ export interface PlayerSnapshot {
   playing: boolean;
   time: number;
   duration: number;
+  /** The deck that is actually audible right now. */
+  active: Deck;
+  /** A deck that has been asked for but is still fetching, or null. */
+  pending: Deck | null;
+}
+
+/**
+ * Why a deck is out of service.
+ *
+ * `missing`    the engine answered 404 — the file is not there any more
+ * `forbidden`  the engine refused to serve it (403, path policy)
+ * `unreadable` the bytes arrived but no decoder would take them
+ * `network`    the engine could not be reached at all
+ */
+export type DeckFaultKind = 'missing' | 'forbidden' | 'unreadable' | 'network';
+
+/**
+ * A deck that was asked for and could not be played.
+ *
+ * This is the one thing the player cannot keep to itself. Falling back to the
+ * other deck silently is what made the A/B control state something untrue —
+ * the switch stayed lit on CLEANED while the ORIGINAL element was the one
+ * making sound — so every fallback is published here and the store mirrors it.
+ */
+export interface DeckFault {
+  deck: Deck;
+  /** The engine URL this deck was asked to hold when it failed. */
+  url: string;
+  kind: DeckFaultKind;
+  /** The HTTP status when the engine answered, else null. */
+  status: number | null;
+  /** The deck that took over, or null when there was nothing to fall back to. */
+  fellBackTo: Deck | null;
 }
 
 type Listener = (snap: PlayerSnapshot) => void;
+type FaultListener = (fault: DeckFault) => void;
 
 /**
  * `empty`   nothing playable on this deck (it may still hold a retired src)
@@ -58,6 +92,10 @@ const SYNC_TOLERANCE_S = 0.035;
  */
 const MEMORY_DECK_MAX_BYTES = 128 * 1024 * 1024;
 
+/** `MediaError.code` values, named (the spec's constants live on the class). */
+const MEDIA_ERR_ABORTED = 1;
+const MEDIA_ERR_NETWORK = 2;
+
 export class DualPlayer {
   private readonly els: Record<Deck, HTMLAudioElement>;
   private ctx: AudioContext | null = null;
@@ -75,7 +113,10 @@ export class DualPlayer {
   private epoch: Record<Deck, number> = { original: 0, cleaned: 0 };
   /** A `setActive` that arrived while the deck was still fetching. */
   private pendingActive: Deck | null = null;
+  /** The last published fault per deck, cleared when the deck is asked for again. */
+  private faults: Record<Deck, DeckFault | null> = { original: null, cleaned: null };
   private listeners = new Set<Listener>();
+  private faultListeners = new Set<FaultListener>();
   private raf = 0;
   private wantPlaying = false;
 
@@ -94,7 +135,22 @@ export class DualPlayer {
         }
       });
       el.addEventListener('loadedmetadata', () => this.emit());
-      el.addEventListener('error', () => this.emit());
+      // A media element that cannot play what it was given is a deck that is
+      // out of service, not a line in a log. The size probe in `attach` cuts
+      // off the common case (a 404 never reaches the element at all), but a
+      // deck above MEMORY_DECK_MAX_BYTES streams, and a stream that dies
+      // arrives here — so this is the path for *any* load failure the probe
+      // did not already own.
+      el.addEventListener('error', () => {
+        const code = el.error?.code ?? 0;
+        // MEDIA_ERR_ABORTED is ours: a src swap or a dispose. Everything else
+        // means this deck cannot make sound.
+        if (this.state[deck] !== 'empty' && code !== MEDIA_ERR_ABORTED) {
+          this.fail(deck, code === MEDIA_ERR_NETWORK ? 'network' : 'unreadable', null);
+          return;
+        }
+        this.emit();
+      });
       el.addEventListener('pause', () => {
         // The browser can pause an element on its own (media pipeline hiccup,
         // source swap). If we still intend to play, recover rather than
@@ -182,11 +238,27 @@ export class DualPlayer {
     return this.state[deck] === 'ready';
   }
 
+  /** The standing fault on a deck, or null when it has none. */
+  deckFault(deck: Deck): DeckFault | null {
+    return this.faults[deck];
+  }
+
+  /** Publishes every deck that goes out of service. See {@link DeckFault}. */
+  onFault(fn: FaultListener): () => void {
+    this.faultListeners.add(fn);
+    return () => {
+      this.faultListeners.delete(fn);
+    };
+  }
+
   load(deck: Deck, url: string | null): void {
     if (url === null) {
       this.retire(deck);
       return;
     }
+    // Asking for a deck again is a fresh attempt: whatever it failed at last
+    // time is no longer the current answer.
+    this.faults[deck] = null;
     if (this.wanted[deck] === url && this.state[deck] !== 'empty') return;
     this.wanted[deck] = url;
     // Re-selecting a run whose master is still on the element: revive it
@@ -211,6 +283,8 @@ export class DualPlayer {
    */
   private async attach(deck: Deck, url: string, gen: number): Promise<void> {
     let src = url;
+    /** The engine's own answer to the probe, or null when it never answered. */
+    let answered: number | null = null;
     try {
       // The size probe is a one-byte ranged GET rather than a HEAD: a HEAD
       // response carries a body stream that is never consumed, and Chromium
@@ -219,21 +293,37 @@ export class DualPlayer {
       // `Content-Range` carries the full length.
       const probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
       await probe.arrayBuffer();
-      const total = probe.headers.get('Content-Range')?.split('/')[1];
-      const len = Number(total ?? probe.headers.get('Content-Length') ?? Number.NaN);
-      if (probe.ok && Number.isFinite(len) && len > 0 && len <= MEMORY_DECK_MAX_BYTES) {
-        const res = await fetch(url, { cache: 'no-store' });
-        if (res.ok) {
-          const blob = await res.blob();
-          if (this.epoch[deck] === gen) src = URL.createObjectURL(blob);
+      answered = probe.status;
+      if (probe.ok) {
+        const total = probe.headers.get('Content-Range')?.split('/')[1];
+        const len = Number(total ?? probe.headers.get('Content-Length') ?? Number.NaN);
+        if (Number.isFinite(len) && len > 0 && len <= MEMORY_DECK_MAX_BYTES) {
+          const res = await fetch(url, { cache: 'no-store' });
+          if (res.ok) {
+            const blob = await res.blob();
+            if (this.epoch[deck] === gen) src = URL.createObjectURL(blob);
+          }
         }
       }
     } catch {
-      // Offline, refused, or a body we could not read: fall back to streaming.
-      // The element will surface its own error if the URL is truly bad.
+      // Nobody answered: offline, refused, or a body we could not read. That
+      // is not the engine saying no, so the element is still given the URL and
+      // its own error — if there is one — comes back through the `error`
+      // listener as a fault.
     }
     if (this.epoch[deck] !== gen) {
       if (src.startsWith('blob:')) URL.revokeObjectURL(src);
+      return;
+    }
+    // The engine answered and the answer was no. Handing the URL to the element
+    // anyway would give us a deck that reports itself ready and makes no sound
+    // — the whole bug this path exists to refuse.
+    if (answered !== null && answered >= 400) {
+      this.fail(
+        deck,
+        answered === 404 ? 'missing' : answered === 403 ? 'forbidden' : 'unreadable',
+        answered,
+      );
       return;
     }
     this.setSrc(deck, url, src);
@@ -275,14 +365,29 @@ export class DualPlayer {
    * silent, and reports itself unavailable until something is loaded onto it.
    */
   private retire(deck: Deck): void {
+    this.faults[deck] = null;
     if (this.state[deck] === 'empty' && this.wanted[deck] === null) return;
+    this.takeOutOfService(deck, false);
+    this.emit();
+  }
+
+  /**
+   * The shared body of "this deck stops making sound". Returns the deck that
+   * took over, or null when there was nothing to hand to.
+   *
+   * `keepPlaying` is false for a deliberate retire — a new clip is arriving and
+   * playback ends with the old one — and true for a fault, where the run
+   * carries on over whatever deck still works. That fallback is exactly the
+   * event the user has to be told about, so `fail` publishes it.
+   */
+  private takeOutOfService(deck: Deck, keepPlaying: boolean): Deck | null {
     this.epoch[deck] += 1; // supersede any in-flight attach
     this.wanted[deck] = null;
     this.state[deck] = 'empty';
     if (this.pendingActive === deck) this.pendingActive = null;
     const el = this.els[deck];
     el.pause();
-    if (deck === this.active && this.wantPlaying) {
+    if (deck === this.active && this.wantPlaying && !keepPlaying) {
       this.wantPlaying = false;
       this.pauseAll();
     }
@@ -297,9 +402,56 @@ export class DualPlayer {
     // `time` and `duration` read the active element.
     if (deck === this.active) {
       const other: Deck = deck === 'original' ? 'cleaned' : 'original';
-      if (this.state[other] === 'ready') this.setActive(other);
+      if (this.state[other] === 'ready') {
+        // `setActive` sample-locks the arriving deck to the leaving one. A deck
+        // that never loaded reads 0, and locking to that would throw the
+        // transport back to the top of the take — so the survivor's own
+        // position is taken before the switch and put back after it.
+        const keep = this.els[other].currentTime;
+        this.setActive(other);
+        if (Number.isFinite(keep) && Math.abs(this.els[other].currentTime - keep) > 0.001) {
+          this.els[other].currentTime = keep;
+        }
+        return other;
+      }
+      if (this.wantPlaying) {
+        this.wantPlaying = false;
+        this.pauseAll();
+      }
     }
+    return null;
+  }
+
+  /**
+   * A deck could not be played.
+   *
+   * Take it out of service, fall back to the deck that still works, and *say
+   * so*. Before this existed the fallback happened silently: the A/B control
+   * stayed lit on CLEANED, `aria-checked` stayed true, and the ORIGINAL element
+   * was the one making sound. A player that quietly swaps decks is a player
+   * that makes the screen lie, so the swap is now an event.
+   */
+  private fail(deck: Deck, kind: DeckFaultKind, status: number | null): void {
+    const already = this.faults[deck];
+    if (already && already.kind === kind && this.state[deck] === 'empty') return;
+    // Read before `takeOutOfService` clears it: the fault has to name the file
+    // it is about, so a listener can tell a stale answer from a live one.
+    const url = this.wanted[deck] ?? this.attached[deck] ?? '';
+    // Whatever the element is holding, it is not something this deck can play.
+    this.attached[deck] = null;
+    // "Heading here" covers both shapes of the same request: the deck is live,
+    // or a `setActive` is waiting on its fetch. Either way the transport was on
+    // its way to this deck, so whatever it ends up on instead is a fallback the
+    // user has to be told about.
+    const wasHeadingHere = this.active === deck || this.pendingActive === deck;
+    const other: Deck = deck === 'original' ? 'cleaned' : 'original';
+    const switched = this.takeOutOfService(deck, true);
+    const fellBackTo =
+      switched ?? (wasHeadingHere && this.state[other] === 'ready' ? other : null);
+    const fault: DeckFault = { deck, url, kind, status, fellBackTo };
+    this.faults[deck] = fault;
     this.emit();
+    for (const fn of this.faultListeners) fn(fault);
   }
 
   setActive(deck: Deck): void {
@@ -403,7 +555,16 @@ export class DualPlayer {
   }
 
   snapshot(): PlayerSnapshot {
-    return { playing: this.playing, time: this.time, duration: this.duration };
+    return {
+      playing: this.playing,
+      time: this.time,
+      duration: this.duration,
+      // The A/B control renders these two, not its own idea of what is on:
+      // `active` is the deck making sound and `pending` is the deck it has
+      // been asked to arrive at. Neither can drift from the player.
+      active: this.active,
+      pending: this.pendingActive,
+    };
   }
 
   subscribe(fn: Listener): () => void {
@@ -458,6 +619,8 @@ export class DualPlayer {
   dispose(): void {
     this.stopTicker();
     this.listeners.clear();
+    this.faultListeners.clear();
+    this.faults = { original: null, cleaned: null };
     for (const deck of ['original', 'cleaned'] as const) {
       const el = this.els[deck];
       this.epoch[deck] += 1;

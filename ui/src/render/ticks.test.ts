@@ -188,6 +188,27 @@ describe('formatters', () => {
     expect(formatTimeShort(65.4)).toBe('1:05');
   });
 
+  // REGRESSION GUARD. An earlier build split the minute off first and rounded
+  // the seconds remainder on its own — so 119.6 s printed `1:60`, a clock
+  // reading that does not exist, and 59.6 s printed `60s`. The fix rounds to
+  // whole seconds FIRST and only then splits; these cases are the difference.
+  it('formatTimeShort carries a rounded-up remainder into the minute', () => {
+    expect(formatTimeShort(119.6)).toBe('2:00');
+    expect(formatTimeShort(179.5)).toBe('3:00');
+    expect(formatTimeShort(59.6)).toBe('1:00');
+    expect(formatTimeShort(3599.7)).toBe('60:00');
+    expect(formatTimeShort(119.4)).toBe('1:59'); // control: nothing to carry
+  });
+
+  it('formatTimeShort never prints a sixtieth second, anywhere in 10 minutes', () => {
+    for (let i = 0; i <= 6000; i++) {
+      const t = i / 10;
+      const out = formatTimeShort(t);
+      expect(out, `t=${t.toFixed(1)}`).not.toMatch(/:60$/);
+      expect(out, `t=${t.toFixed(1)}`).not.toBe('60s');
+    }
+  });
+
   it('formatSeconds shows more digits the deeper the zoom', () => {
     expect(formatSeconds(12.3456789, 120)).toBe('12.3 s');
     expect(formatSeconds(12.3456789, 12)).toBe('12.35 s');

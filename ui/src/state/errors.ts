@@ -27,6 +27,9 @@ export type FailureKind =
   | 'no-audio'
   | 'rate-high'
   | 'rate-low'
+  | 'channels'
+  | 'stereo-ambiguous'
+  | 'interrupted'
   | 'too-large'
   | 'bad-response'
   | 'engine-fault'
@@ -207,6 +210,65 @@ export function classifyFailure(e: unknown, name?: string): UiFailure {
         retryable: false,
       };
     }
+    /*
+     * C5 · the layouts this pipeline cannot take, said without naming a knob
+     * that does not exist here.
+     *
+     * The engine refuses an 8-channel file with "Multi-channel audio with 8
+     * channels is not supported without explicit split_speakers declaration."
+     * `split_speakers` is a `channel_mode` value in the engine's config file;
+     * the web API's JobRequest carries `input_path`, `profile` and `overwrite`
+     * and nothing else, so there is no control on this screen — and no request
+     * this page could send — that would satisfy that sentence. Printing it put
+     * the one word that sounds like the answer in front of the user and then
+     * offered no way to type it, and it was long enough to be cut mid-word in
+     * both the status line and the run list.
+     *
+     * What is actually true: this tool cleans one voice at a time, and it will
+     * not guess which of eight channels carry it. That is a fold-down, and a
+     * fold-down is something the user can do.
+     */
+    /*
+     * The run whose engine died under it. The status is synthesised in
+     * actions.ts with a sentence already written for a person, so the detail
+     * is that sentence — but with no `kind` of its own it fell through to the
+     * generic branch, which builds a headline by cutting the detail at 89
+     * characters. Both the status line and the run list therefore ended on
+     * "Nothing was writte…". A designed kind gives them a whole thought.
+     */
+    if (e.code === 'ENGINE_RESTARTED') {
+      return {
+        kind: 'interrupted',
+        code: e.code,
+        headline: 'The engine stopped mid-run',
+        detail: clean,
+        raw,
+        retryable: true,
+      };
+    }
+
+    const multi = /Multi-channel audio with (\d+) channels/i.exec(raw);
+    if (multi?.[1]) {
+      const n = multi[1];
+      return {
+        kind: 'channels',
+        code: e.code,
+        headline: `${n}-channel audio is more than this tool takes`,
+        detail: `${who} carries ${n} channels. This tool cleans one voice at a time — fold the file down to mono or stereo and load that.`,
+        raw,
+        retryable: false,
+      };
+    }
+    if (/ambiguous_stereo/i.test(raw)) {
+      return {
+        kind: 'stereo-ambiguous',
+        code: e.code,
+        headline: `${who}’s two channels are not one voice each`,
+        detail: `${who} is stereo, but its channels are neither the same signal nor one voice each — cleaning that as speech would smear the stereo image. Fold it to mono and load that.`,
+        raw,
+        retryable: false,
+      };
+    }
     if (/no audio stream found/i.test(raw)) {
       return {
         kind: 'no-audio',
@@ -274,6 +336,49 @@ export function classifyFailure(e: unknown, name?: string): UiFailure {
     raw,
     retryable: false,
   };
+}
+
+/**
+ * Where a failure came from, in two or three words — the error bar's label.
+ *
+ * The bar used to print `Engine error` over every sentence it was ever given,
+ * which was true for most of them and a lie for the rest: a clipboard
+ * permission the *browser* refused was published to the user as ENGINE ERROR,
+ * and so was a clip the engine read perfectly well and simply would not take.
+ * The classification already knows which is which; this is that knowledge in
+ * label form. Callers that do not go through `classifyFailure` pass their own.
+ */
+export function failureSource(f: UiFailure): string {
+  switch (f.kind) {
+    case 'offline':
+      return 'Engine offline';
+    case 'unauthorized':
+      return 'Access refused';
+    case 'missing':
+    case 'forbidden':
+    case 'unreadable':
+    case 'no-audio':
+    case 'rate-high':
+    case 'rate-low':
+    case 'channels':
+    case 'stereo-ambiguous':
+    case 'too-large':
+      // The engine is healthy and said no to this file. The clip is the news.
+      return 'Clip refused';
+    case 'interrupted':
+      // Not a refusal and not a fault: the process that owned the run left.
+      return 'Engine gone';
+    case 'engine-fault':
+      return 'Engine error';
+    case 'bad-response':
+      return 'Version mismatch';
+    case 'cancelled':
+      return 'Cancelled';
+    default:
+      // 'unknown' with an engine code came off the wire; without one it was
+      // thrown in this page and calling it an engine error would be guessing.
+      return f.code === 'unexpected' ? 'App error' : 'Engine refused';
+  }
 }
 
 /** The one line the error bar shows. */

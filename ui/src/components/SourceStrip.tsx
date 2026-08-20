@@ -4,6 +4,7 @@ import {
   ACCEPTED_EXTENSIONS,
   ACCEPTED_SHORTLIST,
   cancelAnalysis,
+  channelWarning,
   cancelUpload,
   ingestDataTransfer,
   ingestFile,
@@ -233,6 +234,11 @@ export function SourceStrip() {
   }, []);
 
   const rateNote = original ? rateWarning(original.sample_rate) : null;
+  // C5 · the same pre-flight the rate cell has had, for the other property of
+  // a clip this pipeline refuses. An 8-channel file used to sit here on a
+  // plain cell with PROCESS armed, and the only news it ever got was the
+  // failure ten seconds later.
+  const chanNote = original ? channelWarning(original.channels) : null;
 
   const onOpen = useCallback(() => {
     if (isWeb) inputRef.current?.click();
@@ -353,9 +359,16 @@ export function SourceStrip() {
                     {rateNote ? <IconWarn size={10} /> : null}
                   </span>
                 </span>
-                <span className="kv">
+                <span className={`kv${chanNote ? ' warn' : ''}`} title={chanNote ?? undefined}>
                   <span className="k">Channels</span>
-                  <span className="v">{original.channels === 1 ? 'Mono' : original.channels === 2 ? 'Stereo' : `${original.channels} ch`}</span>
+                  <span className="v">
+                    {original.channels === 1
+                      ? 'Mono'
+                      : original.channels === 2
+                        ? 'Stereo'
+                        : `${original.channels} ch`}
+                    {chanNote ? <IconWarn size={10} /> : null}
+                  </span>
                 </span>
               </>
             ) : analyzing ? (
