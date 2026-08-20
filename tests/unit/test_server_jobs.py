@@ -514,7 +514,7 @@ def test_runner_crash_marks_job_failed(tmp_path: Path) -> None:
     def boom(_record: JobRecord) -> None:
         raise RuntimeError("runner bug")
 
-    manager._run_job = boom  # type: ignore[method-assign]
+    manager._run_job = boom  # type: ignore[assignment]
     try:
         job_id = manager.submit(
             input_path=tmp_path / "in.wav",

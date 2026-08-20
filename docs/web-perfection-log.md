@@ -707,3 +707,27 @@ measured). But it refuted enough to matter, so **A6, B5, B6, C4, C5 and D4 are u
 17. The **overview scrubber has no hover state** (0 pixels change) despite being a draggable Tab stop.
 18. `Footer.tsx` hardcodes `<b>Engine error</b>` and reuses it for non-engine failures — a clipboard
     permission denial surfaced as "ENGINE ERROR".
+
+### Orchestrator follow-up on the audit's E3 finding (measured, 2026-08-20)
+
+The audit reported AAC windows drifting up to 70 samples (1.46 ms) at t=94 s **against the unseeked
+full decode**. I checked the question that actually decides whether E3 is honestly ticked — whether
+the *display* is self-consistent and playhead-aligned — and it is:
+
+- `/api/analyze` overview vs `/api/peaks` over the identical whole-file span, 1200 buckets:
+  **mean |diff| 0.00008, max 0.025, zero buckets over 0.05.** Same timeline.
+- The same 2 s span near **t=89-91 s** (the audit's worst-drift region) requested two different ways —
+  once directly at 1143 buckets, once as a slice of an 80-94 s window at 8000 buckets — cross-correlates
+  to **best alignment at lag = 0 buckets** (bucket = 1.750 ms), mean |diff| 0.00637, 34/1143 buckets
+  over 0.05 (bucket-grid phase, not position).
+
+So `/api/peaks`, the playhead and `<audio>` share one timeline and agree with each other: what you see
+at any zoom is where the playhead is. The outlier is the **unseeked full decode**, which is what the
+*pipeline* runs on — so the report's unit times sit on a timeline that diverges from the display's by
+up to 1.46 ms at the end of a 95 s file. That is sub-pixel at normal zoom and about 35 px at 1:1, and
+it only matters if you zoom to 1:1 exactly on a unit boundary near the end of a long lossy file.
+
+**E3 stays ticked** — its requirement (deep zoom shows true samples, not interpolated buckets) is met
+and the display is coherent. The cross-timeline gap is recorded here as a known, bounded limitation
+rather than claimed away, and the log's earlier "bit-exact against the full decode" wording was
+overstated: it is bit-exact *after* a position-dependent shift.

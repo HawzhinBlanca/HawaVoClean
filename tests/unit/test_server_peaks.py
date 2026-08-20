@@ -443,12 +443,16 @@ def test_probe_cache_serves_repeat_windows_and_notices_a_rewrite(
     """Zoom is a burst of windows over one file; the whole-file SHA-256 inside
     ``probe_audio`` must not be paid per gesture. It must still be paid the
     moment the file on disk changes."""
+    from hawavoclean.audio.probe import probe_audio as real
     from hawavoclean.server import analysis
 
     wav = _click_train(work / "clicks.wav")
     analysis._probe_cache.clear()
     calls = 0
-    real = analysis.probe_audio
+    # ``analysis`` re-imports this from ``hawavoclean.audio.probe``; take the
+    # function from where it is defined so the capture is the same object
+    # without reaching through a module that does not re-export it.
+    assert analysis.probe_audio is real  # type: ignore[attr-defined]
 
     def counted(*args: Any, **kwargs: Any) -> Any:
         nonlocal calls
@@ -523,12 +527,14 @@ def test_a_stream_that_ends_early_reports_what_it_actually_covered(
     """A container can promise more samples than it delivers. The response then
     has to describe the span that was really read — no empty tail buckets, and
     an ``end_s`` the client can trust."""
+    from hawavoclean.audio.decode import decode_audio_window as real
     from hawavoclean.audio.types import AudioBuffer
     from hawavoclean.server import analysis
 
     wav = _click_train(work / "clicks.wav")
     monkeypatch.setattr(analysis, "WINDOW_CHUNK_SAMPLES", 5000)
-    real = analysis.decode_audio_window
+    # Same object ``analysis`` holds, taken from its defining module (see above).
+    assert analysis.decode_audio_window is real  # type: ignore[attr-defined]
 
     def truncating(probe: Any, start_s: float, end_s: float, **kw: Any) -> AudioBuffer:
         buf = real(probe, start_s, end_s, **kw)

@@ -89,6 +89,7 @@ def client(work: Path) -> Iterator[TestClient]:
 
 def _wait_done(client: TestClient, job_id: str, timeout: float = 30.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
+    snap: dict[str, Any] = {}
     while time.monotonic() < deadline:
         snap = client.get(f"/api/jobs/{job_id}", headers=H).json()
         if snap["state"] in TERMINAL_STATES:

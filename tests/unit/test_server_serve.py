@@ -3,6 +3,7 @@ binding, token gate, clean exit on ``POST /api/shutdown``."""
 
 import contextlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from typing import Any
 import pytest
 
 import hawavoclean.cli as cli
+from hawavoclean import __version__
 from hawavoclean.errors import ExitCode, InvalidUserInputError
 from hawavoclean.server.app import _validate_loopback, bind_loopback_socket
 
@@ -45,7 +47,7 @@ def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
         ready = json.loads(line)
         assert ready["event"] == "ready"
         assert ready["pid"] == proc.pid
-        assert ready["version"] == cli.__version__
+        assert ready["version"] == __version__
         port = ready["port"]
         assert isinstance(port, int) and 1024 <= port <= 65535
         base = f"http://127.0.0.1:{port}"
@@ -197,7 +199,7 @@ def test_run_server_in_process_ready_line_health_and_shutdown(
                 break
         time.sleep(0.05)
     assert ready is not None, "no ready line"
-    assert ready["event"] == "ready" and ready["version"] == cli.__version__
+    assert ready["event"] == "ready" and ready["version"] == __version__
     base = f"http://127.0.0.1:{ready['port']}"
     status, body = _get(f"{base}/api/health", token="tok")
     assert status == 200 and body["ok"] is True
@@ -239,10 +241,10 @@ def test_schedule_hard_exit_and_redirect_helpers(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(threading, "Timer", FakeTimer)
     app_mod._schedule_hard_exit(0.7)
-    assert started[0][0] == 0.7 and started[0][1] is app_mod.os._exit and started[0][2] == (0,)
+    assert started[0][0] == 0.7 and started[0][1] is os._exit and started[0][2] == (0,)
     assert started[-1] == "started"
 
     calls: list[tuple[int, int]] = []
-    monkeypatch.setattr(app_mod.os, "dup2", lambda a, b: calls.append((a, b)))
+    monkeypatch.setattr(os, "dup2", lambda a, b: calls.append((a, b)))
     app_mod._redirect_stdout_to_stderr()  # under capture fileno() may raise: suppressed
     assert calls == [] or calls[0][0] == sys.stderr.fileno()

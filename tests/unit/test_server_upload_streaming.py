@@ -19,7 +19,7 @@ for a client that declares no length.
 from collections.abc import Iterator
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,6 +70,16 @@ def _uploads(work: Path) -> list[Path]:
 # --------------------------------------------- what Starlette actually does
 
 
+def _rolled_to_disk(spool: "SpooledTemporaryFile[bytes]") -> bool:
+    """Whether the spool has spilled onto disk.
+
+    ``SpooledTemporaryFile`` keeps that state in a private ``_rolled`` flag that
+    typeshed does not model, so it is read through ``Any`` — the behaviour under
+    test is exactly this flag, and asserting it must not cost the file its type.
+    """
+    return bool(cast(Any, spool)._rolled)  # noqa: SLF001 - the behaviour under test
+
+
 def test_starlette_spools_a_file_part_to_disk_above_one_mebibyte() -> None:
     """The engine's memory safety rests on this, so it is asserted rather than
     believed: the multipart parser gives each file part a spooled temp file
@@ -79,9 +89,9 @@ def test_starlette_spools_a_file_part_to_disk_above_one_mebibyte() -> None:
     assert MultiPartParser.spool_max_size == 1024 * 1024
     with SpooledTemporaryFile(max_size=MultiPartParser.spool_max_size) as spool:
         spool.write(b"x" * MultiPartParser.spool_max_size)
-        assert spool._rolled is False  # noqa: SLF001 - the behaviour under test
+        assert _rolled_to_disk(spool) is False
         spool.write(b"x")
-        assert spool._rolled is True  # noqa: SLF001
+        assert _rolled_to_disk(spool) is True
 
 
 def test_the_body_reaches_the_route_on_disk_not_in_memory(
