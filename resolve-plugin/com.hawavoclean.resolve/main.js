@@ -21,16 +21,22 @@
  *   HAWA_ENGINE_TIMEOUT_MS=N   override the 60 s ready timeout (tests only)
  */
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, session, protocol } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { fileURLToPath, pathToFileURL } = require('node:url');
 
 const PLUGIN_ID = 'com.hawavoclean.resolve';
 const APP_TITLE = 'HawaVoClean';
+const APP_SCHEME = 'hawa';
+const APP_ENTRY_URL = `${APP_SCHEME}://app/index.html`;
+// No `persist:` prefix: Electron guarantees an in-memory session. This keeps cookies, cache and
+// service workers out of Resolve's default session and discards the plugin session at process exit.
+const SESSION_PARTITION = 'hawavoclean-isolated';
 const ENGINE_READY_TIMEOUT_MS = positiveInt(process.env.HAWA_ENGINE_TIMEOUT_MS, 60_000);
 const RESOLVE_INIT_TIMEOUT_MS = 8_000;
 const SHUTDOWN_POST_TIMEOUT_MS = 1_000;
@@ -39,6 +45,38 @@ const QUIT_HARD_DEADLINE_MS = 10_000;
 const STDERR_TAIL_LINES = 80;
 const DEVTOOLS = process.env.HAWA_DEVTOOLS === '1';
 const SELFTEST = process.env.HAWA_SELFTEST === '1';
+const RUNTIME_EVIDENCE = Object.freeze({
+  electron: process.versions.electron || null,
+  chromium: process.versions.chrome || null,
+  node: process.versions.node || null,
+  v8: process.versions.v8 || null,
+});
+const securityEvents = {
+  blockedPermissions: 0,
+  blockedNavigations: 0,
+  blockedWindows: 0,
+  blockedRequests: 0,
+  blockedWebviews: 0,
+};
+
+// Must run before `ready`. The app scheme is standard so relative Vite assets resolve, secure so
+// browser APIs behave normally, and explicitly CORS-enabled to avoid the custom-protocol class of
+// cross-origin read flaws. Service workers and CSP bypass remain disabled.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: APP_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+      codeCache: true,
+      allowServiceWorkers: false,
+      bypassCSP: false,
+    },
+  },
+]);
 
 // Directories where common CLI tools (ffmpeg etc.) live on macOS but which are missing from
 // the minimal PATH a GUI-launched process inherits from Resolve.
@@ -52,6 +90,109 @@ function positiveInt(value, fallback) {
 function log(...args) {
   // Goes to the Electron main process stderr (visible when run standalone; Resolve discards it).
   console.error('[hawa-shell]', ...args);
+}
+
+function pathInside(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function isTrustedAppUrl(value) {
+  if (typeof value !== 'string' || !value) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === `${APP_SCHEME}:` && url.hostname === 'app' && url.pathname === '/index.html';
+  } catch {
+    return false;
+  }
+}
+
+function ipcSenderUrl(event) {
+  if (event.senderFrame && typeof event.senderFrame.url === 'string') return event.senderFrame.url;
+  return event.sender.getURL();
+}
+
+function isTrustedIpcSender(event) {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return false;
+  if (event.senderFrame && event.sender.mainFrame && event.senderFrame !== event.sender.mainFrame) return false;
+  return isTrustedAppUrl(ipcSenderUrl(event));
+}
+
+function requireTrustedIpcSender(event) {
+  if (!isTrustedIpcSender(event)) throw new Error('IPC sender is not the trusted HawaVoClean renderer.');
+}
+
+function trustedClipboardRequest(contents, permission, requestingUrl) {
+  return (
+    permission === 'clipboard-sanitized-write' &&
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    contents === mainWindow.webContents &&
+    isTrustedAppUrl(requestingUrl || contents.getURL())
+  );
+}
+
+function configureSessionSecurity() {
+  const appSession = session.fromPartition(SESSION_PARTITION);
+  appSession.protocol.handle(APP_SCHEME, (request) => {
+    try {
+      const url = new URL(request.url);
+      if (request.method !== 'GET' || url.hostname !== 'app') {
+        return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+      }
+      const decodedPath = decodeURIComponent(url.pathname);
+      if (decodedPath.includes('\0')) throw new Error('NUL in app path');
+      const candidate = path.resolve(__dirname, '.' + decodedPath);
+      const realRoot = fs.realpathSync(__dirname);
+      const realCandidate = fs.realpathSync(candidate);
+      if (!pathInside(realRoot, realCandidate) || !fs.statSync(realCandidate).isFile()) {
+        throw new Error('app path escaped plugin root');
+      }
+      return appSession.fetch(pathToFileURL(realCandidate).href);
+    } catch {
+      return new Response('not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+    }
+  });
+  appSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const allowed = trustedClipboardRequest(contents, permission, details && details.requestingUrl);
+    if (!allowed) {
+      securityEvents.blockedPermissions += 1;
+      log(`blocked permission ${permission}`);
+    }
+    callback(Boolean(allowed));
+  });
+  appSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
+    const url = (details && details.requestingUrl) || requestingOrigin || (contents && contents.getURL()) || '';
+    const allowed = trustedClipboardRequest(contents, permission, url);
+    if (!allowed) securityEvents.blockedPermissions += 1;
+    return Boolean(allowed);
+  });
+  if (typeof appSession.setDevicePermissionHandler === 'function') {
+    appSession.setDevicePermissionHandler(() => false);
+  }
+  appSession.webRequest.onBeforeRequest(
+    { urls: [`${APP_SCHEME}://*/*`, 'file://*/*', 'http://*/*', 'https://*/*'] },
+    (details, callback) => {
+      let allowed = false;
+      try {
+        const url = new URL(details.url);
+        if (url.protocol === `${APP_SCHEME}:`) {
+          allowed = url.hostname === 'app';
+        } else if (url.protocol === 'file:') {
+          allowed = pathInside(__dirname, fileURLToPath(url));
+        } else if (url.protocol === 'http:') {
+          allowed = url.hostname === '127.0.0.1' && Number(url.port) === engine.port;
+        }
+      } catch {
+        allowed = false;
+      }
+      if (!allowed) {
+        securityEvents.blockedRequests += 1;
+        log(`blocked renderer request to ${details.url}`);
+      }
+      callback({ cancel: !allowed });
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -627,7 +768,7 @@ function errorPageHtml(title, detail) {
   const cmd = engine.config ? engine.config.command.join(' ') : '(engine.json missing or invalid)';
   const cwd = engine.config ? engine.config.cwd : '';
   const tail = engine.stderrTail.length ? engine.stderrTail.join('\n') : '(no output on stderr)';
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(APP_TITLE)} — error</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${escapeHtml(APP_TITLE)} — error</title>
 <style>
   html,body{margin:0;background:#0e1013;color:#e6e8eb;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
   main{max-width:900px;margin:0 auto;padding:40px 32px}
@@ -689,35 +830,47 @@ function createWindow({ loadUi = true } = {}) {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
+      partition: SESSION_PARTITION,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
+      navigateOnDragDrop: false,
+      safeDialogs: true,
+      spellcheck: false,
     },
   });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
-  // Keep the UI inside the window: external links go to the system browser.
+  // This product has no trusted external-navigation surface. A compromised renderer must not
+  // turn shell.openExternal into a URL launcher, so every popup is denied without side effects.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
+    securityEvents.blockedWindows += 1;
+    log(`blocked new window to ${url}`);
     return { action: 'deny' };
   });
   // Deny-by-default navigation: the only renderer-initiated navigation allowed is a reload of
-  // the page that is already loaded. http(s) links open in the system browser; anything else
-  // (foreign file: URLs — e.g. a file dropped on a spot the UI does not handle — data:, custom
-  // schemes) is blocked so the privileged preload never attaches to unexpected content.
+  // the page that is already loaded. Foreign file:, http(s), data: and custom schemes are blocked
+  // so the privileged preload never attaches to unexpected content.
   const contents = mainWindow.webContents;
   contents.on('will-navigate', (event, url) => {
     if (url === contents.getURL()) return; // allow reload
     event.preventDefault();
-    if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
-    else log(`blocked navigation to ${url}`);
+    securityEvents.blockedNavigations += 1;
+    log(`blocked navigation to ${url}`);
+  });
+  contents.on('will-attach-webview', (event) => {
+    securityEvents.blockedWebviews += 1;
+    event.preventDefault();
   });
   if (DEVTOOLS) mainWindow.webContents.openDevTools({ mode: 'detach' });
 
   if (loadUi) {
     const indexHtml = path.join(__dirname, 'index.html');
     if (fs.existsSync(indexHtml)) {
-      mainWindow.loadFile(indexHtml).catch((err) => log(`loadFile failed: ${err.message}`));
+      mainWindow.loadURL(APP_ENTRY_URL).catch((err) => log(`app URL load failed: ${err.message}`));
     } else {
-      const html = `<!doctype html><html><head><meta charset="utf-8"><title>${APP_TITLE}</title></head>
+      const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${APP_TITLE}</title></head>
 <body style="margin:0;background:#0e1013;color:#e6e8eb;font:14px/1.5 -apple-system,Helvetica,Arial,sans-serif">
 <main style="max-width:760px;margin:0 auto;padding:48px 32px">
 <h1 style="font-size:20px;font-weight:600;margin:0 0 8px">UI bundle not found</h1>
@@ -737,15 +890,17 @@ function createWindow({ loadUi = true } = {}) {
 function registerIpc() {
   // The one synchronous call: preload needs `host` as a plain value at script-evaluation time.
   ipcMain.on('hawa:host', (event) => {
-    event.returnValue = host;
+    event.returnValue = isTrustedIpcSender(event) ? host : null;
   });
 
-  ipcMain.handle('hawa:engine:endpoint', async () => {
+  ipcMain.handle('hawa:engine:endpoint', async (event) => {
+    requireTrustedIpcSender(event);
     if (engine.failure) throw engine.failure;
     return engine.ready; // rejects with the failure Error if the engine never comes up
   });
 
   ipcMain.handle('hawa:files:pick', async (event) => {
+    requireTrustedIpcSender(event);
     const owner = BrowserWindow.fromWebContents(event.sender) || mainWindow || undefined;
     const result = await dialog.showOpenDialog(owner, {
       title: 'Choose an audio or video file',
@@ -760,16 +915,32 @@ function registerIpc() {
     return result.filePaths[0];
   });
 
-  ipcMain.handle('hawa:files:reveal', async (_event, filePath) => {
+  ipcMain.handle('hawa:files:reveal', async (event, filePath) => {
+    requireTrustedIpcSender(event);
     if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('revealInFinder: path must be an absolute path.');
     shell.showItemInFolder(filePath);
   });
 
-  ipcMain.handle('hawa:resolve:selected', async () => resolveGetSelectedClip());
-  ipcMain.handle('hawa:resolve:import', async (_event, filePath) => resolveImportMedia(filePath));
-  ipcMain.handle('hawa:resolve:replace', async (_event, mediaId, filePath) => resolveReplaceClip(mediaId, filePath));
-  ipcMain.handle('hawa:resolve:append', async (_event, mediaId) => resolveAppendToTimeline(mediaId));
-  ipcMain.handle('hawa:resolve:context', async () => resolveGetContext());
+  ipcMain.handle('hawa:resolve:selected', async (event) => {
+    requireTrustedIpcSender(event);
+    return resolveGetSelectedClip();
+  });
+  ipcMain.handle('hawa:resolve:import', async (event, filePath) => {
+    requireTrustedIpcSender(event);
+    return resolveImportMedia(filePath);
+  });
+  ipcMain.handle('hawa:resolve:replace', async (event, mediaId, filePath) => {
+    requireTrustedIpcSender(event);
+    return resolveReplaceClip(mediaId, filePath);
+  });
+  ipcMain.handle('hawa:resolve:append', async (event, mediaId) => {
+    requireTrustedIpcSender(event);
+    return resolveAppendToTimeline(mediaId);
+  });
+  ipcMain.handle('hawa:resolve:context', async (event) => {
+    requireTrustedIpcSender(event);
+    return resolveGetContext();
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -790,6 +961,47 @@ async function runSelfTest() {
     out.health = { status: r.status, body: await r.json() };
     const r2 = await fetch(ep.baseUrl + '/api/health');
     out.unauthStatus = r2.status;
+    const csp = document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content || '';
+    out.security = { csp };
+    delete window.__hawaInjectedInlineRan;
+    const inline = document.createElement('script');
+    inline.textContent = 'window.__hawaInjectedInlineRan = true';
+    document.head.appendChild(inline);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    inline.remove();
+    out.security.inlineScriptBlocked = window.__hawaInjectedInlineRan !== true;
+    try {
+      await fetch('https://example.invalid/hawavoclean-must-not-connect');
+      out.security.remoteFetchBlocked = false;
+    } catch {
+      out.security.remoteFetchBlocked = true;
+    }
+    out.security.popupBlocked = window.open('https://example.invalid/hawavoclean-must-not-open') === null;
+    try {
+      const permission = await navigator.permissions.query({ name: 'geolocation' });
+      out.security.geolocationDenied = permission.state === 'denied';
+    } catch {
+      out.security.geolocationDenied = true;
+    }
+    try {
+      const traversal = await fetch('${APP_SCHEME}://app/%2e%2e%2fpackage.json');
+      out.security.pathTraversalBlocked = !traversal.ok;
+    } catch {
+      out.security.pathTraversalBlocked = true;
+    }
+    try {
+      await navigator.serviceWorker.register('./hawavoclean-must-not-register.js');
+      out.security.serviceWorkerBlocked = false;
+    } catch {
+      out.security.serviceWorkerBlocked = true;
+    }
+    out.security.blobWorkerRan = await new Promise((resolve) => {
+      const workerUrl = URL.createObjectURL(new Blob(['postMessage("ok")'], { type: 'text/javascript' }));
+      const worker = new Worker(workerUrl);
+      const timer = setTimeout(() => { worker.terminate(); URL.revokeObjectURL(workerUrl); resolve(false); }, 2000);
+      worker.onmessage = (event) => { clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(workerUrl); resolve(event.data === 'ok'); };
+      worker.onerror = () => { clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(workerUrl); resolve(false); };
+    });
     // Test pages may publish extra probe results here (e.g. module script / worker checks).
     if (window.__hawaSelftestPage !== undefined) {
       out.page = await Promise.resolve(window.__hawaSelftestPage);
@@ -799,6 +1011,8 @@ async function runSelfTest() {
   try {
     const result = await mainWindow.webContents.executeJavaScript(js, true);
     result.enginePid = engine.child ? engine.child.pid : null;
+    result.runtime = RUNTIME_EVIDENCE;
+    result.securityEvents = { ...securityEvents };
     console.log('HAWA_SELFTEST_RESULT ' + JSON.stringify(result));
   } catch (err) {
     console.log('HAWA_SELFTEST_ERROR ' + JSON.stringify({ title: 'selftest threw', detail: String(err && err.message ? err.message : err) }));
@@ -857,6 +1071,8 @@ process.on('uncaughtException', (err) => {
 app.setName(APP_TITLE);
 
 app.whenReady().then(async () => {
+  configureSessionSecurity();
+  log(`runtime evidence: ${JSON.stringify(RUNTIME_EVIDENCE)}; sandbox=true contextIsolation=true nodeIntegration=false`);
   registerIpc();
   startEngine();
   // Decide the host before the first page loads: preload reads it synchronously.

@@ -31,14 +31,17 @@ fi
 
 ENGINE_JSON="$PLUGIN_DIR/engine.json"
 INDEX_HTML="$PLUGIN_DIR/index.html"
+SECURITY_JS="$PLUGIN_DIR/selftest-security.js"
 BACKUP_DIR="$(mktemp -d)"
 [ -f "$ENGINE_JSON" ] && cp "$ENGINE_JSON" "$BACKUP_DIR/engine.json"
 [ -f "$INDEX_HTML" ] && cp "$INDEX_HTML" "$BACKUP_DIR/index.html"
+[ -f "$SECURITY_JS" ] && cp "$SECURITY_JS" "$BACKUP_DIR/selftest-security.js"
 
 cleanup() {
-  command rm -f "$ENGINE_JSON" "$INDEX_HTML"
+  command rm -f "$ENGINE_JSON" "$INDEX_HTML" "$SECURITY_JS"
   [ -f "$BACKUP_DIR/engine.json" ] && cp "$BACKUP_DIR/engine.json" "$ENGINE_JSON"
   [ -f "$BACKUP_DIR/index.html" ] && cp "$BACKUP_DIR/index.html" "$INDEX_HTML"
+  [ -f "$BACKUP_DIR/selftest-security.js" ] && cp "$BACKUP_DIR/selftest-security.js" "$SECURITY_JS"
   [ ! -d "$BACKUP_DIR" ] || find "$BACKUP_DIR" -depth -delete
 }
 trap cleanup EXIT
@@ -47,9 +50,42 @@ cat > "$ENGINE_JSON" <<EOF
 {"command": ["$NODE_BIN", "$FAKE_ENGINE", "serve"], "cwd": "$HERE", "env": {"FAKE_ENGINE_MARKER": "selftest"}}
 EOF
 cat > "$INDEX_HTML" <<'EOF'
-<!doctype html><html><head><meta charset="utf-8"><title>HawaVoClean selftest</title></head>
+<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http://127.0.0.1:*; media-src 'self' blob: http://127.0.0.1:*; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+<title>HawaVoClean selftest</title></head>
 <body style="background:#0e1013;color:#ddd;font-family:sans-serif"><h1>HawaVoClean shell self-test page</h1>
-<p id="s">loading</p><script>document.getElementById('s').textContent = 'hawa host: ' + (window.hawa ? window.hawa.host : 'none');</script></body></html>
+<p id="s">loading</p><script>window.__hawaInlineScriptRan = true</script><script src="./selftest-security.js"></script></body></html>
+EOF
+cat > "$SECURITY_JS" <<'EOF'
+window.__hawaSelftestPage = (async () => {
+  const result = { inlineScriptBlocked: window.__hawaInlineScriptRan !== true };
+  document.getElementById('s').textContent = 'hawa host: ' + (window.hawa ? window.hawa.host : 'none');
+  try {
+    await fetch('https://example.invalid/hawavoclean-must-not-connect');
+    result.remoteFetchBlocked = false;
+  } catch {
+    result.remoteFetchBlocked = true;
+  }
+  result.popupBlocked = window.open('https://example.invalid/hawavoclean-must-not-open') === null;
+  try {
+    const permission = await navigator.permissions.query({ name: 'geolocation' });
+    result.geolocationDenied = permission.state === 'denied';
+  } catch {
+    result.geolocationDenied = true;
+  }
+  result.blobWorkerRan = await new Promise((resolve) => {
+    const workerUrl = URL.createObjectURL(new Blob(['postMessage("ok")'], { type: 'text/javascript' }));
+    const worker = new Worker(workerUrl);
+    const timer = setTimeout(() => { worker.terminate(); URL.revokeObjectURL(workerUrl); resolve(false); }, 2000);
+    worker.onmessage = (event) => { clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(workerUrl); resolve(event.data === 'ok'); };
+    worker.onerror = () => { clearTimeout(timer); worker.terminate(); URL.revokeObjectURL(workerUrl); resolve(false); };
+  });
+  const before = window.location.href;
+  window.location.assign('https://example.invalid/hawavoclean-must-not-navigate');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  result.navigationBlocked = window.location.href === before;
+  return result;
+})();
 EOF
 
 # run_electron <timeout_s> <logfile> [ENV=VAL ...]
@@ -101,6 +137,18 @@ for sc in "${SCENARIOS[@]}"; do
         [[ "$tok" =~ ^[0-9a-f]{32}$ ]] && pass "token is 32 hex" || failmsg "bad token: $tok"
         [ "$(json_field "$line" 'o.health.status')" = "200" ] && [ "$(json_field "$line" 'o.health.body.ok')" = "true" ] && pass "renderer fetched /api/health with token (200 ok)" || failmsg "health: $(json_field "$line" 'o.health')"
         [ "$(json_field "$line" 'o.unauthStatus')" = "401" ] && pass "no token -> 401" || failmsg "unauth status $(json_field "$line" 'o.unauthStatus')"
+        [ "$(json_field "$line" 'o.runtime.electron')" = "43.4.1" ] && pass "runtime evidence is exact Electron 43.4.1" || failmsg "runtime = $(json_field "$line" 'o.runtime')"
+        [ "$(json_field "$line" 'o.page.inlineScriptBlocked')" = "true" ] && pass "CSP blocked inline script" || failmsg "inline CSP probe failed"
+        [ "$(json_field "$line" 'o.page.remoteFetchBlocked')" = "true" ] && pass "CSP blocked remote fetch" || failmsg "remote fetch was not blocked"
+        [ "$(json_field "$line" 'o.page.popupBlocked')" = "true" ] && pass "popup denied" || failmsg "popup was not denied"
+        [ "$(json_field "$line" 'o.page.navigationBlocked')" = "true" ] && pass "navigation denied" || failmsg "navigation was not denied"
+        [ "$(json_field "$line" 'o.page.geolocationDenied')" = "true" ] && pass "unexpected permission denied" || failmsg "geolocation permission was not denied"
+        [ "$(json_field "$line" 'o.page.blobWorkerRan')" = "true" ] && pass "declared blob worker still runs" || failmsg "declared worker was broken by CSP"
+        [ "$(json_field "$line" 'o.security.pathTraversalBlocked')" = "true" ] && pass "app protocol traversal denied" || failmsg "app protocol traversal was not denied"
+        [ "$(json_field "$line" 'o.security.serviceWorkerBlocked')" = "true" ] && pass "service-worker registration denied" || failmsg "service worker was not denied"
+        [ "$(json_field "$line" 'o.securityEvents.blockedWindows')" -ge 1 ] && pass "main process observed blocked window" || failmsg "window block was not observed"
+        [ "$(json_field "$line" 'o.securityEvents.blockedNavigations')" -ge 1 ] && pass "main process observed blocked navigation" || failmsg "navigation block was not observed"
+        [ "$(json_field "$line" 'o.securityEvents.blockedPermissions')" -ge 1 ] && pass "main process observed blocked permission" || failmsg "permission block was not observed"
         epid="$(json_field "$line" 'o.enginePid')"
         if [ -n "$epid" ] && ! kill -0 "$epid" 2>/dev/null; then pass "engine pid $epid is gone after quit"; else failmsg "engine pid $epid still alive"; fi
         grep -q 'shutdown requested; exiting' "$log" && pass "engine received POST /api/shutdown" || failmsg "no shutdown log line"

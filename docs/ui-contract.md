@@ -172,8 +172,17 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
   escape it. Absolute paths remain available only for explicit developer configurations.
   Spawns `command + ["--port","0","--token",TOKEN,"--ui-dir",__dirname]` with a fresh random 32-hex TOKEN,
   waits for the `ready` stdout line (timeout 60 s → show an error page with the stderr tail).
-* `BrowserWindow` 1280×820 (min 960×640), dark background `#0e1013`, `webPreferences: {preload, sandbox:true,
-  contextIsolation:true, nodeIntegration:false}`; `loadFile('index.html')`. `HAWA_DEVTOOLS=1` opens devtools.
+* Registers a standard secure `hawa://app` protocol on a private in-memory session. Its handler serves
+  only canonical regular files below the plugin root; CORS is enabled while service workers and CSP
+  bypass are disabled. `BrowserWindow` loads `hawa://app/index.html` at 1280×820 (min 960×640), dark
+  background `#0e1013`.
+* Window preferences are fixed: `sandbox:true`, `contextIsolation:true`, `nodeIntegration:false`,
+  `webSecurity:true`, `allowRunningInsecureContent:false`, `webviewTag:false`. All popups, foreign
+  navigation and webview attachments are denied. Renderer requests are limited to the app protocol,
+  its confined backing files, and exactly the spawned `http://127.0.0.1:<port>` engine.
+* The session denies all device permissions and every permission except sanitized clipboard write
+  from the exact main renderer. Every privileged IPC handler validates the exact main frame and app
+  URL before acting. `HAWA_DEVTOOLS=1` opens devtools for explicit standalone diagnostics.
 * `WorkflowIntegration.node` is `require`d in **main** (sandboxed preload cannot load native modules);
   `Initialize('com.hawavoclean.resolve')` failing ⇒ `host='electron'` and no `resolve` bridge (standalone run).
   Registers `ResolveQuit` callback → quit.
@@ -215,6 +224,8 @@ the engine is self-contained and does not refer to the source checkout or a muta
 ## 6. Non-negotiables
 
 * Engine binds 127.0.0.1 only, token required, path policy enforced. No arbitrary file reads.
+* The Resolve-owned Electron version is not inferred from the standalone lock. Capture and assess it
+  separately as specified in `docs/resolve-runtime-risk.md`; never describe a vulnerable host as clean.
 * The UI never drives per-frame drawing through React state: waveform in a Worker via `OffscreenCanvas`
   (WebGL2), spectrum/analyser via `requestAnimationFrame` + refs. React owns layout/controls only.
 * Dependencies: Python extra `ui = [fastapi, uvicorn, python-multipart]`; UI deps: react, react-dom,

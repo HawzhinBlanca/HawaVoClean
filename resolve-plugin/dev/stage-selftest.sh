@@ -37,6 +37,16 @@ if (!value.hasBridge) throw new Error('preload bridge missing');
 if (value.host !== 'electron') throw new Error(`unexpected standalone host ${value.host}`);
 if (value.health?.status !== 200 || value.health?.body?.ok !== true) throw new Error('authenticated health check failed');
 if (value.unauthStatus !== 401) throw new Error('unauthenticated health check did not fail');
+if (value.runtime?.electron !== '43.4.1') throw new Error(`unexpected Electron runtime ${value.runtime?.electron}`);
+for (const probe of ['inlineScriptBlocked', 'remoteFetchBlocked', 'popupBlocked', 'geolocationDenied', 'pathTraversalBlocked', 'serviceWorkerBlocked', 'blobWorkerRan']) {
+  if (value.security?.[probe] !== true) throw new Error(`security probe failed: ${probe}`);
+}
+if (!value.security.csp.includes("object-src 'none'") || value.security.csp.includes("'unsafe-eval'")) {
+  throw new Error('staged CSP is missing a required boundary');
+}
+if ((value.securityEvents?.blockedWindows ?? 0) < 1 || (value.securityEvents?.blockedPermissions ?? 0) < 1) {
+  throw new Error('main process did not observe denied window/permission requests');
+}
 if (!Number.isInteger(value.enginePid) || value.enginePid <= 1) throw new Error('engine PID missing');
 process.stdout.write(String(value.enginePid));
 JS
