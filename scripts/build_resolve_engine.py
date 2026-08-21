@@ -20,6 +20,29 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 HEX40 = set("0123456789abcdef")
+LAUNCHER_SOURCE = """from pathlib import Path
+import multiprocessing
+import sys
+
+
+def _run() -> int:
+    engine_root = Path(__file__).resolve().parent
+    sys.path.insert(0, str(engine_root / "site-packages"))
+    from hawavoclean.cli import main
+
+    return main()
+
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    raise SystemExit(_run())
+"""
+SHELL_LAUNCHER_SOURCE = """#!/bin/sh
+set -eu
+engine_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+export PYTHONNOUSERSITE=1
+exec "$engine_dir/python/bin/python3.11" -I "$engine_dir/launcher.py" "$@"
+"""
 
 
 class BundleError(RuntimeError):
@@ -97,6 +120,13 @@ def _remove_bytecode(root: Path) -> None:
             shutil.rmtree(directory)
     for bytecode in root.rglob("*.py[co]"):
         bytecode.unlink()
+
+
+def _write_launchers(stage: Path) -> None:
+    (stage / "launcher.py").write_text(LAUNCHER_SOURCE)
+    launcher = stage / "hawavoclean-engine"
+    launcher.write_text(SHELL_LAUNCHER_SOURCE)
+    launcher.chmod(0o755)
 
 
 def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
@@ -190,27 +220,8 @@ def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
         # self-contained runtime. It is covered by ENGINE-SHA256SUMS below.
         shutil.copy2(ROOT / "THIRD_PARTY_LICENSES.md", stage / "THIRD_PARTY_LICENSES.md")
 
-        (stage / "launcher.py").write_text(
-            """from pathlib import Path
-import sys
-
-engine_root = Path(__file__).resolve().parent
-sys.path.insert(0, str(engine_root / "site-packages"))
-from hawavoclean.cli import main
-
-raise SystemExit(main())
-"""
-        )
+        _write_launchers(stage)
         launcher = stage / "hawavoclean-engine"
-        launcher.write_text(
-            """#!/bin/sh
-set -eu
-engine_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-export PYTHONNOUSERSITE=1
-exec "$engine_dir/python/bin/python3.11" -I "$engine_dir/launcher.py" "$@"
-"""
-        )
-        launcher.chmod(0o755)
 
         version_output = _run([str(launcher), "--version"], cwd=stage)
         if version_output != "hawavoclean 3.3.0":
