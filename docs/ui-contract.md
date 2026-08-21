@@ -167,7 +167,7 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
 ## 4. Shell behaviour (main.js)
 
 * Reads `engine.json` next to `main.js`. The shipped file is relocatable:
-  `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1"}}`.
+  `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1"}}`.
   Relative executable and working-directory paths are resolved below the plugin directory and may not
   escape it. Absolute paths remain available only for explicit developer configurations.
   Spawns `command + ["--port","0","--token",TOKEN,"--ui-dir",__dirname]` with a fresh random 32-hex TOKEN,

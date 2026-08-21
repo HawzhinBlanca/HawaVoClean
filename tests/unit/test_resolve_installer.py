@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -227,10 +228,13 @@ def test_assembler_contract_has_no_mutable_or_repo_local_fallback() -> None:
     main = (ROOT / "resolve-plugin" / PLUGIN_ID / "main.js").read_text()
 
     assert "--frozen-lockfile" in install
-    assert 'npm --prefix "$SRC_DIR" ci' in install
+    assert 'cd "$UI_DIR" && node "$PNPM_CLI" install --frozen-lockfile' in install
+    assert 'cd "$SRC_DIR" && node "$PNPM_CLI" install --frozen-lockfile' in install
+    assert 'npm --prefix "$TOOLCHAIN_DIR" ci --ignore-scripts' in install
     assert "retrying without" not in install
     assert ".venv/bin/hawavoclean" not in install
     assert '"./engine/hawavoclean-engine", "serve"' in install
+    assert '"PYTHONDONTWRITEBYTECODE": "1"' in install
     assert "stage-selftest.sh" in install
     assert 'activate.sh" --stage "$FINAL_STAGE" --verify-only' in install
     assert "engine regular-file inventory" in install
@@ -239,3 +243,11 @@ def test_assembler_contract_has_no_mutable_or_repo_local_fallback() -> None:
     assert "after_backup" in activate and "after_activate" in activate
     assert "restoring the prior plugin" in activate
     assert "relative executable may not escape" in main
+
+    toolchain = json.loads((ROOT / "resolve-plugin" / "toolchain" / "package.json").read_text())
+    plugin = json.loads((ROOT / "resolve-plugin" / PLUGIN_ID / "package.json").read_text())
+    ui = json.loads((ROOT / "ui" / "package.json").read_text())
+    assert toolchain["dependencies"] == {"pnpm": "11.22.0"}
+    assert plugin["packageManager"] == "pnpm@11.22.0"
+    assert ui["packageManager"] == "pnpm@11.22.0"
+    assert (ROOT / "resolve-plugin" / PLUGIN_ID / "pnpm-lock.yaml").is_file()

@@ -33,7 +33,7 @@ lives under `build/` (gitignored).
    runtime's version from its standalone test dependency. The controlled test runtime is exact
    Electron 43.4.1; real-host version evidence is captured separately during Resolve acceptance.
 2. **`main.js` reads `engine.json`** (next to itself):
-   `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1"}}`
+   `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1"}}`
    and spawns
    `command + ["--port","0","--token",TOKEN,"--ui-dir",<plugin dir>]` with a fresh random 32-hex
    token. It waits for the engine's single stdout line `{"event":"ready","port":N,"pid":P,"version":V}`
@@ -87,7 +87,9 @@ succeeds with the engine's CORS headers.
   locked `studio` + `ui` dependency closure, the exact wheel, integrity manifests and the third-party
   license inventory. It is qualified for Apple silicon macOS in v3.3.
 * `ffmpeg` on `/opt/homebrew/bin` or `/usr/local/bin` (external runtime prerequisite).
-* Exact pnpm 11.5.3 and npm 10.9.2, plus Node compatible with those locked build tools.
+* Node plus a bootstrap npm capable of reading lockfile v3. The installer uses that npm only to
+  integrity-check and install `resolve-plugin/toolchain/package-lock.json`, then performs all UI and
+  shell work with the lock's exact pnpm 11.22.0. npm is not part of the runtime or build tool closure.
 
 ## Install into Resolve
 
@@ -110,7 +112,8 @@ resolve-plugin/install.sh --engine-bundle /absolute/engine --desktop-only --dest
 resolve-plugin/install.sh --engine-bundle /absolute/engine --sdk-node /absolute/WorkflowIntegration.node
 ```
 
-The installer accepts only locked inputs, assembles a content-addressed stage under
+The installer bootstraps its exact package managers from a committed integrity lock, accepts only
+locked inputs, assembles a content-addressed stage under
 `build/resolve-plugin/stages/`, verifies all engine bytes, runs `doctor`, and exercises the real staged
 Electron → engine → authenticated/unauthenticated health → shutdown lifecycle before activation. The
 stage contains shell files, UI assets, the native bridge, the complete `engine/`, and signed inventories
@@ -125,12 +128,14 @@ Then **restart DaVinci Resolve Studio** (plugins are enumerated at startup) and 
 **Workspace → Workflow Integrations → HawaVoClean**.
 
 `engine.json` points only inside the installed plugin. The installed runtime has no source-checkout or
-mutable virtual-environment dependency and may be relocated as a unit.
+mutable virtual-environment dependency and may be relocated as a unit. It suppresses bytecode writes,
+so normal execution does not mutate the content-addressed engine and works from a read-only install.
 
 ## Run standalone (desktop, no Resolve)
 
 ```bash
-npm --prefix resolve-plugin/com.hawavoclean.resolve ci
+(cd resolve-plugin/com.hawavoclean.resolve && \
+  node ../toolchain/node_modules/pnpm/bin/pnpm.mjs install --frozen-lockfile)
 resolve-plugin/install.sh --engine-bundle /absolute/engine --desktop-only --no-install
 HAWA_DEVTOOLS=1 resolve-plugin/com.hawavoclean.resolve/node_modules/.bin/electron \
   /absolute/content-addressed/stage/com.hawavoclean.resolve

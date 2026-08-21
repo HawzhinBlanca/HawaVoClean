@@ -19,6 +19,7 @@ PLUGIN_ID="com.hawavoclean.resolve"
 VERSION=""
 SRC_DIR="$SCRIPT_DIR/$PLUGIN_ID"
 UI_DIR="$REPO_ROOT/ui"
+TOOLCHAIN_DIR="$SCRIPT_DIR/toolchain"
 STAGES_DIR="$REPO_ROOT/build/resolve-plugin/stages"
 DEFAULT_DEST="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins"
 SDK_NODE_DEFAULT="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Workflow Integrations/Examples/SamplePlugin/WorkflowIntegration.node"
@@ -95,24 +96,29 @@ verify_engine_bundle "$ENGINE_BUNDLE"
 for f in manifest.xml package.json main.js preload.js; do
   [ -f "$SRC_DIR/$f" ] || die "missing shell source $SRC_DIR/$f"
 done
-[ "$(pnpm --version 2>/dev/null || true)" = "11.5.3" ] || die "pnpm 11.5.3 is required by ui/package.json"
-[ "$(npm --version 2>/dev/null || true)" = "10.9.2" ] || die "npm 10.9.2 is required by the Resolve shell lock"
+[ -f "$TOOLCHAIN_DIR/package-lock.json" ] || die "Resolve build-tool lock is missing"
+command -v node >/dev/null 2>&1 || die "Node.js is required to run the locked build toolchain"
+command -v npm >/dev/null 2>&1 || die "npm is required only to bootstrap the integrity-locked build toolchain"
+say "Bootstrapping exact pnpm from the Resolve toolchain lock"
+npm --prefix "$TOOLCHAIN_DIR" ci --ignore-scripts --audit=false --fund=false
+PNPM_CLI="$TOOLCHAIN_DIR/node_modules/pnpm/bin/pnpm.mjs"
+[ "$(node "$PNPM_CLI" --version)" = "11.22.0" ] || die "locked pnpm bootstrap did not produce 11.22.0"
 VERSION="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$SRC_DIR/package.json")"
 [ "$VERSION" = "3.3.0" ] || die "Resolve package identity is not the expected v3.3.0 release"
 
 if [ "$BUILD_UI" -eq 1 ]; then
   say "Installing UI dependencies from the frozen pnpm lock"
-  pnpm --dir "$UI_DIR" install --frozen-lockfile
+  (cd "$UI_DIR" && node "$PNPM_CLI" install --frozen-lockfile)
   say "Building the UI"
-  pnpm --dir "$UI_DIR" build
+  (cd "$UI_DIR" && node "$PNPM_CLI" build)
 else
   say "Reusing the existing UI build (--skip-ui-build)"
 fi
 [ -f "$UI_DIR/dist/index.html" ] || die "a complete ui/dist build is required"
 [ -d "$UI_DIR/dist/assets" ] || die "ui/dist/assets is missing"
 
-say "Installing the exact standalone Electron test runtime from package-lock.json"
-npm --prefix "$SRC_DIR" ci
+say "Installing the exact standalone Electron test runtime from pnpm-lock.yaml"
+(cd "$SRC_DIR" && node "$PNPM_CLI" install --frozen-lockfile)
 
 mkdir -p "$STAGES_DIR"
 ASSEMBLY_ROOT="$(mktemp -d "$STAGES_DIR/.assembly.XXXXXX")"
@@ -143,7 +149,7 @@ cat > "$STAGE/engine.json" <<'EOF'
 {
   "command": ["./engine/hawavoclean-engine", "serve"],
   "cwd": ".",
-  "env": {"PYTHONNOUSERSITE": "1"}
+  "env": {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
 }
 EOF
 printf '%s\n' "$PLUGIN_ID" > "$STAGE/PLUGIN_ID"

@@ -399,7 +399,7 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
                 {
                     "name": "hawavoclean:plugin-lock-sha256",
                     "value": _sha256(
-                        ROOT / "resolve-plugin" / "com.hawavoclean.resolve" / "package-lock.json"
+                        ROOT / "resolve-plugin" / "com.hawavoclean.resolve" / "pnpm-lock.yaml"
                     ),
                 },
                 {"name": "hawavoclean:container-image", "value": image},

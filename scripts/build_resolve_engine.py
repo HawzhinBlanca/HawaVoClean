@@ -22,11 +22,14 @@ ROOT = Path(__file__).resolve().parents[1]
 HEX40 = set("0123456789abcdef")
 LAUNCHER_SOURCE = """from pathlib import Path
 import multiprocessing
+import os
 import sys
 
 
 def _run() -> int:
     engine_root = Path(__file__).resolve().parent
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+    sys.dont_write_bytecode = True
     sys.path.insert(0, str(engine_root / "site-packages"))
     from hawavoclean.cli import main
 
@@ -41,7 +44,8 @@ SHELL_LAUNCHER_SOURCE = """#!/bin/sh
 set -eu
 engine_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 export PYTHONNOUSERSITE=1
-exec "$engine_dir/python/bin/python3.11" -I "$engine_dir/launcher.py" "$@"
+export PYTHONDONTWRITEBYTECODE=1
+exec "$engine_dir/python/bin/python3.11" -I -B "$engine_dir/launcher.py" "$@"
 """
 
 
@@ -226,6 +230,7 @@ def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
         version_output = _run([str(launcher), "--version"], cwd=stage)
         if version_output != "hawavoclean 3.3.0":
             raise BundleError(f"bundled engine reported unexpected version: {version_output}")
+        _remove_bytecode(stage)
         distributions = sorted(
             {
                 f"{dist.metadata['Name']}=={dist.version}"

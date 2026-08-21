@@ -37,7 +37,7 @@ def main() -> int:
     marker = tmp_path / "child-ran.txt"
 
     result = subprocess.run(
-        [sys.executable, "-I", str(tmp_path / "launcher.py"), str(marker)],
+        [sys.executable, "-I", "-B", str(tmp_path / "launcher.py"), str(marker)],
         text=True,
         capture_output=True,
         timeout=30,
@@ -47,10 +47,13 @@ def main() -> int:
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "spawned once\n"
     assert "bootstrapping phase" not in result.stderr
+    assert not list((tmp_path / "site-packages").rglob("*.py[co]"))
+    assert not list((tmp_path / "site-packages").rglob("__pycache__"))
 
 
 def test_shell_launcher_is_relocatable_and_isolated() -> None:
     source = build_resolve_engine.SHELL_LAUNCHER_SOURCE
     assert 'dirname -- "$0"' in source
     assert "PYTHONNOUSERSITE=1" in source
-    assert 'python3.11" -I' in source
+    assert "PYTHONDONTWRITEBYTECODE=1" in source
+    assert 'python3.11" -I -B' in source

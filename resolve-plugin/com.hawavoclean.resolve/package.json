@@ -1,7 +1,7 @@
 {
   "name": "hawavoclean-resolve",
   "version": "3.3.0",
-  "packageManager": "npm@10.9.2",
+  "packageManager": "pnpm@11.22.0",
   "main": "main.js",
   "private": true,
   "scripts": {

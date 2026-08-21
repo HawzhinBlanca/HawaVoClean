@@ -11,7 +11,7 @@
 #   hang      engine never reports ready -> ready timeout (shortened to 2 s) -> error page.
 #   stubborn  engine ignores /api/shutdown and SIGTERM -> shell must SIGKILL it on quit.
 #
-# Requires: `npm ci` done in resolve-plugin/com.hawavoclean.resolve (Electron 43.4.1).
+# Requires: the exact pnpm install performed by resolve-plugin/install.sh (Electron 43.4.1).
 # Creates a temporary engine.json + index.html next to main.js and removes them afterwards
 # (pre-existing ones are backed up and restored).
 set -euo pipefail
@@ -25,7 +25,7 @@ SCENARIOS=("$@")
 [ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(ok crash hang stubborn)
 
 if [ ! -x "$ELECTRON_BIN" ]; then
-  echo "electron not installed; run: npm --prefix $PLUGIN_DIR ci" >&2
+  echo "electron not installed; run the locked resolve-plugin/install.sh assembler first" >&2
   exit 1
 fi
 
