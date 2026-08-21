@@ -12,6 +12,8 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
   the chain changes the committed file hash and commit.
 - `t4.1-container-proof.json` binds the reproducible, non-root CPU image, exact transitive Wolfi lock,
   read-only operational probe and current vulnerability/misconfiguration results.
+- `hawavoclean-3.3.0.cdx.json` and its checksum are the deterministic CycloneDX 1.6 T4.2 proof
+  snapshot; `t4.2-sbom-proof.json` binds its inventory, artifact hashes and retained failed attempts.
 - `t4.5-resolve-installer-proof.json` binds the transactional, relocatable Resolve package proof.
 - `t4.6-resolve-runtime-proof.json` separates the audited standalone Electron lock from the exact
   signed Blackmagic-owned runtime, retains every advisory ID, and records the still-unaccepted risk.

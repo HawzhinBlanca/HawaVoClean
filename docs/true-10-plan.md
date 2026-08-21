@@ -174,7 +174,7 @@ Goal: every install is reproducible, bounded, recoverable and truthfully describ
   - Use available pinned bases, install the matching extras, run non-root with a read-only-friendly
     filesystem design, health check and explicit cache/work mounts.
   - **Proof:** clean build, vulnerability/misconfiguration scan and representative process/verify run.
-- [ ] **T4.2 — Emit a real multi-ecosystem SBOM** (P1, M)
+- [x] **T4.2 — Emit a real multi-ecosystem SBOM** (P1, M)
   - Produce validated CycloneDX JSON for Python, UI/plugin JavaScript, model weights and system/runtime
     artifacts; include licenses, hashes and relationships.
   - Sign/checksum the SBOM and bind it to release artifact hashes.
