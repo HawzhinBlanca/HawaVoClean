@@ -8,11 +8,16 @@ FROM python:3.12-slim-bookworm@sha256:a116514e19457bcb7af7efe9c3dd0b9b71e85b3176
 COPY --from=uv /uv /bin/uv
 WORKDIR /app
 
+ARG SOURCE_REVISION
+ARG SOURCE_DATE_EPOCH
+
 # Build from the exact Python lock. The project wheel is installed without a
 # second resolver pass, so the runtime environment cannot drift from uv.lock.
 COPY pyproject.toml uv.lock README.md THIRD_PARTY_LICENSES.md hatch_build.py ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
+    HAWAVOCLEAN_SOURCE_REVISION="${SOURCE_REVISION}" \
+    SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
     uv build --wheel --out-dir /dist \
     && uv sync --frozen --no-dev --no-install-project \
     && uv pip install --python /app/.venv/bin/python --no-deps /dist/*.whl

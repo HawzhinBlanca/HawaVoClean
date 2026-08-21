@@ -33,6 +33,8 @@ def test_container_copies_the_declared_custom_build_hook() -> None:
 
     assert hook == "hatch_build.py"
     assert re.search(rf"^COPY [^\n]*\b{re.escape(hook)}\b[^\n]* \./$", _dockerfile(), re.MULTILINE)
+    assert 'HAWAVOCLEAN_SOURCE_REVISION="${SOURCE_REVISION}"' in _dockerfile()
+    assert 'SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}"' in _dockerfile()
 
 
 def test_container_is_cpu_only_non_root_and_read_only_friendly() -> None:
