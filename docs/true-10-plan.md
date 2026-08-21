@@ -145,7 +145,7 @@ only in another worktree or unmerged branch.
 
 Goal: eliminate the gap between locally green subsets and the release claim.
 
-- [ ] **T3.1 — Build a hermetic full release gate** (P0, L; depends on Phase 2)
+- [x] **T3.1 — Build a hermetic full release gate** (P0, L; depends on Phase 2)
   - One non-mutating command runs formatting, lint, strict types, default tests, branch coverage, fuzz,
     mutation, UI type/build/tests, wheel/sdist install smoke, CLI E2E, real regression fixtures, plugin
     self-test, container build/run if supported, SBOM validation, audits and documentation consistency.

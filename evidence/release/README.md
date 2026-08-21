@@ -17,6 +17,8 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
 - `t4.5-resolve-installer-proof.json` binds the transactional, relocatable Resolve package proof.
 - `t4.6-resolve-runtime-proof.json` separates the audited standalone Electron lock from the exact
   signed Blackmagic-owned runtime, retains every advisory ID, and records the still-unaccepted risk.
+- `t3.1-release-gate-proof.json` records the two clean-checkout full-gate passes, all ten matching
+  artifact identities, test/audit counts, proof hashes and retained failed attempts.
 
 Verify the committed evidence:
 
