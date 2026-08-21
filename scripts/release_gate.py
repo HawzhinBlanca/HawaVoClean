@@ -460,6 +460,10 @@ def _run_pass(
         ["uv", "run", "--frozen", "python", "scripts/generate_schemas.py", "--check"],
     )
     runner.run(
+        "sorani-protocol-design",
+        ["uv", "run", "--frozen", "python", "-m", "scripts.validate_sorani_protocol"],
+    )
+    runner.run(
         "default-tests-branch-coverage",
         [
             "uv",

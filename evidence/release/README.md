@@ -19,6 +19,9 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
   signed Blackmagic-owned runtime, retains every advisory ID, and records the still-unaccepted risk.
 - `t3.1-release-gate-proof.json` records the two clean-checkout full-gate passes, all ten matching
   artifact identities, test/audit counts, proof hashes and retained failed attempts.
+- `sorani-evaluation-protocol.json` is the result-free, machine-validated T5.1 design lock. Its design
+  digest deliberately excludes the later approval record, so explicit approval can bind the exact
+  study design without rewriting it. A structurally valid draft is not an approved protocol.
 
 Verify the committed evidence:
 

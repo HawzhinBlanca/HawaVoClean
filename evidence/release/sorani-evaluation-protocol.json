@@ -1,0 +1,379 @@
+{
+  "schema_version": 1,
+  "protocol_id": "hawavoclean-sorani-acceptance-v1",
+  "protocol_revision": "1.0.0",
+  "release": {
+    "product": "hawavoclean",
+    "version": "3.3.0"
+  },
+  "frozen_at": "2026-08-21T00:00:00Z",
+  "scope": {
+    "claim": "For intended Sorani dialogue inputs, HawaVoClean 3.3.0 preserves spoken content and provides profile-appropriate quality that is superior or non-inferior to the original under the locked rules below.",
+    "unit_of_analysis": "one source speech unit and one compatible shipped profile output",
+    "languages": [
+      "Central Kurdish (Sorani)"
+    ],
+    "not_claimed": [
+      "semantic correctness inferred by ASR",
+      "performance for languages other than Sorani",
+      "performance outside the declared input and host support contract",
+      "a population prevalence below the statistical bound when speaker clustering or sampling bias invalidates independence"
+    ]
+  },
+  "systems": [
+    {
+      "id": "original",
+      "role": "within-source control",
+      "shipped_candidate": false,
+      "render_rule": "decoded source aligned to the candidate without enhancement"
+    },
+    {
+      "id": "discarded_guard_candidate",
+      "role": "internal diagnostic condition for an ultimately reverted unit",
+      "shipped_candidate": false,
+      "render_rule": "capture the final processed candidate whose Guard A or Guard B rejection caused original selection; the capture path must be proved bitwise non-interfering with the exact release artifact",
+      "use": "content review only, profile-blinded; never presented as shipped audio"
+    },
+    {
+      "id": "production",
+      "role": "shipped profile",
+      "shipped_candidate": true,
+      "render_rule": "exact release artifact and production profile; no post-processing"
+    },
+    {
+      "id": "studio",
+      "role": "shipped profile",
+      "shipped_candidate": true,
+      "render_rule": "exact release artifact and studio profile; no post-processing"
+    },
+    {
+      "id": "lowband",
+      "role": "shipped profile",
+      "shipped_candidate": true,
+      "render_rule": "exact release artifact and lowband profile on compatible inputs; no post-processing"
+    }
+  ],
+  "population_and_splits": {
+    "speaker_disjoint": true,
+    "heldout_labels_unseen": true,
+    "reserve_holdout_required": true,
+    "split_roles": [
+      "reviewer training",
+      "calibration",
+      "locked held-out acceptance",
+      "untouched reserve held-out"
+    ],
+    "sample_size": {
+      "minimum_heldout_source_units_per_profile": 450,
+      "minimum_heldout_speakers": 45,
+      "maximum_units_per_speaker": 10,
+      "minimum_independent_content_reviews_per_profile": 900,
+      "one_sided_alpha": 0.05,
+      "bonferroni_alpha_per_profile": 0.016666666666666666,
+      "zero_event_upper_95_per_profile": 0.006635072879038639,
+      "zero_event_upper_95_simultaneous_three_profiles": 0.009057276974793749,
+      "rationale": "With zero confirmed changes among 450 units, the exact one-sided binomial upper bound is 0.6636% per profile. Using alpha 0.05/3 gives a conservative simultaneous upper bound of 0.9058% across three profiles. These bounds assume independent representative units; speaker-block sensitivity and cluster-aware intervals are mandatory, and more units must be added if effective sample size is lower."
+    },
+    "coverage_requirements": {
+      "dialect": [
+        "Slemani",
+        "Hawleri",
+        "Garmiani",
+        "other documented Sorani variety"
+      ],
+      "speaker_demographics": [
+        "self-described gender",
+        "adult age band where collection rights permit"
+      ],
+      "capture": [
+        "studio microphone",
+        "consumer microphone",
+        "phone or field recorder",
+        "treated room",
+        "untreated room"
+      ],
+      "degradation": [
+        "clean",
+        "stationary hum or fan noise",
+        "street or crowd noise",
+        "reverberation",
+        "codec",
+        "clipping risk",
+        "music bleed",
+        "low-bandwidth source"
+      ],
+      "critical_content": [
+        "negation",
+        "numbers",
+        "names",
+        "borrowed words",
+        "word-final consonants",
+        "short function words"
+      ],
+      "minimum_units_in_each_reported_primary_stratum": 30,
+      "rule": "Freeze quotas using rights-cleared inventory before candidate generation; report every predefined stratum and add data rather than silently pooling an underfilled primary stratum."
+    },
+    "leakage_checks": [
+      "speaker identity disjoint across calibration, acceptance, and reserve",
+      "audio fingerprint and near-duplicate search across splits",
+      "transcript and prompt duplicate search across splits",
+      "no held-out verdict, label, output, or summary visible during calibration"
+    ]
+  },
+  "outcomes": [
+    {
+      "id": "confirmed_content_change",
+      "primary": true,
+      "maximum_allowed": 0,
+      "release_blocking": true,
+      "definition": "A candidate introduces, deletes, substitutes, repeats, or meaningfully reorders a spoken word or changes a negation, name, number, or other meaning-bearing content relative to the adjudicated source.",
+      "measure": "adjudicated binary verdict per source-unit/profile comparison"
+    },
+    {
+      "id": "guard_false_accept",
+      "primary": true,
+      "maximum_allowed": 0,
+      "release_blocking": true,
+      "definition": "The shipped output contains a confirmed content change in a unit for which the product selected processed audio rather than the original.",
+      "measure": "adjudicated count and exact one-sided confidence bound per profile"
+    },
+    {
+      "id": "guard_false_revert",
+      "primary": false,
+      "release_blocking": false,
+      "definition": "The product selected the original because of Guard A or Guard B even though dual review confirmed that the final discarded processed candidate preserved content.",
+      "measure": "content-safe discarded-candidate rate with cluster-aware interval; reported as guard efficiency and no-op risk, never used as a linguistic oracle"
+    },
+    {
+      "id": "intelligibility",
+      "primary": true,
+      "release_blocking": true,
+      "definition": "Sorani keyword/content recognition relative to the transcript locked before processing.",
+      "measure": "blind scored critical-token accuracy and paired intelligibility rating; Sorani pilot locks the scoring key before held-out use"
+    },
+    {
+      "id": "artifact_severity",
+      "primary": true,
+      "release_blocking": true,
+      "definition": "Processing-induced musical noise, chirping, pumping, smearing, discontinuity, phase image damage, or other audible defect.",
+      "measure": "0 none, 1 mild, 2 moderate, 3 severe, 4 unusable; source-existing defects are recorded separately"
+    },
+    {
+      "id": "p835_sig",
+      "primary": true,
+      "release_blocking": true,
+      "definition": "P.835 speech-signal naturalness/distortion rating.",
+      "measure": "five-category SIG score"
+    },
+    {
+      "id": "p835_bak",
+      "primary": true,
+      "release_blocking": true,
+      "definition": "P.835 background-noise intrusiveness rating.",
+      "measure": "five-category BAK score"
+    },
+    {
+      "id": "p835_ovrl",
+      "primary": true,
+      "release_blocking": true,
+      "definition": "P.835 overall-quality rating.",
+      "measure": "five-category OVRL score"
+    },
+    {
+      "id": "blinded_preference",
+      "primary": false,
+      "release_blocking": false,
+      "definition": "Preference between time-aligned original and candidate after content review is locked.",
+      "measure": "candidate, original, or tie; ties score one half for the candidate in the declared win-rate analysis"
+    }
+  ],
+  "review": {
+    "source_transcript_locked_first": true,
+    "independent_content_reviewers_per_comparison": 2,
+    "adjudicator_required": true,
+    "profile_blinding_until_verdict_lock": true,
+    "asr_role": "triage_only_not_oracle",
+    "reviewer_qualification": [
+      "demonstrated Sorani fluency",
+      "dialect competency recorded",
+      "passes a training and qualification set with known content alterations",
+      "has not developed or tuned the candidate under review"
+    ],
+    "procedure": [
+      "A data custodian locks the rights-cleared source, transcript, split, profile render, alignment, and anonymous comparison ID.",
+      "Two reviewers independently listen to source and candidate, inspect the locked transcript, and record content, intelligibility, and artifact verdicts without profile identity.",
+      "For every unit ultimately reverted by Guard A or Guard B, the same dual-review rule is also applied to the final discarded processed candidate so guard false reverts are measured rather than inferred.",
+      "Reviewers identify exact timecodes and content tokens for any suspected change; ASR output may prioritize review but cannot clear a sample.",
+      "Any disagreement or suspected change goes to a third qualified adjudicator who remains profile-blind and records a reasoned final verdict.",
+      "The mapping from anonymous system IDs to profiles is opened only after all verdicts, exclusions, and analysis inputs are locked."
+    ],
+    "agreement_reporting": [
+      "raw agreement",
+      "Cohen kappa for paired binary content verdicts",
+      "Krippendorff alpha for ordinal artifact ratings",
+      "adjudication rate by profile and stratum"
+    ]
+  },
+  "listening_test": {
+    "minimum_valid_sorani_listeners": 32,
+    "minimum_valid_ratings_per_item_condition": 16,
+    "double_blind": true,
+    "design": "balanced incomplete randomized blocks with source and system order counter-balanced",
+    "p835_dimensions": [
+      "SIG",
+      "BAK",
+      "OVRL"
+    ],
+    "balanced_scale_orders": [
+      "SIG-BAK-OVRL",
+      "BAK-SIG-OVRL"
+    ],
+    "conditions": [
+      "original",
+      "production",
+      "studio",
+      "lowband"
+    ],
+    "quality_controls": [
+      "Sorani comprehension and dialect screening",
+      "headphone and playback-level check",
+      "quiet-environment attestation or documented laboratory chain",
+      "training examples outside all evaluation splits",
+      "hidden reference and known-degradation anchors",
+      "repeat trials for within-listener consistency",
+      "predeclared attention and completion-time rules",
+      "session length and break limits"
+    ],
+    "pilot_rule": "Use only the reviewer-training/calibration split to translate instructions, validate anchors, estimate variance and clustering, and increase the listener or rating count for 90% power at the locked margins. Never reduce the stated floors."
+  },
+  "analysis": {
+    "analysis_lock": "Code, model formulae, seed derivation, stratum map, QC rules, and table shells are hashed before system unblinding.",
+    "estimands": "paired candidate-minus-original effects per profile, plus predefined dialect, environment, degradation, capture, and critical-content strata",
+    "cluster_units": [
+      "speaker",
+      "source_unit",
+      "listener"
+    ],
+    "model": "paired hierarchical mixed-effects analysis checked by a speaker-block and listener-block bootstrap; report both and use the more conservative release conclusion",
+    "confidence": "one-sided 95% intervals for release gates and two-sided 95% intervals for descriptive estimates",
+    "multiplicity": "holm_5_percent_within_profile_primary_family",
+    "no_missing_value_imputation": true,
+    "release_thresholds": {
+      "content_changes_maximum": 0,
+      "guard_false_accepts_maximum": 0,
+      "processing_induced_severe_artifacts_maximum": 0,
+      "sig_noninferiority_margin_mos": -0.25,
+      "ovrl_noninferiority_margin_mos": -0.25,
+      "bak_noninferiority_margin_mos": -0.25,
+      "bak_superiority_lower_bound_on_noisy_intended_strata": 0.0,
+      "intelligibility_noninferiority_margin": -0.02,
+      "profile_value_rule": "After every safety and non-inferiority gate passes, each profile must also have a Holm-adjusted lower confidence bound above zero for OVRL or BAK in an intended degradation stratum, or a blinded-preference lower bound above 0.5."
+    },
+    "stratum_rule": "No aggregate can conceal a confirmed content change or severe introduced artifact. Report every locked stratum, its sample count and uncertainty; label underpowered strata rather than pooling them post hoc.",
+    "missingness_rule": "Report missing and invalid ratings with reasons. Exclude listeners only by locked QC rules; a missing unit-level render or review is a failed gate, not missing data.",
+    "sensitivity": [
+      "speaker-cluster effective sample size and zero-event bound",
+      "leave-one-speaker-out",
+      "per-dialect and per-degradation worst case",
+      "with and without adjudicated reviewer disagreements",
+      "pointwise and simultaneous zero-event bounds"
+    ]
+  },
+  "exclusions": {
+    "locked_before_candidate_generation": true,
+    "allowed_source_exclusions": [
+      "rights or consent not adequate for this evaluation",
+      "corrupt or truncated source before product processing",
+      "no audible speech",
+      "duplicate or split leak",
+      "source transcript cannot be resolved by blinded adjudication"
+    ],
+    "technical_processing_failure_is_failure": true,
+    "failed_units_are_not_replaced": true,
+    "rule": "Apply source exclusions without examining any candidate or candidate-derived metric. Preserve excluded IDs and reasons in the audit ledger; never substitute an easier unit after a failure."
+  },
+  "stopping_and_regression": {
+    "any_confirmed_content_change_stops_release": true,
+    "output_changing_fix_invalidates_exposed_holdout": true,
+    "stop_actions": [
+      "freeze and hash the complete evidence state",
+      "quarantine the affected candidate and stop any release claim",
+      "determine scope on already exposed material without tuning against hidden reserve labels",
+      "fix only on development/calibration material",
+      "rerun final acceptance on the untouched reserve or a newly rights-cleared holdout"
+    ],
+    "regression_rule": "Every later source, model, dependency, profile, threshold, or output-changing code revision must rerun the complete locked acceptance protocol on untouched evidence. A metadata-only change may reuse evidence only after a documented bitwise-output equivalence proof.",
+    "prohibited": [
+      "threshold tuning on held-out verdicts",
+      "dropping a failed profile or stratum after unblinding",
+      "replacing a failed unit",
+      "reporting only aggregate means",
+      "treating ASR agreement as human content clearance"
+    ]
+  },
+  "data_governance": {
+    "rights_approval_required_before_collection": true,
+    "raw_audio_and_pii_forbidden_in_git": true,
+    "reviewer_identity_mapping_outside_repository": true,
+    "required_provenance_per_source": [
+      "source and collector",
+      "recording date or bounded period",
+      "license or consent class",
+      "commercial product-validation and derivative-output permission",
+      "retention and deletion terms",
+      "speaker pseudonym and split assignment",
+      "audio hash and access-control location"
+    ],
+    "repository_artifacts": "Only hash-locked manifests, anonymous reviewer IDs, verdicts, statistics, scripts, and redacted evidence may be committed.",
+    "access": "Separate least-privilege roles for data custody, candidate generation, linguistic review, statistical analysis, and final unblinding; log every held-out access."
+  },
+  "standards": [
+    {
+      "id": "ITU-T P.800",
+      "version": "08/1996 in force",
+      "use": "general subjective listening-test design",
+      "url": "https://www.itu.int/rec/T-REC-P.800/en"
+    },
+    {
+      "id": "ITU-T P.835",
+      "version": "07/2026 in force, text pending publication at protocol freeze; accessible 11/2003 procedure is the execution baseline until reconciled",
+      "use": "separate SIG, BAK, and OVRL judgments and counter-balanced scale order",
+      "url": "https://www.itu.int/rec/T-REC-P.835/en"
+    },
+    {
+      "id": "ITU-T P.808",
+      "version": "06/2021 in force",
+      "use": "remote-listener environment, qualification, and quality-control guidance if crowdsourcing is used",
+      "url": "https://www.itu.int/rec/T-REC-P.808/en"
+    },
+    {
+      "id": "ITU-T P.807",
+      "version": "02/2016 in force; Sorani adaptation requires calibration-only pilot",
+      "use": "design reference for diagnostic intelligibility scoring, not a claim of English P.807 conformance",
+      "url": "https://www.itu.int/rec/T-REC-P.807/en"
+    },
+    {
+      "id": "Hanley-Lippman-Hand zero numerator",
+      "version": "JAMA 1983",
+      "use": "zero-event sample-size rationale, with exact binomial calculation used here",
+      "url": "https://pubmed.ncbi.nlm.nih.gov/6827763/"
+    },
+    {
+      "id": "Hu-Loizou speech enhancement evaluation",
+      "version": "Speech Communication 2007",
+      "use": "primary published example of P.835 speech-enhancement evaluation",
+      "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC2098693/"
+    }
+  ],
+  "approval": {
+    "status": "pending_user_approval",
+    "approved_by": null,
+    "approved_at": null,
+    "approved_design_sha256": null,
+    "heldout_examined_before_approval": false
+  },
+  "integrity": {
+    "algorithm": "sha256-canonical-json-v1",
+    "design_sha256": "896dfc12be5600705cd279b367fe5e28e6dfd3c6543a14977b4aa8e981bedd82"
+  }
+}
