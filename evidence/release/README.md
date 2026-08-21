@@ -17,8 +17,10 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
 - `t4.5-resolve-installer-proof.json` binds the transactional, relocatable Resolve package proof.
 - `t4.6-resolve-runtime-proof.json` separates the audited standalone Electron lock from the exact
   signed Blackmagic-owned runtime, retains every advisory ID, and records the still-unaccepted risk.
-- `t3.1-release-gate-proof.json` records the two clean-checkout full-gate passes, all ten matching
-  artifact identities, test/audit counts, proof hashes and retained failed attempts.
+- `t3.1-release-gate-proof.json` records the original two-clean-checkout gate proof and its retained
+  failed attempts. `t3.1-release-gate-refresh.json` is the compact checkpoint for the later
+  documentation/support source commit: two 41-step passes, all ten matching artifact identities,
+  exact test/audit counts, and hashes of the retained 60 KiB full proof and its component records.
 - `sorani-evaluation-protocol.json` is the result-free, machine-validated T5.1 design lock. Its design
   digest deliberately excludes the later approval record, so explicit approval can bind the exact
   study design without rewriting it. A structurally valid draft is not an approved protocol.

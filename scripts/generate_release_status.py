@@ -13,7 +13,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs" / "generated-release-status.md"
 RELEASE_IDENTITY = ROOT / "src" / "hawavoclean" / "release.json"
-FULL_GATE_PROOF = ROOT / "evidence" / "release" / "t3.1-release-gate-proof.json"
+FULL_GATE_PROOF = ROOT / "evidence" / "release" / "t3.1-release-gate-refresh.json"
 RUNTIME_RISK_PROOF = ROOT / "evidence" / "release" / "t4.6-resolve-runtime-proof.json"
 PROTOCOL = ROOT / "evidence" / "release" / "sorani-evaluation-protocol.json"
 SOURCE_ASSESSMENT = ROOT / "evidence" / "release" / "sorani-corpus-source-assessment.json"
@@ -122,6 +122,35 @@ def render_status() -> str:
         raise ReleaseStatusError("T3.1 source commit is invalid")
     suite = _object(gate_result.get("default_test_suite_per_pass"), "T3.1 default suite")
     container = _object(gate_result.get("container"), "T3.1 container result")
+    reproducibility = _object(full_gate.get("reproducibility"), "T3.1 reproducibility")
+    if reproducibility.get("status") != "passed":
+        raise ReleaseStatusError("the recorded T3.1 artifacts are not reproducible")
+    artifacts = _object(reproducibility.get("artifact_sha256"), "T3.1 artifact identities")
+    expected_artifacts = {
+        "audio-regression",
+        "container-audio",
+        "container-image",
+        "resolve-engine",
+        "resolve-plugin",
+        "sbom",
+        "sdist",
+        "ui",
+        "wheel",
+        "wheel-smoke-audio",
+    }
+    if set(artifacts) != expected_artifacts or any(
+        not isinstance(digest, str) or HEX64.fullmatch(digest) is None
+        for digest in artifacts.values()
+    ):
+        raise ReleaseStatusError("T3.1 artifact identities are incomplete or invalid")
+    proof_integrity = _object(full_gate.get("proof_integrity"), "T3.1 proof integrity")
+    for field in (
+        "full_proof_canonical_sha256",
+        "full_proof_file_sha256",
+        "external_input_inventory_canonical_sha256",
+    ):
+        if HEX64.fullmatch(_string(proof_integrity, field, f"T3.1 {field}")) is None:
+            raise ReleaseStatusError(f"T3.1 {field} is invalid")
 
     assessment = _object(runtime.get("assessment"), "T4.6 assessment")
     controlled = _object(runtime.get("controlled_runtime"), "controlled runtime")

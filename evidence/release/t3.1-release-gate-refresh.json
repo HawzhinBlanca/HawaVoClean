@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "task_id": "T3.1",
+  "recorded_on": "2026-08-21",
+  "source_commit": "13d43a7ef842b8aee56abc963e09cf2195d0f64a",
+  "command": "bash scripts/run_release_checks.sh",
+  "result": {
+    "status": "passed",
+    "isolated_clean_checkout_passes": 2,
+    "steps_per_pass": 41,
+    "pass_duration_seconds": [
+      708.84,
+      666.631
+    ],
+    "default_test_suite_per_pass": {
+      "passed": 1018,
+      "skipped": 1,
+      "fuzz_deselected": 41,
+      "branch_coverage_percent": 92.73,
+      "required_branch_coverage_percent": 92.49
+    },
+    "separate_fuzz_tests_per_pass": 41,
+    "owner_scoped_mutations_caught_per_pass": "23/23",
+    "real_audio_cases": 6,
+    "runs_per_real_audio_case": 2,
+    "ui_tests_per_pass": 342,
+    "python_ui_plugin_and_toolchain_audits": "zero known vulnerabilities",
+    "resolve_staged_lifecycle_self_test": "passed in both checkouts",
+    "container": {
+      "exact_locked_packages": "77/77",
+      "non_root_read_only_doctor_process_verify": "passed in both checkouts",
+      "high_or_critical_vulnerabilities": 0,
+      "high_or_critical_configuration_findings": 0
+    },
+    "generated_identity_schema_status_and_design_drift": 0,
+    "tracked_tree_drift": 0
+  },
+  "reproducibility": {
+    "status": "passed",
+    "artifact_sha256": {
+      "audio-regression": "2c83457494380c50781b93019395396429a6c09bfde1c15d0272a74182c13781",
+      "container-audio": "186039f165286d1c0cb62a931db8116a9dcf437b04627b0f4e9040bb30758723",
+      "container-image": "751e4963f390016bb6d4739b83ba7673d58f9e0af8219a5a58ed506785fcc36c",
+      "resolve-engine": "c3f8835c436911fd4021fc0fcb9fb755ff87b3e801cb93b9837b8d94425fe3ed",
+      "resolve-plugin": "05196762fd7eadc031eb919c0a162337177e21a72c0a94b8a5ed94baf7c21578",
+      "sbom": "c56ea98c723ebe01943ab1f5de2ad45240af130526fc0487e0b35a5e8e1fa6a9",
+      "sdist": "ef6de4ffc9144de41220523511e5d2224dfe19cd9cdb5be6c378a7a4f3d8bcb2",
+      "ui": "66050d512787116fd97a04a3a0af8ac219632ad9bad0bf9da031d881e05f4592",
+      "wheel": "7f58c41cc380e522647a145b478eb37732d2b2cc7ed4fe102550285f3a76d13b",
+      "wheel-smoke-audio": "186039f165286d1c0cb62a931db8116a9dcf437b04627b0f4e9040bb30758723"
+    },
+    "pass_artifact_inventory_canonical_sha256": "e7520f969fb925d46256a21e8d899168a50773b0c9e7841222dcc799018ed885"
+  },
+  "proof_integrity": {
+    "retained_proof_path": "build/release-gate/20260821T142729.360433Z/release-gate-proof.json",
+    "full_proof_canonical_sha256": "3ba97a3d07db8880a981614aefb3e0c180e9d84435c5c9e68a3abd22ec2db2a1",
+    "full_proof_file_sha256": "6c6fb19a14672b98eee9c7523f21acae2f33df49a9799f53f86fe3bb8466003b",
+    "external_input_inventory_canonical_sha256": "00980d7d171d9fe371709d21ed853b9835799c46935e8ee288236f8237d50443",
+    "pass_step_records_canonical_sha256": [
+      "2d0d8db77e7ad7b253dfd37382a9a7e3ae2a047c1f5ce483232b2fd6687764d1",
+      "c68b7ccddc5f1b34596131366cea14a0d44db6d806b387765462deb3c9f07d4f"
+    ]
+  },
+  "toolchain": {
+    "toolchain_lock_sha256": "5da46aea914dba9ab7d4d630c23624a1c9ad11068f08f8c6d071429e6c8d8fd1",
+    "python": "3.14.5",
+    "resolve_engine_python": "3.11.15",
+    "uv": "0.11.14",
+    "ruff": "0.16.3",
+    "mypy": "2.3.1",
+    "pytest": "9.1.1",
+    "node": "22.13.1",
+    "npm": "10.9.2",
+    "pnpm": "11.22.0",
+    "docker": "29.7.2",
+    "trivy": "0.67.2",
+    "pip_audit": "2.10.1",
+    "check_jsonschema": "0.35.0",
+    "ffmpeg": "8.1",
+    "trivy_database_updated_at": "2026-08-21 07:04:30.810065873 +0000 UTC",
+    "trivy_check_bundle_digest": "sha256:0491169789b867ae5a7353381220c1d4d97b3a0d6d9dfd84a25d06f0ba68aa93"
+  },
+  "known_limits": [
+    "Real Sorani human acceptance remains Phase 5 and is not implied by this automated gate.",
+    "Actual in-Resolve workflow and accessibility acceptance remain Phase 6.",
+    "Vendor-owned Resolve Electron risk still requires explicit acceptance or a qualifying update.",
+    "GitHub required-check and branch-protection proof remains T3.2/T3.3 after user checkpoint U1.",
+    "Final Phase 7 artifacts must be rebuilt and identity-signed from the eventual release commit."
+  ]
+}

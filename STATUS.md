@@ -26,12 +26,11 @@ gate fails if that file drifts from its sources.
 
 ## What the strongest proof currently establishes
 
-The last full two-pass proof is bound to source commit `31ca46e`, not automatically to later
-documentation and evaluation-design commits. It passed twice from detached clean checkouts with
-992 default tests, one skip, 41 separate fuzz cases, 23/23 declared mutations, 342 UI tests and
-92.73% branch coverage in each pass. Ten promised release/engineering identities reproduced. The
-later protocol, source-audit and T7.1 documentation tree additionally completed 1,019 default tests,
-strict formatting, lint and types, but the final candidate still must rerun the complete two-pass gate.
+The latest full proof is bound to source commit `13d43a7`, not automatically to later evidence-summary
+or final-release commits. It passed twice from detached clean checkouts with 1,018 default tests, one
+skip, 41 separate fuzz cases, 23/23 declared mutations, 342 UI tests and 92.73% branch coverage in
+each pass. All ten promised release/engineering identities reproduced. The final candidate must still
+rerun this complete gate after every human, host and governance blocker closes.
 
 The proof is engineering evidence, not Sorani product validation. Private real speech regressions and
 tracked synthetic fixtures can detect drift; they cannot establish population-level content safety,

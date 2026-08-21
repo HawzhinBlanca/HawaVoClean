@@ -9,8 +9,8 @@ has completed the human, host, governance, or final-release gates.
 |---|---|
 | Candidate identity | HawaVoClean 3.3.0; report schema 2 |
 | True-10 plan | 17/31 tasks have committed completion proof |
-| Last full local gate | Passed on `31ca46eb6992084023e1934110250c151b99c4ae`; 2 isolated passes × 38 steps |
-| Default suite in each full-gate pass | 992 passed, 1 skipped, 41 fuzz-only deselected; 92.73% branch coverage (floor 92.49%) |
+| Last full local gate | Passed on `13d43a7ef842b8aee56abc963e09cf2195d0f64a`; 2 isolated passes × 41 steps |
+| Default suite in each full-gate pass | 1018 passed, 1 skipped, 41 fuzz-only deselected; 92.73% branch coverage (floor 92.49%) |
 | Separate mutation/fuzz/UI gates | 23/23 mutations; 41 fuzz cases; 342 UI tests per pass |
 | Reproduced release identities | Wheel, sdist, UI, Resolve engine/plugin, container, SBOM and engineering-audio identities matched across both passes |
 | CPU container at the full gate | 77/77 packages; 0 high/critical vulnerabilities; 0 high/critical configuration findings |

@@ -18,9 +18,7 @@ def test_committed_release_status_is_exactly_generated() -> None:
 
 def test_snapshot_names_the_exact_proofs_and_open_human_gates() -> None:
     rendered = status.render_status()
-    gate = json.loads(
-        (ROOT / "evidence" / "release" / "t3.1-release-gate-proof.json").read_text(encoding="utf-8")
-    )
+    gate = json.loads(status.FULL_GATE_PROOF.read_text(encoding="utf-8"))
     assert gate["source_commit"] in rendered
     assert "unapproved" in rendered
     assert "final candidate must rerun" in rendered
@@ -41,4 +39,16 @@ def test_generator_rejects_a_broken_ledger_link(
     broken.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8")
     monkeypatch.setattr(status, "LEDGER", broken)
     with pytest.raises(status.ReleaseStatusError, match="does not link"):
+        status.render_status()
+
+
+def test_generator_rejects_a_fabricated_release_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    proof = json.loads(status.FULL_GATE_PROOF.read_text(encoding="utf-8"))
+    proof["reproducibility"]["artifact_sha256"]["wheel"] = "fabricated"
+    corrupt = tmp_path / "release-proof.json"
+    corrupt.write_text(json.dumps(proof), encoding="utf-8")
+    monkeypatch.setattr(status, "FULL_GATE_PROOF", corrupt)
+    with pytest.raises(status.ReleaseStatusError, match="identities are incomplete or invalid"):
         status.render_status()
