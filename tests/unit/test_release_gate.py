@@ -129,3 +129,7 @@ def test_verify_command_names_the_exact_report() -> None:
         "--report",
         "output.hawavoclean.json",
     ]
+
+
+def test_release_smoke_probes_use_the_shipped_deterministic_profile() -> None:
+    assert release_gate.SMOKE_PROFILE == "production"

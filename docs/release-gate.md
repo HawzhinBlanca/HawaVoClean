@@ -15,11 +15,11 @@ Each pass runs all of the following against the same commit:
 - exact UI/plugin installs, typechecking, production build and UI tests;
 - Python, UI, plugin and build-tool lock audits;
 - deterministic wheel and source-archive builds plus a fresh Python 3.11 wheel
-  install, doctor, process and verify exercise;
+  install, doctor, production-profile process and verify exercise;
 - a relocatable Resolve engine build and the real staged Electron-to-engine
   lifecycle self-test using the hash-pinned Resolve SDK bridge;
 - the pinned CPU container build, exact package check, non-root read-only
-  doctor/process/verify exercise, and current high/critical vulnerability and
+  doctor plus production-profile process/verify exercise, and current high/critical vulnerability and
   configuration scans; and
 - generation and validation of the artifact-bound CycloneDX 1.6 SBOM.
 

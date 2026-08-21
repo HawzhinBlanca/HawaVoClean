@@ -264,6 +264,32 @@ def test_ephemeral_trivy_scan_subject_is_removed_without_dropping_metadata() -> 
     assert bom == {"metadata": {"timestamp": "stable"}}
 
 
+def test_mutable_local_image_tags_do_not_change_the_sbom_identity() -> None:
+    component = {
+        "type": "container",
+        "purl": "pkg:oci/hawavoclean@sha256%3Aabc",
+        "properties": [
+            {"name": "aquasecurity:trivy:ImageID", "value": "sha256:abc"},
+            {"name": "aquasecurity:trivy:RepoTag", "value": "hawavoclean:first"},
+            {"name": "aquasecurity:trivy:RepoTag", "value": "hawavoclean:second"},
+            {"name": "aquasecurity:trivy:RepoDigest", "value": "hawavoclean@sha256:abc"},
+        ],
+    }
+    one_tag = json.loads(json.dumps(component))
+    one_tag["properties"] = [
+        prop for prop in one_tag["properties"] if prop.get("value") != "hawavoclean:second"
+    ]
+
+    generate_sbom._remove_mutable_image_aliases([component])
+    generate_sbom._remove_mutable_image_aliases([one_tag])
+
+    assert component["properties"] == [
+        {"name": "aquasecurity:trivy:ImageID", "value": "sha256:abc"},
+        {"name": "aquasecurity:trivy:RepoDigest", "value": "hawavoclean@sha256:abc"},
+    ]
+    assert one_tag == component
+
+
 def test_contract_rejects_a_missing_release_ecosystem() -> None:
     incomplete = {
         "components": [

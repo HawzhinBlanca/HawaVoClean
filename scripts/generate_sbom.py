@@ -111,6 +111,28 @@ def _remove_scan_subject(bom: dict[str, Any]) -> None:
         metadata.pop("component", None)
 
 
+def _remove_mutable_image_aliases(components: list[dict[str, Any]]) -> None:
+    """Remove local Docker tags that are not part of an immutable image identity.
+
+    Trivy reports every tag currently attached to an image ID. Adding a second
+    tag to the same byte-identical image must not change its release SBOM; the
+    immutable ImageID, RepoDigest, layers and OCI labels remain recorded.
+    """
+    for component in components:
+        purl = component.get("purl")
+        if component.get("type") != "container" and not (
+            isinstance(purl, str) and purl.startswith("pkg:oci/")
+        ):
+            continue
+        properties = component.get("properties")
+        if isinstance(properties, list):
+            component["properties"] = [
+                prop
+                for prop in properties
+                if not (isinstance(prop, dict) and prop.get("name") == "aquasecurity:trivy:RepoTag")
+            ]
+
+
 def _canonical_ref(component: dict[str, Any]) -> str:
     purl = component.get("purl")
     if isinstance(purl, str) and purl:
@@ -683,6 +705,7 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
         _remove_scan_subject(source_bom)
         image_bom = _trivy_bom(["image", image_id], temp / "image.cdx.json")
         components, dependency_rows = _normalized_inventory([source_bom, image_bom])
+        _remove_mutable_image_aliases(components)
         model_components, model_dependencies = _model_components()
         artifact_components = [_artifact_component(name, path) for name, path in artifacts]
         custom_components = [*model_components, *artifact_components]

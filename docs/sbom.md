@@ -18,6 +18,9 @@ trees cannot enter the release inventory.
   root-escaping symlinks fail generation.
 - A supplied image tag is never trusted as identity. Docker resolves it to `sha256:…`, and its OCI
   source revision, version and creation date must match the clean Git release before scanning.
+- Mutable local `RepoTag` aliases reported by Trivy are excluded from the canonical inventory; the
+  immutable image ID, repository digest, layer identities and OCI labels remain recorded. Attaching
+  another local name to identical image bytes therefore cannot change the SBOM.
 
 ## Verification
 

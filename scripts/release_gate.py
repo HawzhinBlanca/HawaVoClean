@@ -47,6 +47,7 @@ PRIVATE_FIELDS = (
     ("reference_audio", "audio_sha256"),
     ("reference_report", "report_sha256"),
 )
+SMOKE_PROFILE = "production"
 
 
 class GateError(RuntimeError):
@@ -653,7 +654,7 @@ def _run_pass(
             "--output",
             str(smoke_output),
             "--profile",
-            "development",
+            SMOKE_PROFILE,
             "--overwrite",
         ],
     )
@@ -762,7 +763,7 @@ def _run_pass(
             "--output",
             "/work/output.wav",
             "--profile",
-            "development",
+            SMOKE_PROFILE,
             "--overwrite",
         ],
     )
