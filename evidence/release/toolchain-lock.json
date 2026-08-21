@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "release_host": "macos-arm64",
+  "tools": {
+    "check-jsonschema": "0.35.0",
+    "docker": "29.7.2",
+    "ffmpeg": "8.1",
+    "mypy": "2.3.1",
+    "node": "22.13.1",
+    "npm": "10.9.2",
+    "pip-audit": "2.10.1",
+    "pnpm": "11.22.0",
+    "pytest": "9.1.1",
+    "python": "3.14.5",
+    "resolve-engine-python": "3.11.15",
+    "ruff": "0.16.3",
+    "trivy": "0.67.2",
+    "uv": "0.11.14"
+  },
+  "resolve_host": {
+    "build": "21.0.30007",
+    "sdk_node_sha256": "91705298c56b649a75bf76be101fea28fbe41b1e88adf4778490ce8b2d14b3e2",
+    "version": "21.0.3"
+  }
+}

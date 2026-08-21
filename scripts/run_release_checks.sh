@@ -1,25 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "================================================================================"
-echo "                  HAWAVOCLEAN - RELEASE GATES SUITE                      "
-echo "================================================================================"
-
-echo "[1/5] Formatting check..."
-uv run ruff format --check .
-
-echo "[2/5] Linting check..."
-uv run ruff check .
-
-echo "[3/5] Type safety check (Mypy strict)..."
-uv run mypy --strict src tests scripts data
-
-echo "[4/5] Running tests with branch coverage..."
-uv run pytest -q --cov=hawavoclean --cov-branch --cov-report=term-missing --cov-fail-under=92.49
-
-echo "[5/5] Doctor preflight..."
-uv run hawavoclean doctor
-
-echo "================================================================================"
-echo "ALL RELEASE CHECKS PASSED SUCCESSFULLY."
-echo "================================================================================"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
+exec uv run --frozen python scripts/release_gate.py "$@"

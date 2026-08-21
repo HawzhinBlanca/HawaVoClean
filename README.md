@@ -141,6 +141,20 @@ Paths are CWD-independent: configs and model artifacts ship inside the
 package and can be overridden with `HAWAVOCLEAN_CONFIG_DIR`,
 `HAWAVOCLEAN_MODEL_DIR`, and `HAWAVOCLEAN_WORK_DIR`.
 
+## Release validation
+
+The release claim has one local entry point:
+
+```bash
+bash scripts/run_release_checks.sh
+```
+
+It runs the complete gate twice in fresh detached checkouts and succeeds only
+when the shipped wheel, UI, Resolve plugin, container and SBOM identities
+reproduce. The pinned host requirements, every included check, retained proof
+format and honest external limits are documented in
+[docs/release-gate.md](docs/release-gate.md).
+
 ## License
 
 All rights reserved. Proprietary and confidential.
