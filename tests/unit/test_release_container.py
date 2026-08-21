@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +25,14 @@ def test_container_bases_and_installer_are_immutable() -> None:
     assert "uv pip install --python /app/.venv/bin/python --no-deps" in text
     assert "COPY docker/debian.sources /etc/apt/sources.list.d/debian.sources" in text
     assert "apt-get upgrade" not in text
+
+
+def test_container_copies_the_declared_custom_build_hook() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    hook = project["tool"]["hatch"]["build"]["hooks"]["custom"]["path"]
+
+    assert hook == "hatch_build.py"
+    assert re.search(rf"^COPY [^\n]*\b{re.escape(hook)}\b[^\n]* \./$", _dockerfile(), re.MULTILINE)
 
 
 def test_container_is_cpu_only_non_root_and_read_only_friendly() -> None:

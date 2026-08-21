@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Build from the exact Python lock. The project wheel is installed without a
 # second resolver pass, so the runtime environment cannot drift from uv.lock.
-COPY pyproject.toml uv.lock README.md THIRD_PARTY_LICENSES.md ./
+COPY pyproject.toml uv.lock README.md THIRD_PARTY_LICENSES.md hatch_build.py ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv build --wheel --out-dir /dist \
