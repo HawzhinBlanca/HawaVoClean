@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -102,7 +103,7 @@ def test_image_reference_is_resolved_and_source_labels_must_match(
 ) -> None:
     commit = "a" * 40
     image_id = f"sha256:{'b' * 64}"
-    inspection = [
+    inspection: list[dict[str, Any]] = [
         {
             "Id": image_id,
             "Config": {
@@ -131,7 +132,7 @@ def test_image_reference_is_resolved_and_source_labels_must_match(
 
 
 def test_exact_locks_enrich_package_hashes_and_explicit_unknown_licenses() -> None:
-    components = [
+    components: list[dict[str, Any]] = [
         {
             "type": "library",
             "name": "electron",
@@ -177,8 +178,8 @@ def test_source_export_contains_only_the_exact_git_tree(tmp_path: Path) -> None:
     assert not (source / "test_output").exists()
 
 
-def _minimal_complete_contract() -> dict[str, object]:
-    def package(purl: str) -> dict[str, object]:
+def _minimal_complete_contract() -> dict[str, Any]:
+    def package(purl: str) -> dict[str, Any]:
         return {
             "type": "library",
             "name": purl,

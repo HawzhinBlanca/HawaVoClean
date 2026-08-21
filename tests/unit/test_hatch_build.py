@@ -8,6 +8,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -28,7 +29,8 @@ def _load_build_hook() -> types.ModuleType:
             "hatchling.builders.hooks.plugin.interface"
         ),
     }
-    modules["hatchling.builders.hooks.plugin.interface"].BuildHookInterface = BuildHookInterface
+    interface = cast(Any, modules["hatchling.builders.hooks.plugin.interface"])
+    interface.BuildHookInterface = BuildHookInterface
     sys.modules.update(modules)
     try:
         return importlib.import_module("hatch_build")
