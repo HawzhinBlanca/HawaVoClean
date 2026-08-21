@@ -45,7 +45,11 @@ from hawavoclean.server.analysis import (
     compute_peaks_window,
 )
 from hawavoclean.server.jobs import TERMINAL_STATES, JobManager
-from hawavoclean.server.policy import PathPolicyError, resolve_client_path
+from hawavoclean.server.policy import (
+    PathPolicyError,
+    resolve_client_output_path,
+    resolve_client_path,
+)
 
 logger = get_logger("server")
 
@@ -482,7 +486,7 @@ def create_app(
     async def create_job(req: JobRequest) -> dict[str, Any]:
         input_path = resolve_client_path(req.input_path, must_exist=True)
         if req.output_path:
-            output_path = resolve_client_path(req.output_path)
+            output_path = resolve_client_output_path(req.output_path)
         else:
             output_path = default_output_path(input_path, req.profile)
         if output_path.suffix.lower() != ".wav":

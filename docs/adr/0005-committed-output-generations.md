@@ -112,6 +112,10 @@ Accepted because all public artifacts change generation through one filesystem o
 
 ## Verification
 
+The normative durable-state and recovery model is
+[`docs/publication-state-machine.md`](../publication-state-machine.md). Its failure positions are
+owned by executable tests rather than a manually maintained claim.
+
 - Inject failure before and after every copy, flush, alias replacement, pointer replacement and cleanup.
 - Send `SIGINT`, `SIGTERM` and `SIGKILL` at each durable state and run recovery repeatedly.
 - Assert that `current` names either the prior complete generation or the new complete generation.
@@ -119,4 +123,3 @@ Accepted because all public artifacts change generation through one filesystem o
   committed manifest.
 - Exercise first publish, legacy migration, overwrite, identical republish, disk full, permission loss,
   concurrent readers and malicious/unexpected symlinks.
-

@@ -51,6 +51,7 @@ from hawavoclean.logging import get_logger
 from hawavoclean.paths import work_root
 from hawavoclean.pipeline import _preflight_destination, run_pipeline
 from hawavoclean.progress import ProgressCallback, ProgressEvent, emit_progress
+from hawavoclean.publication import public_output_path, resolve_committed_publication
 from hawavoclean.report.schema import HawaVoCleanReport, MediaStats, PassRecord
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import serialize_json_report
@@ -217,7 +218,7 @@ def run_multipass(
     target = MAX_PASSES if auto else pass_count
 
     in_path = Path(input_path).resolve()
-    out_path = Path(output_path).resolve()
+    out_path = public_output_path(output_path)
     # Refuse a bad destination BEFORE pass 1 decodes a sample — the per-pass
     # preflight only ever sees the private temp destinations.
     _preflight_destination(in_path, out_path, overwrite)
@@ -247,7 +248,9 @@ def run_multipass(
                 overwrite=False,
                 on_progress=_pass_progress(on_progress, k, None if auto else target),
             )
-            record = _pass_record(k, report, measure_separation_db(pass_out))
+            committed_pass = resolve_committed_publication(pass_out)
+            pass_audio = committed_pass[0] if committed_pass is not None else pass_out
+            record = _pass_record(k, report, measure_separation_db(pass_audio))
             if k == 1:
                 # Only pass 1's report holds the ORIGINAL source's MediaStats;
                 # every later pass's "input" is a temp file about to vanish.
@@ -264,8 +267,8 @@ def run_multipass(
 
             records.append(record)
             shipped_report = report
-            shipped_audio = pass_out
-            current_input = pass_out
+            shipped_audio = pass_audio
+            current_input = pass_audio
             logger.info(
                 f"Pass {k}: {record.enhanced}/{record.units_total} enhanced, "
                 f"separation {record.separation_db:.2f} dB"

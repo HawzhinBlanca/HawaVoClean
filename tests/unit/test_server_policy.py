@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from hawavoclean.server.policy import PathPolicyError, allowed_roots, resolve_client_path
+from hawavoclean.server.policy import (
+    PathPolicyError,
+    allowed_roots,
+    resolve_client_output_path,
+    resolve_client_path,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -55,6 +60,21 @@ def test_inside_work_dir_and_home_are_allowed(
     with pytest.raises(PathPolicyError) as exc:
         resolve_client_path(str(tmp_path), must_exist=True)  # a directory is not a file
     assert exc.value.status == 404
+
+
+def test_output_policy_preserves_final_symlink_name_but_resolves_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path))
+    hidden = tmp_path / ".out.wav.hawavoclean" / "current"
+    hidden.mkdir(parents=True)
+    target = hidden / "master.wav"
+    target.write_bytes(b"old")
+    public = tmp_path / "out.wav"
+    public.symlink_to(target.relative_to(tmp_path))
+
+    assert resolve_client_path(str(public), must_exist=True) == target
+    assert resolve_client_output_path(str(public)) == public
 
 
 def test_text_that_cannot_be_a_filename_is_400_not_a_raised_exception(

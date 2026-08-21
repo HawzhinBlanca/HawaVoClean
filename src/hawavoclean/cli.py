@@ -40,6 +40,11 @@ from hawavoclean.multipass import MAX_PASSES, run_multipass
 from hawavoclean.paths import models_dir, profile_config_path
 from hawavoclean.pipeline import run_pipeline
 from hawavoclean.progress import ProgressEvent
+from hawavoclean.publication import (
+    public_output_path,
+    publication_paths,
+    resolve_committed_publication,
+)
 from hawavoclean.report.writer import load_json_report
 from hawavoclean.watchdog import child_env, install_parent_death_watchdog
 
@@ -221,7 +226,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 on_progress=on_progress,
             )
         if sink is not None:
-            out_path = Path(args.output).resolve()
+            out_path = public_output_path(args.output)
             sink.emit(
                 {
                     "event": "done",
@@ -605,8 +610,17 @@ def cmd_batch(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     """Verify an output audio master against its immutable JSON report."""
-    audio_path = Path(args.output).resolve()
-    report_path = Path(args.report).resolve()
+    public_audio = public_output_path(args.output)
+    public_report = public_output_path(args.report)
+    expected_report = publication_paths(public_audio).json
+    committed = (
+        resolve_committed_publication(public_audio) if public_report == expected_report else None
+    )
+    if committed is None:
+        audio_path = public_audio.resolve()
+        report_path = public_report.resolve()
+    else:
+        audio_path, report_path, _ = committed
 
     if not audio_path.exists():
         exit_with_code(ExitCode.INVALID_USER_INPUT, f"Audio file not found: {audio_path}")

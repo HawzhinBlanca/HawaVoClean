@@ -232,34 +232,19 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "M9",
-        "report and summary never staged (audio published alone)",
-        "src/hawavoclean/job.py",
-        """            shutil.copyfile(temp_audio_path, staged_audio)
-            for staged, content in ((staged_json, json_report_str), (staged_txt, txt_summary_str)):
-                with open(staged, "w", encoding="utf-8") as f:
-                    f.write(content)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-            renamed: list[tuple[Path, Path]] = []
-            try:
-                for staged, dest in (
-                    (staged_audio, dest_audio),
-                    (staged_json, dest_json),
-                    (staged_txt, dest_txt),
-                ):""",
-        """            shutil.copyfile(temp_audio_path, staged_audio)
-
-            renamed: list[tuple[Path, Path]] = []
-            try:
-                for staged, dest in (
-                    (staged_audio, dest_audio),
-                ):""",
-        # Owners: `verify` reads the published report back, so it is the test
-        # that notices when audio is published without its report and summary.
+        "overwrite commit pointer keeps the previous generation",
+        "src/hawavoclean/publication.py",
+        """            _checkpoint("before_pointer_commit")
+            _replace_current(paths, generation_id)
+            _replace_json(""",
+        """            _checkpoint("before_pointer_commit")
+            _replace_current(paths, prior or generation_id)
+            _replace_json(""",
+        # Owner: an overwrite is complete only when the single authoritative
+        # pointer names the new immutable generation. This catches a publisher
+        # that prepares perfect artifacts yet silently keeps serving the old set.
         owners=(
-            "tests/unit/test_cli_surface.py::test_verify_happy_path",
-            "tests/unit/test_cli.py::test_cli_verify_success",
+            "tests/unit/test_publication_transaction.py::test_overwrite_retains_prior_immutable_generation",
         ),
     ),
     Mutation(

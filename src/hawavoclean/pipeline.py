@@ -81,6 +81,7 @@ from hawavoclean.progress import (
     emit_progress,
     unit_progress,
 )
+from hawavoclean.publication import public_output_path, publication_exists, publication_paths
 from hawavoclean.report.schema import (
     CoreMetadata,
     EnvironmentMetadata,
@@ -115,18 +116,14 @@ def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> No
       minutes of processing.
     - an unwritable destination directory is refused here, cleanly.
     """
-    sidecars = (
-        out_path,
-        out_path.parent / f"{out_path.stem}.hawavoclean.json",
-        out_path.parent / f"{out_path.stem}.hawavoclean.txt",
-    )
+    sidecars = publication_paths(out_path).public
     for candidate in sidecars:
         if candidate == in_path:
             raise PublicationError(
                 f"Refusing to write output over the input: {in_path}. "
                 "Choose a different output path."
             )
-    if not overwrite and any(c.exists() for c in sidecars):
+    if not overwrite and publication_exists(out_path):
         raise PublicationError(
             f"Destination output file already exists and overwrite=False: {out_path} "
             "(pass --overwrite to replace it)"
@@ -212,7 +209,7 @@ def run_pipeline(
     stage boundary; exceptions it raises are logged and ignored.
     """
     in_path = Path(input_path).resolve()
-    out_path = Path(output_path).resolve()
+    out_path = public_output_path(output_path)
 
     logger.info(f"Starting HawaVoClean pipeline on {in_path} -> {out_path} [profile={profile}]")
     _preflight_destination(in_path, out_path, overwrite)

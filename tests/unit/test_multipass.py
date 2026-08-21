@@ -30,6 +30,7 @@ from hawavoclean.multipass import (
 )
 from hawavoclean.paths import work_root
 from hawavoclean.progress import ProgressEvent
+from hawavoclean.publication import public_output_path
 from hawavoclean.report.schema import (
     CoreMetadata,
     EnvironmentMetadata,
@@ -410,7 +411,7 @@ def test_explicit_two_passes_chains_input_and_records_both(
     assert stub.calls[1][0] == stub.calls[0][1], "pass 2 must consume pass 1's output"
     assert out.exists()
     assert hash_file(out) == report.output.sha256
-    assert report.output.path == str(out.resolve())
+    assert report.output.path == str(public_output_path(out))
     # Report input is the ORIGINAL source, passes[] chains the journey.
     assert report.input.sha256 == hash_file(src)
     assert [p.pass_index for p in report.passes] == [1, 2]
