@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from hawavoclean.errors import ExitCode
 from hawavoclean.logging import get_logger
@@ -39,6 +39,13 @@ JobState = Literal["queued", "running", "done", "failed", "cancelled"]
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 STDERR_TAIL_LINES = 50
 DEFAULT_KILL_GRACE_S = 5.0
+DEFAULT_MAX_ACTIVE_JOBS = 8
+DEFAULT_MAX_TERMINAL_JOBS = 256
+DEFAULT_TERMINAL_JOB_TTL_S = 24 * 60 * 60.0
+
+
+class QueueFullError(RuntimeError):
+    """The bounded active-job queue has no capacity for another submission."""
 
 
 def _now_iso() -> str:
@@ -63,6 +70,7 @@ class JobRecord:
     created_at: str = field(default_factory=_now_iso)
     started_at: str | None = None
     finished_at: str | None = None
+    terminal_at: float | None = None
     error: dict[str, str] | None = None
     report: dict[str, Any] | None = None
     cancel_requested: bool = False
@@ -97,6 +105,7 @@ class JobRecord:
 
 
 CommandFactory = Callable[[JobRecord], list[str]]
+TerminalCallback = Callable[[JobRecord], None]
 
 
 def default_command(record: JobRecord) -> list[str]:
@@ -143,15 +152,30 @@ class JobManager:
         command_factory: CommandFactory | None = None,
         kill_grace_s: float = DEFAULT_KILL_GRACE_S,
         env: dict[str, str] | None = None,
+        max_active_jobs: int = DEFAULT_MAX_ACTIVE_JOBS,
+        max_terminal_jobs: int = DEFAULT_MAX_TERMINAL_JOBS,
+        terminal_ttl_s: float = DEFAULT_TERMINAL_JOB_TTL_S,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if max_active_jobs < 1:
+            raise ValueError("max_active_jobs must be at least 1")
+        if max_terminal_jobs < 1:
+            raise ValueError("max_terminal_jobs must be at least 1")
+        if terminal_ttl_s <= 0:
+            raise ValueError("terminal_ttl_s must be positive")
         self._command_factory: CommandFactory = command_factory or default_command
         self._kill_grace_s = kill_grace_s
         self._env = env
+        self._max_active_jobs = max_active_jobs
+        self._max_terminal_jobs = max_terminal_jobs
+        self._terminal_ttl_s = terminal_ttl_s
+        self._clock = clock
         self._jobs: dict[str, JobRecord] = {}
         self._queue: deque[str] = deque()
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._subscribers: dict[str, list[_Subscriber]] = {}
+        self._terminal_callbacks: list[TerminalCallback] = []
         self._closed = False
         self._worker = threading.Thread(target=self._run_loop, name="hawavoclean-jobs", daemon=True)
         self._worker.start()
@@ -179,6 +203,12 @@ class JobManager:
         with self._wake:
             if self._closed:
                 raise RuntimeError("job manager is shut down")
+            self._prune_locked()
+            active = sum(record.state not in TERMINAL_STATES for record in self._jobs.values())
+            if active >= self._max_active_jobs:
+                raise QueueFullError(
+                    f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
+                )
             self._jobs[record.job_id] = record
             self._queue.append(record.job_id)
             running = any(r.state == "running" for r in self._jobs.values())
@@ -189,17 +219,34 @@ class JobManager:
 
     def get_status(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._prune_locked()
             record = self._jobs.get(job_id)
             return record.snapshot() if record is not None else None
 
     def list_jobs(self) -> list[dict[str, Any]]:
         with self._lock:
+            self._prune_locked()
             return [r.snapshot() for r in self._jobs.values()]
+
+    def active_input_paths(self) -> set[Path]:
+        """Inputs that retention cleanup must not remove while queued/running."""
+        with self._lock:
+            return {
+                record.input_path.resolve()
+                for record in self._jobs.values()
+                if record.state not in TERMINAL_STATES
+            }
+
+    def add_terminal_callback(self, callback: TerminalCallback) -> None:
+        """Register idempotent, bounded cleanup invoked when any job becomes terminal."""
+        with self._lock:
+            self._terminal_callbacks.append(callback)
 
     def cancel(self, job_id: str) -> bool:
         """Cancel a queued or running job. Returns False for an unknown id;
         True otherwise (including the no-op on an already finished job)."""
         with self._lock:
+            self._prune_locked()
             record = self._jobs.get(job_id)
             if record is None:
                 return False
@@ -220,8 +267,9 @@ class JobManager:
         """Register the calling event loop for status pushes. Returns None for
         an unknown job. Call from inside a running asyncio loop."""
         loop = asyncio.get_running_loop()
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=2)
         with self._lock:
+            self._prune_locked()
             if job_id not in self._jobs:
                 return None
             self._subscribers.setdefault(job_id, []).append((loop, queue))
@@ -230,7 +278,11 @@ class JobManager:
     def unsubscribe(self, job_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
         with self._lock:
             subs = self._subscribers.get(job_id, [])
-            self._subscribers[job_id] = [s for s in subs if s[1] is not queue]
+            remaining = [s for s in subs if s[1] is not queue]
+            if remaining:
+                self._subscribers[job_id] = remaining
+            else:
+                self._subscribers.pop(job_id, None)
 
     def shutdown(self, grace_s: float = 0.5) -> None:
         """Cancel everything: queued jobs are marked cancelled, the running
@@ -287,9 +339,17 @@ class JobManager:
             return
         snap = record.snapshot()
         alive: list[_Subscriber] = []
+
+        def _put_latest(queue: asyncio.Queue[dict[str, Any]], value: dict[str, Any]) -> None:
+            while not queue.empty():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+            with contextlib.suppress(asyncio.QueueFull):
+                queue.put_nowait(value)
+
         for loop, queue in subs:
             try:
-                loop.call_soon_threadsafe(queue.put_nowait, snap)
+                loop.call_soon_threadsafe(_put_latest, queue, snap)
             except RuntimeError:
                 continue  # loop closed: subscriber is gone
             alive.append((loop, queue))
@@ -298,6 +358,7 @@ class JobManager:
     def _finish_locked(self, record: JobRecord, state: JobState, message: str) -> None:
         record.state = state
         record.finished_at = _now_iso()
+        record.terminal_at = self._clock()
         record.message = message
         if state == "done":
             record.stage = "done"
@@ -305,6 +366,32 @@ class JobManager:
         elif state == "failed":
             record.stage = "error"
         self._notify_locked(record)
+        for callback in self._terminal_callbacks:
+            try:
+                callback(record)
+            except Exception as exc:  # cleanup cannot change the authoritative job verdict
+                logger.error(f"Terminal cleanup for {record.job_id} failed: {exc}", exc_info=True)
+
+    def _prune_locked(self) -> None:
+        """Expire terminal snapshots by age/count; never evict active jobs or subscribers."""
+        now = self._clock()
+        candidates = [
+            record
+            for record in self._jobs.values()
+            if record.state in TERMINAL_STATES and record.terminal_at is not None
+        ]
+        expired = {
+            record.job_id
+            for record in candidates
+            if now - cast(float, record.terminal_at) >= self._terminal_ttl_s
+        }
+        retained = [record for record in candidates if record.job_id not in expired]
+        retained.sort(key=lambda record: (record.terminal_at or 0.0, record.job_id))
+        overflow = max(0, len(retained) - self._max_terminal_jobs)
+        expired.update(record.job_id for record in retained[:overflow])
+        for job_id in expired:
+            self._jobs.pop(job_id, None)
+            self._subscribers.pop(job_id, None)
 
     def _run_loop(self) -> None:
         while True:

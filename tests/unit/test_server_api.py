@@ -129,6 +129,11 @@ def test_token_by_header_or_query(client: TestClient) -> None:
         "version": __version__,
         "profiles": ["studio", "lowband", "production"],
         "engine_pid": body["engine_pid"],
+        "storage": {
+            "managed_upload_bytes": 0,
+            "managed_upload_limit_bytes": 16 * 1024 * 1024 * 1024,
+            "minimum_free_bytes": 512 * 1024 * 1024,
+        },
     }
     assert isinstance(body["engine_pid"], int)
     assert client.get(f"/api/health?token={TOKEN}", headers={"Origin": "null"}).status_code == 200

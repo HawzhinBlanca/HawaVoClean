@@ -16,6 +16,8 @@ before the body is read at all, and again from the byte count while streaming
 for a client that declares no length.
 """
 
+import asyncio
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from tempfile import SpooledTemporaryFile
@@ -28,6 +30,7 @@ from starlette.formparsers import MultiPartParser
 
 from hawavoclean.server import app as app_module
 from hawavoclean.server.app import (
+    DEFAULT_MAX_CONCURRENT_UPLOADS,
     DEFAULT_MAX_UPLOAD_BYTES,
     MAX_UPLOAD_BYTES_ENV,
     UPLOAD_CHUNK_BYTES,
@@ -241,10 +244,19 @@ def test_an_unauthenticated_oversized_upload_is_401_not_413(work: Path) -> None:
         assert r.json()["error"] == "unauthorized"
 
 
-def test_a_cap_of_zero_disables_the_limit(work: Path) -> None:
-    for c in _client(work, max_upload_bytes=0):
-        r = c.post("/api/upload", headers=H, files={"file": ("free.wav", b"x" * 200000)})
-        assert r.status_code == 200, r.text
+def test_an_explicit_zero_cap_is_rejected_as_unbounded() -> None:
+    manager = JobManager()
+    try:
+        with pytest.raises(ValueError, match="must be positive"):
+            create_app(
+                TOKEN,
+                None,
+                job_manager=manager,
+                on_shutdown=lambda: None,
+                max_upload_bytes=0,
+            )
+    finally:
+        manager.shutdown()
 
 
 # ------------------------------------------------------------ configuration
@@ -258,7 +270,7 @@ def test_the_cap_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv(MAX_UPLOAD_BYTES_ENV, "123456")
     assert configured_max_upload_bytes() == 123456
     monkeypatch.setenv(MAX_UPLOAD_BYTES_ENV, "0")
-    assert configured_max_upload_bytes() == 0
+    assert configured_max_upload_bytes() == DEFAULT_MAX_UPLOAD_BYTES
     # A typo must not silently uncap the endpoint.
     for junk in ("", "   ", "lots", "-5", "1.5"):
         monkeypatch.setenv(MAX_UPLOAD_BYTES_ENV, junk)
@@ -273,3 +285,60 @@ def test_the_environment_cap_reaches_a_built_app(
         assert c.app.state.max_upload_bytes == 4096  # type: ignore[attr-defined]
         r = c.post("/api/upload", headers=H, files={"file": ("huge.wav", b"x" * 9000)})
         assert r.status_code == 413
+
+
+def test_multipart_spooling_has_a_concurrency_bound_before_parsing() -> None:
+    async def exercise() -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def inner(_scope: Any, _receive: Any, send: Any) -> None:
+            entered.set()
+            await release.wait()
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        middleware = app_module.UploadSizeLimitMiddleware(inner, max_bytes=1024, max_concurrent=1)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/upload",
+            "headers": [],
+        }
+
+        async def receive() -> dict[str, Any]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        first_messages: list[dict[str, Any]] = []
+        second_messages: list[dict[str, Any]] = []
+
+        async def first_send(message: dict[str, Any]) -> None:
+            first_messages.append(message)
+
+        async def second_send(message: dict[str, Any]) -> None:
+            second_messages.append(message)
+
+        first = asyncio.create_task(middleware(scope, receive, cast(Any, first_send)))
+        await entered.wait()
+        await middleware(scope, receive, cast(Any, second_send))
+        release.set()
+        await first
+
+        assert DEFAULT_MAX_CONCURRENT_UPLOADS == 2
+        assert second_messages[0]["status"] == 503
+        body = json.loads(second_messages[1]["body"])
+        assert body["error"] == "upload_busy"
+        assert first_messages[0]["status"] == 204
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(("byte_limit", "concurrency"), [(0, 1), (1, 0)])
+def test_upload_middleware_limits_cannot_be_disabled(byte_limit: int, concurrency: int) -> None:
+    async def unused(_scope: Any, _receive: Any, _send: Any) -> None:
+        raise AssertionError("not called")
+
+    with pytest.raises(ValueError, match="must be positive"):
+        app_module.UploadSizeLimitMiddleware(
+            unused, max_bytes=byte_limit, max_concurrent=concurrency
+        )

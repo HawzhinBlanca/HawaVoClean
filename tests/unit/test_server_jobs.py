@@ -16,6 +16,7 @@ from hawavoclean.server.jobs import (
     TERMINAL_STATES,
     JobManager,
     JobRecord,
+    QueueFullError,
     default_command,
     queue_position,
 )
@@ -632,3 +633,130 @@ def test_non_object_json_lines_are_ignored(tmp_path: Path) -> None:
         assert _wait_terminal(manager, job_id)["state"] == "done"
     finally:
         manager.shutdown()
+
+
+def test_active_job_queue_is_hard_bounded(tmp_path: Path) -> None:
+    manager = JobManager(command_factory=lambda _record: _py(_SLOW), max_active_jobs=2)
+    try:
+        first = manager.submit(
+            input_path=tmp_path / "a.wav",
+            output_path=tmp_path / "a-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        _wait_state(manager, first, "running")
+        manager.submit(
+            input_path=tmp_path / "b.wav",
+            output_path=tmp_path / "b-out.wav",
+            profile="production",
+            overwrite=False,
+        )
+        with pytest.raises(QueueFullError, match=r"2/2 active jobs"):
+            manager.submit(
+                input_path=tmp_path / "c.wav",
+                output_path=tmp_path / "c-out.wav",
+                profile="production",
+                overwrite=False,
+            )
+    finally:
+        manager.shutdown(grace_s=0.2)
+
+
+def test_terminal_jobs_expire_by_fake_clock_without_touching_active_jobs(tmp_path: Path) -> None:
+    now = [100.0]
+    manager = JobManager(
+        command_factory=_success_factory,
+        terminal_ttl_s=10.0,
+        clock=lambda: now[0],
+    )
+    try:
+        finished = manager.submit(
+            input_path=tmp_path / "done.wav",
+            output_path=tmp_path / "done-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        assert _wait_terminal(manager, finished)["state"] == "done"
+        now[0] = 109.9
+        assert manager.get_status(finished) is not None
+        now[0] = 110.0
+        assert manager.get_status(finished) is None
+    finally:
+        manager.shutdown()
+
+
+def test_terminal_job_count_retains_only_newest_records(tmp_path: Path) -> None:
+    now = [0.0]
+    manager = JobManager(
+        command_factory=_success_factory,
+        max_terminal_jobs=2,
+        clock=lambda: now[0],
+    )
+    ids: list[str] = []
+    try:
+        for index in range(3):
+            now[0] = float(index)
+            job_id = manager.submit(
+                input_path=tmp_path / f"{index}.wav",
+                output_path=tmp_path / f"{index}-out.wav",
+                profile="production",
+                overwrite=False,
+            )["job_id"]
+            _wait_terminal(manager, job_id)
+            ids.append(job_id)
+        retained = {row["job_id"] for row in manager.list_jobs()}
+        assert retained == set(ids[-2:])
+        assert manager.get_status(ids[0]) is None
+    finally:
+        manager.shutdown()
+
+
+def test_terminal_callback_runs_for_success_failure_and_cancel(tmp_path: Path) -> None:
+    seen: list[tuple[str, str]] = []
+    manager = JobManager(command_factory=_success_factory)
+    manager.add_terminal_callback(lambda record: seen.append((record.job_id, record.state)))
+    try:
+        job_id = manager.submit(
+            input_path=tmp_path / "done.wav",
+            output_path=tmp_path / "done-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        _wait_terminal(manager, job_id)
+        assert seen == [(job_id, "done")]
+    finally:
+        manager.shutdown()
+
+
+def test_terminal_cleanup_failure_does_not_change_the_job_verdict(tmp_path: Path) -> None:
+    manager = JobManager(command_factory=_success_factory)
+
+    def fail_cleanup(_record: JobRecord) -> None:
+        raise OSError("cleanup failed")
+
+    manager.add_terminal_callback(fail_cleanup)
+    try:
+        job_id = manager.submit(
+            input_path=tmp_path / "done.wav",
+            output_path=tmp_path / "done-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        assert _wait_terminal(manager, job_id)["state"] == "done"
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("max_active", "max_terminal", "ttl"),
+    [(0, 1, 1.0), (1, 0, 1.0), (1, 1, 0.0), (1, 1, -1.0)],
+)
+def test_retention_limits_must_remain_bounded(
+    max_active: int, max_terminal: int, ttl: float
+) -> None:
+    with pytest.raises(ValueError):
+        JobManager(
+            max_active_jobs=max_active,
+            max_terminal_jobs=max_terminal,
+            terminal_ttl_s=ttl,
+        )

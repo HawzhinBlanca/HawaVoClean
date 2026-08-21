@@ -16,7 +16,6 @@ import os
 import socket
 import sys
 import threading
-import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal
@@ -44,11 +43,19 @@ from hawavoclean.server.analysis import (
     analyze_audio,
     compute_peaks_window,
 )
-from hawavoclean.server.jobs import TERMINAL_STATES, JobManager
+from hawavoclean.server.jobs import TERMINAL_STATES, JobManager, JobRecord, QueueFullError
 from hawavoclean.server.policy import (
     PathPolicyError,
     resolve_client_output_path,
     resolve_client_path,
+)
+from hawavoclean.server.retention import (
+    DEFAULT_MAX_UPLOAD_TOTAL_BYTES,
+    DEFAULT_MIN_FREE_BYTES,
+    DEFAULT_UPLOAD_TTL_S,
+    DiskUsageFactory,
+    StoragePressureError,
+    UploadStore,
 )
 
 logger = get_logger("server")
@@ -90,6 +97,7 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 # client that declares nothing. Override with ``HAWAVOCLEAN_MAX_UPLOAD_BYTES``
 # (0 disables the cap) or ``create_app(max_upload_bytes=...)``.
 DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
+DEFAULT_MAX_CONCURRENT_UPLOADS = 2
 MAX_UPLOAD_BYTES_ENV = "HAWAVOCLEAN_MAX_UPLOAD_BYTES"
 UPLOAD_PATH = "/api/upload"
 SSE_MIN_INTERVAL_S = 0.05
@@ -108,6 +116,7 @@ _HTTP_CODES = {
     422: "bad_request",
     500: "internal_error",
     503: "unavailable",
+    507: "insufficient_storage",
 }
 
 
@@ -169,8 +178,8 @@ def configured_max_upload_bytes() -> int:
     except ValueError:
         logger.warning(f"{MAX_UPLOAD_BYTES_ENV}={raw!r} is not an integer; using the default")
         return DEFAULT_MAX_UPLOAD_BYTES
-    if value < 0:
-        logger.warning(f"{MAX_UPLOAD_BYTES_ENV}={raw!r} is negative; using the default")
+    if value <= 0:
+        logger.warning(f"{MAX_UPLOAD_BYTES_ENV}={raw!r} is not positive; using the default")
         return DEFAULT_MAX_UPLOAD_BYTES
     return value
 
@@ -185,13 +194,26 @@ class UploadSizeLimitMiddleware:
     bytes are counted as they arrive and the request is aborted the moment it
     passes the cap — before Starlette's spool file grows past it.
 
-    ``max_bytes <= 0`` disables the cap entirely.
+    Concurrent request bodies are bounded too: the middleware wraps multipart
+    parsing, so at most ``max_concurrent`` file parts can occupy Starlette's
+    spool area before the route enforces the persistent total quota.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int, path: str = UPLOAD_PATH) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        max_bytes: int,
+        path: str = UPLOAD_PATH,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_UPLOADS,
+    ) -> None:
+        if max_bytes < 1 or max_concurrent < 1:
+            raise ValueError("upload byte and concurrency limits must be positive")
         self.app = app
         self.max_bytes = max_bytes
         self.path = path
+        self.max_concurrent = max_concurrent
+        self._active = 0
+        self._lock = asyncio.Lock()
 
     def _too_large(self, seen: int) -> StarletteHTTPException:
         return StarletteHTTPException(
@@ -201,36 +223,49 @@ class UploadSizeLimitMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
-            self.max_bytes <= 0
-            or scope["type"] != "http"
+            scope["type"] != "http"
             or scope.get("method") != "POST"
             or str(scope.get("path", "")) != self.path
         ):
             await self.app(scope, receive, send)
             return
 
-        declared = Headers(scope=scope).get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
-            response = error_response(
-                413,
-                "payload_too_large",
-                f"upload declares {int(declared)} bytes, over the {self.max_bytes} byte limit",
-            )
-            await response(scope, receive, send)
-            return
+        async with self._lock:
+            if self._active >= self.max_concurrent:
+                response = error_response(
+                    503,
+                    "upload_busy",
+                    f"at most {self.max_concurrent} uploads may be received concurrently",
+                )
+                await response(scope, receive, send)
+                return
+            self._active += 1
+        try:
+            declared = Headers(scope=scope).get("content-length")
+            if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
+                response = error_response(
+                    413,
+                    "payload_too_large",
+                    f"upload declares {int(declared)} bytes, over the {self.max_bytes} byte limit",
+                )
+                await response(scope, receive, send)
+                return
 
-        seen = 0
+            seen = 0
 
-        async def counted() -> Any:
-            nonlocal seen
-            message = await receive()
-            if message["type"] == "http.request":
-                seen += len(message.get("body", b""))
-                if seen > self.max_bytes:
-                    raise self._too_large(seen)
-            return message
+            async def counted() -> Any:
+                nonlocal seen
+                message = await receive()
+                if message["type"] == "http.request":
+                    seen += len(message.get("body", b""))
+                    if seen > self.max_bytes:
+                        raise self._too_large(seen)
+                return message
 
-        await self.app(scope, counted, send)
+            await self.app(scope, counted, send)
+        finally:
+            async with self._lock:
+                self._active -= 1
 
 
 class AnalyzeRequest(BaseModel):
@@ -384,17 +419,41 @@ def create_app(
     job_manager: JobManager | None = None,
     on_shutdown: Callable[[], None] | None = None,
     max_upload_bytes: int | None = None,
+    max_upload_total_bytes: int = DEFAULT_MAX_UPLOAD_TOTAL_BYTES,
+    upload_ttl_s: float = DEFAULT_UPLOAD_TTL_S,
+    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+    retention_clock: Callable[[], float] | None = None,
+    retention_disk_usage: DiskUsageFactory | None = None,
 ) -> FastAPI:
     """Build the engine app. ``on_shutdown`` runs (in a thread) shortly after
     ``POST /api/shutdown`` has been answered; when omitted the process hard-exits.
-    ``max_upload_bytes`` caps ``POST /api/upload`` (0 disables the cap); when
-    omitted it comes from ``HAWAVOCLEAN_MAX_UPLOAD_BYTES`` or the default."""
+    ``max_upload_bytes`` caps ``POST /api/upload`` and must be positive; when
+    omitted it comes from ``HAWAVOCLEAN_MAX_UPLOAD_BYTES`` or the default.
+    Total upload bytes, age, and the emergency free-space reserve are always
+    bounded; zero/negative values are rejected rather than becoming an
+    accidental unlimited mode."""
     if not token:
         raise ValueError("token must be non-empty")
     manager = job_manager if job_manager is not None else JobManager()
     upload_limit = (
         configured_max_upload_bytes() if max_upload_bytes is None else int(max_upload_bytes)
     )
+    if upload_limit < 1:
+        raise ValueError("max_upload_bytes must be positive")
+    upload_store = UploadStore(
+        work_root() / "uploads",
+        ttl_s=upload_ttl_s,
+        max_total_bytes=max_upload_total_bytes,
+        min_free_bytes=min_free_bytes,
+        clock=retention_clock,
+        disk_usage=retention_disk_usage,
+    )
+    upload_store.scavenge(manager.active_input_paths())
+
+    def _cleanup_terminal_input(record: JobRecord) -> None:
+        upload_store.cleanup_input(record.input_path)
+
+    manager.add_terminal_callback(_cleanup_terminal_input)
 
     def _hard_exit() -> None:  # pragma: no cover - process exit
         os._exit(0)
@@ -411,6 +470,8 @@ def create_app(
     app.state.token = token
     app.state.ui_dir = ui_dir
     app.state.max_upload_bytes = upload_limit
+    app.state.upload_store = upload_store
+    app.state.upload_lock = asyncio.Lock()
 
     # Middleware: the last one added is outermost, so CORS wraps auth and
     # browser preflights (which carry no token) are answered before auth, and
@@ -470,6 +531,11 @@ def create_app(
             "version": __version__,
             "profiles": list(PROFILES),
             "engine_pid": os.getpid(),
+            "storage": {
+                "managed_upload_bytes": upload_store.usage_bytes(),
+                "managed_upload_limit_bytes": upload_store.max_total_bytes,
+                "minimum_free_bytes": upload_store.min_free_bytes,
+            },
         }
 
     @app.post("/api/analyze")
@@ -489,6 +555,7 @@ def create_app(
 
     @app.post("/api/jobs", status_code=202)
     async def create_job(req: JobRequest) -> dict[str, Any]:
+        upload_store.scavenge(manager.active_input_paths())
         input_path = resolve_client_path(req.input_path, must_exist=True)
         if req.output_path:
             output_path = resolve_client_output_path(req.output_path)
@@ -503,6 +570,8 @@ def create_app(
                 profile=req.profile,
                 overwrite=req.overwrite,
             )
+        except QueueFullError as e:
+            raise ApiError(503, "queue_full", str(e)) from e
         except RuntimeError as e:
             raise ApiError(503, "unavailable", str(e)) from e
         return {
@@ -603,36 +672,48 @@ def create_app(
         to raise ``ValueError`` out of ``open()`` as a 500.
         """
         name = _safe_upload_name(file.filename)
-        dest_dir = work_root() / "uploads" / uuid.uuid4().hex
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / name
         limit = int(getattr(app.state, "max_upload_bytes", 0))
-        written = 0
+        dest: Path | None = None
         try:
-            with open(dest, "wb") as out:
-                while chunk := await file.read(UPLOAD_CHUNK_BYTES):
-                    written += len(chunk)
-                    if 0 < limit < written:
-                        # Belt and braces: the middleware rejects an over-sized
-                        # body before it is spooled, but a spool that arrived
-                        # some other way must not be copied out in full either.
-                        raise ApiError(
-                            413,
-                            "payload_too_large",
-                            f"upload exceeds the {limit} byte limit",
-                        )
-                    out.write(chunk)
+            # Local UI uploads are serialized. That makes the total quota an
+            # exact reservation rather than a racy estimate across concurrent
+            # requests, while processing jobs continue independently.
+            async with app.state.upload_lock:
+                upload_store.scavenge(manager.active_input_paths())
+                existing = upload_store.usage_bytes()
+                expected = int(file.size) if file.size is not None else upload_store.max_total_bytes
+                upload_store.ensure_capacity(existing, expected)
+                dest = upload_store.stage(name)
+                written = 0
+                with open(dest, "xb") as out:
+                    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+                        written += len(chunk)
+                        if 0 < limit < written:
+                            # Belt and braces: the middleware rejects an over-sized
+                            # body before it is spooled, but a spool that arrived
+                            # some other way must not be copied out in full either.
+                            raise ApiError(
+                                413,
+                                "payload_too_large",
+                                f"upload exceeds the {limit} byte limit",
+                            )
+                        upload_store.ensure_progress(existing, written)
+                        out.write(chunk)
+        except StoragePressureError as exc:
+            if dest is not None:
+                upload_store.cleanup_input(dest)
+            raise ApiError(507, "insufficient_storage", str(exc)) from exc
         except BaseException:
             # Cleanup must never raise over the failure it is cleaning up
             # after: an unlink that itself throws would replace the real
             # error with its own.
-            with contextlib.suppress(OSError, ValueError):
-                dest.unlink(missing_ok=True)
-            with contextlib.suppress(OSError, ValueError):
-                dest_dir.rmdir()
+            if dest is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    upload_store.cleanup_input(dest)
             raise
         finally:
             await file.close()
+        assert dest is not None
         return {"path": str(dest)}
 
     async def _shutdown_later() -> None:
