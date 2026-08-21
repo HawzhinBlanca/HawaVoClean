@@ -239,6 +239,39 @@ def _pnpm_lock_hashes(path: Path) -> dict[str, list[dict[str, str]]]:
     return values
 
 
+def _npm_lock_hashes(path: Path) -> dict[str, list[dict[str, str]]]:
+    """Extract package integrity hashes from an npm lockfile v2/v3 package table."""
+    lock: Any = json.loads(path.read_text(encoding="utf-8"))
+    packages = lock.get("packages") if isinstance(lock, dict) else None
+    if not isinstance(packages, dict):
+        raise SbomError(f"npm lock has no package table: {path}")
+    values: dict[str, list[dict[str, str]]] = {}
+    for location, package in packages.items():
+        if not location or not isinstance(location, str) or not isinstance(package, dict):
+            continue
+        name = location.rsplit("node_modules/", 1)[-1]
+        version = package.get("version")
+        integrity = package.get("integrity")
+        if not isinstance(version, str) or not isinstance(integrity, str):
+            raise SbomError(f"npm lock package lacks version or integrity: {location}")
+        match = re.fullmatch(r"([A-Za-z0-9]+)-([A-Za-z0-9+/=]+)", integrity)
+        if match is None:
+            raise SbomError(f"invalid npm integrity value in {path}: {location}")
+        algorithm = match.group(1).lower()
+        algorithm_names = {"sha256": "SHA-256", "sha384": "SHA-384", "sha512": "SHA-512"}
+        if algorithm not in algorithm_names:
+            raise SbomError(f"unsupported npm integrity algorithm in {path}: {algorithm}")
+        try:
+            content = base64.b64decode(match.group(2), validate=True).hex()
+        except ValueError as exc:
+            raise SbomError(f"invalid npm integrity encoding in {path}: {location}") from exc
+        purl = f"pkg:npm/{quote(name, safe='/')}@{version}"
+        values.setdefault(purl, []).append({"alg": algorithm_names[algorithm], "content": content})
+    if not values:
+        raise SbomError(f"npm lock contains no package integrity hashes: {path}")
+    return values
+
+
 def _uv_lock_hashes(path: Path) -> dict[str, list[dict[str, str]]]:
     """Extract every registry artifact digest retained by the exact uv lock."""
     lock = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -278,6 +311,10 @@ def _enrich_lock_metadata(components: list[dict[str, Any]]) -> None:
     ):
         for purl, hashes in _pnpm_lock_hashes(path).items():
             lock_hashes.setdefault(purl, []).extend(hashes)
+    for purl, hashes in _npm_lock_hashes(
+        ROOT / "resolve-plugin" / "toolchain" / "package-lock.json"
+    ).items():
+        lock_hashes.setdefault(purl, []).extend(hashes)
     for purl, hashes in _uv_lock_hashes(ROOT / "uv.lock").items():
         lock_hashes.setdefault(purl, []).extend(hashes)
 
@@ -560,6 +597,16 @@ def _download_schemas(directory: Path) -> Path:
     return directory / "bom-1.6.schema.json"
 
 
+def _export_source_tree(commit: str, directory: Path) -> Path:
+    """Export exactly ``commit`` so ignored/untracked state cannot pollute inventory."""
+    archive = directory / "source.tar"
+    source = directory / "source"
+    source.mkdir()
+    _run(["git", "archive", "--format=tar", f"--output={archive}", commit])
+    _run(["tar", "-xf", str(archive), "-C", str(source)])
+    return source
+
+
 def _validate_contract(bom: dict[str, Any], artifact_names: set[str]) -> None:
     components = bom.get("components", [])
     if any(not component.get("licenses") for component in components):
@@ -611,17 +658,12 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
     image_id = _resolve_image(image, commit, version)
     with tempfile.TemporaryDirectory(prefix="hawavoclean-sbom-") as temp_name:
         temp = Path(temp_name)
+        source_tree = _export_source_tree(commit, temp)
         source_bom = _trivy_bom(
             [
                 "fs",
                 "--include-dev-deps",
-                "--skip-dirs",
-                ".venv",
-                "--skip-dirs",
-                "ui/node_modules",
-                "--skip-dirs",
-                "resolve-plugin/com.hawavoclean.resolve/node_modules",
-                str(ROOT),
+                str(source_tree),
             ],
             temp / "source.cdx.json",
         )

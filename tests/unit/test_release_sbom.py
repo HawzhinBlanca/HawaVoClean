@@ -144,6 +144,12 @@ def test_exact_locks_enrich_package_hashes_and_explicit_unknown_licenses() -> No
             "version": "0.8.0",
             "purl": "pkg:pypi/annotated-types@0.8.0",
         },
+        {
+            "type": "library",
+            "name": "pnpm",
+            "version": "11.22.0",
+            "purl": "pkg:npm/pnpm@11.22.0",
+        },
     ]
 
     generate_sbom._enrich_lock_metadata(components)
@@ -158,6 +164,17 @@ def test_exact_locks_enrich_package_hashes_and_explicit_unknown_licenses() -> No
         for value in components[1]["hashes"]
     )
     assert components[0]["licenses"] == [{"license": {"name": "NOASSERTION"}}]
+    assert any(value["alg"] == "SHA-512" for value in components[2]["hashes"])
+
+
+def test_source_export_contains_only_the_exact_git_tree(tmp_path: Path) -> None:
+    commit = generate_sbom._run(["git", "rev-parse", "HEAD"]).strip()
+    source = generate_sbom._export_source_tree(commit, tmp_path)
+
+    assert (source / "Dockerfile").is_file()
+    assert not (source / ".git").exists()
+    assert not (source / ".coverage").exists()
+    assert not (source / "test_output").exists()
 
 
 def _minimal_complete_contract() -> dict[str, object]:
