@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Generating CycloneDX Software Bill of Materials (SBOM)..."
-mkdir -p build/sbom
+if [ "$#" -eq 0 ]; then
+    echo "usage: $0 --image IMAGE --artifact NAME=PATH [--artifact NAME=PATH ...] --output FILE" >&2
+    exit 2
+fi
 
-uv pip freeze > build/sbom/requirements.frozen.txt
-echo "Requirements frozen to build/sbom/requirements.frozen.txt"
-echo "SBOM generation complete."
+exec uv run python scripts/generate_sbom.py "$@"
