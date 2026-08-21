@@ -17,6 +17,15 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
 - `t4.5-resolve-installer-proof.json` binds the transactional, relocatable Resolve package proof.
 - `t4.6-resolve-runtime-proof.json` separates the audited standalone Electron lock from the exact
   signed Blackmagic-owned runtime, retains every advisory ID, and records the still-unaccepted risk.
+- `github-governance-contract.json` is the tamper-evident, still-pending-U1 design for the full
+  Linux/macOS and Python support matrix, exact private-evidence release runner, immutable action pins,
+  least permissions, required status context, protected `main`, and immovable `v*` tags. Its validator
+  also emits the future external API mutations as a non-executing review plan.
+- Final candidate files are deliberately not committed here. `scripts/release_candidate.py` verifies
+  the retained two-pass T7.2 inputs, produces a closed checksum inventory, signs it with a user-owned
+  OpenSSH key, verifies the signer namespace/identity, reconstructs tested UI/plugin tree hashes, and
+  runs wheel/container process-and-verify smokes from candidate runtimes. An unsigned rehearsal is
+  explicitly non-final.
 - `t3.1-release-gate-proof.json` records the original two-clean-checkout gate proof and its retained
   failed attempts. `t3.1-release-gate-refresh.json` is the compact checkpoint for the later
   documentation/support source commit: two 41-step passes, all ten matching artifact identities,

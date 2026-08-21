@@ -46,6 +46,9 @@ registries/advisory services and are outside that offline processing claim.
 - Exact Python, JavaScript, build-tool, container and model locks are audited. Release artifacts carry
   source/build identity, hashes and a deterministic CycloneDX 1.6 SBOM. A final release must rebuild
   and rescan the exact eventual commit; historical scans are not silently current.
+- Final release checksums use an OpenSSH `sshsig` restricted to the `hawavoclean-release` namespace.
+  The private key and allowed-signers policy stay outside Git and the Actions workspace. Unsigned
+  rehearsal candidates are labeled as such and cannot pass normal verification.
 
 ### Loopback API and uploads
 

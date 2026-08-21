@@ -45,6 +45,25 @@ non-redistributed evidence. Their paths and SHA-256 identities are committed in
 `evidence/release/audio-regressions.json`; the gate verifies each source before
 copying only the required files into an isolated checkout.
 
+## GitHub Actions mapping
+
+`.github/workflows/ci.yml` invokes this exact command on a protected, dedicated Apple-silicon runner;
+it does not redefine a smaller remote “release gate.” Separate hosted jobs add the complete declared
+Python 3.11–3.14 × Linux/macOS support matrix and a macOS web/Resolve-shell check. The stable
+`release / required` job fails unless every component succeeds on the same source commit.
+
+Private regression files are never stored in GitHub or uploaded as evidence. After protected
+environment approval, `scripts/hydrate_release_evidence.py` validates them from an external
+runner-local mirror and copies only the required Git-ignored files into the checkout. The exact gate
+then re-verifies the same hashes before creating either isolated pass. Full-gate logs and proof JSON
+are uploaded under a source-SHA/run-attempt identity; the private audio itself remains excluded.
+
+The machine-checked design, immutable action revisions, required branch/tag rules, and read-only API
+plan live in `evidence/release/github-governance-contract.json` and
+`scripts/validate_github_governance.py`. They remain a design—not remote proof—until U1, a green exact
+candidate run, activated protections, and the deliberately failing pull-request exercise are
+recorded.
+
 ## Proof output
 
 Every invocation creates a new ignored directory under `build/release-gate/`.
@@ -53,6 +72,24 @@ hashes, every command, duration, exit status and log hash, the artifact
 identities from each pass, and the cross-pass comparison. The proof contains a
 canonical SHA-256 over all its other fields. Failed attempts are retained in
 their own timestamped directory and never replace a prior proof.
+
+For the eventual T7.2 candidate, retain the actual distributable bytes from both passes:
+
+```console
+bash scripts/run_release_checks.sh --retain-candidate-assets
+```
+
+This adds no weaker build path. Each isolated pass exports the wheel, source archive, hash-locked
+runtime requirements, normalized UI archive, normalized full Resolve-plugin archive, normalized
+Linux-arm64 container archive, and CycloneDX SBOM from the artifacts it just tested. The gate compares
+those release-file SHA-256 identities across both passes, retains pass 1 under `candidate-inputs/`, and
+deletes the redundant passing copy. A mismatch fails the full gate. Failed exports remain in their
+timestamped session for diagnosis.
+
+Directory archives use sorted members, source-commit time, zero owner/group identities, preserved
+executable modes, and validated relative symlinks. The Docker export normalizes only its outer tar
+metadata and order; its content-addressed configuration and layer bytes are unchanged. The retained
+container is exported by image ID so a per-pass tag cannot contaminate reproducibility.
 
 The committed compact checkpoint is validated on every generated-status check.
 To additionally prove that every committed count, artifact identity and digest

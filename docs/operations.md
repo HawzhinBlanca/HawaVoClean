@@ -16,6 +16,49 @@ in [the generated release status](generated-release-status.md) and [STATUS.md](.
 
 Do not convert a declared target into a release claim until its required CI/in-host gate is green.
 
+## Protected CI and release-runner setup
+
+The committed GitHub workflow has one stable branch-protection context: `release / required`. It
+succeeds only when the source contract, all eight Linux/macOS and Python 3.11–3.14 jobs, the macOS
+web/Resolve-shell job, and the exact Apple-silicon release gate all succeed on the same commit. The
+hosted matrix builds a wheel, installs it with hash-locked runtime dependencies in a separate virtual
+environment, then runs `doctor`, `process`, and `verify` outside the source environment.
+
+The exact release job is deliberately assigned to `[self-hosted, macOS, ARM64,
+hawavoclean-release]` and the protected `release-candidate` environment. Before enabling it:
+
+1. Resolve checkpoint U1 while retaining the private-repository boundary.
+2. Create the `release-candidate` environment with at least one named reviewer. Approval must happen
+   before the job is scheduled and therefore before private evidence is available to the checkout.
+3. Register an ephemeral or single-purpose Apple-silicon runner under a dedicated unprivileged OS
+   account. It must contain only the exact tools and Resolve/SDK identities in
+   `evidence/release/toolchain-lock.json`; do not leave repository credentials or unrelated working
+   copies on it.
+4. Keep a read-only private evidence mirror outside the Actions workspace, preserving the relative
+   paths in `evidence/release/audio-regressions.json`. Set the repository variable
+   `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` to that external root. The hydrator copies only manifest-named,
+   SHA-256-matching, Git-ignored regular files and refuses symlinks, escapes, conflicting hashes, or
+   pre-existing wrong bytes.
+5. Require `release / required` on `main`, one fresh approving review, last-push approval, linear
+   history, resolved conversations, administrator enforcement, and no force pushes/deletions. Protect
+   `v*` tags against updates and deletion.
+
+Every third-party action is pinned to a full commit SHA, checkout credentials are not persisted, and
+the workflow has only `contents: read`. Successful evidence uploads are source-SHA-named and use the
+immutable artifact service: 30 days for hosted evidence and 90 days for the full release proof.
+
+Validate the committed design and inspect the exact non-mutating API plan with:
+
+```bash
+uv run --frozen python scripts/validate_github_governance.py
+uv run --frozen python scripts/validate_github_governance.py --print-api-plan
+```
+
+The plan is not an apply command. No repository setting should change until U1 is explicitly
+approved and the named environment reviewer and runner are ready. T3.2 closes only after the required
+checks pass on the exact candidate; T3.3 additionally requires a disposable pull request whose
+intentional failing test is shown to block merge.
+
 ## Install and preflight
 
 From the exact release checkout:
@@ -149,6 +192,53 @@ docker run --rm --read-only \
 
 The mounted `work` directory must exist and be writable by the container user. No studio, CUDA, or
 GPU image is supported for v3.3.
+
+## Candidate assembly, signing, and artifact-only smoke
+
+Run the two-pass gate with `--retain-candidate-assets` on the exact eventual candidate commit. Then
+assemble from that proof and its sibling `candidate-inputs` directory. A final candidate requires a
+user-controlled signing key stored outside the repository and runner workspace:
+
+```bash
+uv run --frozen python scripts/release_candidate.py assemble \
+  --gate-proof build/release-gate/<session>/release-gate-proof.json \
+  --assets build/release-gate/<session>/candidate-inputs \
+  --output build/candidates/hawavoclean-3.3.0 \
+  --signing-key /secure/offline/path/release-key \
+  --signer-identity release-owner
+```
+
+The output is a closed inventory: `candidate-manifest.json`, `SHA256SUMS`, its OpenSSH `sshsig`, and
+the seven proof-matched files under `assets/`. The signed checksum file covers the manifest and every
+asset. The manifest binds the source commit, full-gate file/canonical hashes, toolchain lock, tested
+tree/image identities, two-pass release-file identities, signing namespace, and signer identity.
+Unexpected files, symlinks, duplicate JSON keys, altered bytes, altered proof, wrong identity, or a
+missing signature fail verification.
+
+Create an `allowed_signers` file outside Git in OpenSSH format, restricting the key to the
+`hawavoclean-release` namespace, then verify and exercise only candidate runtimes:
+
+```bash
+uv run --frozen python scripts/release_candidate.py verify \
+  build/candidates/hawavoclean-3.3.0 \
+  --gate-proof build/release-gate/<session>/release-gate-proof.json \
+  --allowed-signers /secure/offline/path/allowed_signers
+
+uv run --frozen python scripts/release_candidate.py smoke \
+  build/candidates/hawavoclean-3.3.0 \
+  --gate-proof build/release-gate/<session>/release-gate-proof.json \
+  --allowed-signers /secure/offline/path/allowed_signers \
+  --input tests/fixtures/sample_sorani_podcast.wav \
+  --output build/candidates/hawavoclean-3.3.0-smoke.json
+```
+
+The smoke reconstructs the normalized UI and plugin trees and compares them to the exact tested tree
+hashes; installs the candidate wheel with its candidate runtime lock into a fresh managed Python 3.11
+environment; runs `doctor`, `process`, and `verify`; loads the candidate container and requires the
+exact tested image ID; then repeats non-root/read-only `doctor`, `process`, and `verify`. Its proof is
+written outside the immutable candidate. Assembly without signing arguments is permitted only for
+local rehearsal and is labeled `unsigned_pending_signing`; verification then requires the explicit
+`--allow-unsigned` flag and does not complete T7.2.
 
 ## Resolve build, install, rollback
 

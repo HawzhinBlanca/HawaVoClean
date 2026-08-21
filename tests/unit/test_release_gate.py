@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import release_gate
+from scripts import release_candidate, release_gate
 
 
 def _pass(index: int, suffix: str = "") -> dict[str, object]:
@@ -31,6 +31,29 @@ def test_compare_runs_requires_every_artifact_and_exact_repetition() -> None:
     artifacts["wheel"] = {"sha256": "f" * 64}
     with pytest.raises(release_gate.GateError, match="non-reproducible artifact wheel"):
         release_gate._compare_runs([_pass(1), changed])
+
+
+def test_compare_runs_can_require_actual_distributable_asset_repetition() -> None:
+    runs = [_pass(1), _pass(2)]
+    release_assets = {
+        name: {
+            "filename": f"{name}.asset",
+            "kind": "test",
+            "sha256": f"{index:064x}",
+            "size": index,
+        }
+        for index, name in enumerate(sorted(release_candidate.REQUIRED_ASSETS), start=1)
+    }
+    runs[0]["release_assets"] = release_assets
+    runs[1]["release_assets"] = json.loads(json.dumps(release_assets))
+    result = release_gate._compare_runs(runs)
+    assert result["release_asset_sha256"] == {
+        name: identity["sha256"] for name, identity in release_assets.items()
+    }
+
+    runs[1]["release_assets"]["wheel"]["sha256"] = "f" * 64  # type: ignore[index]
+    with pytest.raises(release_gate.GateError, match="not reproducible"):
+        release_gate._compare_runs(runs)
 
 
 def test_artifact_identity_is_path_independent_and_mode_sensitive(tmp_path: Path) -> None:

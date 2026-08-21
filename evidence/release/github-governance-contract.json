@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "contract_id": "hawavoclean-github-governance-v1",
+  "contract_revision": "1.0.0",
+  "release": {
+    "product": "hawavoclean",
+    "version": "3.3.0"
+  },
+  "status": "designed_pending_u1",
+  "repository": {
+    "full_name": "HawzhinBlanca/HawaVoClean",
+    "default_branch": "main",
+    "visibility": "private",
+    "api_version": "2026-03-10"
+  },
+  "ci": {
+    "workflow": ".github/workflows/ci.yml",
+    "workflow_sha256": "50c7974a6afe529fcd3577206eff49657156e162f6e6d5dde923de854c8ed5b0",
+    "workflow_name": "release",
+    "required_status_context": "release / required",
+    "jobs": [
+      "source-contract",
+      "core-support",
+      "web-resolve",
+      "exact-release-gate",
+      "required"
+    ],
+    "hosted_support_matrix": {
+      "operating_systems": [
+        "ubuntu-24.04",
+        "macos-15"
+      ],
+      "python": [
+        "3.11",
+        "3.12",
+        "3.13",
+        "3.14"
+      ],
+      "coverage_floor_percent": 92.49,
+      "wheel_smoke_outside_repository_environment": true
+    },
+    "exact_release_gate": {
+      "runner_labels": [
+        "self-hosted",
+        "macOS",
+        "ARM64",
+        "hawavoclean-release"
+      ],
+      "environment": "release-candidate",
+      "command": "bash scripts/run_release_checks.sh",
+      "private_evidence_variable": "HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT",
+      "fork_pull_requests_forbidden": true,
+      "environment_approval_required_before_private_evidence": true
+    },
+    "actions": {
+      "actions/checkout": "11bd71901bbe5b1630ceea73d27597364c9af683",
+      "actions/setup-node": "49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "actions/setup-python": "e797f83bcb11b83ae66e0230d6156d7c80228e7c",
+      "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+      "astral-sh/setup-uv": "1e862dfacbd1d6d858c55d9b792c756523627244"
+    },
+    "permissions": {
+      "contents": "read"
+    },
+    "artifact_retention_days": {
+      "hosted": 30,
+      "exact_release_gate": 90
+    },
+    "artifact_names_bind_source_sha": true
+  },
+  "protected_branch": {
+    "name": "main",
+    "strict_status_checks": true,
+    "required_status_contexts": [
+      "release / required"
+    ],
+    "enforce_admins": true,
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false,
+    "required_approving_review_count": 1,
+    "require_last_push_approval": true,
+    "required_linear_history": true,
+    "required_conversation_resolution": true,
+    "allow_force_pushes": false,
+    "allow_deletions": false
+  },
+  "protected_tags": {
+    "ruleset_name": "immutable-release-tags",
+    "include": [
+      "refs/tags/v*"
+    ],
+    "enforcement": "active",
+    "bypass_actors": [],
+    "restrict_updates": true,
+    "restrict_deletions": true
+  },
+  "release_environment": {
+    "name": "release-candidate",
+    "minimum_required_reviewers": 1,
+    "prevent_self_review": false,
+    "deployment_branch_policy": "protected_branches_only",
+    "private_evidence_must_be_outside_runner_workspace": true,
+    "runner_must_be_ephemeral_or_single_purpose": true
+  },
+  "approval": {
+    "checkpoint": "U1",
+    "status": "pending",
+    "approved_by": null,
+    "approved_at": null,
+    "approved_contract_sha256": null
+  },
+  "known_limits": [
+    "This is a machine-validated design contract, not proof that GitHub Actions ran or that repository protections are active.",
+    "U1 remains required before any external GitHub setting is changed or the exact CI proof can be claimed.",
+    "The required release environment needs an explicit reviewer identity and a dedicated Apple-silicon runner before activation.",
+    "T3.3 remains open until a deliberately failing disposable pull request is mechanically prevented from merging."
+  ],
+  "integrity": {
+    "contract_sha256": "8caafaa2bbfadb50c4745b21957f1f8f2fdc7e04b767c19b539c5afc99af594c"
+  }
+}

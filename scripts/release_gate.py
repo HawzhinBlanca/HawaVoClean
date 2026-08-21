@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from scripts import generate_sbom
+from scripts import generate_sbom, release_candidate
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLCHAIN_LOCK = ROOT / "evidence" / "release" / "toolchain-lock.json"
@@ -423,6 +423,7 @@ def _run_pass(
     epoch: int,
     source_date: str,
     lock: dict[str, Any],
+    release_asset_output: Path | None = None,
 ) -> dict[str, Any]:
     started_at = _utc_now()
     started = time.monotonic()
@@ -866,7 +867,7 @@ def _run_pass(
         "wheel": _artifact_identity("wheel", wheel),
         "wheel-smoke-audio": _artifact_identity("wheel-smoke-audio", smoke_output),
     }
-    return {
+    result: dict[str, Any] = {
         "index": index,
         "status": "passed",
         "started_at": started_at,
@@ -876,6 +877,19 @@ def _run_pass(
         "container_packages": package_proof,
         "artifacts": artifacts,
     }
+    if release_asset_output is not None:
+        result["release_assets"] = release_candidate.export_release_assets(
+            release_asset_output,
+            epoch=epoch,
+            wheel=wheel,
+            sdist=sdist,
+            runtime_requirements=smoke_requirements,
+            ui=checkout / "ui" / "dist",
+            resolve_plugin=plugin,
+            sbom=sbom,
+            container_image=image_id,
+        )
+    return result
 
 
 def _load_json_from_text(text: str) -> Any:
@@ -909,7 +923,29 @@ def _compare_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
                     f"non-reproducible artifact {name}: pass 1={expected}, "
                     f"pass {run.get('index')}={actual}"
                 )
-    return {"status": "passed", "passes": len(runs), "artifact_sha256": hashes}
+    result: dict[str, Any] = {
+        "status": "passed",
+        "passes": len(runs),
+        "artifact_sha256": hashes,
+    }
+    release_asset_inventories = [run.get("release_assets") for run in runs]
+    if any(inventory is not None for inventory in release_asset_inventories):
+        if not all(isinstance(inventory, dict) for inventory in release_asset_inventories):
+            raise GateError("release assets were not retained in every pass")
+        first = cast(dict[str, Any], release_asset_inventories[0])
+        if set(first) != release_candidate.REQUIRED_ASSETS:
+            raise GateError("retained release asset inventory is incomplete")
+        asset_hashes = {
+            name: identity.get("sha256") if isinstance(identity, dict) else None
+            for name, identity in first.items()
+        }
+        if any(not isinstance(digest, str) for digest in asset_hashes.values()):
+            raise GateError("retained release asset identity is malformed")
+        for pass_index, inventory in enumerate(release_asset_inventories[1:], start=2):
+            if inventory != first:
+                raise GateError(f"release asset bytes are not reproducible in pass {pass_index}")
+        result["release_asset_sha256"] = asset_hashes
+    return result
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:
@@ -961,6 +997,11 @@ def main() -> int:
         default=ROOT / "build" / "release-gate",
         help="ignored directory in which to retain logs and the proof report",
     )
+    parser.add_argument(
+        "--retain-candidate-assets",
+        action="store_true",
+        help="export and compare the six distributable assets from both isolated passes",
+    )
     args = parser.parse_args()
     if args.runs < 2:
         print("release gate failed: --runs must be at least 2", file=sys.stderr)
@@ -989,6 +1030,8 @@ def main() -> int:
             "GitHub required-check and branch-protection proof remains T3.2/T3.3 after user checkpoint U1.",
         ],
     }
+    if args.retain_candidate_assets:
+        report["candidate_inputs"] = None
     try:
         if _clean_status(ROOT):
             raise GateError("the invoking checkout is not clean")
@@ -1028,12 +1071,23 @@ def main() -> int:
                     epoch,
                     source_date,
                     lock,
+                    session / f"candidate-pass-{index}" if args.retain_candidate_assets else None,
                 )
                 runs.append(run)
                 report["runs"] = runs
             finally:
                 _remove_worktree(parent, checkout)
         reproducibility = _compare_runs(runs)
+        if args.retain_candidate_assets:
+            first_assets = session / "candidate-pass-1"
+            candidate_inputs = session / "candidate-inputs"
+            os.replace(first_assets, candidate_inputs)
+            for index in range(2, args.runs + 1):
+                shutil.rmtree(session / f"candidate-pass-{index}")
+            report["candidate_inputs"] = {
+                "path": candidate_inputs.relative_to(session).as_posix(),
+                "assets": runs[0]["release_assets"],
+            }
         if _clean_status(ROOT):
             raise GateError("the release gate changed the invoking checkout")
         report["reproducibility"] = reproducibility
