@@ -26,5 +26,4 @@ data/acceptance/outputs/
 ui/node_modules/
 ui/dist/
 resolve-plugin/com.hawavoclean.resolve/node_modules/
-resolve-plugin/com.hawavoclean.resolve/package-lock.json
 resolve-plugin/com.hawavoclean.resolve/engine.json

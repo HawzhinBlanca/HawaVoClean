@@ -2,6 +2,7 @@
   "name": "hawavoclean-ui",
   "private": true,
   "version": "3.3.0",
+  "packageManager": "pnpm@11.5.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
