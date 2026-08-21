@@ -53,6 +53,14 @@ hawavoclean = "hawavoclean.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/hawavoclean"]
 
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/pyproject.toml",
+    "/README.md",
+    "/THIRD_PARTY_LICENSES.md",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

@@ -319,6 +319,70 @@ def test_symlinked_lock_file_is_rejected_without_touching_target(tmp_path: Path)
     assert outside.read_bytes() == b"unchanged"
 
 
+def test_nonregular_publication_lock_is_rejected(tmp_path: Path) -> None:
+    paths = publication_paths(tmp_path / "out.wav")
+    os.mkfifo(paths.lock)
+    with pytest.raises(PublicationError, match="not a regular file"):
+        _publish(tmp_path, b"new")
+
+
+@pytest.mark.parametrize(
+    "damage", ["bundle-symlink", "bad-owner", "wrong-owner", "unsafe-generations"]
+)
+def test_unverifiable_bundle_ownership_fails_closed(tmp_path: Path, damage: str) -> None:
+    paths = publication_paths(tmp_path / "out.wav")
+    if damage == "bundle-symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        os.symlink(outside.name, paths.bundle)
+    else:
+        paths.bundle.mkdir()
+        if damage == "bad-owner":
+            (paths.bundle / publication._OWNER_FILE).write_text("{")
+            paths.generations.mkdir()
+        elif damage == "wrong-owner":
+            (paths.bundle / publication._OWNER_FILE).write_text(
+                json.dumps({"schema_version": 1, "public_names": {"audio": "other.wav"}})
+            )
+            paths.generations.mkdir()
+        else:
+            (paths.bundle / publication._OWNER_FILE).write_text(
+                json.dumps(publication._owner_payload(paths))
+            )
+            outside = tmp_path / "outside-generations"
+            outside.mkdir()
+            os.symlink(outside.name, paths.generations)
+
+    with pytest.raises(PublicationError):
+        _publish(tmp_path, b"new")
+
+
+def test_invalid_report_json_is_rejected_before_commit(tmp_path: Path) -> None:
+    with pytest.raises(PublicationError, match="JSON report is invalid"):
+        publish_output_generation(
+            _candidate(tmp_path, b"audio"),
+            tmp_path / "out.wav",
+            "{",
+            "summary",
+        )
+
+
+@pytest.mark.parametrize("pointer", ["regular", "absolute", "bad-generation"])
+def test_invalid_current_pointer_is_rejected(tmp_path: Path, pointer: str) -> None:
+    _publish(tmp_path, b"old")
+    paths = publication_paths(tmp_path / "out.wav")
+    paths.current.unlink()
+    if pointer == "regular":
+        paths.current.write_text("not a symlink")
+    elif pointer == "absolute":
+        os.symlink(str(paths.generations / _current.__name__), paths.current)
+    else:
+        os.symlink("generations/not-a-digest", paths.current)
+
+    with pytest.raises(PublicationError, match="current pointer"):
+        resolve_committed_publication(paths.audio)
+
+
 def test_tampered_committed_generation_is_detected(tmp_path: Path) -> None:
     _publish(tmp_path, b"old")
     paths = publication_paths(tmp_path / "out.wav")
