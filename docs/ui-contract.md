@@ -1,4 +1,4 @@
-# HawaVoClean UI contract (v1)
+# HawaVoClean UI contract (contract revision 1; product 3.3)
 
 One web UI bundle, three shells, one engine. This document is the binding contract
 between the three parts. Anything not written here is the implementer's call, but
@@ -26,8 +26,9 @@ CLI: `hawavoclean serve [--host 127.0.0.1] [--port 0] --token TOKEN [--ui-dir DI
 (optional; when absent `/` returns 404 JSON). Token: every `/api/*` request must carry the token as
 header `X-Hawa-Token: TOKEN` **or** query `?token=TOKEN` (query form exists for `EventSource` and
 `<audio src>` which cannot set headers). Missing/wrong token → 401 `{"error":"unauthorized"}`.
-CORS: allow all origins (`*`), all methods, headers `X-Hawa-Token, Content-Type`. The UI in Resolve
-loads from `file://` (origin `null`), so this is required.
+CORS: allow all origins (`*`), all methods, headers `X-Hawa-Token, Content-Type, Range`. The shared UI
+can be served from a browser origin or the private `hawa://app` Resolve origin; token authentication
+and request filtering remain mandatory even when origin varies.
 
 All errors: JSON `{"error": "<code>", "message": "<human text>"}` with 4xx/5xx.
 

@@ -1,98 +1,83 @@
-# Implementation Status
+# Implementation status
 
-All current gate numbers below were measured on commit `a387b80` on
-2026-08-21 (Python 3.14.5). To re-measure the Phase 2 set:
-`bash scripts/run_release_checks.sh`, `pytest -m fuzz`,
-`python scripts/mutation_gate.py`, and
-`python scripts/audio_regression_gate.py --runs 2`.
+HawaVoClean 3.3.0 is an evidence-backed **release candidate in progress**, not a finished release.
+The core code, crash-safe publication, integrated profiles, local release gate and controllable
+runtime hardening are strong. The project must not be called 10/10 or production-released until the
+remaining human, host, governance and vendor-risk gates close.
 
-## What this system is
+The exact volatile counts, proof commits, approval states and advisory totals are generated from
+tracked evidence in [the release-status snapshot](docs/generated-release-status.md). The release
+gate fails if that file drifts from its sources.
 
-An offline dialogue cleanup tool: an enhancement core + spectral-change
-guard + deterministic finishing + BS.1770 mastering. Three cores ship: the
-default Wiener spectral denoiser (classical DSP), and two optional neural
-cores built on vendored, hash-locked DeepFilterNet3 weights — full-band
-(`studio`) and band-split (`lowband`). There is no speech recognition
-anywhere in the system; see README "What it is not".
+## What is implemented
 
-## Measured verification results (2026-08-21)
+- Three selectable profiles: classical production Wiener DSP, full-band studio DFN3/WPE restoration,
+  and DFN3-below-1-kHz lowband restoration with the original high band preserved.
+- Per-speech-unit fail-closed selection, two guards, sample-exact assembly, continuity taper,
+  deterministic finishing, BS.1770 loudness and 8×-oversampled true-peak limiting.
+- Immutable content-addressed output generations committed through one authoritative `current`
+  pointer. The previous complete generation survives failed overwrite and crash recovery.
+- Schema-v2 provenance, deterministic CycloneDX 1.6 SBOM, bounded loopback server storage/queues,
+  a CPU-only non-root read-only container, and a transactional self-contained Resolve installer.
+- One two-pass local release gate covering Python, fuzz, mutations, UI, packaging, real engineering
+  audio, Resolve staging, container scanning, SBOM and reproducible artifact identities.
+- Result-free Sorani protocol and corpus-source designs that are machine-valid but deliberately
+  refuse approval-dependent execution.
 
-| Gate | Measured result |
-|---|---|
-| Test suite | 869 passed, 0 failed (41 fuzz cases deselected) |
-| Fuzz gate (`pytest -m fuzz`) | 41 passed, 0 failed |
-| Branch coverage (`--cov-fail-under=90`) | 92.13% |
-| Mutation gate | 23/23 mutations caught by their own owning tests |
-| Ruff format / lint | exit 0 / exit 0 |
-| Mypy `--strict` (199 files) | 0 issues |
-| UI (`pnpm typecheck` / `test:run` / `build`) | exit 0 / 342 passed / exit 0 |
-| Doctor from repo dir | exit 0; all 4 profiles and all 3 core locks valid |
-| Real profile regressions | 6 cases × 2 runs; deterministic v3.3 hashes; zero unexplained semantic drift |
-| Publication fault matrix | 57/57 on macOS/APFS and Linux/overlayfs; real SIGINT/SIGTERM/SIGKILL included |
-| Evidence ledger | 6 entries; schema, baseline, external hashes and chain verify |
-| `audit-models` (3 cores, clean tree) | exit 0 |
-| `audit-models` tamper checks | params tamper → exit 2; bad license → exit 2; calibration tamper → exit 2 |
-| Acceptance gates (`hawavoclean eval`) | PASSED 4/4 items; capable of FAILED, enforced under `python -O` |
-| Real-time factor (production profile, CPU; carried from 2026-08-20) | 0.146 |
+## What the strongest proof currently establishes
 
-The v3.3 version bump intentionally changes the deterministic PCM24 dither
-seed, so the six candidate WAV hashes differ from their pre-integration
-references. The regression gate proves the difference is confined to at
-most 2 least-significant bits (RMS 0.708–0.709 LSB), with identical sample
-structure and audio/decision report semantics. This is recorded explicitly;
-it is not presented as byte-identical DSP output.
+The last full two-pass proof is bound to source commit `31ca46e`, not automatically to later
+documentation and evaluation-design commits. It passed twice from detached clean checkouts with
+992 default tests, one skip, 41 separate fuzz cases, 23/23 declared mutations, 342 UI tests and
+92.73% branch coverage in each pass. Ten promised release/engineering identities reproduced. The
+later protocol, source-audit and T7.1 documentation tree additionally completed 1,019 default tests,
+strict formatting, lint and types, but the final candidate still must rerun the complete two-pass gate.
 
-The formal True 10/10 plan requires at least 92.49% branch coverage. The
-integrated tree is currently at 92.13%, so Phase 3 must add direct coverage
-before its unified release gate can pass. The ordinary 90% gate passing is
-not yet the final release claim.
+The proof is engineering evidence, not Sorani product validation. Private real speech regressions and
+tracked synthetic fixtures can detect drift; they cannot establish population-level content safety,
+listening quality or dialect coverage.
 
-## Measured on the band-split core (`lowband`, reverified 2026-08-21)
+## Real-audio engineering measurements
 
-Lab fixture `test_output/teat1vo-lab/src.mp3` — a muffled recording sitting
-on low-frequency rumble. Separation is the 90th minus the 10th percentile of
-20 ms frame level; rumble is the 60–300 Hz level over the quietest fifth of
-frames, relative to the file's own speech level. See
-[ADR 0006](docs/adr/0006-band-split-restoration-core.md).
+The measurements below are frozen engineering references, not corpus averages.
 
-| chain | separation | pause rumble | guard |
-|---|---|---|---|
-| source | 15.1 dB | −32.3 dB | — |
-| production (Wiener) | 19.8 dB | −34.6 dB | enhanced |
-| studio (full-band DFN3) | 15.1 dB | −30.5 dB | all speech units reverted |
-| `lowband` | 29.4 dB | −71.6 dB | enhanced, hole 0.066, consonants 0.999 |
-| `lowband` → `production` | 35.2 dB | −83.3 dB | enhanced in both runs |
+### Lowband reference (24 seconds)
 
-On unrelated material (Flute 09, 5 units) the `lowband` core keeps every
-unit at consonant retention 1.000 and hole scores 0.002–0.011, and the
-`studio` profile's per-unit output hashes are unchanged by this work.
+| Chain | Speech/floor separation | Pause rumble | Guard result |
+|---|---:|---:|---|
+| Source | 15.1 dB | −32.3 dB | — |
+| Production | 19.8 dB | −34.6 dB | Enhanced |
+| Studio | 15.1 dB | −30.5 dB | All speech units reverted |
+| Lowband | 29.4 dB | −71.6 dB | Enhanced; hole 0.066; consonants 0.999 |
+| Lowband → production | 35.2 dB | −83.3 dB | Enhanced in both runs |
 
-## Honest caveats that remain
+The earlier 40.0 dB prototype number came from an unguarded, unmastered intermediate. The guarded
+product chain's 35.2 dB is the valid comparison.
 
-- The guard is very conservative on the bundled synthetic corpus: most
-  units come back UNVERIFIED (featureless tones give the probe too few
-  anchors, so it fails closed). Measured on the calibration corpus:
-  0/16 corrupted renderings accepted, 8/8 benign renderings rejected
-  (dominated by UNVERIFIED-on-identity). On real speech, richer spectral
-  structure yields more anchors; no claim is made until that is measured.
-- There is no adequately licensed, transcribed, speaker-disjoint Sorani
-  corpus with dual human review. The private recordings above are regression
-  fixtures, not linguistic acceptance evidence.
-- The `lowband` prototype reported 40.0 dB separation on the lab fixture;
-  the shipped chain measures 35.2 dB. The prototype reached the higher
-  number by running the band split as an unguarded script and handing a
-  raw, unmastered intermediate to the second pass. Productized, the
-  aggressive step is judged by the guard and the intermediate is a real
-  master. The lower figure is the one with the checks in it.
-- Both the `lowband` and `studio` figures come from a single 24 s recording
-  and a single 94.6 s recording respectively. They are real measurements on
-  real audio, not a corpus result.
+### Continuity reference (94.6 seconds)
 
-## History note
+The production continuity taper preserves five of six guard-passing units instead of cascading one
+failure across the file. Speech/floor separation improved by 7.23 dB over the old fixed-point revert
+behavior. Studio and unrelated lowband outputs remained unchanged except for the separately explained
+version-seeded PCM24 dither identity.
 
-A previous revision of this file claimed "PRODUCTION READY", "100%
-blueprint-compliant", and a measured zero false-accept rate. Those claims
-were false: the metrics were hardcoded, the model registry was fabricated,
-and the audit trail misreported cached re-runs. The 2026-08-19 repair
-(v2.0.0) removed the fabrications; BLUEPRINT.md is retained as a historical
-design document only.
+## Open release blockers
+
+1. **GitHub governance (U1/T3.2–T3.3):** billing currently prevents required private-repository jobs;
+   the full matrix and protected `main` are not proved remotely.
+2. **Vendor Electron (T4.6):** Resolve 21.0.3 embeds Electron 36.3.2 with 33 captured advisories,
+   including seven high. HawaVoClean hardens reachable boundaries, but the residual vendor risk needs
+   explicit acceptance or a qualifying Resolve update.
+3. **Sorani evidence (U3/T5):** protocol `896dfc12…` and source design `1f46b23e…` are unapproved.
+   No licensed held-out split, dual-review verdict ledger or listening result exists.
+4. **Real Resolve product (U2/T6):** the transactional installer and staged lifecycle are proved, but
+   the plugin has not completed the real in-host workflow, timeline, keyboard or VoiceOver matrix.
+5. **Final release (T7.2–T7.4/U4):** the eventual source commit must be rebuilt twice, challenged,
+   signed, merged through protection, tagged and published with matching hashes.
+
+## Historical correction
+
+The 1.0-era repository claimed “production ready,” blueprint compliance, a Sorani ASR guard and zero
+false accepts. Those claims were false: the registry and metrics were fabricated and cached reruns
+could misreport decisions. The 2026-08-19 rebuild removed those mechanisms. `BLUEPRINT.md` and the
+old changelog entries are retained as historical context, not as current product evidence.

@@ -1,7 +1,7 @@
 # Production Enhancement Core Lock
 #
-# HawaVoClean v1 ships exactly one enhancement core, and it is deterministic
-# DSP — not a neural network. Its provenance is its parameter set, hashed
+# The HawaVoClean 3.3 production profile selects this deterministic DSP core;
+# it is not a neural network. Its provenance is its parameter set, hashed
 # canonically below. There are no weights, so there are no weight digests.
 # `hawavoclean audit-models` verifies params_hash against the instantiated
 # core at runtime.

@@ -268,11 +268,12 @@ Goal: the tested experience is the host workflow users will run, not just a stan
 
 Goal: publish exactly what was proved, with no stale or inflated claim.
 
-- [ ] **T7.1 — Generate truthful documentation** (P1, M)
+- [x] **T7.1 — Generate truthful documentation** (P1, M)
   - Rewrite README, STATUS, architecture, model provenance, operations, risks and changelog from the
     release evidence. Remove v1 language, stale counts and unsupported “atomic”/quality claims.
   - Generate volatile counts/versions where practical and test commands/examples.
-  - **Proof:** documentation consistency tests and a fresh-user walkthrough from the README.
+  - **Proof:** evidence-derived status drift check; documentation/core/support/default/link consistency
+    tests; README command registration test; and a fresh locked doctor → process → verify walkthrough.
 - [ ] **T7.2 — Assemble and reproduce the candidate** (P0, L)
   - Build wheel/sdist, UI, plugin, supported container and SBOM twice from clean checkouts.
   - Compare deterministic artifacts; explain and normalize permitted metadata differences.

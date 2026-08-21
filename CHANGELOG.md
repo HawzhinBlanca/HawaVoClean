@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> Release-state note: 3.3.0 is still a candidate. Version/date headings below record internal
+> repository milestones; they are not evidence of a signed, tagged, protected-branch publication.
+> Current proof and blockers are authoritative in `docs/generated-release-status.md` and `STATUS.md`.
+
+### Changed — evidence-backed release hardening and truthful product boundary
+
+- Replaced independent flat-file publication with immutable content-addressed WAV/JSON/TXT
+  generations committed by one verified `current` pointer. Fault injection, real interruption,
+  overwrite, recovery, concurrent-reader/publisher, APFS and Linux-overlayfs tests prove that a mixed
+  generation is never authoritative and the prior complete generation is retained.
+- Canonicalized the 3.3.0 release/report identity and schema-v2 provenance; synchronized Python, UI,
+  Resolve and package manifests; generated an artifact-bound CycloneDX 1.6 SBOM; and made stale
+  generated release status a failing gate.
+- Rebuilt the supported container as CPU/production-only, non-root and read-only-root compatible with
+  exact Wolfi packages. Studio/CUDA, GPU-container and Windows support are explicitly absent.
+- Bounded loopback-server jobs, history, upload concurrency/size/total/age and free-space reserve;
+  startup/terminal cleanup owns only marker-scoped uploads and never committed outputs.
+- Replaced checkout/virtual-environment Resolve installation with a manifest-bearing relocatable
+  CPython 3.11 engine, content-addressed stage, real staged lifecycle test and transactional
+  activation/rollback. The actual in-Resolve workflow/accessibility matrix is still open.
+- Hardened the Electron renderer boundary with a private `hawa://app` origin, fixed IPC sender checks,
+  sandbox/context isolation, CSP and complete navigation/popup/permission/network denial. Resolve
+  21.0.3's vendor-owned Electron 36.3.2 still has 33 captured advisories including seven high; this
+  remains an explicit acceptance/update blocker, not a clean scan.
+- Locked a result-free Sorani evaluation protocol and rights-safe corpus-source route. Both require
+  explicit user approval before acquisition/execution; no held-out content/listening result exists and
+  quarantined or speaker-opaque corpora cannot support the product claim.
+- Established a two-pass clean-checkout local release gate covering tests/coverage, fuzz, mutations,
+  real engineering audio, UI, packaging, Resolve staging, container, audits, SBOM and reproducible
+  identities. The last proof is bound to its recorded source commit; final-commit rerun, remote CI,
+  human evaluation, real Resolve acceptance, signing and protected publication remain required.
+- Rewrote architecture, model provenance, operations, security, risks and status around the actual
+  three-core system, committed-generation behavior, qualification boundaries, known limitations and
+  open human/vendor/governance gates.
+
 ### Added — one v3.3 identity and a measured three-profile regression gate
 
 - `src/hawavoclean/release.json` is now the sole authored product/report

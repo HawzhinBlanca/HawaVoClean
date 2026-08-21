@@ -1,8 +1,8 @@
-"""Protocol and data models for deterministic enhancement cores.
+"""Protocol and data models shared by deterministic and learned enhancement cores.
 
-HawaVoClean v1 ships no learned models. Every core is classical DSP with
-explicit parameters; provenance is the parameter set itself, hashed
-canonically, never a weights digest.
+Every registered core has explicit canonical parameters. Learned cores include
+their exact weight digests in that parameter identity; the classical production
+core has no weight files.
 """
 
 from dataclasses import dataclass, field

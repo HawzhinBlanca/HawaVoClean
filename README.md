@@ -1,8 +1,8 @@
 # HawaVoClean v3.3
 
 > Offline dialogue audio cleanup: Wiener spectral denoising, spectral-change
-> guarded finishing, and BS.1770 loudness mastering — engineered to never
-> damage the source material.
+> guarded finishing, and BS.1770 loudness mastering — engineered to fail
+> closed and preserve the source timeline.
 
 ## What this is
 
@@ -11,6 +11,11 @@ mastered WAV: steady-state noise reduced, hum and clicks repaired, speech
 EQ'd and de-essed, loudness normalized to broadcast targets, true peaks
 limited to −1.0 dBTP. Every processing decision is recorded in an audit
 report published beside the output.
+
+**Release state:** 3.3.0 is a release candidate in progress, not a published 10/10 release. The exact
+evidence counts and open human/vendor gates are generated in
+[the release-status snapshot](docs/generated-release-status.md); [STATUS.md](STATUS.md) explains the
+current verdict in plain language.
 
 **Three enhancement cores, honestly labelled.** The default production core
 is a decision-directed spectral Wiener filter — classical DSP, gentle,
@@ -40,10 +45,10 @@ The fidelity guard compares *spectral signatures*: in `strict_spectral`
 mode (production) it demands the output stay spectrally near-identical; in
 `integrity` mode (studio) it enforces timing, envelope, artifact, and
 collapse protections while allowing the spectral change that restoration
-is. It cannot verify *linguistic* content — that would require a trained
-Kurdish Sorani acoustic model and a human-verified corpus, and this
-project has neither. Where that limits a guarantee, the guarantee is not
-made.
+is. It cannot verify *linguistic* content. HawaVoClean now has a locked
+Sorani human-evaluation protocol and a rights-safe source design, but neither
+is approved or executed and no held-out result exists. Where that limits a
+guarantee, the guarantee is not made.
 
 ## Invariants that hold (and are tested)
 
@@ -74,8 +79,9 @@ made.
 
 1. The guard detects spectral change, not linguistic change. A processing
    artifact that preserves spectral shape passes it.
-2. All bundled corpora are synthesized tones, labelled as such. No Kurdish
-   speech has been processed or evaluated by the maintainers.
+2. The tracked acceptance corpus is synthetic. Private real Sorani recordings
+   are used only as non-redistributed engineering regressions; they are not
+   licensed, speaker-disjoint human acceptance evidence.
 3. The conservative guard reverts aggressively: on the bundled synthetic
    corpus roughly half of speech units keep their original audio (they
    still receive loudness normalization).
@@ -84,13 +90,18 @@ made.
    hidden `.<output-name>.hawavoclean/` generation bundle. When moving or
    archiving it, export/copy the WAV, both reports, and that bundle together;
    copying only the visible symlink can produce a dangling file.
+6. The supported container is CPU/production only. Studio/GPU container
+   support and Windows are not claimed for 3.3.0.
+7. The Resolve plugin's application boundary is hardened, but Resolve 21.0.3
+   embeds a vendor-owned Electron 36.3.2 with unaccepted high-severity
+   advisories. See [the runtime-risk assessment](docs/resolve-runtime-risk.md).
 
 ## Installation
 
 ```bash
 cd hawavoclean
-uv sync --locked                 # base install (Wiener core, no torch)
-uv sync --locked --extra studio  # + neural studio core
+uv sync --frozen                 # base install (Wiener core, no torch)
+uv sync --frozen --extra studio  # + neural studio and lowband cores
 ```
 
 Third-party license texts for the vendored model weights are in
@@ -126,7 +137,7 @@ Both the studio and low-band profiles need the optional neural
 dependencies:
 
 ```bash
-uv sync --extra studio
+uv sync --frozen --extra studio
 ```
 
 Development and evaluation commands:
@@ -141,6 +152,22 @@ Paths are CWD-independent: configs and model artifacts ship inside the
 package and can be overridden with `HAWAVOCLEAN_CONFIG_DIR`,
 `HAWAVOCLEAN_MODEL_DIR`, and `HAWAVOCLEAN_WORK_DIR`.
 
+## Web and Resolve surfaces
+
+The browser/desktop UI uses the same engine over authenticated loopback only:
+
+```bash
+hawavoclean serve --host 127.0.0.1 --port 0 --token REPLACE_WITH_A_RANDOM_SECRET
+```
+
+The server has bounded active/terminal jobs, upload size/total/TTL limits,
+startup scavenging and disk-pressure refusal; it never deletes a committed
+user output. The Resolve installer consumes a self-contained, manifest-bearing
+engine artifact, stages and self-tests the complete plugin, then backs up and
+atomically activates it with rollback on failure. Building/installing that
+artifact and running the actual in-host matrix are documented in
+[the operational runbook](docs/operations.md).
+
 ## Release validation
 
 The release claim has one local entry point:
@@ -154,6 +181,10 @@ when the shipped wheel, UI, Resolve plugin, container and SBOM identities
 reproduce. The pinned host requirements, every included check, retained proof
 format and honest external limits are documented in
 [docs/release-gate.md](docs/release-gate.md).
+
+The last complete proof is bound to its named commit. Any later source or
+documentation change makes a final rerun mandatory; a historical green proof
+is never silently promoted to the current HEAD.
 
 ## License
 

@@ -1,4 +1,4 @@
-"""Command-Line Interface for HawaVoClean v1."""
+"""Command-line interface for HawaVoClean 3.3."""
 
 import argparse
 import atexit

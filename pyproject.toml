@@ -7,7 +7,7 @@ name = "hawavoclean"
 version = "3.3.0"
 description = "Offline dialogue audio cleanup: Wiener denoising, spectral-change guard, BS.1770 mastering"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 license = { text = "Proprietary / All Rights Reserved" }
 authors = [
     { name = "Hawzhin", email = "hawzhin88@gmail.com" }
