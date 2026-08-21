@@ -21,6 +21,8 @@ def _canonical(value: Any) -> str:
 
 def _fixture(tmp_path: Path) -> tuple[dict[str, Any], Path]:
     checkpoint = json.loads(validator.DEFAULT_CHECKPOINT.read_text(encoding="utf-8"))
+    result = checkpoint["result"]
+    suite = result["default_test_suite_per_pass"]
     audit = json.dumps(
         {
             "metadata": {
@@ -36,14 +38,21 @@ def _fixture(tmp_path: Path) -> tuple[dict[str, Any], Path]:
     )
     logs = {
         "default-tests-branch-coverage": (
-            "Total coverage: 92.73%\n1018 passed, 1 skipped, 41 deselected\n"
+            f"Total coverage: {suite['branch_coverage_percent']}%\n"
+            f"{suite['passed']} passed, {suite['skipped']} skipped, "
+            f"{suite['fuzz_deselected']} deselected\n"
         ),
-        "fuzz-tests": "41 passed in 1.00s\n",
-        "mutation-gate": "23/23 caught\n",
+        "fuzz-tests": f"{result['separate_fuzz_tests_per_pass']} passed in 1.00s\n",
+        "mutation-gate": f"{result['owner_scoped_mutations_caught_per_pass']} caught\n",
         "real-audio-regressions": json.dumps(
-            {"cases": [{"status": "passed", "runs": 2} for _ in range(6)]}
+            {
+                "cases": [
+                    {"status": "passed", "runs": result["runs_per_real_audio_case"]}
+                    for _ in range(result["real_audio_cases"])
+                ]
+            }
         ),
-        "ui-tests": "Tests 342 passed\n",
+        "ui-tests": f"Tests {result['ui_tests_per_pass']} passed\n",
         "ui-audit": audit,
         "plugin-audit": audit,
         "toolchain-audit": audit,
