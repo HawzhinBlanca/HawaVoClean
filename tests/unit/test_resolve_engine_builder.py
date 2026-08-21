@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -57,3 +59,49 @@ def test_shell_launcher_is_relocatable_and_isolated() -> None:
     assert "PYTHONNOUSERSITE=1" in source
     assert "PYTHONDONTWRITEBYTECODE=1" in source
     assert 'python3.11" -I -B' in source
+
+
+def test_target_install_pruning_removes_build_paths_and_rewrites_record(tmp_path: Path) -> None:
+    site = tmp_path / "site-packages"
+    package = site / "hawavoclean"
+    dist_info = site / "hawavoclean-3.3.0.dist-info"
+    scripts = site / "bin"
+    base_site = tmp_path / "python" / "lib" / "python3.11" / "site-packages"
+    package.mkdir(parents=True)
+    dist_info.mkdir()
+    scripts.mkdir()
+    base_site.mkdir(parents=True)
+    (package / "__init__.py").write_text("VERSION = '3.3.0'\n")
+    (scripts / "hawavoclean").write_text("#!/private/tmp/build/python\n")
+    (base_site / "pip.py").write_text("# build tool\n")
+    (dist_info / "direct_url.json").write_text('{"url":"file:///private/tmp/wheel.whl"}')
+    (dist_info / "uv_cache.json").write_text('{"timestamp":"nondeterministic"}')
+    record = dist_info / "RECORD"
+    with record.open("w", newline="") as stream:
+        csv.writer(stream, lineterminator="\n").writerows(
+            [
+                ("bin/hawavoclean", "old", "1"),
+                ("hawavoclean/__init__.py", "old", "1"),
+                ("hawavoclean-3.3.0.dist-info/direct_url.json", "old", "1"),
+                ("hawavoclean-3.3.0.dist-info/uv_cache.json", "old", "1"),
+                ("hawavoclean-3.3.0.dist-info/RECORD", "", ""),
+            ]
+        )
+
+    build_resolve_engine._prune_and_normalize_install(tmp_path, site)
+
+    assert not scripts.exists()
+    assert not base_site.exists()
+    assert not (dist_info / "direct_url.json").exists()
+    assert not (dist_info / "uv_cache.json").exists()
+    rows = [tuple(row) for row in csv.reader(record.read_text().splitlines())]
+    expected_hash = build_resolve_engine._record_digest(package / "__init__.py")
+    assert rows == [
+        ("hawavoclean-3.3.0.dist-info/RECORD", "", ""),
+        (
+            "hawavoclean/__init__.py",
+            expected_hash,
+            str((package / "__init__.py").stat().st_size),
+        ),
+    ]
+    assert len(hashlib.sha256(record.read_bytes()).hexdigest()) == 64

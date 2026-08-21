@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import hashlib
 import importlib.metadata
 import json
@@ -126,6 +128,47 @@ def _remove_bytecode(root: Path) -> None:
         bytecode.unlink()
 
 
+def _record_digest(path: Path) -> str:
+    digest = hashlib.sha256(path.read_bytes()).digest()
+    return "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _prune_and_normalize_install(stage: Path, site_packages: Path) -> None:
+    """Remove build-only files and make every installed RECORD truthful."""
+    scripts = site_packages / "bin"
+    if scripts.exists():
+        shutil.rmtree(scripts)
+    base_site = stage / "python" / "lib" / "python3.11" / "site-packages"
+    if base_site.exists():
+        shutil.rmtree(base_site)
+
+    for build_metadata in sorted(site_packages.glob("*.dist-info/uv_cache.json")):
+        build_metadata.unlink()
+    for direct_url in sorted(site_packages.glob("*.dist-info/direct_url.json")):
+        direct_url.unlink()
+
+    site_root = site_packages.resolve()
+    for record in sorted(site_packages.glob("*.dist-info/RECORD")):
+        rows: list[tuple[str, str, str]] = []
+        with record.open(newline="") as stream:
+            original = list(csv.reader(stream))
+        for row in original:
+            if len(row) != 3:
+                raise BundleError(f"invalid installed RECORD row in {record}")
+            relative = row[0]
+            target = (site_packages / relative).resolve()
+            if not target.is_relative_to(site_root):
+                raise BundleError(f"installed RECORD escapes site-packages: {relative}")
+            if target == record.resolve() or not target.is_file():
+                continue
+            rows.append((relative, _record_digest(target), str(target.stat().st_size)))
+        record_relative = record.relative_to(site_packages).as_posix()
+        rows.append((record_relative, "", ""))
+        with record.open("w", newline="") as stream:
+            writer = csv.writer(stream, lineterminator="\n")
+            writer.writerows(sorted(rows))
+
+
 def _write_launchers(stage: Path) -> None:
     (stage / "launcher.py").write_text(LAUNCHER_SOURCE)
     launcher = stage / "hawavoclean-engine"
@@ -218,6 +261,7 @@ def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
             check=True,
         )
         requirements.unlink()
+        _prune_and_normalize_install(stage, site_packages)
         _remove_bytecode(stage)
 
         # Carry the product's generated third-party inventory inside the

@@ -67,6 +67,22 @@ verify_engine_bundle() {
   done < "$root/ENGINE-SYMLINKS"
 }
 
+write_checksum_manifest() {
+  local root="$1" output="$2" rel
+  local -a batch=()
+  (
+    cd "$root"
+    while IFS= read -r rel; do
+      batch+=("$rel")
+      if [ "${#batch[@]}" -ge 256 ]; then
+        shasum -a 256 "${batch[@]}"
+        batch=()
+      fi
+    done < <(find . -type f ! -name "$output" -print | LC_ALL=C sort)
+    [ "${#batch[@]}" -eq 0 ] || shasum -a 256 "${batch[@]}"
+  ) > "$root/$output"
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-install) DO_INSTALL=0 ;;
@@ -160,7 +176,7 @@ say "Running engine integrity and preflight checks"
 "$STAGE/engine/hawavoclean-engine" doctor >/dev/null || die "engine doctor preflight failed"
 
 (cd "$STAGE" && find . -type l -print | LC_ALL=C sort | while IFS= read -r rel; do printf '%s\t%s\n' "$rel" "$(readlink "$rel")"; done) > "$STAGE/SYMLINKS"
-(cd "$STAGE" && find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r rel; do shasum -a 256 "$rel"; done) > "$STAGE/SHA256SUMS"
+write_checksum_manifest "$STAGE" SHA256SUMS
 
 say "Running the real staged Electron → engine → health → shutdown self-test"
 "$SCRIPT_DIR/dev/stage-selftest.sh" "$STAGE"

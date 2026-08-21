@@ -239,6 +239,8 @@ def test_assembler_contract_has_no_mutable_or_repo_local_fallback() -> None:
     assert 'activate.sh" --stage "$FINAL_STAGE" --verify-only' in install
     assert "engine regular-file inventory" in install
     assert "engine symlink inventory" in install
+    assert "write_checksum_manifest" in install
+    assert 'batch+=("$rel")' in install
     assert "rm -rf" not in install + activate
     assert "after_backup" in activate and "after_activate" in activate
     assert "restoring the prior plugin" in activate
