@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "Dockerfile"
+WOLFI_LOCK = ROOT / "docker" / "wolfi-packages.lock"
 
 
 def _dockerfile() -> str:
@@ -21,10 +22,11 @@ def test_container_bases_and_installer_are_immutable() -> None:
     assert len(from_lines) == 3
     assert all(re.search(r"@sha256:[0-9a-f]{64}(?:\s|$)", line) for line in from_lines)
     assert "uv:0.11.14@sha256:" in from_lines[0]
+    assert all("cgr.dev/chainguard/wolfi-base@sha256:" in line for line in from_lines[1:])
     assert text.count("uv sync --frozen") == 1
     assert "uv pip install --python /app/.venv/bin/python --no-deps" in text
-    assert "COPY docker/debian.sources /etc/apt/sources.list.d/debian.sources" in text
-    assert "apt-get upgrade" not in text
+    assert text.count("xargs apk add --no-cache < /tmp/wolfi-packages.lock") == 2
+    assert "apt-get" not in text
 
 
 def test_container_copies_the_declared_custom_build_hook() -> None:
@@ -60,12 +62,14 @@ def test_container_metadata_requires_source_identity() -> None:
     assert 'org.opencontainers.image.created="${SOURCE_DATE}"' in text
 
 
-def test_debian_packages_come_from_an_immutable_snapshot() -> None:
-    sources = (ROOT / "docker" / "debian.sources").read_text(encoding="utf-8")
+def test_wolfi_runtime_lock_pins_every_package_and_core_runtime() -> None:
+    packages = WOLFI_LOCK.read_text(encoding="utf-8").splitlines()
+    names = [line.split("=", 1)[0] for line in packages]
 
-    assert sources.count("https://snapshot.debian.org/archive/") == 2
-    assert sources.count("/20260821T000000Z") == 2
-    assert sources.count("Check-Valid-Until: no") == 2
+    assert len(packages) >= 75
+    assert len(names) == len(set(names))
+    assert all(re.fullmatch(r"[a-zA-Z0-9+_.-]+=[a-zA-Z0-9+_.:-]+", line) for line in packages)
+    assert {"python-3.12", "ffmpeg-7", "libsndfile"}.issubset(names)
 
 
 def test_docker_context_excludes_private_and_generated_state() -> None:
