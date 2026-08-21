@@ -247,6 +247,19 @@ def test_inventory_references_are_deterministic_and_purls_are_preserved() -> Non
     )
 
 
+def test_ephemeral_trivy_scan_subject_is_removed_without_dropping_metadata() -> None:
+    bom = {
+        "metadata": {
+            "timestamp": "stable",
+            "component": {"type": "application", "name": "/tmp/random/source"},
+        }
+    }
+
+    generate_sbom._remove_scan_subject(bom)
+
+    assert bom == {"metadata": {"timestamp": "stable"}}
+
+
 def test_contract_rejects_a_missing_release_ecosystem() -> None:
     incomplete = {
         "components": [

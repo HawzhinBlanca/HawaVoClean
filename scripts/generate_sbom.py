@@ -104,6 +104,13 @@ def _trivy_bom(arguments: list[str], output: Path) -> dict[str, Any]:
     return value
 
 
+def _remove_scan_subject(bom: dict[str, Any]) -> None:
+    """Drop Trivy's path-derived scan subject; the release root is added later."""
+    metadata = bom.get("metadata")
+    if isinstance(metadata, dict):
+        metadata.pop("component", None)
+
+
 def _canonical_ref(component: dict[str, Any]) -> str:
     purl = component.get("purl")
     if isinstance(purl, str) and purl:
@@ -667,6 +674,7 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
             ],
             temp / "source.cdx.json",
         )
+        _remove_scan_subject(source_bom)
         image_bom = _trivy_bom(["image", image_id], temp / "image.cdx.json")
         components, dependency_rows = _normalized_inventory([source_bom, image_bom])
         model_components, model_dependencies = _model_components()
