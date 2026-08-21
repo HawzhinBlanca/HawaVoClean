@@ -1,6 +1,6 @@
 # HawaVoClean: True 10/10 Release Plan
 
-Status: **implementation in progress — Phase 0 complete; Phase 1 active**
+Status: **implementation in progress — Phases 0–1 complete; Phase 2 active**
 Baseline: `continuity-taper` at `bf6d932`, audited 2026-08-21  
 Target: one evidence-backed `v3.3.0` release candidate containing continuity taper, lowband,
 crash-safe publication, complete release hardening, real Sorani validation, and in-Resolve proof.
@@ -88,7 +88,7 @@ can name exactly what it verified.
 Goal: a crash or overwrite failure can never destroy the last complete generation or make an
 incomplete generation authoritative.
 
-- [ ] **T1.1 — Specify truthful publication semantics** (P0, M; depends on T0.3)
+- [x] **T1.1 — Specify truthful publication semantics** (P0, M; depends on T0.3)
   - Write an ADR explicitly rejecting the impossible claim that three independent flat-file renames
     are one atomic filesystem operation.
   - Recommended design: immutable generation directories plus a single atomically replaced commit
@@ -97,21 +97,21 @@ incomplete generation authoritative.
     uncommitted aliases as authoritative.
   - Define startup recovery, overwrite, cancellation, cross-filesystem and concurrent-reader behavior.
   - **Proof:** state-machine model enumerating every durable state and recovery transition.
-- [ ] **T1.2 — Build the transaction with durability barriers** (P0, L; depends on T1.1)
+- [x] **T1.2 — Build the transaction with durability barriers** (P0, L; depends on T1.1)
   - Stage on the destination filesystem; flush each artifact; flush directories; validate hashes;
     commit through one atomic pointer; retain the previous generation until commit is durable.
   - Recovery must be idempotent after process crash, `SIGKILL`, power-loss simulation and repeated
     recovery interruption.
   - **Proof:** implementation contains no destructive removal of the prior committed generation before
     the new commit is durable.
-- [ ] **T1.3 — Add the full publication failure matrix** (P0, L; depends on T1.2)
+- [x] **T1.3 — Add the full publication failure matrix** (P0, L; depends on T1.2)
   - Inject failure before/after every write, flush, rename, directory flush, pointer update and cleanup.
   - Exercise new destination, overwrite, cancellation, disk-full, permission loss and concurrent read.
   - Assert: old generation byte-identical or new generation complete; never mixed; no invisible data
     loss; recovery repeatable; reports hash the exact WAV they describe.
   - Add a mutation owner for transaction ordering and rollback/recovery behavior.
   - **Proof:** failure matrix and mutation gate pass on APFS plus a second supported filesystem/runtime.
-- [ ] **T1.4 — Migrate CLI, UI, verifier and reports** (P0, M; depends on T1.2)
+- [x] **T1.4 — Migrate CLI, UI, verifier and reports** (P0, M; depends on T1.2)
   - All first-party consumers must resolve only committed generations and reject mismatched artifacts.
   - Old complete triplets remain readable; partial legacy triplets fail explicitly.
   - **Proof:** compatibility fixtures and end-to-end process/download/verify tests.
