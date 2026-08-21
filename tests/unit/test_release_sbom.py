@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,106 @@ def test_artifact_component_is_content_bound_and_path_independent(tmp_path: Path
     assert left["hashes"] == [
         {"alg": "SHA-256", "content": hashlib.sha256(b"same artifact").hexdigest()}
     ]
+
+
+def _artifact_tree(root: Path) -> Path:
+    bundle = root / "bundle"
+    executable = bundle / "bin" / "run"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"exact executable\n")
+    executable.chmod(0o755)
+    (bundle / "empty").mkdir()
+    os.symlink("bin/run", bundle / "launcher")
+    return bundle
+
+
+def test_directory_artifact_is_path_independent_and_binds_the_complete_tree(
+    tmp_path: Path,
+) -> None:
+    first = _artifact_tree(tmp_path / "one")
+    second = _artifact_tree(tmp_path / "two")
+
+    left = generate_sbom._artifact_component("plugin", first)
+    right = generate_sbom._artifact_component("plugin", second)
+
+    assert left == right
+    assert str(tmp_path) not in str(left)
+    assert {prop["name"]: prop["value"] for prop in left["properties"]}[
+        "hawavoclean:artifact-kind"
+    ] == "directory-tree"
+
+    (second / "bin" / "run").write_bytes(b"changed\n")
+    assert generate_sbom._artifact_component("plugin", second) != left
+
+
+def test_directory_artifact_binds_modes_and_symlink_targets(tmp_path: Path) -> None:
+    bundle = _artifact_tree(tmp_path)
+    original = generate_sbom._artifact_component("plugin", bundle)
+
+    (bundle / "bin" / "run").chmod(0o644)
+    assert generate_sbom._artifact_component("plugin", bundle) != original
+    (bundle / "bin" / "run").chmod(0o755)
+
+    launcher = bundle / "launcher"
+    launcher.unlink()
+    os.symlink("empty", launcher)
+    assert generate_sbom._artifact_component("plugin", bundle) != original
+
+
+def test_directory_artifact_rejects_escaping_and_dangling_symlinks(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    outside = tmp_path / "outside"
+    outside.write_text("external", encoding="utf-8")
+    os.symlink("../outside", bundle / "escape")
+
+    with pytest.raises(generate_sbom.SbomError, match="escapes"):
+        generate_sbom._artifact_component("plugin", bundle)
+
+    (bundle / "escape").unlink()
+    os.symlink("missing", bundle / "dangling")
+    with pytest.raises(generate_sbom.SbomError, match="dangling"):
+        generate_sbom._artifact_component("plugin", bundle)
+
+
+def test_artifact_parser_accepts_real_directories_and_rejects_aliases(tmp_path: Path) -> None:
+    bundle = _artifact_tree(tmp_path)
+    assert generate_sbom._parse_artifacts([f"plugin={bundle}"]) == [("plugin", bundle.resolve())]
+    with pytest.raises(generate_sbom.SbomError, match="invalid or duplicate"):
+        generate_sbom._parse_artifacts([f"plugin={bundle}", f"alias={bundle}"])
+
+
+def test_image_reference_is_resolved_and_source_labels_must_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commit = "a" * 40
+    image_id = f"sha256:{'b' * 64}"
+    inspection = [
+        {
+            "Id": image_id,
+            "Config": {
+                "Labels": {
+                    "org.opencontainers.image.revision": commit,
+                    "org.opencontainers.image.version": "3.3.0",
+                    "org.opencontainers.image.created": "1970-01-01T00:02:03Z",
+                }
+            },
+        }
+    ]
+
+    def fake_run(command: list[str], **_kwargs: object) -> str:
+        if command[:3] == ["docker", "image", "inspect"]:
+            assert command[3] == "mutable:tag"
+            return json.dumps(inspection)
+        assert command[:2] == ["git", "show"]
+        return "123\n"
+
+    monkeypatch.setattr(generate_sbom, "_run", fake_run)
+    assert generate_sbom._resolve_image("mutable:tag", commit, "3.3.0") == image_id
+
+    inspection[0]["Config"]["Labels"]["org.opencontainers.image.revision"] = "c" * 40
+    with pytest.raises(generate_sbom.SbomError, match="does not match"):
+        generate_sbom._resolve_image("mutable:tag", commit, "3.3.0")
 
 
 def test_vendored_model_inventory_contains_every_weight_hash() -> None:

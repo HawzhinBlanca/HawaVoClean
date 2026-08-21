@@ -7,7 +7,9 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +40,7 @@ SCHEMAS = {
     ),
 }
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+ARTIFACT_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 class SbomError(RuntimeError):
@@ -210,6 +213,81 @@ def _file_component(path: Path, license_name: str, *, kind: str) -> dict[str, An
     }
 
 
+def _directory_inventory(path: Path) -> dict[str, Any]:
+    """Hash a directory as a path-independent, non-escaping canonical tree."""
+    if path.is_symlink() or not path.is_dir():
+        raise SbomError(f"directory artifact is not a real directory: {path}")
+    root = path.resolve()
+    records: list[dict[str, Any]] = []
+    regular_files = 0
+    total_size = 0
+    for current, raw_directories, raw_files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        directories: list[str] = []
+        for name in sorted(raw_directories):
+            entry = current_path / name
+            relative = entry.relative_to(root).as_posix()
+            if entry.is_symlink():
+                target = os.readlink(entry)
+                _validate_tree_symlink(root, entry, target)
+                records.append({"path": relative, "target": target, "type": "symlink"})
+            else:
+                mode = format(stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode), "04o")
+                records.append({"mode": mode, "path": relative, "type": "directory"})
+                directories.append(name)
+        raw_directories[:] = directories
+        for name in sorted(raw_files):
+            entry = current_path / name
+            relative = entry.relative_to(root).as_posix()
+            if entry.is_symlink():
+                target = os.readlink(entry)
+                _validate_tree_symlink(root, entry, target)
+                records.append({"path": relative, "target": target, "type": "symlink"})
+                continue
+            metadata = entry.stat(follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise SbomError(f"artifact tree contains an unsupported file type: {relative}")
+            file_digest = _sha256(entry)
+            records.append(
+                {
+                    "mode": format(stat.S_IMODE(metadata.st_mode), "04o"),
+                    "path": relative,
+                    "sha256": file_digest,
+                    "size": metadata.st_size,
+                    "type": "file",
+                }
+            )
+            regular_files += 1
+            total_size += metadata.st_size
+    records.sort(key=lambda value: (str(value["path"]), str(value["type"])))
+    tree_digest = hashlib.sha256(b"hawavoclean-artifact-tree-v1\n")
+    for record in records:
+        tree_digest.update(
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        tree_digest.update(b"\n")
+    return {
+        "digest": tree_digest.hexdigest(),
+        "entries": len(records),
+        "regular_files": regular_files,
+        "total_size": total_size,
+    }
+
+
+def _validate_tree_symlink(root: Path, entry: Path, target: str) -> None:
+    if Path(target).is_absolute():
+        raise SbomError(f"artifact tree contains an absolute symlink: {entry.relative_to(root)}")
+    resolved = (entry.parent / target).resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise SbomError(
+            f"artifact tree symlink escapes its root: {entry.relative_to(root)}"
+        ) from exc
+    if not resolved.exists():
+        raise SbomError(f"artifact tree contains a dangling symlink: {entry.relative_to(root)}")
+
+
 def _model_components() -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
     components: dict[str, dict[str, Any]] = {}
     dependencies: dict[str, set[str]] = {}
@@ -265,7 +343,28 @@ def _model_components() -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
 
 
 def _artifact_component(name: str, path: Path) -> dict[str, Any]:
-    digest = _sha256(path)
+    if path.is_dir():
+        inventory = _directory_inventory(path)
+        digest = cast(str, inventory["digest"])
+        kind = "directory-tree"
+        extra_properties = [
+            {"name": "hawavoclean:artifact-tree-format", "value": "canonical-jsonl-v1"},
+            {"name": "hawavoclean:artifact-tree-entries", "value": str(inventory["entries"])},
+            {
+                "name": "hawavoclean:artifact-tree-regular-files",
+                "value": str(inventory["regular_files"]),
+            },
+            {
+                "name": "hawavoclean:artifact-tree-total-size",
+                "value": str(inventory["total_size"]),
+            },
+        ]
+    else:
+        digest = _sha256(path)
+        kind = "file"
+        extra_properties = [
+            {"name": "hawavoclean:artifact-file-size", "value": str(path.stat().st_size)}
+        ]
     return {
         "bom-ref": f"urn:hawavoclean:release-artifact:{name}:sha256:{digest}",
         "type": "file",
@@ -275,6 +374,8 @@ def _artifact_component(name: str, path: Path) -> dict[str, Any]:
         "properties": [
             {"name": "hawavoclean:artifact-name", "value": name},
             {"name": "hawavoclean:artifact-filename", "value": path.name},
+            {"name": "hawavoclean:artifact-kind", "value": kind},
+            *extra_properties,
         ],
     }
 
@@ -282,16 +383,53 @@ def _artifact_component(name: str, path: Path) -> dict[str, Any]:
 def _parse_artifacts(values: list[str]) -> list[tuple[str, Path]]:
     artifacts: list[tuple[str, Path]] = []
     names: set[str] = set()
+    paths: set[Path] = set()
     for value in values:
         name, separator, raw_path = value.partition("=")
-        path = Path(raw_path).resolve()
-        if not separator or not name or name in names or not path.is_file():
+        unresolved = Path(raw_path).expanduser()
+        path = unresolved.resolve()
+        valid_path = (path.is_file() or path.is_dir()) and not unresolved.is_symlink()
+        if (
+            not separator
+            or ARTIFACT_NAME.fullmatch(name) is None
+            or name in names
+            or path in paths
+            or not valid_path
+        ):
             raise SbomError(f"invalid or duplicate artifact NAME=PATH: {value}")
         names.add(name)
+        paths.add(path)
         artifacts.append((name, path))
     if not artifacts:
         raise SbomError("at least one --artifact NAME=PATH is required")
     return artifacts
+
+
+def _resolve_image(image: str, commit: str, version: str) -> str:
+    """Resolve a local image reference and prove it belongs to this source."""
+    try:
+        values: Any = json.loads(_run(["docker", "image", "inspect", image]))
+    except json.JSONDecodeError as exc:
+        raise SbomError("Docker returned invalid image inspection JSON") from exc
+    if not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
+        raise SbomError("Docker did not resolve exactly one local image")
+    value = values[0]
+    image_id = value.get("Id")
+    if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+        raise SbomError("Docker image has no immutable sha256 ID")
+    config = value.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if not isinstance(labels, dict):
+        raise SbomError("Docker image has no source identity labels")
+    expected = {
+        "org.opencontainers.image.revision": commit,
+        "org.opencontainers.image.version": version,
+        "org.opencontainers.image.created": _source_date(commit),
+    }
+    for label, expected_value in expected.items():
+        if labels.get(label) != expected_value:
+            raise SbomError(f"Docker image label {label} does not match the source release")
+    return image_id
 
 
 def _download_schemas(directory: Path) -> Path:
@@ -312,10 +450,12 @@ def _download_schemas(directory: Path) -> Path:
 def _validate_contract(bom: dict[str, Any], artifact_names: set[str]) -> None:
     components = bom.get("components", [])
     purls = {value for component in components for value in [component.get("purl")] if value}
-    required_purl_fragments = ("pkg:pypi/", "pkg:npm/react@", "pkg:npm/electron@", "pkg:deb/")
+    required_purl_fragments = ("pkg:pypi/", "pkg:npm/react@", "pkg:npm/electron@")
     for fragment in required_purl_fragments:
         if not any(fragment in str(purl) for purl in purls):
             raise SbomError(f"inventory is missing required ecosystem component: {fragment}")
+    if not any(fragment in str(purl) for fragment in ("pkg:apk/", "pkg:deb/") for purl in purls):
+        raise SbomError("inventory is missing required system-package ecosystem")
     recorded_artifacts = {
         prop["value"]
         for component in components
@@ -345,6 +485,7 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise SbomError("cannot resolve the source commit")
     version = _release_version()
+    image_id = _resolve_image(image, commit, version)
     with tempfile.TemporaryDirectory(prefix="hawavoclean-sbom-") as temp_name:
         temp = Path(temp_name)
         source_bom = _trivy_bom(
@@ -361,7 +502,7 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
             ],
             temp / "source.cdx.json",
         )
-        image_bom = _trivy_bom(["image", image], temp / "image.cdx.json")
+        image_bom = _trivy_bom(["image", image_id], temp / "image.cdx.json")
         components, dependency_rows = _normalized_inventory([source_bom, image_bom])
         model_components, model_dependencies = _model_components()
         artifact_components = [_artifact_component(name, path) for name, path in artifacts]
@@ -402,7 +543,8 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
                         ROOT / "resolve-plugin" / "com.hawavoclean.resolve" / "pnpm-lock.yaml"
                     ),
                 },
-                {"name": "hawavoclean:container-image", "value": image},
+                {"name": "hawavoclean:container-image", "value": image_id},
+                {"name": "hawavoclean:container-image-requested", "value": image},
             ],
         }
         components = [component for component in components if component["bom-ref"] != root_ref]
@@ -413,8 +555,16 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
             for ref, children in sorted(dependency_map.items())
             if ref == root_ref or ref in existing_refs
         ]
+        artifact_digests = {
+            name: str(component["hashes"][0]["content"])
+            for (name, _path), component in zip(artifacts, artifact_components, strict=True)
+        }
         seed = "|".join(
-            [commit, image, *sorted(f"{name}:{_sha256(path)}" for name, path in artifacts)]
+            [
+                commit,
+                image_id,
+                *sorted(f"{name}:{digest}" for name, digest in artifact_digests.items()),
+            ]
         )
         bom = {
             "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
@@ -481,13 +631,17 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="exact built container image tag or digest")
+    parser.add_argument(
+        "--image",
+        required=True,
+        help="local container reference (resolved and bound to its immutable image ID)",
+    )
     parser.add_argument(
         "--artifact",
         action="append",
         default=[],
         metavar="NAME=PATH",
-        help="release artifact to hash-bind (repeatable)",
+        help="release file or directory tree to hash-bind (repeatable)",
     )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
