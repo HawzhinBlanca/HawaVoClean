@@ -1,6 +1,6 @@
 # HawaVoClean: True 10/10 Release Plan
 
-Status: **implementation in progress — Phases 0–1 complete; Phase 2 active**
+Status: **implementation in progress — Phases 0–2 complete; Phase 3 active**
 Baseline: `continuity-taper` at `bf6d932`, audited 2026-08-21  
 Target: one evidence-backed `v3.3.0` release candidate containing continuity taper, lowband,
 crash-safe publication, complete release hardening, real Sorani validation, and in-Resolve proof.
@@ -123,17 +123,17 @@ partial output. This gate blocks every merge and release task below.
 
 Goal: continuity taper, multipass and lowband exist together in one versioned source tree.
 
-- [ ] **T2.1 — Integrate lowband semantically** (P0, L; depends on Phase 1)
+- [x] **T2.1 — Integrate lowband semantically** (P0, L; depends on Phase 1)
   - Reconcile `CHANGELOG.md`, mutation ownership and `studio.py` conflicts deliberately; do not choose
     conflict sides mechanically.
   - Register lowband in factory, CLI, server, UI, schemas, docs and provenance locks.
   - Preserve full-band DFN3 inference with the verified 1 kHz crossover behavior.
   - **Proof:** profile-surface tests and real lowband regression hashes pass beside continuity tests.
-- [ ] **T2.2 — Unify version and artifact identity** (P0, M; depends on T2.1)
+- [x] **T2.2 — Unify version and artifact identity** (P0, M; depends on T2.1)
   - Make one source authoritative for Python, UI, plugin, report and release versions.
   - Advance report schema compatibly; reject fabricated or internally inconsistent build identity.
   - **Proof:** test that all reported/package versions derive from the same release identity.
-- [ ] **T2.3 — Run semantic regression comparisons** (P0, M; depends on T2.1)
+- [x] **T2.3 — Run semantic regression comparisons** (P0, M; depends on T2.1)
   - Compare production, studio and lowband against frozen pre-integration references.
   - Explain every changed hash with an intended code path and measured audio/report difference.
   - **Proof:** zero unexplained drift and deterministic repetition on the chosen release platform.

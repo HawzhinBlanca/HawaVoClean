@@ -1,8 +1,10 @@
 # Implementation Status
 
-All numbers below were measured on 2026-08-20 (Python 3.14.5). To
-re-measure: `bash scripts/run_release_checks.sh` and
-`python scripts/mutation_gate.py`.
+All current gate numbers below were measured on commit `a387b80` on
+2026-08-21 (Python 3.14.5). To re-measure the Phase 2 set:
+`bash scripts/run_release_checks.sh`, `pytest -m fuzz`,
+`python scripts/mutation_gate.py`, and
+`python scripts/audio_regression_gate.py --runs 2`.
 
 ## What this system is
 
@@ -13,31 +15,39 @@ cores built on vendored, hash-locked DeepFilterNet3 weights — full-band
 (`studio`) and band-split (`lowband`). There is no speech recognition
 anywhere in the system; see README "What it is not".
 
-## Measured verification results (2026-08-20)
+## Measured verification results (2026-08-21)
 
 | Gate | Measured result |
 |---|---|
-| Test suite | 591 passed, 7 skipped, 0 failed (41 fuzz cases deselected) |
+| Test suite | 869 passed, 0 failed (41 fuzz cases deselected) |
 | Fuzz gate (`pytest -m fuzz`) | 41 passed, 0 failed |
-| Branch coverage (`--cov-fail-under=90`) | 92.70% |
-| Mutation gate | 14/14 mutations caught by their own owning tests |
+| Branch coverage (`--cov-fail-under=90`) | 92.13% |
+| Mutation gate | 23/23 mutations caught by their own owning tests |
 | Ruff format / lint | exit 0 / exit 0 |
-| Mypy `--strict` (173 files) | 0 issues |
+| Mypy `--strict` (199 files) | 0 issues |
 | UI (`pnpm typecheck` / `test:run` / `build`) | exit 0 / 342 passed / exit 0 |
-| Doctor from repo dir and from `/` | exit 0 / exit 0 |
+| Doctor from repo dir | exit 0; all 4 profiles and all 3 core locks valid |
+| Real profile regressions | 6 cases × 2 runs; deterministic v3.3 hashes; zero unexplained semantic drift |
+| Publication fault matrix | 57/57 on macOS/APFS and Linux/overlayfs; real SIGINT/SIGTERM/SIGKILL included |
+| Evidence ledger | 6 entries; schema, baseline, external hashes and chain verify |
 | `audit-models` (3 cores, clean tree) | exit 0 |
 | `audit-models` tamper checks | params tamper → exit 2; bad license → exit 2; calibration tamper → exit 2 |
 | Acceptance gates (`hawavoclean eval`) | PASSED 4/4 items; capable of FAILED, enforced under `python -O` |
-| Real-time factor (production profile, CPU) | 0.146 |
+| Real-time factor (production profile, CPU; carried from 2026-08-20) | 0.146 |
 
-Carried forward from the 2026-08-19 fresh-clone audit and still enforced by
-the suite, but not re-measured by hand on 2026-08-20: re-run determinism
-(per-unit verdicts identical), `verify` over every produced output, the
-−1.0 dBTP ceiling (property-tested at 8× with zero tolerance), the mono
-−19.0 / stereo −16.0 LUFS targets, and cross-filesystem publish onto a RAM
-disk.
+The v3.3 version bump intentionally changes the deterministic PCM24 dither
+seed, so the six candidate WAV hashes differ from their pre-integration
+references. The regression gate proves the difference is confined to at
+most 2 least-significant bits (RMS 0.708–0.709 LSB), with identical sample
+structure and audio/decision report semantics. This is recorded explicitly;
+it is not presented as byte-identical DSP output.
 
-## Measured on the band-split core (`lowband`, 2026-08-20)
+The formal True 10/10 plan requires at least 92.49% branch coverage. The
+integrated tree is currently at 92.13%, so Phase 3 must add direct coverage
+before its unified release gate can pass. The ordinary 90% gate passing is
+not yet the final release claim.
+
+## Measured on the band-split core (`lowband`, reverified 2026-08-21)
 
 Lab fixture `test_output/teat1vo-lab/src.mp3` — a muffled recording sitting
 on low-frequency rumble. Separation is the 90th minus the 10th percentile of
@@ -65,7 +75,9 @@ unit at consonant retention 1.000 and hole scores 0.002–0.011, and the
   0/16 corrupted renderings accepted, 8/8 benign renderings rejected
   (dominated by UNVERIFIED-on-identity). On real speech, richer spectral
   structure yields more anchors; no claim is made until that is measured.
-- No Kurdish speech has been processed or evaluated by the maintainers.
+- There is no adequately licensed, transcribed, speaker-disjoint Sorani
+  corpus with dual human review. The private recordings above are regression
+  fixtures, not linguistic acceptance evidence.
 - The `lowband` prototype reported 40.0 dB separation on the lab fixture;
   the shipped chain measures 35.2 dB. The prototype reached the higher
   number by running the band split as an unguarded script and handing a
