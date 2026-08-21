@@ -224,6 +224,36 @@ def test_run_server_rejects_empty_token_and_bad_ui_dir(tmp_path: Path) -> None:
         run_server("127.0.0.1", 0, "t", tmp_path)
 
 
+def test_run_server_disables_access_logs_that_would_expose_query_tokens(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import uvicorn
+
+    import hawavoclean.server.app as app_mod
+
+    captured: dict[str, Any] = {}
+
+    class FakeConfig:
+        def __init__(self, _app: Any, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    class FakeServer:
+        def __init__(self, _config: Any) -> None:
+            self.should_exit = False
+
+        def run(self, *, sockets: list[socket.socket]) -> None:
+            for bound in sockets:
+                bound.close()
+
+    monkeypatch.setattr(uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(app_mod, "_configure_uvicorn_logging", lambda: None)
+    monkeypatch.setattr(app_mod, "_redirect_stdout_to_stderr", lambda: None)
+    assert app_mod.run_server("127.0.0.1", 0, "secret-token", None) == 0
+    assert captured["access_log"] is False
+    assert json.loads(capsys.readouterr().out)["event"] == "ready"
+
+
 def test_schedule_hard_exit_and_redirect_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     import threading
 

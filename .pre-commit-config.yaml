@@ -1,13 +1,18 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.0
+  - repo: local
     hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.9.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [pydantic>=2.6.0, torch>=2.2.0, numpy>=1.26.0]
-        args: [--strict]
+      - id: pinned-ruff
+        name: pinned ruff lint
+        entry: uv run --frozen ruff check .
+        language: system
+        pass_filenames: false
+      - id: pinned-ruff-format
+        name: pinned ruff format
+        entry: uv run --frozen ruff format --check .
+        language: system
+        pass_filenames: false
+      - id: pinned-mypy
+        name: pinned strict mypy
+        entry: uv run --frozen mypy --strict src tests scripts data
+        language: system
+        pass_filenames: false

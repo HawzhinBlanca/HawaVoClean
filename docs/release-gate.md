@@ -54,6 +54,15 @@ identities from each pass, and the cross-pass comparison. The proof contains a
 canonical SHA-256 over all its other fields. Failed attempts are retained in
 their own timestamped directory and never replace a prior proof.
 
+The committed compact checkpoint is validated on every generated-status check.
+To additionally prove that every committed count, artifact identity and digest
+was derived from a retained raw proof and its hash-bound logs, run:
+
+```console
+uv run python scripts/validate_release_gate_checkpoint.py \
+  --full-proof build/release-gate/<run>/release-gate-proof.json
+```
+
 Passing this command establishes the automated local portion of T3.1. It does
 not claim the Phase 5 Sorani human evaluation, the Phase 6 in-Resolve workflow
 and accessibility exercise, GitHub branch governance, release signing, or

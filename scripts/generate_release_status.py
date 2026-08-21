@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+if not __package__:  # Direct ``python scripts/generate_release_status.py`` execution.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.validate_release_gate_checkpoint import CheckpointError, validate_checkpoint
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs" / "generated-release-status.md"
@@ -77,6 +83,14 @@ def _validate_ledger() -> None:
         expected_previous = None if index == 1 else entries[index - 2]["entry_sha256"]
         if entry.get("previous_entry_sha256") != expected_previous:
             raise ReleaseStatusError(f"ledger entry {index} does not link to its predecessor")
+        covered = dict(entry)
+        covered.pop("entry_sha256", None)
+        canonical = json.dumps(
+            covered, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        actual = hashlib.sha256(canonical).hexdigest()
+        if digest != actual:
+            raise ReleaseStatusError(f"ledger entry {index} digest does not recompute")
 
 
 def _task_counts() -> tuple[int, int]:
@@ -104,7 +118,10 @@ def _approval(value: dict[str, Any], label: str) -> tuple[str, str]:
 def render_status() -> str:
     """Return the deterministic Markdown snapshot derived from committed evidence."""
     identity = _json(RELEASE_IDENTITY, "release identity")
-    full_gate = _json(FULL_GATE_PROOF, "T3.1 full-gate proof")
+    try:
+        full_gate = validate_checkpoint(FULL_GATE_PROOF)
+    except CheckpointError as exc:
+        raise ReleaseStatusError(f"invalid T3.1 full-gate checkpoint: {exc}") from exc
     runtime = _json(RUNTIME_RISK_PROOF, "T4.6 runtime proof")
     protocol = _json(PROTOCOL, "Sorani protocol")
     sources = _json(SOURCE_ASSESSMENT, "Sorani source assessment")

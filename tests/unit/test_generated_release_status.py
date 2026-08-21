@@ -42,6 +42,24 @@ def test_generator_rejects_a_broken_ledger_link(
         status.render_status()
 
 
+def test_generator_rejects_ledger_content_with_a_stale_self_digest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    entries = [
+        json.loads(line)
+        for line in (ROOT / "evidence" / "release" / "ledger.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line
+    ]
+    entries[-1]["result"]["summary"] += " (tampered)"
+    broken = tmp_path / "ledger.jsonl"
+    broken.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8")
+    monkeypatch.setattr(status, "LEDGER", broken)
+    with pytest.raises(status.ReleaseStatusError, match="digest does not recompute"):
+        status.render_status()
+
+
 def test_generator_rejects_a_fabricated_release_artifact(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -50,5 +68,5 @@ def test_generator_rejects_a_fabricated_release_artifact(
     corrupt = tmp_path / "release-proof.json"
     corrupt.write_text(json.dumps(proof), encoding="utf-8")
     monkeypatch.setattr(status, "FULL_GATE_PROOF", corrupt)
-    with pytest.raises(status.ReleaseStatusError, match="identities are incomplete or invalid"):
+    with pytest.raises(status.ReleaseStatusError, match="artifact wheel is not a valid digest"):
         status.render_status()
