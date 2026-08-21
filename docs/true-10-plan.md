@@ -67,7 +67,9 @@ Goal: every later result is attributable to an exact source and artifact.
   - Create `codex/v3.3-release` from the audited `continuity-taper` commit.
   - Record `main`, continuity, lowband, tag, lockfile and real-audio reference hashes.
   - Confirm the working tree is clean and preserve all three branches.
-  - **Proof:** committed baseline manifest whose hashes reproduce from a clean checkout.
+  - **Proof:** committed baseline manifest whose tracked hashes reproduce from a clean checkout;
+    local real-audio references verify separately on the audited workstation without pretending the
+    private recording is part of the repository.
 - [ ] **T0.2 — Create an append-only evidence log** (P0, S)
   - Record task ID, commit, command/tool version, input artifact, result, output hash and known limits.
   - Failed attempts remain in the log; corrections append rather than rewrite history.
