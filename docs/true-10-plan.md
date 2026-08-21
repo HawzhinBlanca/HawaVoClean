@@ -1,6 +1,6 @@
 # HawaVoClean: True 10/10 Release Plan
 
-Status: **implementation in progress — Phases 0–2 complete; Phase 3 active**
+Status: **implementation in progress — Phases 0–2 complete; Phase 3 active; Phase 4 partially closed**
 Baseline: `continuity-taper` at `bf6d932`, audited 2026-08-21  
 Target: one evidence-backed `v3.3.0` release candidate containing continuity taper, lowband,
 crash-safe publication, complete release hardening, real Sorani validation, and in-Resolve proof.
@@ -169,7 +169,7 @@ Goal: eliminate the gap between locally green subsets and the release claim.
 
 Goal: every install is reproducible, bounded, recoverable and truthfully described.
 
-- [ ] **T4.1 — Repair or retire the Docker contract** (P1, M)
+- [x] **T4.1 — Repair or retire the Docker contract** (P1, M)
   - Decide whether the release supports CPU-only, studio/GPU, or both; remove unsupported claims.
   - Use available pinned bases, install the matching extras, run non-root with a read-only-friendly
     filesystem design, health check and explicit cache/work mounts.
@@ -179,17 +179,17 @@ Goal: every install is reproducible, bounded, recoverable and truthfully describ
     artifacts; include licenses, hashes and relationships.
   - Sign/checksum the SBOM and bind it to release artifact hashes.
   - **Proof:** schema validation and independent inventory spot-checks.
-- [ ] **T4.3 — Complete report provenance** (P1, M)
+- [x] **T4.3 — Complete report provenance** (P1, M)
   - Record tool/release version, source/build ID, lock digest, model/core/guard hashes, Python and all
     relevant DSP/neural/runtime versions, device and deterministic settings.
   - Retain compatibility readers for schema v1.
   - **Proof:** a fresh installed wheel produces a self-verifiable schema-v2 report; tampering fails.
-- [ ] **T4.4 — Bound server state and uploaded data** (P1, M)
+- [x] **T4.4 — Bound server state and uploaded data** (P1, M)
   - Add queue limits, terminal-job TTL/count retention, upload quotas/TTL, cleanup on success/failure,
     startup scavenging and observable disk-pressure errors.
   - Never delete a committed user output as retention cleanup.
   - **Proof:** fake-clock, restart and disk-pressure tests demonstrate bounded growth and safe cleanup.
-- [ ] **T4.5 — Make the Resolve installer transactional and self-contained** (P1, L)
+- [x] **T4.5 — Make the Resolve installer transactional and self-contained** (P1, L)
   - No mutable lock fallback; assemble from exact locked inputs; self-test before install.
   - Install to a staging target, back up the prior plugin, atomically activate, verify, and roll back on
     failure. Do not hardcode the repository virtual environment as the production engine.
