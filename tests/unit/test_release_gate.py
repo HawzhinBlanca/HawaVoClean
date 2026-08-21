@@ -117,3 +117,15 @@ def test_runner_scopes_build_environment_to_one_step(tmp_path: Path) -> None:
     runner.run("scoped", probe, extra_environment={"BUILD_ONLY": "yes"})
     assert output.read_text(encoding="utf-8") == "present|yes"
     assert runner.environment == {"BASE": "present"}
+
+
+def test_verify_command_names_the_exact_report() -> None:
+    assert release_gate._verify_command(
+        ["hawavoclean"], "output.wav", "output.hawavoclean.json"
+    ) == [
+        "hawavoclean",
+        "verify",
+        "output.wav",
+        "--report",
+        "output.hawavoclean.json",
+    ]

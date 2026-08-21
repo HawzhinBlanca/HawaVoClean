@@ -409,6 +409,11 @@ def _container_packages(checkout: Path, image: str) -> dict[str, Any]:
     }
 
 
+def _verify_command(prefix: list[str], output: str, report: str) -> list[str]:
+    """Build the explicit verification contract; no adjacent-file guessing."""
+    return [*prefix, "verify", output, "--report", report]
+
+
 def _run_pass(
     index: int,
     checkout: Path,
@@ -652,7 +657,14 @@ def _run_pass(
             "--overwrite",
         ],
     )
-    runner.run("wheel-cli-verify", [str(smoke_cli), "verify", str(smoke_output)])
+    runner.run(
+        "wheel-cli-verify",
+        _verify_command(
+            [str(smoke_cli)],
+            str(smoke_output),
+            str(smoke_output.with_suffix(".hawavoclean.json")),
+        ),
+    )
 
     engine = artifact_root / "resolve-engine"
     runner.run(
@@ -754,7 +766,14 @@ def _run_pass(
             "--overwrite",
         ],
     )
-    runner.run("container-verify", [*docker_runtime, "verify", "/work/output.wav"])
+    runner.run(
+        "container-verify",
+        _verify_command(
+            docker_runtime,
+            "/work/output.wav",
+            "/work/output.hawavoclean.json",
+        ),
+    )
 
     image_scan = build_root / "trivy-image.json"
     config_scan = build_root / "trivy-config.json"
