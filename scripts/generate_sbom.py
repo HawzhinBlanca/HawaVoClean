@@ -114,6 +114,12 @@ def _remove_scan_subject(bom: dict[str, Any]) -> None:
 def _canonical_ref(component: dict[str, Any]) -> str:
     purl = component.get("purl")
     if isinstance(purl, str) and purl:
+        # Trivy describes the same Wolfi package from a source lock and an
+        # installed image with different observational arch/distro qualifiers.
+        # Name+version is the package identity; merging retains both sources'
+        # hashes, licenses and properties on the installed component.
+        if purl.startswith("pkg:apk/"):
+            return purl.partition("?")[0]
         return purl
     hashes = component.get("hashes", [])
     identity = {

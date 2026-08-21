@@ -245,6 +245,9 @@ def test_inventory_references_are_deterministic_and_purls_are_preserved() -> Non
     assert generate_sbom._canonical_ref(file_component) == generate_sbom._canonical_ref(
         dict(reversed(list(file_component.items())))
     )
+    apk_source = {"purl": "pkg:apk/wolfi/ffmpeg-7@7.1.5-r0?arch=aarch64&distro=wolfi"}
+    apk_image = {"purl": "pkg:apk/wolfi/ffmpeg-7@7.1.5-r0?arch=aarch64&distro=20230201"}
+    assert generate_sbom._canonical_ref(apk_source) == generate_sbom._canonical_ref(apk_image)
 
 
 def test_ephemeral_trivy_scan_subject_is_removed_without_dropping_metadata() -> None:
