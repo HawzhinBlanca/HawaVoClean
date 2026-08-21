@@ -22,6 +22,10 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
 - `sorani-evaluation-protocol.json` is the result-free, machine-validated T5.1 design lock. Its design
   digest deliberately excludes the later approval record, so explicit approval can bind the exact
   study design without rewriting it. A structurally valid draft is not an approved protocol.
+- `sorani-corpus-source-assessment.json` locks the audited T5.2 source inventory, exact recommended
+  hybrid route, quarantine decisions, local metadata hashes and source-specific constraints before
+  acquisition or held-out selection. Its approval and integrity records are separate for the same
+  reason: structurally valid does not mean source-approved.
 
 Verify the committed evidence:
 

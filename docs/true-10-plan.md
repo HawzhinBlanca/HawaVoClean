@@ -219,9 +219,10 @@ evaluation that can actually falsify the quality promise.
 - [ ] **T5.2 — Build licensed, speaker-disjoint splits** (P0, H; depends on T5.1 and U3)
   - Use real Sorani across dialect, gender, age range where available, microphone, room, reverb, hum,
     fan/street noise, codec, clipping risk and music bleed.
-  - Minimum statistical target: at least 300 independently reviewed held-out speech units, enough that
-    zero observed content changes gives an approximate one-sided 95% upper bound near 1%; increase
-    the sample if independence/stratification reduces effective size.
+  - Minimum statistical target: at least 450 independently reviewed held-out source units per profile.
+    Zero confirmed changes gives a 0.6636% exact one-sided 95% upper bound per profile and a 0.9058%
+    Bonferroni simultaneous bound across three profiles; increase the sample if clustering or
+    stratification reduces effective size.
   - Keep calibration and acceptance speakers disjoint; hash-lock the held-out manifest.
   - **Proof:** validated manifest, provenance/licensing classification, transcripts and split-leak test.
 - [ ] **T5.3 — Dual-review content integrity** (P0, H; depends on T5.2)
@@ -294,7 +295,7 @@ Goal: publish exactly what was proved, with no stale or inflated claim.
 |---|---|---|---|
 | U1 | Before T3.2 | Fix GitHub billing or authorize a visibility change | Fix billing; keep the private-repo boundary |
 | U2 | Before T6.1 | Approve and authenticate the sudo plugin install | Install only the hash-recorded hardened candidate |
-| U3 | Before T5.2 | Approve corpus sources/licensing and identify Sorani reviewers | Use only sources with recorded rights; two reviewers |
+| U3 | Before T5.2 | Approve the locked corpus route/terms and identify Sorani reviewers | Common Voice 26.0 + fresh consented collection; two reviewers and an adjudicator |
 | U4 | Before T7.4 | Final go/no-go after listening, Resolve and risk review | Release only with no open P0/P1 |
 | U5 | During T0.3/T5 | Decide whether reverted units receive finishing | Keep `REVERT = original` until human evidence supports a change |
 

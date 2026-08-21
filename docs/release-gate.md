@@ -9,7 +9,8 @@ Each pass runs all of the following against the same commit:
 
 - exact Python dependency sync; formatting, linting and strict type checks;
 - generated release-identity and JSON-schema drift checks, plus semantic validation of the result-free
-  Sorani human-evaluation design lock (approval and results remain separate human gates);
+  Sorani human-evaluation design and corpus-source locks (approval, acquisition and results remain
+  separate human gates);
 - the default suite with branch coverage at or above 92.49%;
 - the separate fuzz suite and all declared owner-scoped mutations;
 - two-run frozen real-audio regressions for production, studio and lowband;
