@@ -169,7 +169,7 @@ Goal: eliminate the gap between locally green subsets and the release claim.
 
 Goal: every install is reproducible, bounded, recoverable and truthfully described.
 
-- [ ] **T4.1 — Repair or retire the Docker contract** (P1, M)
+- [x] **T4.1 — Repair or retire the Docker contract** (P1, M)
   - Decide whether the release supports CPU-only, studio/GPU, or both; remove unsupported claims.
   - Use available pinned bases, install the matching extras, run non-root with a read-only-friendly
     filesystem design, health check and explicit cache/work mounts.

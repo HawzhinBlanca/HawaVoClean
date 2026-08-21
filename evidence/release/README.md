@@ -10,6 +10,8 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
 - `ledger.jsonl` is append-only and SHA-256 chained. Each entry hashes its complete canonical content
   and the prior entry hash. Git history supplies the external anchor: rewriting history and recomputing
   the chain changes the committed file hash and commit.
+- `t4.1-container-proof.json` binds the reproducible, non-root CPU image, exact transitive Wolfi lock,
+  read-only operational probe and current vulnerability/misconfiguration results.
 - `t4.5-resolve-installer-proof.json` binds the transactional, relocatable Resolve package proof.
 - `t4.6-resolve-runtime-proof.json` separates the audited standalone Electron lock from the exact
   signed Blackmagic-owned runtime, retains every advisory ID, and records the still-unaccepted risk.
