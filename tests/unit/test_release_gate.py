@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -95,3 +97,23 @@ def test_written_report_has_a_verifiable_canonical_proof_hash(tmp_path: Path) ->
     stored = json.loads(path.read_text(encoding="utf-8"))
     proof = stored.pop("proof_sha256")
     assert proof == release_gate._canonical_sha256(stored)
+
+
+def test_runner_scopes_build_environment_to_one_step(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    runner = release_gate.Runner(checkout, tmp_path / "logs", {"BASE": "present"})
+    output = tmp_path / "environment.txt"
+    probe = [
+        os.fspath(Path(sys.executable)),
+        "-c",
+        (
+            "import os,pathlib;"
+            f"pathlib.Path({str(output)!r}).write_text("
+            "os.environ.get('BASE','')+'|'+os.environ.get('BUILD_ONLY',''))"
+        ),
+    ]
+
+    runner.run("scoped", probe, extra_environment={"BUILD_ONLY": "yes"})
+    assert output.read_text(encoding="utf-8") == "present|yes"
+    assert runner.environment == {"BASE": "present"}

@@ -302,6 +302,7 @@ class Runner:
         command: list[str],
         *,
         cwd: Path | None = None,
+        extra_environment: dict[str, str] | None = None,
         timeout: int = 3600,
     ) -> None:
         if any(step.name == name for step in self.steps):
@@ -310,12 +311,15 @@ class Runner:
         print(f"[{len(self.steps) + 1:02d}] {name} ...", flush=True)
         started = time.monotonic()
         exit_code = 1
+        environment = dict(self.environment)
+        if extra_environment is not None:
+            environment.update(extra_environment)
         try:
             with log_path.open("w", encoding="utf-8") as log:
                 completed = subprocess.run(
                     command,
                     cwd=cwd or self.checkout,
-                    env=self.environment,
+                    env=environment,
                     stdout=log,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -421,11 +425,9 @@ def _run_pass(
         {
             "CI": "1",
             "HAWAVOCLEAN_DEVICE": "cpu",
-            "HAWAVOCLEAN_SOURCE_REVISION": commit,
             "LC_ALL": "C",
             "NO_COLOR": "1",
             "PYTHONHASHSEED": "0",
-            "SOURCE_DATE_EPOCH": str(epoch),
             "TZ": "UTC",
             "UV_FROZEN": "1",
         }
@@ -586,6 +588,10 @@ def _run_pass(
     runner.run(
         "build-wheel-sdist",
         ["uv", "build", "--wheel", "--sdist", "--out-dir", str(python_artifacts)],
+        extra_environment={
+            "HAWAVOCLEAN_SOURCE_REVISION": commit,
+            "SOURCE_DATE_EPOCH": str(epoch),
+        },
         timeout=3600,
     )
     wheel = _single_glob(python_artifacts, "*.whl", "wheel")
