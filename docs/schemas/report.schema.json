@@ -1,5 +1,73 @@
 {
   "$defs": {
+    "BuildMetadata": {
+      "additionalProperties": false,
+      "description": "Exact source, dependency lock and installed-distribution identity.",
+      "properties": {
+        "provenance_schema_version": {
+          "const": 1,
+          "title": "Provenance Schema Version",
+          "type": "integer"
+        },
+        "artifact_type": {
+          "enum": [
+            "wheel",
+            "sdist",
+            "source-tree"
+          ],
+          "title": "Artifact Type",
+          "type": "string"
+        },
+        "source_revision": {
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "source_date_epoch": {
+          "title": "Source Date Epoch",
+          "type": "integer"
+        },
+        "source_dirty": {
+          "title": "Source Dirty",
+          "type": "boolean"
+        },
+        "dependency_lock_sha256": {
+          "title": "Dependency Lock Sha256",
+          "type": "string"
+        },
+        "release_identity_sha256": {
+          "title": "Release Identity Sha256",
+          "type": "string"
+        },
+        "build_id": {
+          "title": "Build Id",
+          "type": "string"
+        },
+        "distribution_record_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Distribution Record Sha256"
+        }
+      },
+      "required": [
+        "provenance_schema_version",
+        "artifact_type",
+        "source_revision",
+        "source_date_epoch",
+        "source_dirty",
+        "dependency_lock_sha256",
+        "release_identity_sha256",
+        "build_id"
+      ],
+      "title": "BuildMetadata",
+      "type": "object"
+    },
     "CoreMetadata": {
       "additionalProperties": false,
       "description": "Enhancement core identification. The core is deterministic DSP; its\nprovenance is its parameter set, hashed canonically.",
@@ -20,6 +88,25 @@
           "default": true,
           "title": "Phase Coherent",
           "type": "boolean"
+        },
+        "lock_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lock Sha256"
+        },
+        "weight_sha256": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Weight Sha256",
+          "type": "object"
         }
       },
       "required": [
@@ -70,6 +157,30 @@
           "default": null,
           "title": "Cpu Model"
         },
+        "runtime_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Runtime Versions",
+          "type": "object"
+        },
+        "deterministic_settings": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Deterministic Settings",
+          "type": "object"
+        },
         "compute_device": {
           "title": "Compute Device",
           "type": "string"
@@ -101,6 +212,18 @@
         "calibration_id": {
           "title": "Calibration Id",
           "type": "string"
+        },
+        "calibration_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Calibration Sha256"
         }
       },
       "required": [
@@ -254,6 +377,36 @@
         "separation_db"
       ],
       "title": "PassRecord",
+      "type": "object"
+    },
+    "ReleaseMetadata": {
+      "additionalProperties": false,
+      "description": "Release identity copied from, and checked against, packaged bytes.",
+      "properties": {
+        "product": {
+          "title": "Product",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "report_schema_version": {
+          "title": "Report Schema Version",
+          "type": "integer"
+        },
+        "identity_sha256": {
+          "title": "Identity Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "product",
+        "version",
+        "report_schema_version",
+        "identity_sha256"
+      ],
+      "title": "ReleaseMetadata",
       "type": "object"
     },
     "ReviewTimecode": {
@@ -509,9 +662,35 @@
   "description": "Master immutable JSON audit report format as defined in BLUEPRINT.md section 18.1.",
   "properties": {
     "schema_version": {
-      "default": 1,
+      "default": 2,
+      "enum": [
+        1,
+        2
+      ],
       "title": "Schema Version",
       "type": "integer"
+    },
+    "release": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReleaseMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "build": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "job_id": {
       "title": "Job Id",

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 import hawavoclean.release as release_module
 from hawavoclean import __version__
+from hawavoclean.provenance import runtime_versions
 from hawavoclean.release import (
     RELEASE_IDENTITY,
     REPORT_SCHEMA_VERSION,
@@ -20,14 +21,12 @@ from hawavoclean.release import (
     _validated_identity,
 )
 from hawavoclean.report.schema import (
-    CoreMetadata,
-    EnvironmentMetadata,
-    GuardMetadata,
     HawaVoCleanReport,
     MediaStats,
     UnitSummary,
     current_release_metadata,
 )
+from tests.support.report_provenance import build, core, environment, guard
 
 ROOT = Path(__file__).resolve().parents[2]
 IDENTITY_PATH = ROOT / "src" / "hawavoclean" / "release.json"
@@ -45,20 +44,14 @@ def _report_dict() -> dict[str, object]:
     report = HawaVoCleanReport(
         schema_version=REPORT_SCHEMA_VERSION,
         release=current_release_metadata(),
+        build=build(),
         job_id="job",
         config_hash="b" * 64,
         input=media,
         output=media.model_copy(update={"path": "out.wav", "sha256": "c" * 64}),
-        core=CoreMetadata(id="core", algorithm="algorithm", params_hash="d" * 64),
-        guard=GuardMetadata(id="guard", probe_hash="e" * 64, calibration_id="f" * 64),
-        environment=EnvironmentMetadata(
-            platform="test",
-            os_version="test",
-            python_version="3",
-            numpy_version="2",
-            scipy_version="1",
-            soundfile_version="0",
-        ),
+        core=core("core", "algorithm", "d" * 64),
+        guard=guard("guard", "e" * 64, "f" * 64),
+        environment=environment(),
         summary=UnitSummary(),
     )
     return report.model_dump()
@@ -108,8 +101,62 @@ def test_schema_v2_requires_identity_and_v1_does_not_invent_it() -> None:
         HawaVoCleanReport.model_validate(raw)
 
     raw["schema_version"] = 1
+    del raw["build"]
     legacy = HawaVoCleanReport.model_validate(raw)
     assert legacy.release is None
+    assert legacy.build is None
+
+
+def test_schema_v2_requires_complete_build_and_processing_provenance() -> None:
+    raw = _report_dict()
+    del raw["build"]
+    with pytest.raises(ValidationError, match="require build provenance"):
+        HawaVoCleanReport.model_validate(raw)
+
+    raw = _report_dict()
+    assert isinstance(raw["build"], dict)
+    raw["build"]["build_id"] = "0" * 64
+    with pytest.raises(ValidationError, match="ID does not recompute"):
+        HawaVoCleanReport.model_validate(raw)
+
+    raw = _report_dict()
+    assert isinstance(raw["core"], dict)
+    raw["core"]["lock_sha256"] = None
+    with pytest.raises(ValidationError, match="core lock digest"):
+        HawaVoCleanReport.model_validate(raw)
+
+    raw = _report_dict()
+    assert isinstance(raw["guard"], dict)
+    raw["guard"]["calibration_sha256"] = None
+    with pytest.raises(ValidationError, match="guard calibration digest"):
+        HawaVoCleanReport.model_validate(raw)
+
+
+def test_current_build_and_runtime_inventory_are_cryptographically_anchored() -> None:
+    current = build()
+    assert len(current.source_revision) == 40
+    assert (
+        current.dependency_lock_sha256
+        == hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest()
+    )
+    assert current.release_identity_sha256 == RELEASE_IDENTITY.identity_sha256
+    assert len(current.build_id) == 64
+    if current.artifact_type == "wheel":
+        assert current.source_dirty is False
+        assert current.distribution_record_sha256 is not None
+
+    versions = runtime_versions()
+    assert {
+        "hawavoclean",
+        "numpy",
+        "scipy",
+        "soundfile",
+        "pyloudnorm",
+        "pydantic",
+        "libsndfile",
+        "ffmpeg",
+        "ffprobe",
+    } <= versions.keys()
 
 
 def test_schema_v1_rejects_a_backfilled_modern_identity() -> None:

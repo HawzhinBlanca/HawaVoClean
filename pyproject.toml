@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -56,10 +56,14 @@ packages = ["src/hawavoclean"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
+    "/hatch_build.py",
     "/pyproject.toml",
     "/README.md",
     "/THIRD_PARTY_LICENSES.md",
 ]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.ruff]
 line-length = 100

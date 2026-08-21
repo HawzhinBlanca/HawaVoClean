@@ -81,6 +81,7 @@ from hawavoclean.progress import (
     emit_progress,
     unit_progress,
 )
+from hawavoclean.provenance import deterministic_settings, runtime_versions
 from hawavoclean.publication import public_output_path, publication_exists, publication_paths
 from hawavoclean.release import REPORT_SCHEMA_VERSION
 from hawavoclean.report.schema import (
@@ -92,6 +93,7 @@ from hawavoclean.report.schema import (
     ReviewTimecode,
     UnitDecisionRecord,
     UnitSummary,
+    current_build_metadata,
     current_release_metadata,
 )
 from hawavoclean.report.summary import generate_human_summary
@@ -141,7 +143,7 @@ def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> No
         ) from e
 
 
-def _load_core_lock(core_id: str) -> dict[str, Any]:
+def _load_core_lock(core_id: str) -> tuple[dict[str, Any], str]:
     """Load and verify the configured core's lockfile. Missing or mismatched
     provenance is a hard failure, never a silent degradation."""
     registration = resolve_core(core_id)
@@ -160,8 +162,8 @@ def _load_core_lock(core_id: str) -> dict[str, Any]:
             f"Core lockfile missing: {lock_path}. Refusing to run without "
             "verifiable core provenance."
         )
-    with open(lock_path, "rb") as f:
-        lock = tomllib.load(f)
+    raw_lock = lock_path.read_bytes()
+    lock = tomllib.loads(raw_lock.decode("utf-8"))
 
     if lock.get("core_id") != core_id:
         raise PreflightError(
@@ -192,7 +194,7 @@ def _load_core_lock(core_id: str) -> dict[str, Any]:
             raise PreflightError(f"Locked weights file missing: {weight_path}")
         if hash_file(weight_path) != digest:
             raise PreflightError(f"Weights digest mismatch for {rel}")
-    return lock
+    return lock, hash_bytes(raw_lock)
 
 
 def run_pipeline(
@@ -231,7 +233,7 @@ def run_pipeline(
         )
     active_guard_cfg = apply_calibrated_thresholds(config.guard, calib_data)
 
-    core_lock = _load_core_lock(config.enhancement.core_id)
+    core_lock, core_lock_sha256 = _load_core_lock(config.enhancement.core_id)
     if bool(core_lock.get("phase_coherent", True)) != config.enhancement.phase_coherent:
         raise ConfigError(
             f"enhancement.phase_coherent = {config.enhancement.phase_coherent} but core "
@@ -277,7 +279,9 @@ def run_pipeline(
             config,
             active_guard_cfg,
             calib_data,
+            hash_file(calib_path),
             core_lock,
+            core_lock_sha256,
             media,
             workspace,
             in_path,
@@ -297,7 +301,9 @@ def _run_after_preflight(
     config: HawaVoCleanConfig,
     active_guard_cfg: Any,
     calib_data: dict[str, Any],
+    calibration_sha256: str,
     core_lock: dict[str, Any],
+    core_lock_sha256: str,
     media: AudioProbeResult,
     workspace: JobWorkspace,
     in_path: Path,
@@ -812,6 +818,7 @@ def _run_after_preflight(
     report = HawaVoCleanReport(
         schema_version=REPORT_SCHEMA_VERSION,
         release=current_release_metadata(),
+        build=current_build_metadata(),
         job_id=workspace.job_id,
         config_hash=workspace.config_hash,
         input=MediaStats(
@@ -839,11 +846,17 @@ def _run_after_preflight(
             algorithm=str(core_lock["algorithm"]),
             params_hash=str(core_lock["params_hash"]),
             phase_coherent=config.enhancement.phase_coherent,
+            lock_sha256=core_lock_sha256,
+            weight_sha256={
+                str(key): str(value)
+                for key, value in dict(core_lock.get("weight_sha256", {})).items()
+            },
         ),
         guard=GuardMetadata(
             id=active_guard_cfg.guard_id,
             probe_hash=probe.probe_hash,
             calibration_id=str(calib_data["calibration_id"]),
+            calibration_sha256=calibration_sha256,
         ),
         environment=EnvironmentMetadata(
             platform=platform.platform(),
@@ -853,6 +866,8 @@ def _run_after_preflight(
             scipy_version=scipy.__version__,
             soundfile_version=soundfile.__version__,
             cpu_model=platform.processor(),
+            runtime_versions=runtime_versions(),
+            deterministic_settings=deterministic_settings(config),
         ),
         summary=UnitSummary(
             units_total=len(all_units),

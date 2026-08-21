@@ -6,9 +6,6 @@ from pathlib import Path
 import pytest
 
 from hawavoclean.report.schema import (
-    CoreMetadata,
-    EnvironmentMetadata,
-    GuardMetadata,
     HawaVoCleanReport,
     MediaStats,
     UnitSummary,
@@ -16,12 +13,14 @@ from hawavoclean.report.schema import (
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import load_json_report, write_json_report
+from tests.support.report_provenance import build, core, environment, guard
 
 
 @pytest.mark.unit
 def test_report_serialization_and_summary() -> None:
     rep = HawaVoCleanReport(
         release=current_release_metadata(),
+        build=build(),
         job_id="test_job_123",
         config_hash="a" * 64,
         input=MediaStats(
@@ -42,9 +41,9 @@ def test_report_serialization_and_summary() -> None:
             true_peak_dbtp=-1.0,
             integrated_lufs=-16.0,
         ),
-        core=CoreMetadata(id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="a" * 64),
-        guard=GuardMetadata(id="spectral-guard", probe_hash="1" * 64, calibration_id="cal_1"),
-        environment=EnvironmentMetadata(
+        core=core("wiener-dd-48k-v1", "wiener-dd", "a" * 64),
+        guard=guard("spectral-guard", "1" * 64, "cal_1"),
+        environment=environment(
             platform="darwin",
             os_version="14.0",
             python_version="3.13.0",

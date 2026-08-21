@@ -32,9 +32,6 @@ from hawavoclean.paths import work_root
 from hawavoclean.progress import ProgressEvent
 from hawavoclean.publication import public_output_path
 from hawavoclean.report.schema import (
-    CoreMetadata,
-    EnvironmentMetadata,
-    GuardMetadata,
     HawaVoCleanReport,
     MediaStats,
     PassRecord,
@@ -44,6 +41,7 @@ from hawavoclean.report.schema import (
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import load_json_report, write_json_report
+from tests.support.report_provenance import build, core, environment, guard
 from tests.support.wavbytes import masked_wav_bytes
 
 REPO = Path(__file__).resolve().parents[2]
@@ -161,20 +159,14 @@ def _report(
 ) -> HawaVoCleanReport:
     return HawaVoCleanReport(
         release=current_release_metadata(),
+        build=build(),
         job_id="job",
         config_hash="c" * 64,
         input=_media("in.wav", "a" * 64),
         output=_media("out.wav", out_sha),
-        core=CoreMetadata(id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="e" * 64),
-        guard=GuardMetadata(id="g", probe_hash="f" * 64, calibration_id="cal"),
-        environment=EnvironmentMetadata(
-            platform="p",
-            os_version="v",
-            python_version="3",
-            numpy_version="2",
-            scipy_version="1",
-            soundfile_version="0",
-        ),
+        core=core("wiener-dd-48k-v1", "wiener-dd", "e" * 64),
+        guard=guard("g", "f" * 64, "cal"),
+        environment=environment(platform="p", os_version="v"),
         summary=UnitSummary(units_total=len(units or []), enhanced=1),
         units=units or [],
         passes=passes or [],
@@ -208,6 +200,7 @@ def test_report_passes_default_is_empty_and_legacy_schema_v1_still_loads() -> No
     raw = json.loads(rep.model_dump_json())
     raw["schema_version"] = 1
     del raw["release"]
+    del raw["build"]
     del raw["passes"]
     old = HawaVoCleanReport.model_validate(raw)
     assert old.passes == []
@@ -358,20 +351,14 @@ class _StubPipeline:
         units = [_unit(0, 1.0 if k > 1 else 0.5, "enhanced"), _unit(1, 0.0, "original_no_speech")]
         return HawaVoCleanReport(
             release=current_release_metadata(),
+            build=build(),
             job_id=f"job{k}",
             config_hash="c" * 64,
             input=_media(str(in_path), hash_file(in_path) if in_path.exists() else "a" * 64),
             output=_media(str(out_path), hash_file(out_path)),
-            core=CoreMetadata(id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="e" * 64),
-            guard=GuardMetadata(id="g", probe_hash="f" * 64, calibration_id="cal"),
-            environment=EnvironmentMetadata(
-                platform="p",
-                os_version="v",
-                python_version="3",
-                numpy_version="2",
-                scipy_version="1",
-                soundfile_version="0",
-            ),
+            core=core("wiener-dd-48k-v1", "wiener-dd", "e" * 64),
+            guard=guard("g", "f" * 64, "cal"),
+            environment=environment(platform="p", os_version="v"),
             summary=UnitSummary(
                 units_total=2, enhanced=self.enhanced[k - 1], no_speech=1, reverted=0
             ),
