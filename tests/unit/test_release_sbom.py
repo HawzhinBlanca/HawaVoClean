@@ -130,6 +130,79 @@ def test_image_reference_is_resolved_and_source_labels_must_match(
         generate_sbom._resolve_image("mutable:tag", commit, "3.3.0")
 
 
+def test_exact_locks_enrich_package_hashes_and_explicit_unknown_licenses() -> None:
+    components = [
+        {
+            "type": "library",
+            "name": "electron",
+            "version": "43.4.1",
+            "purl": "pkg:npm/electron@43.4.1",
+        },
+        {
+            "type": "library",
+            "name": "annotated-types",
+            "version": "0.8.0",
+            "purl": "pkg:pypi/annotated-types@0.8.0",
+        },
+    ]
+
+    generate_sbom._enrich_lock_metadata(components)
+
+    assert any(value["alg"] == "SHA-512" for value in components[0]["hashes"])
+    assert any(
+        value
+        == {
+            "alg": "SHA-256",
+            "content": "13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7",
+        }
+        for value in components[1]["hashes"]
+    )
+    assert components[0]["licenses"] == [{"license": {"name": "NOASSERTION"}}]
+
+
+def _minimal_complete_contract() -> dict[str, object]:
+    def package(purl: str) -> dict[str, object]:
+        return {
+            "type": "library",
+            "name": purl,
+            "purl": purl,
+            "hashes": [{"alg": "SHA-256", "content": "a" * 64}],
+            "licenses": [{"license": {"name": "NOASSERTION"}}],
+        }
+
+    model_components, _dependencies = generate_sbom._model_components()
+    return {
+        "components": [
+            package("pkg:pypi/hawavoclean@3.3.0"),
+            package("pkg:npm/react@19.2.8"),
+            package("pkg:npm/electron@43.4.1"),
+            package("pkg:apk/wolfi/ffmpeg-7@7.1.5-r0"),
+            *model_components,
+            {
+                "type": "file",
+                "name": "release.whl",
+                "hashes": [{"alg": "SHA-256", "content": "b" * 64}],
+                "licenses": [{"license": {"name": "NOASSERTION"}}],
+                "properties": [{"name": "hawavoclean:artifact-name", "value": "wheel"}],
+            },
+        ]
+    }
+
+
+def test_contract_requires_hashes_for_every_locked_ecosystem_component() -> None:
+    complete = _minimal_complete_contract()
+    generate_sbom._validate_contract(complete, {"wheel"})
+
+    electron = next(
+        component
+        for component in complete["components"]
+        if component.get("purl") == "pkg:npm/electron@43.4.1"
+    )
+    electron["hashes"] = []
+    with pytest.raises(generate_sbom.SbomError, match="no cryptographic hash"):
+        generate_sbom._validate_contract(complete, {"wheel"})
+
+
 def test_vendored_model_inventory_contains_every_weight_hash() -> None:
     components, dependencies = generate_sbom._model_components()
     hashes = {
@@ -163,6 +236,8 @@ def test_contract_rejects_a_missing_release_ecosystem() -> None:
             {
                 "type": "library",
                 "purl": "pkg:pypi/hawavoclean@3.3.0",
+                "hashes": [{"alg": "SHA-256", "content": "a" * 64}],
+                "licenses": [{"license": {"name": "NOASSERTION"}}],
                 "properties": [{"name": "hawavoclean:artifact-name", "value": "wheel"}],
             }
         ]

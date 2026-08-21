@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -20,6 +21,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_ROOT = ROOT / "src" / "hawavoclean" / "resources" / "models"
@@ -192,6 +194,117 @@ def _normalized_inventory(
         for ref, children in sorted(dependencies.items())
     ]
     return [components[key] for key in sorted(components)], dependency_rows
+
+
+def _pnpm_lock_hashes(path: Path) -> dict[str, list[dict[str, str]]]:
+    """Extract registry integrity hashes from a pnpm v9 lock without a YAML dependency."""
+    values: dict[str, list[dict[str, str]]] = {}
+    in_packages = False
+    current_purl: str | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line == "packages:":
+            in_packages = True
+            continue
+        if in_packages and line and not line.startswith(" "):
+            break
+        if not in_packages:
+            continue
+        if line.startswith("  ") and not line.startswith("    ") and line.endswith(":"):
+            key = line[2:-1].strip()
+            if len(key) >= 2 and key[0] == key[-1] and key[0] in {"'", '"'}:
+                key = key[1:-1]
+            package, separator, version = key.rpartition("@")
+            if not separator or not package or not version:
+                raise SbomError(f"cannot parse pnpm package identity in {path}: {key}")
+            current_purl = f"pkg:npm/{quote(package, safe='/')}@{version}"
+            continue
+        match = re.search(r"\bintegrity:\s*([A-Za-z0-9]+)-([A-Za-z0-9+/=]+)", line)
+        if match is None:
+            continue
+        if current_purl is None:
+            raise SbomError(f"pnpm integrity appears before a package identity in {path}")
+        algorithm = match.group(1).lower()
+        algorithm_names = {"sha256": "SHA-256", "sha384": "SHA-384", "sha512": "SHA-512"}
+        if algorithm not in algorithm_names:
+            raise SbomError(f"unsupported pnpm integrity algorithm in {path}: {algorithm}")
+        try:
+            content = base64.b64decode(match.group(2), validate=True).hex()
+        except ValueError as exc:
+            raise SbomError(f"invalid pnpm integrity encoding in {path}") from exc
+        values.setdefault(current_purl, []).append(
+            {"alg": algorithm_names[algorithm], "content": content}
+        )
+    if not values:
+        raise SbomError(f"pnpm lock contains no package integrity hashes: {path}")
+    return values
+
+
+def _uv_lock_hashes(path: Path) -> dict[str, list[dict[str, str]]]:
+    """Extract every registry artifact digest retained by the exact uv lock."""
+    lock = tomllib.loads(path.read_text(encoding="utf-8"))
+    values: dict[str, list[dict[str, str]]] = {}
+    for package in lock.get("package", []):
+        if not isinstance(package, dict):
+            continue
+        name = package.get("name")
+        version = package.get("version")
+        if not isinstance(name, str) or not isinstance(version, str):
+            continue
+        normalized = re.sub(r"[-_.]+", "-", name).lower()
+        purl = f"pkg:pypi/{quote(normalized, safe='')}@{version}"
+        artifacts: list[Any] = []
+        sdist = package.get("sdist")
+        if isinstance(sdist, dict):
+            artifacts.append(sdist)
+        wheels = package.get("wheels")
+        if isinstance(wheels, list):
+            artifacts.extend(wheels)
+        for artifact in artifacts:
+            if not isinstance(artifact, dict) or not isinstance(artifact.get("hash"), str):
+                continue
+            algorithm, separator, content = artifact["hash"].partition(":")
+            algorithms = {"sha256": "SHA-256", "sha384": "SHA-384", "sha512": "SHA-512"}
+            if not separator or algorithm not in algorithms or HEX64.fullmatch(content) is None:
+                raise SbomError(f"unsupported or malformed uv artifact hash for {name} {version}")
+            values.setdefault(purl, []).append({"alg": algorithms[algorithm], "content": content})
+    return {purl: _dedupe_objects(hashes) for purl, hashes in values.items()}
+
+
+def _enrich_lock_metadata(components: list[dict[str, Any]]) -> None:
+    lock_hashes: dict[str, list[dict[str, str]]] = {}
+    for path in (
+        ROOT / "ui" / "pnpm-lock.yaml",
+        ROOT / "resolve-plugin" / "com.hawavoclean.resolve" / "pnpm-lock.yaml",
+    ):
+        for purl, hashes in _pnpm_lock_hashes(path).items():
+            lock_hashes.setdefault(purl, []).extend(hashes)
+    for purl, hashes in _uv_lock_hashes(ROOT / "uv.lock").items():
+        lock_hashes.setdefault(purl, []).extend(hashes)
+
+    for component in components:
+        component_purl = component.get("purl")
+        purl_base = component_purl.partition("?")[0] if isinstance(component_purl, str) else ""
+        additions = lock_hashes.get(purl_base, [])
+        existing_hashes = component.get("hashes", [])
+        if not isinstance(existing_hashes, list):
+            raise SbomError(f"component has malformed hashes: {component.get('name')}")
+        if additions:
+            component["hashes"] = _dedupe_objects([*existing_hashes, *additions])
+            properties = component.setdefault("properties", [])
+            if not isinstance(properties, list):
+                raise SbomError(f"component has malformed properties: {component.get('name')}")
+            source = "pnpm-lock" if purl_base.startswith("pkg:npm/") else "uv-lock"
+            properties.append({"name": "hawavoclean:integrity-source", "value": source})
+            component["properties"] = _dedupe_objects(properties)
+        if not component.get("licenses"):
+            component["licenses"] = _license("NOASSERTION")
+            properties = component.setdefault("properties", [])
+            if not isinstance(properties, list):
+                raise SbomError(f"component has malformed properties: {component.get('name')}")
+            properties.append(
+                {"name": "hawavoclean:license-metadata", "value": "not-asserted-by-source"}
+            )
+            component["properties"] = _dedupe_objects(properties)
 
 
 def _license(value: str) -> list[dict[str, dict[str, str]]]:
@@ -449,6 +562,8 @@ def _download_schemas(directory: Path) -> Path:
 
 def _validate_contract(bom: dict[str, Any], artifact_names: set[str]) -> None:
     components = bom.get("components", [])
+    if any(not component.get("licenses") for component in components):
+        raise SbomError("inventory contains a component without explicit license metadata")
     purls = {value for component in components for value in [component.get("purl")] if value}
     required_purl_fragments = ("pkg:pypi/", "pkg:npm/react@", "pkg:npm/electron@")
     for fragment in required_purl_fragments:
@@ -456,6 +571,14 @@ def _validate_contract(bom: dict[str, Any], artifact_names: set[str]) -> None:
             raise SbomError(f"inventory is missing required ecosystem component: {fragment}")
     if not any(fragment in str(purl) for fragment in ("pkg:apk/", "pkg:deb/") for purl in purls):
         raise SbomError("inventory is missing required system-package ecosystem")
+    for component in components:
+        purl = component.get("purl")
+        if (
+            isinstance(purl, str)
+            and purl.startswith(("pkg:apk/", "pkg:npm/", "pkg:pypi/"))
+            and not component.get("hashes")
+        ):
+            raise SbomError(f"locked package has no cryptographic hash: {purl}")
     recorded_artifacts = {
         prop["value"]
         for component in components
@@ -512,6 +635,7 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
             if component["bom-ref"] not in existing_refs:
                 components.append(component)
                 existing_refs.add(component["bom-ref"])
+        _enrich_lock_metadata(components)
         dependency_map = {row["ref"]: set(row.get("dependsOn", [])) for row in dependency_rows}
         for ref, children in model_dependencies.items():
             dependency_map.setdefault(ref, set()).update(children)
