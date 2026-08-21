@@ -66,7 +66,7 @@ Above roughly 1.1 kHz, DFN3 is reaching into the consonant band, the score
 crosses the threshold, and every unit comes back as original. So
 `crossover_hz` lives inside `params_hash`: moving it is a new core and a
 relock, enforced at preflight, by `hawavoclean audit-models`, and by
-mutation **M13**. The complementary split is enforced by mutation **M14**.
+mutation **M22**. The complementary split is enforced by mutation **M23**.
 
 ## Consequences
 

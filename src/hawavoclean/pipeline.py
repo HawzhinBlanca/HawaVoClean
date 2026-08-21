@@ -82,6 +82,7 @@ from hawavoclean.progress import (
     unit_progress,
 )
 from hawavoclean.publication import public_output_path, publication_exists, publication_paths
+from hawavoclean.release import REPORT_SCHEMA_VERSION
 from hawavoclean.report.schema import (
     CoreMetadata,
     EnvironmentMetadata,
@@ -91,6 +92,7 @@ from hawavoclean.report.schema import (
     ReviewTimecode,
     UnitDecisionRecord,
     UnitSummary,
+    current_release_metadata,
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import serialize_json_report
@@ -808,7 +810,8 @@ def _run_after_preflight(
     out_sha256 = hash_file(tmp_out)
 
     report = HawaVoCleanReport(
-        schema_version=1,
+        schema_version=REPORT_SCHEMA_VERSION,
+        release=current_release_metadata(),
         job_id=workspace.job_id,
         config_hash=workspace.config_hash,
         input=MediaStats(

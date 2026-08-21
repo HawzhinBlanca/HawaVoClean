@@ -2,8 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from hawavoclean.release import RELEASE_IDENTITY, REPORT_SCHEMA_VERSION
 from hawavoclean.runtime import active_device
 
 
@@ -66,6 +67,26 @@ class EnvironmentMetadata(ReportBaseModel):
     #: library versions above do; a classical-DSP core always reports ``cpu``
     #: whatever ``runtime.device`` asked for, because that is what ran.
     compute_device: str = Field(default_factory=active_device)
+
+
+class ReleaseMetadata(ReportBaseModel):
+    """Release identity copied from, and checked against, packaged bytes."""
+
+    product: str
+    version: str
+    report_schema_version: int
+    identity_sha256: str
+
+    @model_validator(mode="after")
+    def matches_packaged_release(self) -> "ReleaseMetadata":
+        if self.model_dump() != RELEASE_IDENTITY.report_fields():
+            raise ValueError("report release identity does not match the packaged release")
+        return self
+
+
+def current_release_metadata() -> ReleaseMetadata:
+    """Construct the only release identity valid for a newly emitted report."""
+    return ReleaseMetadata(**RELEASE_IDENTITY.report_fields())
 
 
 class UnitSummary(ReportBaseModel):
@@ -148,7 +169,8 @@ class UnitDecisionRecord(ReportBaseModel):
 class HawaVoCleanReport(ReportBaseModel):
     """Master immutable JSON audit report format as defined in BLUEPRINT.md section 18.1."""
 
-    schema_version: int = 1
+    schema_version: Literal[1, 2] = REPORT_SCHEMA_VERSION
+    release: ReleaseMetadata | None = None
     job_id: str
     config_hash: str
     input: MediaStats
@@ -164,6 +186,20 @@ class HawaVoCleanReport(ReportBaseModel):
     #: report's ``units`` are always the FINAL (shipped) pass's records;
     #: this list is the journey, including any auto-discarded pass.
     passes: list[PassRecord] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def release_matches_schema(self) -> "HawaVoCleanReport":
+        if self.schema_version == 1:
+            if self.release is not None:
+                raise ValueError("schema-v1 reports cannot claim schema-v2 release identity")
+            return self
+        if self.schema_version != REPORT_SCHEMA_VERSION:
+            raise ValueError("report schema does not match the packaged release identity")
+        if self.release is None:
+            raise ValueError("schema-v2 reports require release identity")
+        if self.release.report_schema_version != self.schema_version:
+            raise ValueError("report schema and embedded release identity disagree")
+        return self
 
 
 class CorpusItem(ReportBaseModel):

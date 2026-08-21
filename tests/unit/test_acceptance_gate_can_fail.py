@@ -11,11 +11,13 @@ from hawavoclean.report.schema import (
     HawaVoCleanReport,
     MediaStats,
     UnitSummary,
+    current_release_metadata,
 )
 
 
 def _report_violating_sample_count() -> HawaVoCleanReport:
     return HawaVoCleanReport(
+        release=current_release_metadata(),
         job_id="testjob",
         config_hash="c" * 64,
         input=MediaStats(
@@ -83,6 +85,7 @@ def _base_report(**overrides: Any) -> HawaVoCleanReport:
     from hawavoclean.report.schema import UnitDecisionRecord
 
     defaults: dict[str, Any] = {
+        "release": current_release_metadata(),
         "job_id": "j",
         "config_hash": "c" * 64,
         "input": MediaStats(

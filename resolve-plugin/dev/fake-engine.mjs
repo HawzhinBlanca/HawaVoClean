@@ -147,7 +147,7 @@ function startServer() {
       const token = req.headers['x-hawa-token'] || url.searchParams.get('token');
       if (token !== opts.token) return sendJson(res, 401, { error: 'unauthorized' });
       if (url.pathname === '/api/health' && req.method === 'GET') {
-        return sendJson(res, 200, { ok: true, version: VERSION, profiles: ['studio', 'production'], engine_pid: process.pid });
+        return sendJson(res, 200, { ok: true, version: VERSION, profiles: ['studio', 'lowband', 'production'], engine_pid: process.pid });
       }
       if (url.pathname === '/api/shutdown' && req.method === 'POST') {
         req.resume();

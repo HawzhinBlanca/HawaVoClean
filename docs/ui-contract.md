@@ -18,7 +18,7 @@ Base URL: `http://127.0.0.1:{port}`. The server prints exactly one JSON line to 
 it is listening and then nothing else on stdout (all logs go to stderr):
 
 ```json
-{"event":"ready","port":54321,"pid":12345,"version":"3.2.0"}
+{"event":"ready","port":54321,"pid":12345,"version":"3.3.0"}
 ```
 
 CLI: `hawavoclean serve [--host 127.0.0.1] [--port 0] --token TOKEN [--ui-dir DIR]`.
@@ -33,7 +33,7 @@ All errors: JSON `{"error": "<code>", "message": "<human text>"}` with 4xx/5xx.
 
 ### `GET /api/health`
 ```json
-{"ok":true,"version":"3.2.0","profiles":["studio","production"],"engine_pid":12345}
+{"ok":true,"version":"3.3.0","profiles":["studio","lowband","production"],"engine_pid":12345}
 ```
 
 ### `POST /api/analyze`
@@ -59,9 +59,10 @@ of the per-bucket `rms_db` over buckets above −120. Loudness via the existing
 
 ### `POST /api/jobs`
 Request `{"input_path": "/abs/in.m4a.mp4", "profile": "studio", "output_path": "/abs/out.wav" (optional), "overwrite": false}`
-Default `output_path`: same directory as input, `<stem>_studio.wav` for `studio`, `<stem>_clean.wav`
-for `production`, where `<stem>` strips **all** audio/container suffixes (`Flute 09.m4a.mp4` → `Flute 09`,
-same rule as `cli._clean_stem`). Response `202`:
+Default `output_path`: same directory as input, `<stem>_studio.wav` for `studio`,
+`<stem>_lowband.wav` for `lowband`, and `<stem>_clean.wav` for `production`, where `<stem>` strips
+**all** audio/container suffixes (`Flute 09.m4a.mp4` → `Flute 09`, same rule as
+`cli._clean_stem`). Response `202`:
 ```json
 {"job_id":"j_8f2a...","output_path":"/abs/Flute 09_studio.wav","report_path":"/abs/Flute 09_studio.hawavoclean.json"}
 ```
@@ -197,7 +198,7 @@ Assembled plugin directory (what Resolve loads), at
   <Plugin>
     <Id>com.hawavoclean.resolve</Id>
     <Name>HawaVoClean</Name>
-    <Version>0.1.0</Version>
+    <Version>3.3.0</Version>
     <Description>HawaVoClean voice restoration for DaVinci Resolve Studio.</Description>
     <FilePath>main.js</FilePath>
   </Plugin>

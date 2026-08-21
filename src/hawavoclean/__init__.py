@@ -1,3 +1,5 @@
 """HawaVoClean - Kurdish Sorani Dialogue Audio Enhancement & Fidelity System."""
 
-__version__ = "3.2.0"
+from hawavoclean.release import VERSION
+
+__version__ = VERSION

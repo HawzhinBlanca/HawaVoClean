@@ -12,6 +12,7 @@ from hawavoclean.report.schema import (
     HawaVoCleanReport,
     MediaStats,
     UnitSummary,
+    current_release_metadata,
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import load_json_report, write_json_report
@@ -20,6 +21,7 @@ from hawavoclean.report.writer import load_json_report, write_json_report
 @pytest.mark.unit
 def test_report_serialization_and_summary() -> None:
     rep = HawaVoCleanReport(
+        release=current_release_metadata(),
         job_id="test_job_123",
         config_hash="a" * 64,
         input=MediaStats(

@@ -1,4 +1,4 @@
-# HawaVoClean v1
+# HawaVoClean v3.3
 
 > Offline dialogue audio cleanup: Wiener spectral denoising, spectral-change
 > guarded finishing, and BS.1770 loudness mastering — engineered to never
@@ -65,6 +65,10 @@ made.
    `hawavoclean audit-models` fails if the lockfile and the implementation
    disagree. No digest in this repository refers to a file that does not
    exist.
+7. **One committed output generation** — the WAV, JSON report, and text
+   summary are published as one verified transaction. An interruption can
+   leave the previous complete generation or the new complete generation,
+   never a mixed triplet; the previous generation remains recoverable.
 
 ## Known limitations
 
@@ -76,6 +80,10 @@ made.
    corpus roughly half of speech units keep their original audio (they
    still receive loudness normalization).
 4. Processed audio is an enhanced dialogue master, not forensic evidence.
+5. A processed output is a three-file publication backed by its adjacent
+   hidden `.<output-name>.hawavoclean/` generation bundle. When moving or
+   archiving it, export/copy the WAV, both reports, and that bundle together;
+   copying only the visible symlink can produce a dangling file.
 
 ## Installation
 

@@ -40,6 +40,7 @@ from hawavoclean.report.schema import (
     PassRecord,
     UnitDecisionRecord,
     UnitSummary,
+    current_release_metadata,
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import load_json_report, write_json_report
@@ -159,6 +160,7 @@ def _report(
     out_sha: str = "b" * 64,
 ) -> HawaVoCleanReport:
     return HawaVoCleanReport(
+        release=current_release_metadata(),
         job_id="job",
         config_hash="c" * 64,
         input=_media("in.wav", "a" * 64),
@@ -196,15 +198,20 @@ def _pass_record(index: int, sep: float, enhanced: int = 1, **kw: Any) -> PassRe
 
 
 @pytest.mark.unit
-def test_report_passes_default_is_empty_and_schema_version_1() -> None:
+def test_report_passes_default_is_empty_and_legacy_schema_v1_still_loads() -> None:
     rep = _report(passes=None)
     assert rep.passes == []
-    assert rep.schema_version == 1
-    # A pre-multipass report (no "passes" key at all) must still validate.
+    assert rep.schema_version == 2
+    assert rep.release == current_release_metadata()
+    # A pre-v2 report has neither release identity nor the multipass key and
+    # must remain readable without inventing a modern release for it.
     raw = json.loads(rep.model_dump_json())
+    raw["schema_version"] = 1
+    del raw["release"]
     del raw["passes"]
     old = HawaVoCleanReport.model_validate(raw)
     assert old.passes == []
+    assert old.release is None
 
 
 @pytest.mark.unit
@@ -350,6 +357,7 @@ class _StubPipeline:
             on_progress(ProgressEvent("publish", 0.98, "Publishing master"))
         units = [_unit(0, 1.0 if k > 1 else 0.5, "enhanced"), _unit(1, 0.0, "original_no_speech")]
         return HawaVoCleanReport(
+            release=current_release_metadata(),
             job_id=f"job{k}",
             config_hash="c" * 64,
             input=_media(str(in_path), hash_file(in_path) if in_path.exists() else "a" * 64),

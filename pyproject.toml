@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hawavoclean"
-version = "3.2.0"
+version = "3.3.0"
 description = "Offline dialogue audio cleanup: Wiener denoising, spectral-change guard, BS.1770 mastering"
 readme = "README.md"
 requires-python = ">=3.11"

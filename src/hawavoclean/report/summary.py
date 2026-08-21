@@ -11,6 +11,14 @@ def generate_human_summary(report: HawaVoCleanReport) -> str:
         "================================================================================",
         f"Job ID:               {report.job_id}",
         f"Schema Version:       {report.schema_version}",
+        *(
+            [
+                f"Release:              {report.release.version}",
+                f"Release Identity:     {report.release.identity_sha256[:16]}...",
+            ]
+            if report.release is not None
+            else ["Release:              legacy schema-v1 report (not recorded)"]
+        ),
         f"Config Hash:          {report.config_hash[:16]}...",
         "",
         "--- INPUT MEDIA ---",

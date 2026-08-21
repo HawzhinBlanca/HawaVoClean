@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — one v3.3 identity and a measured three-profile regression gate
+
+- `src/hawavoclean/release.json` is now the sole authored product/report
+  version. Python reads the packaged identity directly; Python/UI/Resolve
+  package manifests are checked generated mirrors. Schema-v2 reports embed
+  its exact SHA-256 and reject missing or altered identity, while schema-v1
+  reports remain readable without a fabricated backfill.
+- The integrated release tree now contains production, studio and lowband
+  together across factory, CLI, server, UI, docs and model locks. Lowband's
+  two real-audio masters reproduced their branch references byte for byte
+  before the version bump.
+- `scripts/audio_regression_gate.py` runs all three profiles on both private
+  real recordings twice. All six v3.3 masters are deterministic and retain
+  identical audio/decision report semantics against their frozen references.
+  Their changed WAV hashes are fully explained by the version-keyed TPDF
+  dither seed: same rate/layout/count, maximum difference exactly 2 PCM24
+  least-significant bits (RMS 0.708–0.709 LSB).
+
 ### Fixed — one failing unit no longer discards a whole file of passing ones
 
 The continuity rule forbids enhanced audio from butting against original audio
@@ -81,7 +99,7 @@ publish audio no guard ever scored for that time range.
   ignored, a too-short unit faded instead of reverted, the pipeline planning a
   fade it never applies, the ramp becoming a hard step, the fade resolving to
   the candidate instead of the original, the fade planned at the wrong sample
-  rate, and a continuity revert filed under the guard's own REVERT. 21/21
+  rate, and a continuity revert filed under the guard's own REVERT. 23/23
   caught, every mutation owner-credited.
 
 **Adversarial audit, and what it broke.** Seven independent auditors attacked

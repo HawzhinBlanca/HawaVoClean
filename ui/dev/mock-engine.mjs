@@ -26,7 +26,17 @@ const HOST = arg('--host', '127.0.0.1');
 const TOKEN = arg('--token', 'dev');
 const UI_DIR = arg('--ui-dir', null);
 const WORK_DIR = join(tmpdir(), 'hawavoclean-mock');
-const VERSION = '3.2.0';
+const RELEASE_IDENTITY_BYTES = await readFile(
+  new URL('../../src/hawavoclean/release.json', import.meta.url),
+);
+const RELEASE_IDENTITY = JSON.parse(RELEASE_IDENTITY_BYTES.toString('utf8'));
+const VERSION = RELEASE_IDENTITY.version;
+const REPORT_RELEASE = {
+  product: RELEASE_IDENTITY.product,
+  version: RELEASE_IDENTITY.version,
+  report_schema_version: RELEASE_IDENTITY.report_schema_version,
+  identity_sha256: createHash('sha256').update(RELEASE_IDENTITY_BYTES).digest('hex'),
+};
 
 // ---------------------------------------------------------------------------
 // Deterministic synthesis
@@ -317,7 +327,8 @@ function makeReport(job) {
   const noSpeech = units.filter((u) => u.final_decision === 'original_no_speech').length;
   const media = (p, lufs, tp) => ({ path: p, sha256: createHash('sha256').update(p).digest('hex'), sample_rate: SR, channels: 1, samples: N, duration_s: DURATION_S, integrated_lufs: lufs, true_peak_dbtp: tp });
   return {
-    schema_version: 1, job_id: job.id, config_hash: createHash('sha256').update('mock-config').digest('hex'),
+    schema_version: RELEASE_IDENTITY.report_schema_version, release: REPORT_RELEASE,
+    job_id: job.id, config_hash: createHash('sha256').update('mock-config').digest('hex'),
     input: media(job.input_path, -23.4, -3.1), output: media(job.output_path, -19.0, -1.0),
     core: {
       studio: { id: 'studio-dfn3-48k-v1', algorithm: 'WPE + DeepFilterNet3', params_hash: 'b1f7' + '0'.repeat(60), phase_coherent: true },

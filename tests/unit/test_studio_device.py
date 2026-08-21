@@ -40,6 +40,27 @@ def test_core_refuses_a_device_this_machine_cannot_provide(
         StudioVoiceCore(device="cuda")
 
 
+def test_lowband_core_takes_its_device_from_the_armed_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("torch")
+    from hawavoclean.enhancement.studio_lowband import StudioLowBandCore
+
+    monkeypatch.setenv(runtime.DEVICE_ENV_VAR, "cpu")
+    assert StudioLowBandCore().device == "cpu"
+
+
+def test_lowband_core_refuses_a_device_this_machine_cannot_provide(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("torch")
+    from hawavoclean.enhancement.studio_lowband import StudioLowBandCore
+
+    monkeypatch.setattr(runtime, "device_available", lambda n: n == "cpu")
+    with pytest.raises(ConfigError):
+        StudioLowBandCore(device="cuda")
+
+
 def test_loading_the_model_pins_deepfilternets_own_device_lookup() -> None:
     """df.enhance re-reads df's global device for every feature tensor. If the
     pin does not take, model and features land on different devices."""
