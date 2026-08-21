@@ -1,5 +1,5 @@
 {
-  "command": ["/Users/hawzhin/HawaVoClean/.venv/bin/hawavoclean", "serve"],
-  "cwd": "/Users/hawzhin/HawaVoClean",
-  "env": {}
+  "command": ["./engine/hawavoclean-engine", "serve"],
+  "cwd": ".",
+  "env": {"PYTHONNOUSERSITE": "1"}
 }

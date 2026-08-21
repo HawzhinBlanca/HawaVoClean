@@ -1,162 +1,197 @@
 #!/usr/bin/env bash
-# HawaVoClean — build the UI, assemble the Resolve Workflow Integration plugin, install it.
+# Build, verify, self-test and optionally activate the relocatable Resolve plugin.
 #
-#   resolve-plugin/install.sh [--no-install] [--skip-ui] [--engine PATH] [--sdk-node PATH]
+# Usage:
+#   resolve-plugin/install.sh --engine-bundle ABSOLUTE_PATH [options]
 #
-# Steps
-#   1. Build the UI bundle:  pnpm --dir ui install --frozen-lockfile (fallback: install) && pnpm --dir ui build
-#   2. Assemble build/resolve-plugin/com.hawavoclean.resolve/ =
-#        manifest.xml package.json main.js preload.js   (shell sources, resolve-plugin/com.hawavoclean.resolve/)
-#      + index.html assets/ ...                          (ui/dist contents)
-#      + WorkflowIntegration.node                        (copied from the Resolve SDK, never committed)
-#      + engine.json                                     (generated: {"command":[ENGINE,"serve"],"cwd":REPO,"env":{}})
-#   3. Install into "/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins/".
-#      If that directory is not writable, the exact sudo command is printed and the script exits 2
-#      (it never elevates on its own).
-#
-# Flags
-#   --no-install       assemble only (steps 1–2)
-#   --skip-ui          skip step 1; reuse an existing ui/dist if present, otherwise assemble without the UI
-#   --engine PATH      hawavoclean executable to write into engine.json (default: <repo>/.venv/bin/hawavoclean)
-#   --sdk-node PATH    WorkflowIntegration.node to ship (default: the SDK's Examples/SamplePlugin copy)
-#   -h, --help
+# Options:
+#   --no-install          assemble and self-test only
+#   --skip-ui-build       reuse ui/dist, but still require and verify a complete UI
+#   --engine-bundle PATH  relocatable, manifest-bearing engine directory (required)
+#   --sdk-node PATH       WorkflowIntegration.node from the installed Resolve SDK
+#   --desktop-only        explicitly assemble without WorkflowIntegration.node
+#   --dest PATH           alternate Workflow Integration Plugins directory
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLUGIN_ID="com.hawavoclean.resolve"
+VERSION=""
 SRC_DIR="$SCRIPT_DIR/$PLUGIN_ID"
 UI_DIR="$REPO_ROOT/ui"
-STAGE_ROOT="$REPO_ROOT/build/resolve-plugin"
-STAGE="$STAGE_ROOT/$PLUGIN_ID"
-DEST="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins"
+STAGES_DIR="$REPO_ROOT/build/resolve-plugin/stages"
+DEFAULT_DEST="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins"
 SDK_NODE_DEFAULT="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Workflow Integrations/Examples/SamplePlugin/WorkflowIntegration.node"
 
-ENGINE="$REPO_ROOT/.venv/bin/hawavoclean"
+ENGINE_BUNDLE=""
 SDK_NODE="$SDK_NODE_DEFAULT"
+DEST="$DEFAULT_DEST"
 DO_INSTALL=1
 BUILD_UI=1
+DESKTOP_ONLY=0
 
 usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; }
+say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-while [ $# -gt 0 ]; do
+verify_engine_bundle() {
+  local root="$1" actual listed rel target
+  [ -z "$(find "$root" ! -type d ! -type f ! -type l -print -quit)" ] || die "engine bundle contains a special filesystem node"
+  (cd "$root" && shasum -a 256 --strict --status -c ENGINE-SHA256SUMS) || die "engine bundle checksum verification failed"
+
+  actual="$(mktemp)"
+  (cd "$root" && find . -type f ! -name ENGINE-SHA256SUMS -print | LC_ALL=C sort) > "$actual"
+  listed="$(mktemp)"
+  sed -E 's/^[0-9a-fA-F]{64}  //' "$root/ENGINE-SHA256SUMS" | LC_ALL=C sort > "$listed"
+  if ! cmp -s "$actual" "$listed"; then
+    command rm -f "$actual" "$listed"
+    die "engine regular-file inventory does not match ENGINE-SHA256SUMS"
+  fi
+  command rm -f "$actual" "$listed"
+
+  actual="$(mktemp)"
+  (cd "$root" && find . -type l -print | LC_ALL=C sort) > "$actual"
+  listed="$(mktemp)"
+  cut -f1 "$root/ENGINE-SYMLINKS" | LC_ALL=C sort > "$listed"
+  if ! cmp -s "$actual" "$listed"; then
+    command rm -f "$actual" "$listed"
+    die "engine symlink inventory does not match ENGINE-SYMLINKS"
+  fi
+  command rm -f "$actual" "$listed"
+  while IFS=$'\t' read -r rel target; do
+    [ -n "$rel" ] || continue
+    case "$rel" in ./*) ;; *) die "unsafe engine symlink path: $rel" ;; esac
+    case "$target" in /*|../*|*/../*|*/..) die "escaping engine symlink target: $target" ;; esac
+    [ -L "$root/${rel#./}" ] && [ "$(readlink "$root/${rel#./}")" = "$target" ] || die "engine symlink differs from its manifest: $rel"
+  done < "$root/ENGINE-SYMLINKS"
+}
+
+while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-install) DO_INSTALL=0 ;;
-    --skip-ui) BUILD_UI=0 ;;
-    --engine) [ $# -ge 2 ] || { echo "--engine needs a PATH" >&2; exit 1; }; ENGINE="$2"; shift ;;
-    --engine=*) ENGINE="${1#--engine=}" ;;
-    --sdk-node) [ $# -ge 2 ] || { echo "--sdk-node needs a PATH" >&2; exit 1; }; SDK_NODE="$2"; shift ;;
+    --skip-ui-build) BUILD_UI=0 ;;
+    --desktop-only) DESKTOP_ONLY=1 ;;
+    --engine-bundle) [ "$#" -ge 2 ] || die "--engine-bundle needs a path"; ENGINE_BUNDLE="$2"; shift ;;
+    --engine-bundle=*) ENGINE_BUNDLE="${1#--engine-bundle=}" ;;
+    --sdk-node) [ "$#" -ge 2 ] || die "--sdk-node needs a path"; SDK_NODE="$2"; shift ;;
     --sdk-node=*) SDK_NODE="${1#--sdk-node=}" ;;
+    --dest) [ "$#" -ge 2 ] || die "--dest needs a path"; DEST="$2"; shift ;;
+    --dest=*) DEST="${1#--dest=}" ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
+    *) die "unknown argument: $1" ;;
   esac
   shift
 done
 
-say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+[ -n "$ENGINE_BUNDLE" ] || die "--engine-bundle is required; repo-local virtual environments are not installable artifacts"
+case "$ENGINE_BUNDLE" in /*) ;; *) die "--engine-bundle must be absolute" ;; esac
+[ -d "$ENGINE_BUNDLE" ] && [ ! -L "$ENGINE_BUNDLE" ] || die "engine bundle is not a real directory: $ENGINE_BUNDLE"
+for rel in ENGINE-MANIFEST.json ENGINE-SHA256SUMS ENGINE-SYMLINKS hawavoclean-engine python/bin/python3.11 site-packages/hawavoclean; do
+  [ -e "$ENGINE_BUNDLE/$rel" ] || die "engine bundle is incomplete: missing $rel"
+done
+[ -x "$ENGINE_BUNDLE/hawavoclean-engine" ] || die "engine launcher is not executable"
+verify_engine_bundle "$ENGINE_BUNDLE"
 
 for f in manifest.xml package.json main.js preload.js; do
   [ -f "$SRC_DIR/$f" ] || die "missing shell source $SRC_DIR/$f"
 done
+[ "$(pnpm --version 2>/dev/null || true)" = "11.5.3" ] || die "pnpm 11.5.3 is required by ui/package.json"
+[ "$(npm --version 2>/dev/null || true)" = "10.9.2" ] || die "npm 10.9.2 is required by the Resolve shell lock"
+VERSION="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$SRC_DIR/package.json")"
+[ "$VERSION" = "3.3.0" ] || die "Resolve package identity is not the expected v3.3.0 release"
 
-# ---------------------------------------------------------------------------------------------
-# 1. UI build
-# ---------------------------------------------------------------------------------------------
 if [ "$BUILD_UI" -eq 1 ]; then
-  [ -f "$UI_DIR/package.json" ] || die "$UI_DIR/package.json not found (pass --skip-ui to assemble without the UI)"
-  command -v pnpm >/dev/null 2>&1 || die "pnpm not found on PATH (corepack enable / npm i -g pnpm)"
-  say "Installing UI dependencies (pnpm --dir $UI_DIR install --frozen-lockfile)"
-  if ! pnpm --dir "$UI_DIR" install --frozen-lockfile; then
-    warn "frozen-lockfile install failed; retrying without --frozen-lockfile"
-    pnpm --dir "$UI_DIR" install
-  fi
-  say "Building UI (pnpm --dir $UI_DIR build)"
+  say "Installing UI dependencies from the frozen pnpm lock"
+  pnpm --dir "$UI_DIR" install --frozen-lockfile
+  say "Building the UI"
   pnpm --dir "$UI_DIR" build
-  [ -f "$UI_DIR/dist/index.html" ] || die "UI build did not produce $UI_DIR/dist/index.html"
 else
-  say "Skipping UI build (--skip-ui)"
+  say "Reusing the existing UI build (--skip-ui-build)"
 fi
+[ -f "$UI_DIR/dist/index.html" ] || die "a complete ui/dist build is required"
+[ -d "$UI_DIR/dist/assets" ] || die "ui/dist/assets is missing"
 
-# ---------------------------------------------------------------------------------------------
-# 2. Assemble
-# ---------------------------------------------------------------------------------------------
-case "$STAGE" in
-  */build/resolve-plugin/$PLUGIN_ID) ;;
-  *) die "refusing to clean unexpected staging path: $STAGE" ;;
-esac
-say "Assembling $STAGE"
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
+say "Installing the exact standalone Electron test runtime from package-lock.json"
+npm --prefix "$SRC_DIR" ci
 
-for f in manifest.xml package.json main.js preload.js; do
-  cp "$SRC_DIR/$f" "$STAGE/$f"
-done
+mkdir -p "$STAGES_DIR"
+ASSEMBLY_ROOT="$(mktemp -d "$STAGES_DIR/.assembly.XXXXXX")"
+STAGE="$ASSEMBLY_ROOT/$PLUGIN_ID"
+mkdir "$STAGE"
 
-if [ -f "$UI_DIR/dist/index.html" ]; then
-  cp -R "$UI_DIR/dist/." "$STAGE/"
-  say "UI bundle: $(cd "$UI_DIR/dist" && find . -type f | wc -l | tr -d ' ') files from $UI_DIR/dist"
-else
-  warn "no UI bundle at $UI_DIR/dist — the shell will show its 'UI bundle not found' page"
-fi
-
-if [ -f "$SDK_NODE" ]; then
-  cp "$SDK_NODE" "$STAGE/WorkflowIntegration.node"
-  say "WorkflowIntegration.node copied from $SDK_NODE"
-else
-  if [ "$DO_INSTALL" -eq 1 ]; then
-    die "WorkflowIntegration.node not found at $SDK_NODE (is DaVinci Resolve Studio installed? pass --sdk-node PATH)"
+cleanup_assembly() {
+  if [ -d "$ASSEMBLY_ROOT" ]; then
+    case "$ASSEMBLY_ROOT" in "$STAGES_DIR/.assembly."*) find "$ASSEMBLY_ROOT" -depth -delete ;; esac
   fi
-  warn "WorkflowIntegration.node not found at $SDK_NODE — assembling a desktop-only (host 'electron') plugin"
-fi
+}
+trap cleanup_assembly EXIT
 
-if [ ! -x "$ENGINE" ]; then
-  warn "engine executable $ENGINE does not exist or is not executable yet; engine.json will still point at it"
-fi
-if command -v node >/dev/null 2>&1; then
-  node -e '
-    const fs = require("fs");
-    const [out, engine, cwd] = process.argv.slice(1);
-    fs.writeFileSync(out, JSON.stringify({ command: [engine, "serve"], cwd, env: {} }, null, 2) + "\n");
-  ' "$STAGE/engine.json" "$ENGINE" "$REPO_ROOT"
+say "Assembling a relocatable plugin"
+for f in manifest.xml package.json main.js preload.js; do cp "$SRC_DIR/$f" "$STAGE/$f"; done
+cp -R "$UI_DIR/dist/." "$STAGE/"
+cp -R "$ENGINE_BUNDLE" "$STAGE/engine"
+chmod a+rx "$STAGE/engine/hawavoclean-engine"
+
+if [ "$DESKTOP_ONLY" -eq 0 ]; then
+  [ -f "$SDK_NODE" ] || die "WorkflowIntegration.node not found at $SDK_NODE; pass --sdk-node or use --desktop-only explicitly"
+  cp "$SDK_NODE" "$STAGE/WorkflowIntegration.node"
 else
-  esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-  printf '{\n  "command": ["%s", "serve"],\n  "cwd": "%s",\n  "env": {}\n}\n' "$(esc "$ENGINE")" "$(esc "$REPO_ROOT")" > "$STAGE/engine.json"
+  say "Desktop-only stage requested; Resolve native bridge intentionally omitted"
 fi
-say "engine.json: $(tr -d '\n' < "$STAGE/engine.json" | tr -s ' ')"
 
-say "Staged plugin contents:"
-( cd "$STAGE" && ls -1 | sed 's/^/    /' )
+cat > "$STAGE/engine.json" <<'EOF'
+{
+  "command": ["./engine/hawavoclean-engine", "serve"],
+  "cwd": ".",
+  "env": {"PYTHONNOUSERSITE": "1"}
+}
+EOF
+printf '%s\n' "$PLUGIN_ID" > "$STAGE/PLUGIN_ID"
+printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 
-# ---------------------------------------------------------------------------------------------
-# 3. Install
-# ---------------------------------------------------------------------------------------------
+say "Running engine integrity and preflight checks"
+"$STAGE/engine/hawavoclean-engine" --version | grep -Fxq "hawavoclean $VERSION" || die "engine version does not match plugin version $VERSION"
+"$STAGE/engine/hawavoclean-engine" doctor >/dev/null || die "engine doctor preflight failed"
+
+(cd "$STAGE" && find . -type l -print | LC_ALL=C sort | while IFS= read -r rel; do printf '%s\t%s\n' "$rel" "$(readlink "$rel")"; done) > "$STAGE/SYMLINKS"
+(cd "$STAGE" && find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r rel; do shasum -a 256 "$rel"; done) > "$STAGE/SHA256SUMS"
+
+say "Running the real staged Electron → engine → health → shutdown self-test"
+"$SCRIPT_DIR/dev/stage-selftest.sh" "$STAGE"
+
+STAGE_DIGEST="$(shasum -a 256 "$STAGE/SHA256SUMS" | awk '{print $1}')"
+FINAL_ROOT="$STAGES_DIR/${STAGE_DIGEST:0:20}"
+FINAL_STAGE="$FINAL_ROOT/$PLUGIN_ID"
+if [ -d "$FINAL_STAGE" ] && cmp -s "$STAGE/SHA256SUMS" "$FINAL_STAGE/SHA256SUMS" && cmp -s "$STAGE/SYMLINKS" "$FINAL_STAGE/SYMLINKS"; then
+  say "Reusing identical content-addressed stage"
+else
+  [ ! -e "$FINAL_ROOT" ] || die "content-addressed stage collision: $FINAL_ROOT"
+  mkdir "$FINAL_ROOT"
+  mv "$STAGE" "$FINAL_STAGE"
+fi
+trap - EXIT
+cleanup_assembly
+"$SCRIPT_DIR/activate.sh" --stage "$FINAL_STAGE" --verify-only >/dev/null
+
+say "Verified stage: $FINAL_STAGE"
 if [ "$DO_INSTALL" -eq 0 ]; then
-  say "Assembly only (--no-install). Plugin path:"
-  echo "$STAGE"
+  printf '%s\n' "$FINAL_STAGE"
   exit 0
 fi
 
-TARGET="$DEST/$PLUGIN_ID"
-if [ -d "$DEST" ] && [ -w "$DEST" ] && { [ ! -e "$TARGET" ] || [ -w "$TARGET" ]; }; then
-  say "Installing into $TARGET"
-  rm -rf "$TARGET"
-  cp -R "$STAGE" "$TARGET"
-  say "Installed. Restart DaVinci Resolve Studio, then open Workspace → Workflow Integrations → HawaVoClean."
-  echo "$TARGET"
-  exit 0
+if [ -d "$DEST" ] && [ -w "$DEST" ]; then
+  exec "$SCRIPT_DIR/activate.sh" --stage "$FINAL_STAGE" --dest "$DEST"
 fi
 
 cat >&2 <<EOF
 
-The plugins directory is not writable by $(id -un):
-    $DEST
-Run this to install (it replaces any existing $PLUGIN_ID):
+The Resolve plugins directory needs elevated write permission. The stage has
+already passed checksum, engine, doctor and Electron lifecycle tests. Activate
+it transactionally with:
 
-    sudo mkdir -p "$DEST" && sudo rm -rf "$TARGET" && sudo cp -R "$STAGE" "$TARGET"
+  sudo "$SCRIPT_DIR/activate.sh" --stage "$FINAL_STAGE" --dest "$DEST"
 
-Then restart DaVinci Resolve Studio and open Workspace → Workflow Integrations → HawaVoClean.
-Staged plugin path: $STAGE
+The activator verifies the copied bytes, backs up the prior plugin, atomically
+renames the candidate into place, verifies again, and rolls back on failure.
 EOF
 exit 2

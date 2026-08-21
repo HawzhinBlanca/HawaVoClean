@@ -9,8 +9,8 @@ every name, path and shape written here is fixed.
 | Part | Location | Runtime |
 |------|----------|---------|
 | Engine bridge | `src/hawavoclean/server/` + `hawavoclean serve` + `hawavoclean process --progress-json` | Python (FastAPI + uvicorn), binds 127.0.0.1 only |
-| UI bundle | `ui/` (Vite 8 + React 19 + TypeScript), builds to `ui/dist/` with `base: './'` | Any Chromium 136+ page: browser, Electron, Resolve's Electron |
-| Resolve / desktop shell | `resolve-plugin/com.hawavoclean.resolve/` (`manifest.xml`, `package.json`, `main.js`, `preload.js`) + `resolve-plugin/install.sh` | Resolve's bundled Electron 36.3.2 (sandbox + contextIsolation), or plain `electron .` for desktop |
+| UI bundle | `ui/` (Vite 8 + React 19 + TypeScript), builds to `ui/dist/` with `base: './'` | Supported browser, the pinned standalone Electron test runtime, or Resolve's vendor-owned embedded runtime |
+| Resolve / desktop shell | `resolve-plugin/com.hawavoclean.resolve/` (`manifest.xml`, `package.json`, `main.js`, `preload.js`) + `resolve-plugin/install.sh` | DaVinci Resolve Studio 21 host, or exact standalone Electron 43.4.1 for controlled testing |
 
 ## 1. Engine HTTP API
 
@@ -166,7 +166,10 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
 
 ## 4. Shell behaviour (main.js)
 
-* Reads `engine.json` next to `main.js`: `{"command":["/abs/.venv/bin/hawavoclean","serve"],"cwd":"/abs/repo","env":{}}`.
+* Reads `engine.json` next to `main.js`. The shipped file is relocatable:
+  `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1"}}`.
+  Relative executable and working-directory paths are resolved below the plugin directory and may not
+  escape it. Absolute paths remain available only for explicit developer configurations.
   Spawns `command + ["--port","0","--token",TOKEN,"--ui-dir",__dirname]` with a fresh random 32-hex TOKEN,
   waits for the `ready` stdout line (timeout 60 s → show an error page with the stderr tail).
 * `BrowserWindow` 1280×820 (min 960×640), dark background `#0e1013`, `webPreferences: {preload, sandbox:true,
@@ -182,14 +185,18 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
 resolve-plugin/
   com.hawavoclean.resolve/      # shell sources (no built UI, no .node committed)
     manifest.xml  package.json  main.js  preload.js  engine.json.example
-  install.sh                    # builds ui/, assembles build/resolve-plugin/com.hawavoclean.resolve/, installs
+  install.sh                    # locked build, immutable staging and staged lifecycle self-test
+  activate.sh                   # privileged, build-tool-free transactional activation + rollback
+scripts/build_resolve_engine.py # exact-wheel → relocatable macOS arm64 CPython 3.11 engine
 ui/                             # Vite + React + TS sources; ui/dist is gitignored
 src/hawavoclean/server/         # app.py (FastAPI), jobs.py (child-process job manager), analysis.py, auth/paths helpers
 src/hawavoclean/progress.py     # ProgressEvent + ProgressCallback types
 ```
-Assembled plugin directory (what Resolve loads), at
+The content-addressed stage and installed plugin contain
+`manifest.xml package.json main.js preload.js engine.json index.html assets/ engine/ PLUGIN_ID VERSION
+SHA256SUMS SYMLINKS`, plus `WorkflowIntegration.node` for a Resolve build. The installed directory is
 `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins/com.hawavoclean.resolve/`:
-`manifest.xml package.json main.js preload.js engine.json WorkflowIntegration.node index.html assets/`.
+the engine is self-contained and does not refer to the source checkout or a mutable virtual environment.
 
 `manifest.xml`:
 ```xml

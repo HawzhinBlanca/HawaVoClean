@@ -11,7 +11,7 @@
 #   hang      engine never reports ready -> ready timeout (shortened to 2 s) -> error page.
 #   stubborn  engine ignores /api/shutdown and SIGTERM -> shell must SIGKILL it on quit.
 #
-# Requires: `npm i` done in resolve-plugin/com.hawavoclean.resolve (Electron 36).
+# Requires: `npm ci` done in resolve-plugin/com.hawavoclean.resolve (Electron 43.4.1).
 # Creates a temporary engine.json + index.html next to main.js and removes them afterwards
 # (pre-existing ones are backed up and restored).
 set -euo pipefail
@@ -25,7 +25,7 @@ SCENARIOS=("$@")
 [ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(ok crash hang stubborn)
 
 if [ ! -x "$ELECTRON_BIN" ]; then
-  echo "electron not installed; run: cd $PLUGIN_DIR && npm i" >&2
+  echo "electron not installed; run: npm --prefix $PLUGIN_DIR ci" >&2
   exit 1
 fi
 
@@ -36,10 +36,10 @@ BACKUP_DIR="$(mktemp -d)"
 [ -f "$INDEX_HTML" ] && cp "$INDEX_HTML" "$BACKUP_DIR/index.html"
 
 cleanup() {
-  rm -f "$ENGINE_JSON" "$INDEX_HTML"
+  command rm -f "$ENGINE_JSON" "$INDEX_HTML"
   [ -f "$BACKUP_DIR/engine.json" ] && cp "$BACKUP_DIR/engine.json" "$ENGINE_JSON"
   [ -f "$BACKUP_DIR/index.html" ] && cp "$BACKUP_DIR/index.html" "$INDEX_HTML"
-  rm -rf "$BACKUP_DIR"
+  [ ! -d "$BACKUP_DIR" ] || find "$BACKUP_DIR" -depth -delete
 }
 trap cleanup EXIT
 

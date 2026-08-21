@@ -97,14 +97,28 @@ function readEngineConfig() {
     throw new Error(`engine.json is not valid JSON: ${err.message}`);
   }
   if (!Array.isArray(raw.command) || raw.command.length === 0 || !raw.command.every((s) => typeof s === 'string' && s.length > 0)) {
-    throw new Error('engine.json: "command" must be a non-empty array of strings, e.g. ["/abs/.venv/bin/hawavoclean","serve"].');
+    throw new Error('engine.json: "command" must be a non-empty array of strings, e.g. ["./engine/hawavoclean-engine","serve"].');
   }
-  const cwd = typeof raw.cwd === 'string' && raw.cwd.length > 0 ? raw.cwd : os.homedir();
+  const cwdValue = typeof raw.cwd === 'string' && raw.cwd.length > 0 ? raw.cwd : os.homedir();
+  const cwd = path.isAbsolute(cwdValue) ? cwdValue : path.resolve(__dirname, cwdValue);
+  if (!path.isAbsolute(cwdValue) && (path.relative(__dirname, cwd).startsWith('..' + path.sep) || path.relative(__dirname, cwd) === '..')) {
+    throw new Error('engine.json: a relative cwd may not escape the plugin directory.');
+  }
+  const command = raw.command.slice();
+  if (!path.isAbsolute(command[0])) {
+    if (!command[0].startsWith('./')) {
+      throw new Error('engine.json: a relative executable must start with ./ and stay inside the plugin.');
+    }
+    command[0] = path.resolve(__dirname, command[0]);
+    if (path.relative(__dirname, command[0]).startsWith('..' + path.sep) || path.relative(__dirname, command[0]) === '..') {
+      throw new Error('engine.json: a relative executable may not escape the plugin directory.');
+    }
+  }
   const env = raw.env && typeof raw.env === 'object' && !Array.isArray(raw.env) ? raw.env : {};
   for (const [k, v] of Object.entries(env)) {
     if (typeof v !== 'string') throw new Error(`engine.json: env.${k} must be a string.`);
   }
-  return { command: raw.command.slice(), cwd, env, file };
+  return { command, cwd, env, file };
 }
 
 function buildEngineEnv(config) {
@@ -637,7 +651,7 @@ function errorPageHtml(title, detail) {
 <pre>${escapeHtml(tail)}</pre>
 <h2>What to check</h2>
 <ul>
-  <li>The engine path in <code>engine.json</code> exists and is executable, and its virtualenv has the <code>ui</code> extra installed (<code>uv sync --extra ui</code> / <code>pip install -e '.[ui]'</code>).</li>
+  <li>The bundled engine path in <code>engine.json</code> exists and is executable. Re-run the locked installer if the self-contained engine is missing or damaged.</li>
   <li><code>ffmpeg</code> is on the PATH (Homebrew: <code>/opt/homebrew/bin</code>).</li>
   <li>Close this window and relaunch the plugin from Resolve's <b>Workspace → Workflow Integrations → HawaVoClean</b> (or re-run <code>npm start</code>).</li>
 </ul>
