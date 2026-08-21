@@ -1,6 +1,6 @@
 # HawaVoClean: True 10/10 Release Plan
 
-Status: **planned — implementation has not started**  
+Status: **implementation in progress — Phase 0 complete; Phase 1 active**
 Baseline: `continuity-taper` at `bf6d932`, audited 2026-08-21  
 Target: one evidence-backed `v3.3.0` release candidate containing continuity taper, lowband,
 crash-safe publication, complete release hardening, real Sorani validation, and in-Resolve proof.
@@ -63,18 +63,18 @@ before calibration begins and must remain unseen until the release candidate is 
 
 Goal: every later result is attributable to an exact source and artifact.
 
-- [ ] **T0.1 — Create the integration branch and baseline record** (P0, S)
+- [x] **T0.1 — Create the integration branch and baseline record** (P0, S)
   - Create `codex/v3.3-release` from the audited `continuity-taper` commit.
   - Record `main`, continuity, lowband, tag, lockfile and real-audio reference hashes.
   - Confirm the working tree is clean and preserve all three branches.
   - **Proof:** committed baseline manifest whose tracked hashes reproduce from a clean checkout;
     local real-audio references verify separately on the audited workstation without pretending the
     private recording is part of the repository.
-- [ ] **T0.2 — Create an append-only evidence log** (P0, S)
+- [x] **T0.2 — Create an append-only evidence log** (P0, S)
   - Record task ID, commit, command/tool version, input artifact, result, output hash and known limits.
   - Failed attempts remain in the log; corrections append rather than rewrite history.
   - **Proof:** schema-validation test plus one entry reproducing the 2026-08-21 baseline.
-- [ ] **T0.3 — Pin the release contract** (P0, S)
+- [x] **T0.3 — Pin the release contract** (P0, S)
   - Confirm supported Python and operating-system versions, container support, Resolve version, output
     bundle contract and backwards-compatibility policy.
   - Keep guard-reverted units fully original unless the user explicitly changes that safety contract.

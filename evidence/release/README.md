@@ -34,9 +34,12 @@ uv run python scripts/release_evidence.py append \
   --status passed \
   --summary "Baseline and ledger verified" \
   --input evidence/release/baseline.json \
-  --output evidence/release/ledger.jsonl \
   --tool "python=$(python --version 2>&1)"
 ```
+
+Do not name `ledger.jsonl` as an output: its post-append digest would be self-referential. The entry's
+`entry_sha256`, printed by the tool and chained into the next entry, is the authoritative new ledger
+head.
 
 Failed and blocked results belong in the ledger too. `known_limits` must say what a passing command did
 not prove. Never delete or edit an earlier line; append a correction that names the superseded task.
