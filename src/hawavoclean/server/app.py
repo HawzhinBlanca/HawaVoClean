@@ -13,6 +13,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import socket
 import sys
 import threading
@@ -25,7 +26,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 from starlette.datastructures import Headers, QueryParams
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -35,7 +36,7 @@ from hawavoclean import __version__
 from hawavoclean.cli import _clean_stem
 from hawavoclean.errors import HawaVoCleanError, InvalidUserInputError
 from hawavoclean.logging import get_logger
-from hawavoclean.paths import work_root
+from hawavoclean.paths import profiles_root, work_root
 from hawavoclean.server.analysis import (
     DEFAULT_BUCKETS,
     MAX_BUCKETS,
@@ -269,6 +270,11 @@ class UploadSizeLimitMiddleware:
 
 
 class AnalyzeRequest(BaseModel):
+    # ``extra="forbid"``: an unknown field is refused with 422, never silently
+    # ignored — a client that misspells a knob must hear about it (audit
+    # finding: a typo'd option used to be dropped and the request "succeed").
+    model_config = ConfigDict(extra="forbid")
+
     path: str
     buckets: int = Field(default=DEFAULT_BUCKETS, ge=1, le=MAX_BUCKETS)
 
@@ -278,17 +284,35 @@ class PeaksRequest(BaseModel):
     here rather than downstream: ``json.loads`` happily accepts ``NaN`` and
     ``Infinity`` literals, and a NaN window would silently decode nothing."""
 
+    model_config = ConfigDict(extra="forbid")
+
     path: str
     start_s: float = Field(ge=0.0, allow_inf_nan=False)
     end_s: float = Field(gt=0.0, allow_inf_nan=False)
     buckets: int = Field(default=DEFAULT_BUCKETS, ge=1, le=MAX_BUCKETS)
 
 
+# The speaker id is handed to a child argv (``--speaker-id``) and joined into
+# a profiles path, so it is held to the naming grammar the profile tree uses —
+# anything else (spaces, ``/``, ``-``, uppercase, leading dashes) is refused.
+SPEAKER_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
 class JobRequest(BaseModel):
+    """``POST /api/jobs`` (contract addendum 2 adds the restore-mode fields).
+    The cross-field rules — restore requires ``speaker_id``, ``speaker_id``/
+    ``cutoff_hz`` are restore-only — live in the submit endpoint so their 422s
+    carry one clear message instead of a pydantic error list."""
+
+    model_config = ConfigDict(extra="forbid")
+
     input_path: str
     profile: Literal["studio", "lowband", "production", "development"]
     output_path: str | None = None
     overwrite: bool = False
+    mode: Literal["natural", "restore"] = "natural"
+    speaker_id: str | None = None
+    cutoff_hz: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
 
 
 def default_output_path(input_path: Path, profile: str) -> Path:
@@ -296,6 +320,21 @@ def default_output_path(input_path: Path, profile: str) -> Path:
     suffixes stripped (``Flute 09.m4a.mp4`` -> ``Flute 09``)."""
     suffix = _OUTPUT_SUFFIX.get(profile, "_clean")
     return input_path.parent / f"{_clean_stem(input_path)}{suffix}.wav"
+
+
+def available_speakers() -> list[str]:
+    """Sorted speaker ids with a ``profile.json`` under :func:`profiles_root`.
+
+    An absent or unreadable profiles tree is an empty list, not an error: a
+    natural-mode-only install must still answer ``GET /api/health``, and the
+    UI uses the emptiness itself (``restore_available``) to hide the restore
+    control.
+    """
+    try:
+        entries = list(profiles_root().iterdir())
+    except OSError:
+        return []
+    return sorted(p.name for p in entries if (p / "profile.json").is_file())
 
 
 def _safe_upload_name(raw: str | None) -> str:
@@ -508,10 +547,17 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_req: Request, exc: RequestValidationError) -> JSONResponse:
         parts = []
+        unknown_field = False
         for err in exc.errors():
+            if err.get("type") == "extra_forbidden":
+                unknown_field = True
             loc = ".".join(str(x) for x in err.get("loc", ()) if x != "body")
             parts.append(f"{loc}: {err.get('msg', 'invalid')}")
-        return error_response(400, "bad_request", "; ".join(parts) or "invalid request")
+        # An unknown field is a well-formed request the schema rejects — 422,
+        # like the restore-mode cross-field rules. Malformed values and missing
+        # required fields keep the contract's historical 400.
+        status = 422 if unknown_field else 400
+        return error_response(status, "bad_request", "; ".join(parts) or "invalid request")
 
     @app.exception_handler(HawaVoCleanError)
     async def _engine_error(_req: Request, exc: HawaVoCleanError) -> JSONResponse:
@@ -526,10 +572,15 @@ def create_app(
     # --- routes ---------------------------------------------------------------
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
+        # Recomputed per request: a profile trained while the engine is up
+        # (or an env-pointed tree swapped underneath it) shows without restart.
+        speakers = available_speakers()
         return {
             "ok": True,
             "version": __version__,
             "profiles": list(PROFILES),
+            "speakers": speakers,
+            "restore_available": bool(speakers),
             "engine_pid": os.getpid(),
             "storage": {
                 "managed_upload_bytes": upload_store.usage_bytes(),
@@ -555,6 +606,25 @@ def create_app(
 
     @app.post("/api/jobs", status_code=202)
     async def create_job(req: JobRequest) -> dict[str, Any]:
+        # Restore-mode cross-field rules (contract addendum 2). 422: the JSON
+        # is well-formed and every field is known — the *combination* is what
+        # the contract refuses.
+        if req.mode == "restore":
+            if not req.speaker_id:
+                raise ApiError(
+                    422, "bad_request", 'mode "restore" requires speaker_id (see /api/health)'
+                )
+        else:
+            if req.speaker_id is not None:
+                raise ApiError(
+                    422, "bad_request", 'speaker_id is only valid when mode is "restore"'
+                )
+            if req.cutoff_hz is not None:
+                raise ApiError(422, "bad_request", 'cutoff_hz is only valid when mode is "restore"')
+        if req.speaker_id is not None and not SPEAKER_ID_PATTERN.fullmatch(req.speaker_id):
+            # The id becomes a child argv and a path segment: reject anything
+            # outside the profile-tree grammar before it can travel.
+            raise ApiError(422, "bad_request", "speaker_id must match ^[a-z0-9_]{1,64}$")
         upload_store.scavenge(manager.active_input_paths())
         input_path = resolve_client_path(req.input_path, must_exist=True)
         if req.output_path:
@@ -569,6 +639,9 @@ def create_app(
                 output_path=output_path,
                 profile=req.profile,
                 overwrite=req.overwrite,
+                mode=req.mode,
+                speaker_id=req.speaker_id,
+                cutoff_hz=req.cutoff_hz,
             )
         except QueueFullError as e:
             raise ApiError(503, "queue_full", str(e)) from e

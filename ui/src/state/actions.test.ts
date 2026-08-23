@@ -1720,4 +1720,90 @@ describe('B6 · a deck lost to an outage comes back with the engine', () => {
     expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/a.wav'), 100);
     expect(store.useStore.getState().deckFault).toBeNull();
   });
-})
+});
+
+describe('restore mode (contract addendum 2)', () => {
+  it('the health probe lands the engine’s speakers and the restore flag', async () => {
+    const { actions, store, client } = await boot();
+    store.useStore.getState().setEngine('offline', client as never, '3.2.0');
+    client.health.mockResolvedValue({
+      ok: true,
+      version: '3.3.0',
+      profiles: ['studio', 'lowband', 'production'],
+      speakers: ['character_01', 'character_02'],
+      restore_available: true,
+      engine_pid: 4242,
+    });
+    actions.retryEngineNow();
+    await settle(10);
+    const st = store.useStore.getState();
+    expect(st.speakers).toEqual(['character_01', 'character_02']);
+    expect(st.restoreAvailable).toBe(true);
+    expect(st.speakerId).toBe('character_01');
+  });
+
+  it('a revision-1 health answer (no fields) reads as no restore', async () => {
+    const { actions, store, client } = await boot();
+    store.useStore.getState().setCapabilities(['character_01'], true);
+    store.useStore.getState().setEngine('offline', client as never, '3.2.0');
+    // makeClient()’s default health has neither field — an older engine.
+    actions.retryEngineNow();
+    await settle(10);
+    const st = store.useStore.getState();
+    expect(st.restoreAvailable).toBe(false);
+    expect(st.speakers).toEqual([]);
+    expect(st.mode).toBe('natural');
+    void client;
+  });
+
+  it('a restore submit carries mode and speaker — and only those when the cutoff is auto', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setCapabilities(['character_01'], true);
+    store.useStore.getState().setMode('restore');
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledWith({
+      input_path: '/a.wav',
+      profile: 'studio',
+      overwrite: true,
+      mode: 'restore',
+      speaker_id: 'character_01',
+    });
+  });
+
+  it('a manual cutoff rides the restore submit as cutoff_hz', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const st = store.useStore.getState();
+    st.setCapabilities(['character_01', 'character_02'], true);
+    st.setMode('restore');
+    st.setSpeakerId('character_02');
+    st.setCutoffHz(7800);
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledWith({
+      input_path: '/a.wav',
+      profile: 'studio',
+      overwrite: true,
+      mode: 'restore',
+      speaker_id: 'character_02',
+      cutoff_hz: 7800,
+    });
+  });
+
+  it('a natural submit sends none of the three — the engine forbids extras', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const st = store.useStore.getState();
+    // Restore was configured and then switched off; nothing may leak through,
+    // not even as nulls (the engine’s extra="forbid" would 422 the run).
+    st.setCapabilities(['character_01'], true);
+    st.setCutoffHz(7800);
+    st.setMode('natural');
+    await actions.startJob();
+    const req = client.createJob.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(req).toEqual({ input_path: '/a.wav', profile: 'studio', overwrite: true });
+    expect('mode' in req).toBe(false);
+    expect('speaker_id' in req).toBe(false);
+    expect('cutoff_hz' in req).toBe(false);
+  });
+});

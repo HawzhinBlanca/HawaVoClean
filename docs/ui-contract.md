@@ -1,4 +1,4 @@
-# HawaVoClean UI contract (contract revision 1; product 3.3)
+# HawaVoClean UI contract (contract revision 2; product 3.3)
 
 One web UI bundle, three shells, one engine. This document is the binding contract
 between the three parts. Anything not written here is the implementer's call, but
@@ -270,3 +270,68 @@ only the requested span (ffmpeg `-ss <start> -t <len>` before `-i` for fast seek
 
 `samples_per_bucket` lets the client decide when it has reached 1 sample/bucket (no more detail to
 fetch). Clients should re-query on zoom/pan and cache by `(path, start_s, end_s, buckets)`.
+
+---
+
+## Addendum 2 — restore mode (contract revision 2)
+
+Restore mode (personalized Kurdish spectral restoration, ADR 0008) is a first-class 3.3.0
+feature: the same `POST /api/jobs` endpoint drives it, opt-in per job.
+
+### Request fields (`POST /api/jobs`)
+
+Three fields join the revision-1 request:
+
+```json
+{"input_path": "/abs/in.wav", "profile": "studio",
+ "mode": "restore", "speaker_id": "character_01", "cutoff_hz": 7800.0}
+```
+
+* `mode` — `"natural"` (default; byte-identical behaviour to revision 1) or `"restore"`.
+* `speaker_id` — required when `mode` is `"restore"`; must match `^[a-z0-9_]{1,64}$` (it is
+  passed to the child argv and joined into the profiles path — nothing else is accepted).
+* `cutoff_hz` — optional, restore-only, a positive finite float. When present the child runs
+  with a manual cutoff (`--cutoff-hz`); when absent the cutoff is auto-detected.
+
+Validation (all `422 {"error":"bad_request"}` with a one-line human message):
+
+* `mode:"restore"` without `speaker_id` → 422.
+* `speaker_id` or `cutoff_hz` in natural mode → 422 (never silently ignored).
+* `speaker_id` outside `^[a-z0-9_]{1,64}$` → 422.
+* **Unknown fields → 422.** Every request model (`/api/jobs`, `/api/analyze`, `/api/peaks`)
+  is pinned `extra="forbid"`: a misspelled field is refused, not dropped (revision 1 silently
+  accepted unknown fields — an audit finding). Malformed values and missing required fields
+  keep the revision-1 `400`.
+
+Execution: for a restore job the child command gains
+`--mode restore --speaker-id <id> --profiles-dir <abs profiles root> [--cutoff-hz <val>]`.
+The profiles root is the engine's `HAWAVOCLEAN_PROFILES_DIR` override, else the in-repo
+`profiles/` tree — resolved absolute so the child never depends on its working directory.
+
+### Capabilities (`GET /api/health`)
+
+Two fields join the health body:
+
+```json
+{"ok":true, ..., "speakers":["character_01","character_02"], "restore_available":true}
+```
+
+`speakers` is the sorted list of speaker ids that have a `profile.json` under the engine's
+profiles root (recomputed per request; empty list when the tree is absent). The UI populates
+the restore control from it. `restore_available` is `true` iff `speakers` is non-empty —
+when `false` the UI hides restore entirely.
+
+### `JobStatus` fields
+
+`mode` is always present in a job snapshot. `speaker_id` and `cutoff_hz` appear **only** when
+`mode` is `"restore"` (`cutoff_hz` is `null` for auto-detection); natural-mode snapshots are
+byte-compatible with revision 1.
+
+```json
+{"job_id":"j_8f2a...","state":"running","mode":"restore",
+ "speaker_id":"character_01","cutoff_hz":null, ...}
+```
+
+A done restore job's `report` is a schema-v2 `HawaVoCleanReport` and carries the
+`restoration` section (speaker id, bandwidth estimate with `effective_cutoff_hz` and
+`cutoff_mode`, guard verdicts) — the UI reads it from `report.restoration`.

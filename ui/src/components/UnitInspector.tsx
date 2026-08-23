@@ -21,6 +21,7 @@ import {
 } from '../state/selection';
 import { useStore } from '../state/store';
 import { IconCancel } from './Icons';
+import { RestorationCard } from './RestorationCard';
 
 type ScoreKind = 'ratio' | 'ms' | 'count';
 
@@ -232,6 +233,10 @@ function Summary() {
           <span className="caps">LUFS Δ</span>
         </div>
       </div>
+      {/* A restore run's report carries its restoration audit (Addendum 2);
+          it belongs with the run summary because it is a statement about the
+          whole master, not about any one unit. */}
+      {report?.restoration ? <RestorationCard rest={report.restoration} /> : null}
     </div>
   );
 }

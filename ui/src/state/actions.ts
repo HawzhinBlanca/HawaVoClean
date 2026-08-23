@@ -240,6 +240,11 @@ async function probeEngine(): Promise<void> {
     lastEnginePid = health.engine_pid;
     probeStep = 0;
     getState().setEngine('ready', client, health.version);
+    // Restore capability rides the health answer (contract addendum 2) and is
+    // recomputed per probe, so a profile trained while the engine is up shows
+    // up without a restart. A revision-1 engine sends neither field; that
+    // reads as "no restore", which is exactly what such an engine can do.
+    getState().setCapabilities(health.speakers ?? [], health.restore_available === true);
     if (!everConnected) {
       everConnected = true;
       getState().setStatus(`Engine ready · v${health.version}`);
@@ -1231,11 +1236,26 @@ export async function startJob(): Promise<void> {
     // and the older history row then shows its own cached report beside
     // download links that hand over the newer run's bytes.
     const output = uniqueOutputPath(st.source.path, profile);
+    // Contract addendum 2: the engine pins this request `extra="forbid"` and
+    // natural mode must stay byte-compatible with revision 1, so the three
+    // restore fields are attached only when a restore run is actually being
+    // asked for — never as null placeholders. The speaker check is belt and
+    // braces: the store keeps a speaker selected whenever restore is offered,
+    // and a restore submit without one would only earn the engine's 422.
+    const restore =
+      st.mode === 'restore' && st.speakerId
+        ? {
+            mode: 'restore' as const,
+            speaker_id: st.speakerId,
+            ...(st.cutoffHz !== null ? { cutoff_hz: st.cutoffHz } : {}),
+          }
+        : {};
     const res = await client.createJob({
       input_path: st.source.path,
       profile,
       overwrite: true,
       ...(output ? { output_path: output } : {}),
+      ...restore,
     });
     const job = {
       id: res.job_id,

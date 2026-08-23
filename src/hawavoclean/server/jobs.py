@@ -31,6 +31,7 @@ from typing import Any, Literal, cast
 
 from hawavoclean.errors import ExitCode
 from hawavoclean.logging import get_logger
+from hawavoclean.paths import profiles_root
 from hawavoclean.watchdog import child_env
 
 logger = get_logger("server.jobs")
@@ -62,6 +63,9 @@ class JobRecord:
     report_path: Path
     profile: str
     overwrite: bool
+    mode: str = "natural"
+    speaker_id: str | None = None
+    cutoff_hz: float | None = None
     state: JobState = "queued"
     stage: str = "preflight"
     progress: float = 0.0
@@ -91,10 +95,16 @@ class JobRecord:
             "output_path": str(self.output_path),
             "report_path": str(self.report_path),
             "profile": self.profile,
+            "mode": self.mode,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
         }
+        if self.mode == "restore":
+            # Natural-mode snapshots stay byte-compatible with revision 1
+            # clients: the restore keys appear only when they mean something.
+            out["speaker_id"] = self.speaker_id
+            out["cutoff_hz"] = self.cutoff_hz
         if self.unit is not None:
             out["unit"] = dict(self.unit)
         if self.state == "failed" and self.error is not None:
@@ -121,6 +131,15 @@ def default_command(record: JobRecord) -> list[str]:
         "--profile",
         record.profile,
     ]
+    if record.mode == "restore":
+        # The speaker id is validated at the API boundary (``^[a-z0-9_]{1,64}$``)
+        # before it may reach a child argv, and the profiles dir is resolved
+        # here rather than left to the child's cwd-relative default: the engine
+        # may be launched from anywhere.
+        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]
+        cmd += ["--profiles-dir", str(profiles_root())]
+        if record.cutoff_hz is not None:
+            cmd += ["--cutoff-hz", str(record.cutoff_hz)]
     if record.overwrite:
         cmd.append("--overwrite")
     cmd.append("--progress-json")
@@ -189,6 +208,9 @@ class JobManager:
         output_path: Path,
         profile: str,
         overwrite: bool,
+        mode: str = "natural",
+        speaker_id: str | None = None,
+        cutoff_hz: float | None = None,
     ) -> dict[str, Any]:
         """Queue a job; returns its initial status snapshot."""
         report_path = output_path.parent / f"{output_path.stem}.hawavoclean.json"
@@ -199,6 +221,9 @@ class JobManager:
             report_path=report_path,
             profile=profile,
             overwrite=overwrite,
+            mode=mode,
+            speaker_id=speaker_id,
+            cutoff_hz=cutoff_hz,
         )
         with self._wake:
             if self._closed:
