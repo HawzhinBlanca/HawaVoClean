@@ -467,6 +467,124 @@ MUTATIONS: list[Mutation] = [
             "tests/unit/test_studio_lowband_core.py::test_crossover_reconstructs_the_input_when_the_model_changes_nothing",
         ),
     ),
+    Mutation(
+        "M24",
+        "guard protected-band rejection disabled",
+        "src/hawavoclean/restoration/guard.py",
+        "        if not prot_verif.passes_invariance:",
+        "        if False and not prot_verif.passes_invariance:",
+        # Owner: the revert test's broken candidate is rejected by exactly this
+        # layer (its FAIL verdict carries the protected-band metrics). With the
+        # layer disabled the candidate sails through every other check and the
+        # guard ships altered protected-band audio as a PASS.
+        owners=(
+            "tests/unit/test_restoration_guard.py::test_guard_r_revert_is_reported_as_fail_not_pass",
+        ),
+    ),
+    Mutation(
+        "M25",
+        "guard admits the zero-strength Natural candidate to evaluation",
+        "src/hawavoclean/restoration/guard.py",
+        "            (c for c in candidates if c.strength > 0.0), key=lambda c: c.strength, reverse=True",
+        "            (c for c in candidates), key=lambda c: c.strength, reverse=True",
+        # Owner: the original shipped bug. The 0.0 candidate IS the Natural
+        # audio, so scored against itself it passes trivially and a total
+        # revert is published as a passing verdict.
+        owners=(
+            "tests/unit/test_restoration_guard.py::test_guard_r_revert_is_reported_as_fail_not_pass",
+        ),
+    ),
+    Mutation(
+        "M26",
+        "guard clipping rejection threshold effectively removed",
+        "src/hawavoclean/restoration/guard.py",
+        "        if peak_amp > 1.05:",
+        "        if peak_amp > 1e9:",
+        owners=(
+            "tests/unit/test_restoration_dsp_branches.py::test_guard_rejects_clipping_above_headroom",
+        ),
+    ),
+    Mutation(
+        "M27",
+        "protected-band transition mask generates everywhere",
+        "src/hawavoclean/restoration/protected_band.py",
+        "    mask[freqs >= f_high] = 1.0",
+        "    mask[:] = 1.0",
+        # Owners: the mask IS the protected band. All-ones means the trusted
+        # observed spectrum below the cutoff is replaced by generated content.
+        owners=(
+            "tests/unit/test_restoration_protected_band.py::test_transition_mask_shape_and_values",
+            "tests/unit/test_restoration_protected_band.py::test_merge_protected_spectrum_invariance",
+        ),
+    ),
+    Mutation(
+        "M28",
+        "policy healthy-bandwidth bypass deleted",
+        "src/hawavoclean/restoration/policy.py",
+        """        if (
+            not bandwidth_est.restore_recommended
+            or bandwidth_est.confidence < self.config.cutoff_confidence_min
+        ):""",
+        "        if False:",
+        # Owners: healthy or uncertain audio must never enter the generative
+        # path at all — bypassing is the No-False-Restoration promise.
+        owners=(
+            "tests/unit/test_restoration_validation_branches.py::test_bypass_when_bandwidth_healthy",
+            "tests/unit/test_restoration_validation_branches.py::test_bypass_on_low_confidence",
+        ),
+    ),
+    Mutation(
+        "M29",
+        "restorer attests a fabricated weights hash",
+        "src/hawavoclean/restoration/hawarestore_kd.py",
+        "        self.weights_sha256 = hash_file(ckpt_path)",
+        '        self.weights_sha256 = "0" * 64',
+        # Owner: the report's weights_sha256 must be computed from the file the
+        # network actually loaded — a fabricated digest is provenance fraud.
+        owners=(
+            "tests/unit/test_restoration_hawarestore.py::test_hawarestore_kd_reports_hash_of_loaded_weights",
+        ),
+    ),
+    Mutation(
+        "M30",
+        "bandwidth detector recommends restoring full-band audio",
+        "src/hawavoclean/restoration/bandwidth.py",
+        "        restore_recommended = bool(detected_cutoff <= 16000.0)",
+        "        restore_recommended = True",
+        owners=("tests/unit/test_restoration_bandwidth.py::test_bandwidth_detector_fullband",),
+    ),
+    Mutation(
+        "M31",
+        "strengths ladder no longer requires the 0.0 fallback",
+        "src/hawavoclean/restoration/config.py",
+        """        if 0.0 not in v:
+            raise ValueError("Strengths ladder must include 0.0 as safe fallback candidate.")""",
+        """        if False:
+            raise ValueError("Strengths ladder must include 0.0 as safe fallback candidate.")""",
+        owners=(
+            "tests/unit/test_restoration_validation_branches.py::test_strengths_without_zero_fallback_rejected",
+        ),
+    ),
+    Mutation(
+        "M32",
+        "restore child command loses its absolute profiles dir",
+        "src/hawavoclean/server/jobs.py",
+        """        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]
+        cmd += ["--profiles-dir", str(profiles_root())]""",
+        """        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]""",
+        # Owner: without the explicit absolute dir the child resolves profiles
+        # against its own working directory — the CWD trap this repo has
+        # already been bitten by twice.
+        owners=("tests/unit/test_server_jobs.py::test_default_command_restore_mode_flags",),
+    ),
+    Mutation(
+        "M33",
+        "server stops validating speaker_id before it reaches a child argv",
+        "src/hawavoclean/server/app.py",
+        "        if req.speaker_id is not None and not SPEAKER_ID_PATTERN.fullmatch(req.speaker_id):",
+        "        if False:",
+        owners=("tests/unit/test_server_api.py::test_restore_job_request_validation",),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
