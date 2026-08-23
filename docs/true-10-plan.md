@@ -250,7 +250,7 @@ The restore mode landed after this plan was frozen and is in scope for 3.3.0 by 
 decision. Its engineering safety net is built and mutation-covered; every quality claim is
 currently synthetic. These tasks close that gap and are P0 for any release that ships the mode.
 
-- [ ] **T5.6 — Revise the locked Sorani protocol to four evaluated conditions** (P0, M; depends on T5.1)
+- [x] **T5.6 — Revise the locked Sorani protocol to four evaluated conditions** (P0, M; depends on T5.1)
   - Add `restore` alongside production/studio/lowband: Bonferroni alpha 0.05/4 per profile (the
     450-unit zero-event simultaneous bound stays below 1% at 0.969%), restore-specific stop rules
     (confirmed speaker-identity mismatch, protected-band violation in a shipped unit, undisclosed
