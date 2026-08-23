@@ -167,7 +167,12 @@ def validate_contract(contract: dict[str, Any], *, root: Path = ROOT) -> str:
         == {
             "full_name": "HawzhinBlanca/HawaVoClean",
             "default_branch": "main",
-            "visibility": "private",
+            # U1 was resolved by the visibility change rather than by repairing
+            # private-repo billing: public makes Actions minutes and the
+            # required-reviewer environment available, both of which the
+            # contract depends on and neither of which the free private plan
+            # would grant.
+            "visibility": "public",
             "api_version": "2026-03-10",
         },
         "repository identity differs from the approved boundary",

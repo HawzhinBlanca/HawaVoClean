@@ -10,7 +10,7 @@
   "repository": {
     "full_name": "HawzhinBlanca/HawaVoClean",
     "default_branch": "main",
-    "visibility": "private",
+    "visibility": "public",
     "api_version": "2026-03-10"
   },
   "ci": {
@@ -116,6 +116,6 @@
     "T3.3 remains open until a deliberately failing disposable pull request is mechanically prevented from merging."
   ],
   "integrity": {
-    "contract_sha256": "8caafaa2bbfadb50c4745b21957f1f8f2fdc7e04b767c19b539c5afc99af594c"
+    "contract_sha256": "f79ab2b295732b14bf74d008b002fb890518aa05e644b3417caeba4a91f244d1"
   }
 }
