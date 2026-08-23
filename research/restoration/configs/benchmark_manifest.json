@@ -1,7 +1,9 @@
 {
   "benchmark_name": "hawavoclean_kurdish_restoration_benchmark_v2.1",
-  "version": "1.0",
+  "version": "1.1",
   "target_sample_rate": 48000,
+  "seed": 42,
+  "test_set_provenance": "synthetic_profile_fixtures, non-holdout",
   "speakers": [
     "character_01",
     "character_02",
@@ -21,11 +23,7 @@
     16000.0
   ],
   "candidate_strengths": [
-    1.0,
-    0.75,
-    0.5,
-    0.25,
-    0.0
+    1.0
   ],
   "evaluation_metrics": [
     "fullband_lsd_db",

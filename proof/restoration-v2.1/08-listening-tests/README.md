@@ -1,14 +1,39 @@
-# 08 - Blind ABX and Subjective Listening Protocol
+# 08 - Listening Tests
 
-## Human Listening Protocol Specification
-Subjective listening evaluation for production sign-off requires a double-blind ABX trial protocol across the 10 Kurdish speaker character profiles and native Sorani Kurdish listeners.
+## Status: no human listening evidence exists
 
-### Evaluation Axes
-1. **Intelligibility**: Phonetic clarity of Kurdish sibilants, fricatives, and pharyngeal consonants ($/s/$, $/ʃ/$, $/x/$, $/ħ/$, $/ʕ/$).
-2. **Timbre Naturalness**: Freedom from metallic ringing, robotic phase dispersion, or watery artifacts.
-3. **Speaker Identity Match**: Perceived speaker recognition against reference clean utterances.
+**No human listening test — blind, sighted, formal, or informal — has been conducted on
+Restore-mode output.** No listener ratings, ABX trials, MUSHRA scores, or panel results exist
+anywhere in this repository, and none are claimed. Any release decision made today rests solely
+on automated objective metrics.
 
-### Formal Protocol Status
-- **Automated Evidence**: Full objective verification (LSD, Protected-Band Invariance, Speaker Cosine Similarity, Guard R Multi-Layer Verdicts) is executed continuously via `research/restoration/benchmark.py` and `hawavoclean restore-doctor`.
-- **Subjective Panel Requirements**: Production sign-off requires 15+ native Sorani speakers completing the standardized MUSHRA evaluation harness over 40 paired test utterances (8 kHz low-pass degraded vs. UniverSR vs. HawaRestore-KD vs. Clean 48 kHz reference).
-- **Current Status**: Protocol and scoring harness defined; automated objective metrics gate release. Subjective panels to be scheduled prior to final broad release.
+## What automated evidence exists
+
+Objective verification runs via `research/restoration/benchmark.py` (log-spectral distance,
+protected-band RMS deviation, speaker cosine similarity against profile prototype vectors) and
+`hawavoclean restore-doctor` (preflight and profile diagnostics). Two limits apply:
+
+1. These metrics are currently computed on the **10 synthetic development voice fixtures**, not
+   on recorded Kurdish speech.
+2. Objective metrics cannot verify linguistic content. They do not and cannot substitute for
+   human evaluation of Sorani intelligibility, timbre naturalness, or speaker identity.
+
+## Planned human evaluation
+
+Subjective evaluation is governed by the locked Sorani human acceptance protocol:
+
+- **Protocol document**: `docs/sorani-evaluation-protocol.md`
+  (`hawavoclean-sorani-acceptance-v1`, revision `1.0.0`; machine lock at
+  `evidence/release/sorani-evaluation-protocol.json`).
+- **Precondition**: user checkpoint **U3** (`docs/true-10-plan.md`) must approve every corpus
+  source and its rights, and identify qualified Sorani reviewers, before any candidate material
+  is generated or heard.
+- **Shape of the evaluation** (defined in full by the protocol, which is authoritative over this
+  summary): held-out Sorani source units from held-out speakers, two Sorani-capable reviewers
+  independently comparing every source/candidate pair, a third qualified reviewer adjudicating
+  disagreements blind to profile identity, and hard stop conditions including any single
+  confirmed content alteration.
+
+Until that protocol has been executed and its results recorded, Restore mode has **zero**
+subjective quality or intelligibility evidence, and no claim to the contrary should appear in
+any release material.

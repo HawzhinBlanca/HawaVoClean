@@ -7,6 +7,10 @@
     12000.0,
     16000.0
   ],
+  "seed": 42,
+  "universr_mode": "neural",
+  "test_set_provenance": "synthetic_profile_fixtures, non-holdout",
+  "schema_note": "LSD (log-spectral distance) metrics are in dB and lower is better; speaker_cosine_sim is higher is better. speaker_cosine_sim is computed by the in-repo deterministic mel-DSP SpeakerEmbeddingExtractor, not a neural speaker verification model. Test signals are the 10 synthetic canonical profile WAVs that the personalized model also conditions on (non-holdout).",
   "summary": {
     "degraded_input": {
       "mean_fullband_lsd_db": 6.518167227506638,
@@ -21,16 +25,16 @@
       "mean_speaker_similarity": 0.971080695092678
     },
     "hawarestore_generic_kurdish": {
-      "mean_fullband_lsd_db": 9.615510404109955,
-      "mean_highband_lsd_db": 11.64057515859604,
-      "mean_protected_band_rms": 0.001572264738386978,
-      "mean_speaker_similarity": 0.9601762965321541
+      "mean_fullband_lsd_db": 9.596513921022416,
+      "mean_highband_lsd_db": 11.636346578598022,
+      "mean_protected_band_rms": 0.0015723088776018236,
+      "mean_speaker_similarity": 0.9599932238459588
     },
     "hawarestore_personalized_kd": {
-      "mean_fullband_lsd_db": 9.560268759727478,
-      "mean_highband_lsd_db": 11.578524160385133,
-      "mean_protected_band_rms": 0.001572214719564056,
-      "mean_speaker_similarity": 0.9594933316111565
+      "mean_fullband_lsd_db": 9.54583648443222,
+      "mean_highband_lsd_db": 11.58005074262619,
+      "mean_protected_band_rms": 0.0015723041043904748,
+      "mean_speaker_similarity": 0.9593383982777596
     }
   },
   "results": [
@@ -58,21 +62,21 @@
       "speaker_id": "character_01",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 24.72452735900879,
-      "highband_lsd_db": 27.07718276977539,
-      "protected_band_rms_err": 0.002849379544550638,
-      "highband_energy_error_db": 6.099858420456946,
-      "speaker_cosine_sim": 0.8553763628005981
+      "fullband_lsd_db": 24.28667640686035,
+      "highband_lsd_db": 26.596845626831055,
+      "protected_band_rms_err": 0.0028513728072491204,
+      "highband_energy_error_db": 6.29289486942967,
+      "speaker_cosine_sim": 0.8608496189117432
     },
     {
       "speaker_id": "character_01",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 25.919843673706055,
-      "highband_lsd_db": 28.38703155517578,
-      "protected_band_rms_err": 0.002849021965372512,
-      "highband_energy_error_db": 5.4347026204967355,
-      "speaker_cosine_sim": 0.8460271954536438
+      "fullband_lsd_db": 25.422130584716797,
+      "highband_lsd_db": 27.841079711914062,
+      "protected_band_rms_err": 0.002851937889204249,
+      "highband_energy_error_db": 5.698108553531532,
+      "speaker_cosine_sim": 0.8524262309074402
     },
     {
       "speaker_id": "character_01",
@@ -98,21 +102,21 @@
       "speaker_id": "character_01",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.965883493423462,
-      "highband_lsd_db": 4.767834663391113,
-      "protected_band_rms_err": 0.0009337205269236697,
-      "highband_energy_error_db": 8.822473615143755,
-      "speaker_cosine_sim": 0.9996092915534973
+      "fullband_lsd_db": 4.553086757659912,
+      "highband_lsd_db": 5.476251125335693,
+      "protected_band_rms_err": 0.0009333411184417647,
+      "highband_energy_error_db": 8.917473126162392,
+      "speaker_cosine_sim": 0.9998289346694946
     },
     {
       "speaker_id": "character_01",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.9715449810028076,
-      "highband_lsd_db": 4.7745585441589355,
-      "protected_band_rms_err": 0.0009337109315037914,
-      "highband_energy_error_db": 8.833568916362776,
-      "speaker_cosine_sim": 0.9995990991592407
+      "fullband_lsd_db": 4.650322437286377,
+      "highband_lsd_db": 5.593430995941162,
+      "protected_band_rms_err": 0.0009333165052042261,
+      "highband_energy_error_db": 8.954521106196767,
+      "speaker_cosine_sim": 0.999820351600647
     },
     {
       "speaker_id": "character_01",
@@ -138,21 +142,21 @@
       "speaker_id": "character_01",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.389085054397583,
-      "highband_lsd_db": 4.7621893882751465,
-      "protected_band_rms_err": 0.0006453193385125404,
-      "highband_energy_error_db": 10.123773064182336,
+      "fullband_lsd_db": 3.721121072769165,
+      "highband_lsd_db": 5.231825351715088,
+      "protected_band_rms_err": 0.0006454225940535202,
+      "highband_energy_error_db": 10.19671957513647,
       "speaker_cosine_sim": 0.9999995827674866
     },
     {
       "speaker_id": "character_01",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.3723630905151367,
-      "highband_lsd_db": 4.738012313842773,
-      "protected_band_rms_err": 0.0006452947579237815,
-      "highband_energy_error_db": 10.132557594831859,
-      "speaker_cosine_sim": 0.9999996423721313
+      "fullband_lsd_db": 3.7823283672332764,
+      "highband_lsd_db": 5.3178606033325195,
+      "protected_band_rms_err": 0.0006453786601242784,
+      "highband_energy_error_db": 10.22386800091041,
+      "speaker_cosine_sim": 0.9999995231628418
     },
     {
       "speaker_id": "character_01",
@@ -178,21 +182,21 @@
       "speaker_id": "character_01",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 2.7488179206848145,
-      "highband_lsd_db": 4.726104259490967,
-      "protected_band_rms_err": 0.00045682571902570075,
-      "highband_energy_error_db": 11.512628847586544,
+      "fullband_lsd_db": 2.9501659870147705,
+      "highband_lsd_db": 5.0738091468811035,
+      "protected_band_rms_err": 0.0004564935831414371,
+      "highband_energy_error_db": 11.523348473420466,
       "speaker_cosine_sim": 0.9999998211860657
     },
     {
       "speaker_id": "character_01",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 2.7255992889404297,
-      "highband_lsd_db": 4.685176849365234,
-      "protected_band_rms_err": 0.00045680796466582947,
-      "highband_energy_error_db": 11.51900980914628,
-      "speaker_cosine_sim": 0.9999998211860657
+      "fullband_lsd_db": 2.9896669387817383,
+      "highband_lsd_db": 5.141390323638916,
+      "protected_band_rms_err": 0.0004564224148700632,
+      "highband_energy_error_db": 11.539568284597177,
+      "speaker_cosine_sim": 0.9999998807907104
     },
     {
       "speaker_id": "character_02",
@@ -218,21 +222,21 @@
       "speaker_id": "character_02",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 19.85634994506836,
-      "highband_lsd_db": 21.743030548095703,
-      "protected_band_rms_err": 0.004575647329337712,
-      "highband_energy_error_db": 13.594352515765157,
-      "speaker_cosine_sim": 0.8862694501876831
+      "fullband_lsd_db": 19.552589416503906,
+      "highband_lsd_db": 21.410043716430664,
+      "protected_band_rms_err": 0.004583821350126905,
+      "highband_energy_error_db": 13.69747683098801,
+      "speaker_cosine_sim": 0.8804221749305725
     },
     {
       "speaker_id": "character_02",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 18.931365966796875,
-      "highband_lsd_db": 20.729135513305664,
-      "protected_band_rms_err": 0.004576402021162811,
-      "highband_energy_error_db": 13.90095622300061,
-      "speaker_cosine_sim": 0.8727419376373291
+      "fullband_lsd_db": 18.675081253051758,
+      "highband_lsd_db": 20.448286056518555,
+      "protected_band_rms_err": 0.004583780146148036,
+      "highband_energy_error_db": 13.972851007816502,
+      "speaker_cosine_sim": 0.867128312587738
     },
     {
       "speaker_id": "character_02",
@@ -258,21 +262,21 @@
       "speaker_id": "character_02",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 13.00344467163086,
-      "highband_lsd_db": 15.661343574523926,
-      "protected_band_rms_err": 0.0017589408830409766,
-      "highband_energy_error_db": 8.006805124208658,
-      "speaker_cosine_sim": 0.9937404990196228
+      "fullband_lsd_db": 12.742237091064453,
+      "highband_lsd_db": 15.345542907714844,
+      "protected_band_rms_err": 0.00175901480996873,
+      "highband_energy_error_db": 8.038386710897075,
+      "speaker_cosine_sim": 0.9936686754226685
     },
     {
       "speaker_id": "character_02",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 12.20215892791748,
-      "highband_lsd_db": 14.693323135375977,
-      "protected_band_rms_err": 0.00175889369514661,
-      "highband_energy_error_db": 8.151307935519217,
-      "speaker_cosine_sim": 0.993593692779541
+      "fullband_lsd_db": 11.98801326751709,
+      "highband_lsd_db": 14.434489250183105,
+      "protected_band_rms_err": 0.0017589215998307286,
+      "highband_energy_error_db": 8.169323818581622,
+      "speaker_cosine_sim": 0.9935452938079834
     },
     {
       "speaker_id": "character_02",
@@ -298,20 +302,20 @@
       "speaker_id": "character_02",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.873663425445557,
-      "highband_lsd_db": 6.862914085388184,
-      "protected_band_rms_err": 0.0006390605061844833,
-      "highband_energy_error_db": 5.92044803032929,
+      "fullband_lsd_db": 5.037891864776611,
+      "highband_lsd_db": 7.095374584197998,
+      "protected_band_rms_err": 0.000639132458733799,
+      "highband_energy_error_db": 5.983498400379821,
       "speaker_cosine_sim": 0.9999983310699463
     },
     {
       "speaker_id": "character_02",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.926962852478027,
-      "highband_lsd_db": 6.938573837280273,
-      "protected_band_rms_err": 0.0006391000097269706,
-      "highband_energy_error_db": 5.914196078416213,
+      "fullband_lsd_db": 5.039017677307129,
+      "highband_lsd_db": 7.097294807434082,
+      "protected_band_rms_err": 0.0006392004675767506,
+      "highband_energy_error_db": 5.963021818848384,
       "speaker_cosine_sim": 0.9999982714653015
     },
     {
@@ -338,21 +342,21 @@
       "speaker_id": "character_02",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.978867292404175,
-      "highband_lsd_db": 6.851463794708252,
-      "protected_band_rms_err": 0.000447862511012688,
-      "highband_energy_error_db": 7.1597919432548816,
-      "speaker_cosine_sim": 0.9999991655349731
+      "fullband_lsd_db": 4.045740604400635,
+      "highband_lsd_db": 6.966440200805664,
+      "protected_band_rms_err": 0.0004475177275375039,
+      "highband_energy_error_db": 7.169865316128239,
+      "speaker_cosine_sim": 0.9999992251396179
     },
     {
       "speaker_id": "character_02",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.035429954528809,
-      "highband_lsd_db": 6.950014591217041,
-      "protected_band_rms_err": 0.00044789564593755666,
-      "highband_energy_error_db": 7.155783138368653,
-      "speaker_cosine_sim": 0.9999991655349731
+      "fullband_lsd_db": 4.067514896392822,
+      "highband_lsd_db": 7.0048298835754395,
+      "protected_band_rms_err": 0.00044763339063796714,
+      "highband_energy_error_db": 7.160297347740375,
+      "speaker_cosine_sim": 0.9999991059303284
     },
     {
       "speaker_id": "character_03",
@@ -378,21 +382,21 @@
       "speaker_id": "character_03",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 23.425926208496094,
-      "highband_lsd_db": 25.655134201049805,
-      "protected_band_rms_err": 0.003141757880476829,
-      "highband_energy_error_db": 9.115439827986776,
-      "speaker_cosine_sim": 0.7978643178939819
+      "fullband_lsd_db": 23.049715042114258,
+      "highband_lsd_db": 25.24286651611328,
+      "protected_band_rms_err": 0.003142384824984322,
+      "highband_energy_error_db": 9.250410272611612,
+      "speaker_cosine_sim": 0.8019967675209045
     },
     {
       "speaker_id": "character_03",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 22.765043258666992,
-      "highband_lsd_db": 24.930891036987305,
-      "protected_band_rms_err": 0.0031434370317713674,
-      "highband_energy_error_db": 9.393658816089914,
-      "speaker_cosine_sim": 0.8008868098258972
+      "fullband_lsd_db": 22.41826820373535,
+      "highband_lsd_db": 24.550823211669922,
+      "protected_band_rms_err": 0.0031439009600217026,
+      "highband_energy_error_db": 9.502495717510568,
+      "speaker_cosine_sim": 0.8048381805419922
     },
     {
       "speaker_id": "character_03",
@@ -418,21 +422,21 @@
       "speaker_id": "character_03",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.366423606872559,
-      "highband_lsd_db": 5.247781276702881,
-      "protected_band_rms_err": 0.0009454575391615104,
-      "highband_energy_error_db": 7.214900424187459,
-      "speaker_cosine_sim": 0.9994859099388123
+      "fullband_lsd_db": 4.791369438171387,
+      "highband_lsd_db": 5.760427951812744,
+      "protected_band_rms_err": 0.0009451194645132802,
+      "highband_energy_error_db": 7.335892180896613,
+      "speaker_cosine_sim": 0.9998070001602173
     },
     {
       "speaker_id": "character_03",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.373315334320068,
-      "highband_lsd_db": 5.256155967712402,
-      "protected_band_rms_err": 0.0009454682206512826,
-      "highband_energy_error_db": 7.209184045394328,
-      "speaker_cosine_sim": 0.9994932413101196
+      "fullband_lsd_db": 4.736083984375,
+      "highband_lsd_db": 5.693798542022705,
+      "protected_band_rms_err": 0.000945163808628226,
+      "highband_energy_error_db": 7.30929820557107,
+      "speaker_cosine_sim": 0.999799370765686
     },
     {
       "speaker_id": "character_03",
@@ -458,20 +462,20 @@
       "speaker_id": "character_03",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.7495837211608887,
-      "highband_lsd_db": 5.275829792022705,
-      "protected_band_rms_err": 0.0006508269971558178,
-      "highband_energy_error_db": 9.034204788762416,
-      "speaker_cosine_sim": 0.999999463558197
+      "fullband_lsd_db": 3.9184470176696777,
+      "highband_lsd_db": 5.514415740966797,
+      "protected_band_rms_err": 0.0006510004514458695,
+      "highband_energy_error_db": 9.126644566561371,
+      "speaker_cosine_sim": 0.9999995231628418
     },
     {
       "speaker_id": "character_03",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.771599531173706,
-      "highband_lsd_db": 5.307169437408447,
-      "protected_band_rms_err": 0.0006508468522939718,
-      "highband_energy_error_db": 9.029489004850623,
+      "fullband_lsd_db": 3.896331548690796,
+      "highband_lsd_db": 5.483373641967773,
+      "protected_band_rms_err": 0.0006510003231378941,
+      "highband_energy_error_db": 9.105526095562372,
       "speaker_cosine_sim": 0.9999994039535522
     },
     {
@@ -498,21 +502,21 @@
       "speaker_id": "character_03",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 2.9922564029693604,
-      "highband_lsd_db": 5.137648105621338,
-      "protected_band_rms_err": 0.00046008306179763127,
-      "highband_energy_error_db": 10.62274994592296,
-      "speaker_cosine_sim": 0.9999997615814209
+      "fullband_lsd_db": 3.051755666732788,
+      "highband_lsd_db": 5.238762855529785,
+      "protected_band_rms_err": 0.000459816262858752,
+      "highband_energy_error_db": 10.650368284824642,
+      "speaker_cosine_sim": 0.9999998211860657
     },
     {
       "speaker_id": "character_03",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.0083296298980713,
-      "highband_lsd_db": 5.16586446762085,
-      "protected_band_rms_err": 0.00046008768448268817,
-      "highband_energy_error_db": 10.62033811484911,
-      "speaker_cosine_sim": 0.9999997615814209
+      "fullband_lsd_db": 3.045212507247925,
+      "highband_lsd_db": 5.227872848510742,
+      "protected_band_rms_err": 0.0004598495977521485,
+      "highband_energy_error_db": 10.64285345096247,
+      "speaker_cosine_sim": 0.9999997019767761
     },
     {
       "speaker_id": "character_04",
@@ -538,21 +542,21 @@
       "speaker_id": "character_04",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 20.756488800048828,
-      "highband_lsd_db": 22.72947120666504,
-      "protected_band_rms_err": 0.0043843429680783886,
-      "highband_energy_error_db": 12.680660013628952,
-      "speaker_cosine_sim": 0.8832864761352539
+      "fullband_lsd_db": 20.446552276611328,
+      "highband_lsd_db": 22.38960838317871,
+      "protected_band_rms_err": 0.0043821587383585945,
+      "highband_energy_error_db": 12.784494291778554,
+      "speaker_cosine_sim": 0.8777874708175659
     },
     {
       "speaker_id": "character_04",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 21.05144691467285,
-      "highband_lsd_db": 23.052688598632812,
-      "protected_band_rms_err": 0.0043834928257532185,
-      "highband_energy_error_db": 12.563841036080012,
-      "speaker_cosine_sim": 0.8871461153030396
+      "fullband_lsd_db": 20.7253475189209,
+      "highband_lsd_db": 22.695180892944336,
+      "protected_band_rms_err": 0.004381050471224557,
+      "highband_energy_error_db": 12.68170273609014,
+      "speaker_cosine_sim": 0.8814765214920044
     },
     {
       "speaker_id": "character_04",
@@ -578,21 +582,21 @@
       "speaker_id": "character_04",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 13.656266212463379,
-      "highband_lsd_db": 16.443368911743164,
-      "protected_band_rms_err": 0.0015132521546834417,
-      "highband_energy_error_db": 3.872015157348962,
-      "speaker_cosine_sim": 0.9937462210655212
+      "fullband_lsd_db": 13.359198570251465,
+      "highband_lsd_db": 16.084033966064453,
+      "protected_band_rms_err": 0.0015122701177289768,
+      "highband_energy_error_db": 3.915358141413056,
+      "speaker_cosine_sim": 0.993628978729248
     },
     {
       "speaker_id": "character_04",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 13.866146087646484,
-      "highband_lsd_db": 16.696765899658203,
-      "protected_band_rms_err": 0.0015132957787116757,
-      "highband_energy_error_db": 3.823512405650629,
-      "speaker_cosine_sim": 0.9937846660614014
+      "fullband_lsd_db": 13.555869102478027,
+      "highband_lsd_db": 16.321537017822266,
+      "protected_band_rms_err": 0.0015121274944477475,
+      "highband_energy_error_db": 3.872066615116382,
+      "speaker_cosine_sim": 0.9936662316322327
     },
     {
       "speaker_id": "character_04",
@@ -618,21 +622,21 @@
       "speaker_id": "character_04",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.639162063598633,
-      "highband_lsd_db": 6.526273250579834,
-      "protected_band_rms_err": 0.0006508980664802278,
-      "highband_energy_error_db": 6.821015136292593,
+      "fullband_lsd_db": 4.8492255210876465,
+      "highband_lsd_db": 6.8242082595825195,
+      "protected_band_rms_err": 0.0006509841554513877,
+      "highband_energy_error_db": 6.88522841876956,
       "speaker_cosine_sim": 0.9999975562095642
     },
     {
       "speaker_id": "character_04",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.625975131988525,
-      "highband_lsd_db": 6.507519721984863,
-      "protected_band_rms_err": 0.0006508867998970691,
-      "highband_energy_error_db": 6.822781034202121,
-      "speaker_cosine_sim": 0.9999975562095642
+      "fullband_lsd_db": 4.852259159088135,
+      "highband_lsd_db": 6.828399658203125,
+      "protected_band_rms_err": 0.0006509831124204159,
+      "highband_energy_error_db": 6.891833647847429,
+      "speaker_cosine_sim": 0.9999976754188538
     },
     {
       "speaker_id": "character_04",
@@ -658,21 +662,21 @@
       "speaker_id": "character_04",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.727930784225464,
-      "highband_lsd_db": 6.406445503234863,
-      "protected_band_rms_err": 0.0004572903289578684,
-      "highband_energy_error_db": 8.194155951420989,
-      "speaker_cosine_sim": 0.9999986290931702
+      "fullband_lsd_db": 3.8283560276031494,
+      "highband_lsd_db": 6.580044746398926,
+      "protected_band_rms_err": 0.00045692831280946475,
+      "highband_energy_error_db": 8.203861505479725,
+      "speaker_cosine_sim": 0.9999987483024597
     },
     {
       "speaker_id": "character_04",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.714700222015381,
-      "highband_lsd_db": 6.383307456970215,
-      "protected_band_rms_err": 0.00045728667044277026,
-      "highband_energy_error_db": 8.195339368746076,
-      "speaker_cosine_sim": 0.9999986290931702
+      "fullband_lsd_db": 3.8261942863464355,
+      "highband_lsd_db": 6.576112270355225,
+      "protected_band_rms_err": 0.00045690885291208114,
+      "highband_energy_error_db": 8.206287093909365,
+      "speaker_cosine_sim": 0.9999988675117493
     },
     {
       "speaker_id": "character_05",
@@ -698,21 +702,21 @@
       "speaker_id": "character_05",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 23.604005813598633,
-      "highband_lsd_db": 25.851675033569336,
-      "protected_band_rms_err": 0.0036070899693320894,
-      "highband_energy_error_db": 10.473518477795372,
-      "speaker_cosine_sim": 0.7324112057685852
+      "fullband_lsd_db": 23.212360382080078,
+      "highband_lsd_db": 25.422449111938477,
+      "protected_band_rms_err": 0.003607617803261184,
+      "highband_energy_error_db": 10.643530954660903,
+      "speaker_cosine_sim": 0.7345103025436401
     },
     {
       "speaker_id": "character_05",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 24.625717163085938,
-      "highband_lsd_db": 26.971275329589844,
-      "protected_band_rms_err": 0.0036074989080363737,
-      "highband_energy_error_db": 9.93395624444478,
-      "speaker_cosine_sim": 0.7296572327613831
+      "fullband_lsd_db": 24.19405746459961,
+      "highband_lsd_db": 26.498422622680664,
+      "protected_band_rms_err": 0.003608637292705482,
+      "highband_energy_error_db": 10.157170738913537,
+      "speaker_cosine_sim": 0.7321074604988098
     },
     {
       "speaker_id": "character_05",
@@ -738,21 +742,21 @@
       "speaker_id": "character_05",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.829144477844238,
-      "highband_lsd_db": 5.807944297790527,
-      "protected_band_rms_err": 0.0009593313374358296,
-      "highband_energy_error_db": 1.715319661165017,
-      "speaker_cosine_sim": 0.9993895292282104
+      "fullband_lsd_db": 5.363555431365967,
+      "highband_lsd_db": 6.452938556671143,
+      "protected_band_rms_err": 0.0009589444374050561,
+      "highband_energy_error_db": 1.7528773578347523,
+      "speaker_cosine_sim": 0.9995629787445068
     },
     {
       "speaker_id": "character_05",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.814591407775879,
-      "highband_lsd_db": 5.790332317352295,
-      "protected_band_rms_err": 0.0009593231082986226,
-      "highband_energy_error_db": 1.719502098394606,
-      "speaker_cosine_sim": 0.9993786215782166
+      "fullband_lsd_db": 5.435064315795898,
+      "highband_lsd_db": 6.539082050323486,
+      "protected_band_rms_err": 0.0009589399471188343,
+      "highband_energy_error_db": 1.7667955409380247,
+      "speaker_cosine_sim": 0.9995395541191101
     },
     {
       "speaker_id": "character_05",
@@ -778,21 +782,21 @@
       "speaker_id": "character_05",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.162750244140625,
-      "highband_lsd_db": 5.859228134155273,
-      "protected_band_rms_err": 0.0006537402892552406,
-      "highband_energy_error_db": 7.938654327348339,
-      "speaker_cosine_sim": 0.9999992251396179
+      "fullband_lsd_db": 4.4300923347473145,
+      "highband_lsd_db": 6.23706579208374,
+      "protected_band_rms_err": 0.0006538378113912197,
+      "highband_energy_error_db": 8.006332343127529,
+      "speaker_cosine_sim": 0.9999992847442627
     },
     {
       "speaker_id": "character_05",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.124819755554199,
-      "highband_lsd_db": 5.805157661437988,
-      "protected_band_rms_err": 0.0006537330891681011,
-      "highband_energy_error_db": 7.947446895170059,
-      "speaker_cosine_sim": 0.9999992251396179
+      "fullband_lsd_db": 4.458614349365234,
+      "highband_lsd_db": 6.276876926422119,
+      "protected_band_rms_err": 0.0006538148272063403,
+      "highband_energy_error_db": 8.03106122119612,
+      "speaker_cosine_sim": 0.9999992847442627
     },
     {
       "speaker_id": "character_05",
@@ -818,21 +822,21 @@
       "speaker_id": "character_05",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.343038558959961,
-      "highband_lsd_db": 5.749675273895264,
-      "protected_band_rms_err": 0.0004611997407181361,
-      "highband_energy_error_db": 9.385823171694863,
-      "speaker_cosine_sim": 0.9999995827674866
+      "fullband_lsd_db": 3.4896559715270996,
+      "highband_lsd_db": 6.002754211425781,
+      "protected_band_rms_err": 0.0004608597349138094,
+      "highband_energy_error_db": 9.395193080936068,
+      "speaker_cosine_sim": 0.9999997019767761
     },
     {
       "speaker_id": "character_05",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.3028671741485596,
-      "highband_lsd_db": 5.679311752319336,
-      "protected_band_rms_err": 0.00046119830180847417,
-      "highband_energy_error_db": 9.392754525118171,
-      "speaker_cosine_sim": 0.9999997019767761
+      "fullband_lsd_db": 3.498643159866333,
+      "highband_lsd_db": 6.017511367797852,
+      "protected_band_rms_err": 0.0004608282924657825,
+      "highband_energy_error_db": 9.412078562035012,
+      "speaker_cosine_sim": 0.9999995827674866
     },
     {
       "speaker_id": "character_06",
@@ -858,21 +862,21 @@
       "speaker_id": "character_06",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 20.577394485473633,
-      "highband_lsd_db": 22.53594398498535,
-      "protected_band_rms_err": 0.004578998889838176,
-      "highband_energy_error_db": 13.482870513903045,
-      "speaker_cosine_sim": 0.8936930894851685
+      "fullband_lsd_db": 20.255529403686523,
+      "highband_lsd_db": 22.1824893951416,
+      "protected_band_rms_err": 0.0045804012400515355,
+      "highband_energy_error_db": 13.605023524849686,
+      "speaker_cosine_sim": 0.8875118494033813
     },
     {
       "speaker_id": "character_06",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 20.804920196533203,
-      "highband_lsd_db": 22.785268783569336,
-      "protected_band_rms_err": 0.004577883356616959,
-      "highband_energy_error_db": 13.380911173456782,
-      "speaker_cosine_sim": 0.8969236612319946
+      "fullband_lsd_db": 20.466684341430664,
+      "highband_lsd_db": 22.41391372680664,
+      "protected_band_rms_err": 0.004580450803896333,
+      "highband_energy_error_db": 13.51798275078532,
+      "speaker_cosine_sim": 0.8905518054962158
     },
     {
       "speaker_id": "character_06",
@@ -898,21 +902,21 @@
       "speaker_id": "character_06",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 12.70944595336914,
-      "highband_lsd_db": 15.295740127563477,
-      "protected_band_rms_err": 0.001804068560264273,
-      "highband_energy_error_db": 9.252410619534261,
-      "speaker_cosine_sim": 0.9931243062019348
+      "fullband_lsd_db": 12.50726318359375,
+      "highband_lsd_db": 15.051511764526367,
+      "protected_band_rms_err": 0.001803249149152696,
+      "highband_energy_error_db": 9.274736521452184,
+      "speaker_cosine_sim": 0.993047297000885
     },
     {
       "speaker_id": "character_06",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 12.959406852722168,
-      "highband_lsd_db": 15.597639083862305,
-      "protected_band_rms_err": 0.0018039398666489473,
-      "highband_energy_error_db": 9.204813994845507,
-      "speaker_cosine_sim": 0.9931663274765015
+      "fullband_lsd_db": 12.739531517028809,
+      "highband_lsd_db": 15.332083702087402,
+      "protected_band_rms_err": 0.0018033680984553733,
+      "highband_energy_error_db": 9.232105365881157,
+      "speaker_cosine_sim": 0.9930991530418396
     },
     {
       "speaker_id": "character_06",
@@ -938,21 +942,21 @@
       "speaker_id": "character_06",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.88961935043335,
-      "highband_lsd_db": 6.879195690155029,
-      "protected_band_rms_err": 0.000631563653001862,
-      "highband_energy_error_db": 5.7380932314942275,
+      "fullband_lsd_db": 5.049159049987793,
+      "highband_lsd_db": 7.104822158813477,
+      "protected_band_rms_err": 0.0006316451759500218,
+      "highband_energy_error_db": 5.799834271273575,
       "speaker_cosine_sim": 0.9999982714653015
     },
     {
       "speaker_id": "character_06",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.881280422210693,
-      "highband_lsd_db": 6.867331504821777,
-      "protected_band_rms_err": 0.0006315499739645129,
-      "highband_energy_error_db": 5.739060580922676,
-      "speaker_cosine_sim": 0.9999982118606567
+      "fullband_lsd_db": 5.050669193267822,
+      "highband_lsd_db": 7.106893539428711,
+      "protected_band_rms_err": 0.0006316174329202845,
+      "highband_energy_error_db": 5.802537379108225,
+      "speaker_cosine_sim": 0.9999982714653015
     },
     {
       "speaker_id": "character_06",
@@ -978,20 +982,20 @@
       "speaker_id": "character_06",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.964445114135742,
-      "highband_lsd_db": 6.822934627532959,
-      "protected_band_rms_err": 0.0004417116101045973,
-      "highband_energy_error_db": 7.097438874357089,
+      "fullband_lsd_db": 4.034422874450684,
+      "highband_lsd_db": 6.943414211273193,
+      "protected_band_rms_err": 0.00044137176613896496,
+      "highband_energy_error_db": 7.1078171099758585,
       "speaker_cosine_sim": 0.9999990463256836
     },
     {
       "speaker_id": "character_06",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.9534103870391846,
-      "highband_lsd_db": 6.803661823272705,
-      "protected_band_rms_err": 0.0004417018185807788,
-      "highband_energy_error_db": 7.0983095954099715,
+      "fullband_lsd_db": 4.031909465789795,
+      "highband_lsd_db": 6.938896179199219,
+      "protected_band_rms_err": 0.00044134917366611757,
+      "highband_energy_error_db": 7.109856468497191,
       "speaker_cosine_sim": 0.9999990463256836
     },
     {
@@ -1018,21 +1022,21 @@
       "speaker_id": "character_07",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 23.413206100463867,
-      "highband_lsd_db": 25.641555786132812,
-      "protected_band_rms_err": 0.0033316678818678834,
-      "highband_energy_error_db": 9.926211145010619,
-      "speaker_cosine_sim": 0.7813504934310913
+      "fullband_lsd_db": 23.074674606323242,
+      "highband_lsd_db": 25.2706356048584,
+      "protected_band_rms_err": 0.003328374465121734,
+      "highband_energy_error_db": 10.040406289460755,
+      "speaker_cosine_sim": 0.7844990491867065
     },
     {
       "speaker_id": "character_07",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 23.241973876953125,
-      "highband_lsd_db": 25.453901290893555,
-      "protected_band_rms_err": 0.0033313220692751033,
-      "highband_energy_error_db": 9.996899670995544,
-      "speaker_cosine_sim": 0.7820165753364563
+      "fullband_lsd_db": 22.91419219970703,
+      "highband_lsd_db": 25.09476089477539,
+      "protected_band_rms_err": 0.003328552196631559,
+      "highband_energy_error_db": 10.102275913568619,
+      "speaker_cosine_sim": 0.7852872610092163
     },
     {
       "speaker_id": "character_07",
@@ -1058,21 +1062,21 @@
       "speaker_id": "character_07",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.575482368469238,
-      "highband_lsd_db": 5.496119976043701,
-      "protected_band_rms_err": 0.0009506202146857205,
-      "highband_energy_error_db": 5.4868196783539,
-      "speaker_cosine_sim": 0.9995046257972717
+      "fullband_lsd_db": 4.739642143249512,
+      "highband_lsd_db": 5.694006443023682,
+      "protected_band_rms_err": 0.0009501566134384997,
+      "highband_energy_error_db": 5.695308603375375,
+      "speaker_cosine_sim": 0.9988271594047546
     },
     {
       "speaker_id": "character_07",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.576823711395264,
-      "highband_lsd_db": 5.497748851776123,
-      "protected_band_rms_err": 0.0009506206126625629,
-      "highband_energy_error_db": 5.486356748020141,
-      "speaker_cosine_sim": 0.99950110912323
+      "fullband_lsd_db": 4.733424186706543,
+      "highband_lsd_db": 5.686495304107666,
+      "protected_band_rms_err": 0.0009501715174439695,
+      "highband_energy_error_db": 5.6929257823305885,
+      "speaker_cosine_sim": 0.9988322257995605
     },
     {
       "speaker_id": "character_07",
@@ -1098,21 +1102,21 @@
       "speaker_id": "character_07",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.9570400714874268,
-      "highband_lsd_db": 5.564087390899658,
-      "protected_band_rms_err": 0.0006527616579657053,
-      "highband_energy_error_db": 8.511802974558545,
-      "speaker_cosine_sim": 0.9999994039535522
+      "fullband_lsd_db": 3.7504961490631104,
+      "highband_lsd_db": 5.268860340118408,
+      "protected_band_rms_err": 0.0006527234989025968,
+      "highband_energy_error_db": 8.666397714196005,
+      "speaker_cosine_sim": 0.999999463558197
     },
     {
       "speaker_id": "character_07",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.9657018184661865,
-      "highband_lsd_db": 5.576441287994385,
-      "protected_band_rms_err": 0.0006527697890864217,
-      "highband_energy_error_db": 8.510268030244223,
-      "speaker_cosine_sim": 0.9999994039535522
+      "fullband_lsd_db": 3.746561288833618,
+      "highband_lsd_db": 5.263387203216553,
+      "protected_band_rms_err": 0.0006527538912873492,
+      "highband_energy_error_db": 8.656775818271882,
+      "speaker_cosine_sim": 0.9999995231628418
     },
     {
       "speaker_id": "character_07",
@@ -1138,21 +1142,21 @@
       "speaker_id": "character_07",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.0801265239715576,
-      "highband_lsd_db": 5.298117160797119,
-      "protected_band_rms_err": 0.0004610007154403053,
-      "highband_energy_error_db": 10.526549587639023,
-      "speaker_cosine_sim": 0.9999997019767761
+      "fullband_lsd_db": 2.8404102325439453,
+      "highband_lsd_db": 4.876698970794678,
+      "protected_band_rms_err": 0.0004605053661747468,
+      "highband_energy_error_db": 10.592183628655665,
+      "speaker_cosine_sim": 0.9999997615814209
     },
     {
       "speaker_id": "character_07",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.087953805923462,
-      "highband_lsd_db": 5.311803817749023,
-      "protected_band_rms_err": 0.0004610101987490971,
-      "highband_energy_error_db": 10.525487381667942,
-      "speaker_cosine_sim": 0.9999998211860657
+      "fullband_lsd_db": 2.8392703533172607,
+      "highband_lsd_db": 4.8749308586120605,
+      "protected_band_rms_err": 0.00046052837862354515,
+      "highband_energy_error_db": 10.585682893378706,
+      "speaker_cosine_sim": 0.9999997615814209
     },
     {
       "speaker_id": "character_08",
@@ -1178,21 +1182,21 @@
       "speaker_id": "character_08",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 20.341156005859375,
-      "highband_lsd_db": 22.267358779907227,
-      "protected_band_rms_err": 0.004499528336738632,
-      "highband_energy_error_db": 13.506403953742051,
-      "speaker_cosine_sim": 0.9092733263969421
+      "fullband_lsd_db": 20.072845458984375,
+      "highband_lsd_db": 21.97442054748535,
+      "protected_band_rms_err": 0.004504244813895377,
+      "highband_energy_error_db": 13.611117485950325,
+      "speaker_cosine_sim": 0.904238224029541
     },
     {
       "speaker_id": "character_08",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 19.60760498046875,
-      "highband_lsd_db": 21.462879180908203,
-      "protected_band_rms_err": 0.004500924463069077,
-      "highband_energy_error_db": 13.802939975761745,
-      "speaker_cosine_sim": 0.8991344571113586
+      "fullband_lsd_db": 19.372535705566406,
+      "highband_lsd_db": 21.20625877380371,
+      "protected_band_rms_err": 0.0045049845532252894,
+      "highband_energy_error_db": 13.883764125530526,
+      "speaker_cosine_sim": 0.8942135572433472
     },
     {
       "speaker_id": "character_08",
@@ -1218,21 +1222,21 @@
       "speaker_id": "character_08",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 12.597228050231934,
-      "highband_lsd_db": 15.156172752380371,
-      "protected_band_rms_err": 0.001853963850805613,
-      "highband_energy_error_db": 10.311025664155064,
-      "speaker_cosine_sim": 0.9946714043617249
+      "fullband_lsd_db": 12.537923812866211,
+      "highband_lsd_db": 15.084456443786621,
+      "protected_band_rms_err": 0.0018526780559969481,
+      "highband_energy_error_db": 10.30969369824572,
+      "speaker_cosine_sim": 0.9946123957633972
     },
     {
       "speaker_id": "character_08",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 12.007384300231934,
-      "highband_lsd_db": 14.443340301513672,
-      "protected_band_rms_err": 0.001853977104208723,
-      "highband_energy_error_db": 10.421412302298979,
-      "speaker_cosine_sim": 0.9945617914199829
+      "fullband_lsd_db": 11.97174072265625,
+      "highband_lsd_db": 14.40020751953125,
+      "protected_band_rms_err": 0.0018529427389474499,
+      "highband_energy_error_db": 10.416977836530553,
+      "speaker_cosine_sim": 0.99451744556427
     },
     {
       "speaker_id": "character_08",
@@ -1258,21 +1262,21 @@
       "speaker_id": "character_08",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.997039794921875,
-      "highband_lsd_db": 7.035425662994385,
-      "protected_band_rms_err": 0.0006195589530671789,
-      "highband_energy_error_db": 5.261325027132297,
-      "speaker_cosine_sim": 0.9999986886978149
+      "fullband_lsd_db": 4.598710060119629,
+      "highband_lsd_db": 6.469102382659912,
+      "protected_band_rms_err": 0.000619506278996091,
+      "highband_energy_error_db": 5.387872926047167,
+      "speaker_cosine_sim": 0.9999987483024597
     },
     {
       "speaker_id": "character_08",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 5.040308475494385,
-      "highband_lsd_db": 7.096875190734863,
-      "protected_band_rms_err": 0.0006195920972743631,
-      "highband_energy_error_db": 5.256769926685939,
-      "speaker_cosine_sim": 0.9999986886978149
+      "fullband_lsd_db": 4.641618251800537,
+      "highband_lsd_db": 6.530439376831055,
+      "protected_band_rms_err": 0.0006195943478535045,
+      "highband_energy_error_db": 5.356847856556443,
+      "speaker_cosine_sim": 0.9999988079071045
     },
     {
       "speaker_id": "character_08",
@@ -1298,21 +1302,21 @@
       "speaker_id": "character_08",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.013535022735596,
-      "highband_lsd_db": 6.902302265167236,
-      "protected_band_rms_err": 0.0004324296680455331,
-      "highband_energy_error_db": 7.029830235773416,
-      "speaker_cosine_sim": 0.9999992847442627
+      "fullband_lsd_db": 3.627418279647827,
+      "highband_lsd_db": 6.229066848754883,
+      "protected_band_rms_err": 0.00043196355900470385,
+      "highband_energy_error_db": 7.089925285999224,
+      "speaker_cosine_sim": 0.9999994039535522
     },
     {
       "speaker_id": "character_08",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.059584140777588,
-      "highband_lsd_db": 6.982409477233887,
-      "protected_band_rms_err": 0.00043245112865728674,
-      "highband_energy_error_db": 7.026263044218389,
-      "speaker_cosine_sim": 0.9999992847442627
+      "fullband_lsd_db": 3.6855897903442383,
+      "highband_lsd_db": 6.3310160636901855,
+      "protected_band_rms_err": 0.00043208698135438044,
+      "highband_energy_error_db": 7.0696169833978395,
+      "speaker_cosine_sim": 0.9999994039535522
     },
     {
       "speaker_id": "character_09",
@@ -1338,21 +1342,21 @@
       "speaker_id": "character_09",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 23.683744430541992,
-      "highband_lsd_db": 25.934907913208008,
-      "protected_band_rms_err": 0.00303503231888304,
-      "highband_energy_error_db": 8.50221719735324,
-      "speaker_cosine_sim": 0.8194682598114014
+      "fullband_lsd_db": 23.25963592529297,
+      "highband_lsd_db": 25.469926834106445,
+      "protected_band_rms_err": 0.003030269550812396,
+      "highband_energy_error_db": 8.653491630369418,
+      "speaker_cosine_sim": 0.8253380060195923
     },
     {
       "speaker_id": "character_09",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 22.81571388244629,
-      "highband_lsd_db": 24.983469009399414,
-      "protected_band_rms_err": 0.003030732422941644,
-      "highband_energy_error_db": 8.802282182729943,
-      "speaker_cosine_sim": 0.8239715695381165
+      "fullband_lsd_db": 22.433338165283203,
+      "highband_lsd_db": 24.564197540283203,
+      "protected_band_rms_err": 0.0030261892946522435,
+      "highband_energy_error_db": 8.908024204296535,
+      "speaker_cosine_sim": 0.8296141624450684
     },
     {
       "speaker_id": "character_09",
@@ -1378,21 +1382,21 @@
       "speaker_id": "character_09",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.182654857635498,
-      "highband_lsd_db": 5.031935214996338,
-      "protected_band_rms_err": 0.0009420358234177,
-      "highband_energy_error_db": 7.914622779368781,
-      "speaker_cosine_sim": 0.9994859099388123
+      "fullband_lsd_db": 4.7555460929870605,
+      "highband_lsd_db": 5.722780227661133,
+      "protected_band_rms_err": 0.0009416556647487705,
+      "highband_energy_error_db": 8.00546107971834,
+      "speaker_cosine_sim": 0.9998112320899963
     },
     {
       "speaker_id": "character_09",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.1917595863342285,
-      "highband_lsd_db": 5.042977333068848,
-      "protected_band_rms_err": 0.0009420303861727881,
-      "highband_energy_error_db": 7.907655502712059,
-      "speaker_cosine_sim": 0.9994803667068481
+      "fullband_lsd_db": 4.694427013397217,
+      "highband_lsd_db": 5.64919376373291,
+      "protected_band_rms_err": 0.0009414619465167522,
+      "highband_energy_error_db": 7.987200528909124,
+      "speaker_cosine_sim": 0.9997965693473816
     },
     {
       "speaker_id": "character_09",
@@ -1418,21 +1422,21 @@
       "speaker_id": "character_09",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.5781126022338867,
-      "highband_lsd_db": 5.034778594970703,
-      "protected_band_rms_err": 0.0006494875506213264,
-      "highband_energy_error_db": 9.474204090049964,
+      "fullband_lsd_db": 3.8923401832580566,
+      "highband_lsd_db": 5.479295253753662,
+      "protected_band_rms_err": 0.0006495916540780761,
+      "highband_energy_error_db": 9.545399856508865,
       "speaker_cosine_sim": 0.9999995827674866
     },
     {
       "speaker_id": "character_09",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.593502998352051,
-      "highband_lsd_db": 5.056748867034912,
-      "protected_band_rms_err": 0.0006494279791323357,
-      "highband_energy_error_db": 9.470341521497968,
-      "speaker_cosine_sim": 0.999999463558197
+      "fullband_lsd_db": 3.8774893283843994,
+      "highband_lsd_db": 5.458527088165283,
+      "protected_band_rms_err": 0.000649547090697101,
+      "highband_energy_error_db": 9.541188264458285,
+      "speaker_cosine_sim": 0.9999995827674866
     },
     {
       "speaker_id": "character_09",
@@ -1458,20 +1462,20 @@
       "speaker_id": "character_09",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 2.864198923110962,
-      "highband_lsd_db": 4.923862457275391,
-      "protected_band_rms_err": 0.0004591761365421181,
-      "highband_energy_error_db": 10.849366328173527,
-      "speaker_cosine_sim": 0.9999997615814209
+      "fullband_lsd_db": 3.040090560913086,
+      "highband_lsd_db": 5.227911472320557,
+      "protected_band_rms_err": 0.000458848386749266,
+      "highband_energy_error_db": 10.85963870496515,
+      "speaker_cosine_sim": 0.9999998211860657
     },
     {
       "speaker_id": "character_09",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 2.8827810287475586,
-      "highband_lsd_db": 4.956373691558838,
-      "protected_band_rms_err": 0.00045913772394394107,
-      "highband_energy_error_db": 10.844747060344558,
+      "fullband_lsd_db": 3.034803867340088,
+      "highband_lsd_db": 5.219179630279541,
+      "protected_band_rms_err": 0.00045872617028329567,
+      "highband_energy_error_db": 10.84675601484834,
       "speaker_cosine_sim": 0.9999997615814209
     },
     {
@@ -1498,21 +1502,21 @@
       "speaker_id": "character_10",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 20.17755889892578,
-      "highband_lsd_db": 22.094642639160156,
-      "protected_band_rms_err": 0.004561059073822892,
-      "highband_energy_error_db": 13.064145829958685,
-      "speaker_cosine_sim": 0.8829985857009888
+      "fullband_lsd_db": 19.882328033447266,
+      "highband_lsd_db": 21.771488189697266,
+      "protected_band_rms_err": 0.00456504974902944,
+      "highband_energy_error_db": 13.160886487691108,
+      "speaker_cosine_sim": 0.8775792121887207
     },
     {
       "speaker_id": "character_10",
       "cutoff_hz": 4000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 19.710290908813477,
-      "highband_lsd_db": 21.582551956176758,
-      "protected_band_rms_err": 0.004561868128998053,
-      "highband_energy_error_db": 13.22601701838009,
-      "speaker_cosine_sim": 0.8764405846595764
+      "fullband_lsd_db": 19.443998336791992,
+      "highband_lsd_db": 21.291088104248047,
+      "protected_band_rms_err": 0.0045656110517539586,
+      "highband_energy_error_db": 13.307590790468593,
+      "speaker_cosine_sim": 0.8711392283439636
     },
     {
       "speaker_id": "character_10",
@@ -1538,21 +1542,21 @@
       "speaker_id": "character_10",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 12.473292350769043,
-      "highband_lsd_db": 15.015995979309082,
-      "protected_band_rms_err": 0.0016941451092969428,
-      "highband_energy_error_db": 6.490584626938066,
-      "speaker_cosine_sim": 0.9923209547996521
+      "fullband_lsd_db": 12.25595474243164,
+      "highband_lsd_db": 14.752890586853027,
+      "protected_band_rms_err": 0.0016925856380046102,
+      "highband_energy_error_db": 6.512875525172373,
+      "speaker_cosine_sim": 0.9922191500663757
     },
     {
       "speaker_id": "character_10",
       "cutoff_hz": 7500.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 12.085488319396973,
-      "highband_lsd_db": 14.547744750976562,
-      "protected_band_rms_err": 0.0016941679727425043,
-      "highband_energy_error_db": 6.553329998572447,
-      "speaker_cosine_sim": 0.9922465085983276
+      "fullband_lsd_db": 11.889808654785156,
+      "highband_lsd_db": 14.310626983642578,
+      "protected_band_rms_err": 0.0016928265498753286,
+      "highband_energy_error_db": 6.570202378385987,
+      "speaker_cosine_sim": 0.9921547770500183
     },
     {
       "speaker_id": "character_10",
@@ -1578,20 +1582,20 @@
       "speaker_id": "character_10",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 4.841009140014648,
-      "highband_lsd_db": 6.816715717315674,
-      "protected_band_rms_err": 0.00064630213338495,
-      "highband_energy_error_db": 6.202038384022992,
+      "fullband_lsd_db": 5.017019748687744,
+      "highband_lsd_db": 7.0655717849731445,
+      "protected_band_rms_err": 0.000646388770556901,
+      "highband_energy_error_db": 6.265963252331109,
       "speaker_cosine_sim": 0.9999979138374329
     },
     {
       "speaker_id": "character_10",
       "cutoff_hz": 12000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 4.873708248138428,
-      "highband_lsd_db": 6.863122940063477,
-      "protected_band_rms_err": 0.0006463311254812283,
-      "highband_energy_error_db": 6.197949512634894,
+      "fullband_lsd_db": 5.012790203094482,
+      "highband_lsd_db": 7.059774875640869,
+      "protected_band_rms_err": 0.0006464196443288456,
+      "highband_energy_error_db": 6.251079184883669,
       "speaker_cosine_sim": 0.9999979138374329
     },
     {
@@ -1618,21 +1622,21 @@
       "speaker_id": "character_10",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_generic_kurdish",
-      "fullband_lsd_db": 3.9105100631713867,
-      "highband_lsd_db": 6.732675552368164,
-      "protected_band_rms_err": 0.0004534507055632451,
-      "highband_energy_error_db": 7.522828261550851,
+      "fullband_lsd_db": 3.9893534183502197,
+      "highband_lsd_db": 6.868804931640625,
+      "protected_band_rms_err": 0.0004531071428948661,
+      "highband_energy_error_db": 7.532846378107471,
       "speaker_cosine_sim": 0.9999988675117493
     },
     {
       "speaker_id": "character_10",
       "cutoff_hz": 16000.0,
       "method": "hawarestore_personalized_kd",
-      "fullband_lsd_db": 3.9413321018218994,
-      "highband_lsd_db": 6.786411285400391,
-      "protected_band_rms_err": 0.00045346830160044303,
-      "highband_energy_error_db": 7.520028586375036,
-      "speaker_cosine_sim": 0.999998927116394
+      "fullband_lsd_db": 3.997055768966675,
+      "highband_lsd_db": 6.882505893707275,
+      "protected_band_rms_err": 0.00045318625956879626,
+      "highband_energy_error_db": 7.526936564378962,
+      "speaker_cosine_sim": 0.9999988675117493
     }
   ]
 }

@@ -1,7 +1,12 @@
 """Restoration benchmark harness evaluating baseline and personalized models across cutoffs.
 
-Computes genuine log-spectral distance (LSD), protected-band RMS invariance error,
-and real cosine similarity using SpeakerEmbeddingExtractor over authentic speech signals.
+Computes log-spectral distance (LSD, dB, lower is better), protected-band RMS invariance
+error, and cosine similarity from the in-repo deterministic mel-DSP
+SpeakerEmbeddingExtractor. Test signals are the synthetic canonical profile fixture WAVs
+under profiles/ — the same recordings the personalized model conditions on (non-holdout),
+so this harness measures pipeline integrity, not product quality on real held-out speech.
+The output JSON records the UniverSR execution mode (official neural weights vs. silent
+DSP fallback), the degradation seed, and the cutoffs actually run.
 """
 
 import json
@@ -41,6 +46,7 @@ def run_restoration_benchmark(
     manifest_path: str | Path | None = None,
     output_json_path: str | Path | None = None,
     profiles_root: str | Path = "profiles",
+    seed: int = 42,
 ) -> dict[str, Any]:
     """Execute complete restoration benchmark across cutoffs and baseline comparisons."""
     cutoffs = [4000.0, 7500.0, 12000.0, 16000.0]
@@ -53,11 +59,18 @@ def run_restoration_benchmark(
                 cutoffs = [float(c) for c in manifest_cfg["cutoffs_hz"]]
             if "speakers" in manifest_cfg:
                 speakers = [str(s) for s in manifest_cfg["speakers"]]
+            if "seed" in manifest_cfg:
+                seed = int(manifest_cfg["seed"])
 
     deg_sim = DegradationSimulator(sample_rate=48000)
     universr = UniverSRBaseline(sample_rate=48000)
     hawarestore = HawaRestoreKD(sample_rate=48000)
     spk_extractor = SpeakerEmbeddingExtractor(sample_rate=48000)
+
+    # Record whether the UniverSR baseline actually ran official neural weights
+    # or silently fell back to deterministic DSP spectral extrapolation. The two
+    # produce very different numbers, so evidence without this field is ambiguous.
+    universr_mode = "neural" if universr._neural_model is not None else "dsp_fallback"
 
     results: list[dict[str, Any]] = []
 
@@ -90,7 +103,7 @@ def run_restoration_benchmark(
         clean_emb_norm = float(np.linalg.norm(clean_emb))
 
         for cutoff in cutoffs:
-            degraded, _ = deg_sim.degrade(clean, cutoff_hz=cutoff, seed=42)
+            degraded, _ = deg_sim.degrade(clean, cutoff_hz=cutoff, seed=seed)
             deg_emb = spk_extractor.extract(degraded)
             deg_emb_norm = float(np.linalg.norm(deg_emb))
             deg_sim_score = (
@@ -224,6 +237,16 @@ def run_restoration_benchmark(
         "benchmark": "HawaVoClean Kurdish Bandwidth Restoration v2.1",
         "num_speakers": len(speakers),
         "cutoffs_hz": cutoffs,
+        "seed": seed,
+        "universr_mode": universr_mode,
+        "test_set_provenance": "synthetic_profile_fixtures, non-holdout",
+        "schema_note": (
+            "LSD (log-spectral distance) metrics are in dB and lower is better; "
+            "speaker_cosine_sim is higher is better. speaker_cosine_sim is computed by the "
+            "in-repo deterministic mel-DSP SpeakerEmbeddingExtractor, not a neural speaker "
+            "verification model. Test signals are the 10 synthetic canonical profile WAVs "
+            "that the personalized model also conditions on (non-holdout)."
+        ),
         "summary": summary,
         "results": results,
     }
@@ -239,7 +262,12 @@ def run_restoration_benchmark(
 
 if __name__ == "__main__":
     report = run_restoration_benchmark(
-        output_json_path="proof/restoration-v2.1/benchmark_results.json"
+        manifest_path="research/restoration/configs/benchmark_manifest.json",
+        output_json_path="proof/restoration-v2.1/07-benchmarks/benchmark_results.json",
     )
-    print("Benchmark complete! Summary:")
+    print("Benchmark complete.")
+    print(f"universr_mode: {report['universr_mode']}")
+    print(f"seed: {report['seed']}")
+    print(f"cutoffs_hz: {report['cutoffs_hz']}")
+    print(f"test_set_provenance: {report['test_set_provenance']}")
     print(json.dumps(report["summary"], indent=2))

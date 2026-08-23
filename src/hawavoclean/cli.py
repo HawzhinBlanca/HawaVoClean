@@ -182,7 +182,9 @@ def cmd_restore_doctor(_args: argparse.Namespace) -> int:
         all_passed = False
     else:
         print(f"[OK] Upstream foundation: UniverSR (pinned commit: {pinned_commit[:8]}...)")
-        print("[OK] Verified licenses: UniverSR (MIT), 3D-Speaker (Apache-2.0)")
+        # Only licenses of code that actually ships are attested here. 3D-Speaker
+        # is a design reference in the proof pack, not a vendored dependency.
+        print("[OK] Verified licenses: UniverSR (MIT), official weights (CC-BY-4.0)")
 
     # 2. 10 Speaker Profiles validation
     from hawavoclean.restoration.profiles import validate_all_profiles
