@@ -125,7 +125,15 @@ def test_answers_are_indexed_by_unit_not_by_completion_order() -> None:
     """Four units answered in reverse order still land on their own indices."""
     pool = EnhancementWorkerPool(_spec(_ReverseOrderEnhancer), max_size=4, prewarm=4)
     try:
-        assert _wait_live(pool, 4) == 4, "prewarm must staff the whole pool"
+        # The pool sizes itself to the machine: `max_size` is a request, and the
+        # memory cap trims it (a 16 GB CI runner staffs 3 where a 38 GB
+        # workstation staffs 4). That trimming is the design, so requiring all
+        # four here would assert the size of the host, not the behaviour under
+        # test. Two are enough for completions to interleave, and the invariant
+        # that matters holds at any size: an answer lands on its own unit's
+        # index no matter which worker finished first.
+        live = _wait_live(pool, 4)
+        assert live >= 2, f"need at least two workers for completions to interleave, got {live}"
         items = [(_tagged(i), SR) for i in range(4)]
         out = pool.map_enhance(items)
         assert [o.ok for o in out] == [True, True, True, True]

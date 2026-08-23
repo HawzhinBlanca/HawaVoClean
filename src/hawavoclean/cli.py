@@ -38,6 +38,7 @@ from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.logging import get_logger, setup_logging
 from hawavoclean.multipass import MAX_PASSES, run_multipass
 from hawavoclean.paths import models_dir, profile_config_path
+from hawavoclean.paths import profiles_root as paths_profiles_root
 from hawavoclean.pipeline import run_pipeline
 from hawavoclean.progress import ProgressEvent
 from hawavoclean.publication import (
@@ -163,6 +164,11 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return int(ExitCode.PREFLIGHT_FAILURE)
 
 
+def _repo_root() -> Path:
+    """Repository root for source checkouts, independent of the caller's CWD."""
+    return Path(__file__).resolve().parents[2]
+
+
 def cmd_restore_doctor(_args: argparse.Namespace) -> int:
     """Run full preflight diagnostics for HawaRestore-KD spectral restoration."""
     print("================================================================================")
@@ -171,25 +177,32 @@ def cmd_restore_doctor(_args: argparse.Namespace) -> int:
 
     all_passed = True
 
-    # 1. Upstream commit & source provenance
+    # 1. Upstream research checkout — informational, never a gate.
+    #
+    # vendors/universr is an upstream clone carrying its own .git, so it is not
+    # tracked here. Nothing in restore mode imports it: HawaRestoreKD is
+    # self-contained, and UniverSRBaseline is a research-only comparison
+    # baseline used by the benchmark. Failing preflight on its absence would
+    # make every fresh clone — including every CI checkout — report a broken
+    # restore installation that is in fact complete.
     pinned_commit = "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2"
-    vendor_dir = Path("vendors/universr")
-    if not vendor_dir.exists():
-        print(f"[FAIL] Upstream UniverSR directory missing: {vendor_dir}")
-        all_passed = False
+    vendor_dir = _repo_root() / "vendors" / "universr"
+    if not vendor_dir.is_dir():
+        print(
+            f"[INFO] Upstream UniverSR checkout absent ({vendor_dir}); not required for restore "
+            f"mode, only for the research benchmark baseline."
+        )
     elif not (vendor_dir / "LICENSE").exists():
-        print(f"[FAIL] Upstream UniverSR LICENSE missing in: {vendor_dir}")
-        all_passed = False
+        print(f"[WARN] Upstream UniverSR checkout has no LICENSE file: {vendor_dir}")
     else:
-        print(f"[OK] Upstream foundation: UniverSR (pinned commit: {pinned_commit[:8]}...)")
-        # Only licenses of code that actually ships are attested here. 3D-Speaker
-        # is a design reference in the proof pack, not a vendored dependency.
-        print("[OK] Verified licenses: UniverSR (MIT), official weights (CC-BY-4.0)")
+        print(f"[OK] Upstream research baseline present: UniverSR ({pinned_commit[:8]}..., MIT)")
 
     # 2. 10 Speaker Profiles validation
     from hawavoclean.restoration.profiles import validate_all_profiles
 
-    profiles_root = Path("profiles")
+    # Resolved through paths.profiles_root(), never the working directory: the
+    # doctor must report on the profiles the pipeline would actually load.
+    profiles_root = paths_profiles_root()
     if not profiles_root.exists():
         print(f"[FAIL] Profiles root directory missing: {profiles_root}")
         all_passed = False

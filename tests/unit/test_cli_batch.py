@@ -87,12 +87,21 @@ def test_batch_hung_file_is_killed_and_batch_continues(
     real = c._run_one_isolated
     calls = {"n": 0}
 
-    def fake(src: Path, dest: Path, profile: str, overwrite: bool, timeout_s: float) -> str:
+    # Mirrors _run_one_isolated's real signature, so a future parameter added
+    # there fails this test loudly instead of being silently swallowed.
+    def fake(
+        src: Path,
+        dest: Path,
+        profile: str,
+        overwrite: bool,
+        timeout_s: float,
+        **kwargs: Any,
+    ) -> str:
         calls["n"] += 1
         if calls["n"] == 1:
             # Simulate the child being killed at its deadline
             return f"FAILED: timed out after {timeout_s:.0f}s (killed; batch continued)"
-        return real(src, dest, profile, overwrite, timeout_s)
+        return real(src, dest, profile, overwrite, timeout_s, **kwargs)
 
     monkeypatch.setattr(c, "_run_one_isolated", fake)
     rc = _run_cli(
@@ -103,8 +112,14 @@ def test_batch_hung_file_is_killed_and_batch_continues(
         "-o",
         str(tmp_path),
         "--overwrite",
+        # The first file's hang is simulated above, so this deadline never gates
+        # it. It only bounds the SECOND file, which really is decoded, enhanced
+        # and published by a cold child process — five seconds is a warm
+        # workstation's timing, and a CI runner misses it, turning "the batch
+        # continued" into a spurious failure. The genuine deadline behaviour is
+        # covered by test_batch_real_deadline_kills_a_genuinely_hung_child.
         "--per-file-timeout-s",
-        "5",
+        "600",
     )
     out = capsys.readouterr().out
     assert rc == int(ExitCode.PUBLICATION_FAILURE)
