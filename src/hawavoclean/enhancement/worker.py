@@ -208,7 +208,7 @@ class IsolatedEnhancementWorker:
 
         # Wait for READY signal with timeout
         try:
-            msg = self.resp_queue.get(timeout=15.0)
+            msg = self.resp_queue.get(timeout=30.0)
             if msg.get("type") == "INIT_ERROR":
                 raise RuntimeError(f"Worker init error: {msg.get('error')}")
             if msg.get("type") != "READY":
@@ -216,7 +216,7 @@ class IsolatedEnhancementWorker:
         except queue.Empty as e:
             self._kill_worker()
             raise WorkerCrashError(
-                "Failed to start isolated enhancement worker: no READY within 15s "
+                "Failed to start isolated enhancement worker: no READY within 30s "
                 "(model load too slow, or the worker crashed during init)"
             ) from e
         except Exception as e:

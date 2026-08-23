@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "character_10",
+  "display_name": "Kurdish Speaker 10 (Female Dynamic)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "d1e28d0400102bd7ae720146f00cd5adc9ec7f200f40502c39007a0494bf15e7"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "86423ad1392f6f0f973fe63a8cfabbc7117fa17336b21e6bbf6e9c8eba4f1553",
+  "f0_statistics": {
+    "median_hz": 205.0,
+    "p05_hz": 165.0,
+    "p95_hz": 265.0
+  },
+  "training_split_id": "restore-corpus-v1",
+  "adapter": null,
+  "created_by_commit": "2b93176",
+  "notes": "Verified Kurdish character profile with extracted acoustic prototype vector"
+}

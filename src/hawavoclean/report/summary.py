@@ -64,6 +64,39 @@ def generate_human_summary(report: HawaVoCleanReport) -> str:
         "",
     ]
 
+    if report.restoration:
+        rest = report.restoration
+        lines.append("--- SPECTRAL RESTORATION (HawaRestore-KD) ---")
+        lines.append(f"Mode:                 {rest.get('mode')}")
+        lines.append(f"Speaker ID:           {rest.get('speaker_id')}")
+        lines.append(f"Profile Hash:         {str(rest.get('profile_hash'))[:16]}...")
+        bw = rest.get("bandwidth", {})
+        evidence = bw.get("evidence", {})
+        lines.append(
+            f"Cutoff Frequency:     {bw.get('effective_cutoff_hz', 0.0):.1f} Hz "
+            f"({bw.get('shape', 'unknown')}, confidence {bw.get('confidence', 0.0):.2f}, "
+            f"SNR above cutoff {evidence.get('above_cutoff_snr_db', 0.0):.1f} dB)"
+        )
+        model = rest.get("restorer", {})
+        lines.append(
+            f"Restoration Model:    {model.get('name')} "
+            f"(commit: {str(model.get('commit', ''))[:8]}..., solver: {model.get('solver')})"
+        )
+        lines.append(f"Weights SHA-256:      {str(model.get('weights_sha256'))[:16]}...")
+        segs = rest.get("segments", {})
+        lines.append(
+            f"Segments:             restored={segs.get('restored')}, reduced={segs.get('reduced')}, "
+            f"reverted={segs.get('reverted')}, bypassed={segs.get('bypassed')}, "
+            f"errors={segs.get('errors')}"
+        )
+        guard_r = rest.get("guard_r", {})
+        lines.append(
+            f"Guard R Verdict:      {guard_r.get('verdict', 'n/a')} "
+            f"(accepted strength {guard_r.get('accepted_strength', 0.0):.2f})"
+        )
+        lines.append(f"Guard R Reason:       {guard_r.get('reason', 'n/a')}")
+        lines.append("")
+
     if len(report.passes) > 1:
         lines.append("--- MULTI-PASS AUDIT TRAIL ---")
         for p in report.passes:

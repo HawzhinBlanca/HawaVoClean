@@ -1,0 +1,188 @@
+"""Restoration policy management, candidate ladder evaluation, and fail-closed fallback."""
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from hawavoclean.logging import get_logger
+from hawavoclean.restoration.bandwidth import BandwidthEstimate
+from hawavoclean.restoration.base import RestorationCandidate, Restorer
+from hawavoclean.restoration.config import RestorationConfig
+from hawavoclean.restoration.guard import GuardRResult, RestorationGuard
+from hawavoclean.restoration.profiles import SpeakerProfile
+
+logger = get_logger("restoration.policy")
+
+
+@dataclass(frozen=True)
+class SegmentRestorationDecision:
+    """Outcome of restoration decision on an audio segment."""
+
+    action: str  # "restored", "reduced", "reverted", "bypassed", "error"
+    applied_strength: float
+    cutoff_hz: float
+    guard_result: GuardRResult | None
+    error_message: str | None = None
+
+
+class RestorationPolicyManager:
+    """Orchestrates bandwidth detection, candidate generation, and Guard R selection."""
+
+    def __init__(
+        self,
+        config: RestorationConfig,
+        restorer: Restorer,
+        guard: RestorationGuard,
+    ) -> None:
+        self.config = config
+        self.restorer = restorer
+        self.guard = guard
+
+    def process_segment(
+        self,
+        natural_audio: np.ndarray,
+        sample_rate: int,
+        bandwidth_est: BandwidthEstimate,
+        speaker_profile: SpeakerProfile | None = None,
+        speech_mask: np.ndarray | None = None,
+        segment_seed: int = 42,
+    ) -> tuple[np.ndarray, SegmentRestorationDecision]:
+        """Apply restoration policy to a Natural-safe candidate segment."""
+        # 0. Input validation — fail closed on degenerate input
+        if natural_audio.size == 0 or not np.all(np.isfinite(natural_audio)):
+            err_reason = (
+                "Empty audio"
+                if natural_audio.size == 0
+                else "Non-finite values in Natural candidate"
+            )
+            logger.warning("Input validation failed: %s; failing closed to Natural", err_reason)
+            err_res = GuardRResult(
+                verdict="ERROR",
+                accepted_strength=0.0,
+                reason=f"Input validation: {err_reason}",
+                protected_band={},
+                ctc={},
+                highband_events={},
+                harmonic={},
+                speaker={},
+            )
+            return natural_audio, SegmentRestorationDecision(
+                action="error",
+                applied_strength=0.0,
+                cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                guard_result=err_res,
+                error_message=err_reason,
+            )
+
+        # 1. Healthy audio or low confidence check -> Bypass
+        if (
+            not bandwidth_est.restore_recommended
+            or bandwidth_est.confidence < self.config.cutoff_confidence_min
+        ):
+            bypass_reason = (
+                f"Bandwidth healthy ({bandwidth_est.effective_cutoff_hz:.0f} Hz)"
+                if not bandwidth_est.restore_recommended
+                else f"Low confidence ({bandwidth_est.confidence:.2f} < {self.config.cutoff_confidence_min:.2f})"
+            )
+            logger.info("Bypassing restoration: %s", bypass_reason)
+            no_restore_res = GuardRResult(
+                verdict="NO_RESTORE",
+                accepted_strength=0.0,
+                reason=bypass_reason,
+                protected_band={},
+                ctc={},
+                highband_events={},
+                harmonic={},
+                speaker={},
+            )
+            return natural_audio, SegmentRestorationDecision(
+                action="bypassed",
+                applied_strength=0.0,
+                cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                guard_result=no_restore_res,
+            )
+
+        # 2. Extract speaker embeddings if profile present
+        speaker_id = speaker_profile.speaker_id if speaker_profile else None
+        speaker_emb = speaker_profile.embedding_vector if speaker_profile else None
+
+        # 3. Generate candidate ladder
+        try:
+            candidates: list[RestorationCandidate] = self.restorer.restore(
+                audio_48k=natural_audio,
+                sample_rate=sample_rate,
+                effective_cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                speaker_id=speaker_id,
+                speaker_embedding=speaker_emb,
+                strengths=self.config.strengths,
+                seed=segment_seed,
+            )
+        except Exception as e:
+            logger.warning(
+                "Restoration model exception on segment; failing closed to Natural: %s", e
+            )
+            err_res = GuardRResult(
+                verdict="ERROR",
+                accepted_strength=0.0,
+                reason=f"Restorer runtime error: {e}",
+                protected_band={},
+                ctc={},
+                highband_events={},
+                harmonic={},
+                speaker={},
+            )
+            return natural_audio, SegmentRestorationDecision(
+                action="error",
+                applied_strength=0.0,
+                cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                guard_result=err_res,
+                error_message=str(e),
+            )
+
+        # 4. Guard R Candidate Selection
+        try:
+            selected_audio, guard_res = self.guard.select_best_candidate(
+                natural_audio=natural_audio,
+                candidates=candidates,
+                cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                speaker_embedding=speaker_emb,
+                canonical_embedding=speaker_emb,
+                speech_mask=speech_mask,
+            )
+        except Exception as e:
+            logger.warning("Guard R exception on segment; failing closed to Natural: %s", e)
+            err_res = GuardRResult(
+                verdict="ERROR",
+                accepted_strength=0.0,
+                reason=f"Guard R evaluation error: {e}",
+                protected_band={},
+                ctc={},
+                highband_events={},
+                harmonic={},
+                speaker={},
+            )
+            return natural_audio, SegmentRestorationDecision(
+                action="error",
+                applied_strength=0.0,
+                cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                guard_result=err_res,
+                error_message=str(e),
+            )
+
+        if guard_res.verdict == "NO_RESTORE":
+            # The restorer offered nothing to judge; that is a bypass, not a
+            # rejection, and the counts must not claim the guard turned work away.
+            action = "bypassed"
+        elif guard_res.accepted_strength >= 0.75:
+            action = "restored"
+        elif guard_res.accepted_strength > 0.0:
+            action = "reduced"
+        else:
+            action = "reverted"
+
+        return selected_audio, SegmentRestorationDecision(
+            action=action,
+            applied_strength=guard_res.accepted_strength,
+            cutoff_hz=bandwidth_est.effective_cutoff_hz,
+            guard_result=guard_res,
+        )

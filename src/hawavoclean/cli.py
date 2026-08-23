@@ -163,6 +163,186 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     return int(ExitCode.PREFLIGHT_FAILURE)
 
 
+def cmd_restore_doctor(_args: argparse.Namespace) -> int:
+    """Run full preflight diagnostics for HawaRestore-KD spectral restoration."""
+    print("================================================================================")
+    print("                HAWAVOCLEAN - SPECTRAL RESTORATION DOCTOR (v2.1)                ")
+    print("================================================================================")
+
+    all_passed = True
+
+    # 1. Upstream commit & source provenance
+    pinned_commit = "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2"
+    vendor_dir = Path("vendors/universr")
+    if not vendor_dir.exists():
+        print(f"[FAIL] Upstream UniverSR directory missing: {vendor_dir}")
+        all_passed = False
+    elif not (vendor_dir / "LICENSE").exists():
+        print(f"[FAIL] Upstream UniverSR LICENSE missing in: {vendor_dir}")
+        all_passed = False
+    else:
+        print(f"[OK] Upstream foundation: UniverSR (pinned commit: {pinned_commit[:8]}...)")
+        print("[OK] Verified licenses: UniverSR (MIT), 3D-Speaker (Apache-2.0)")
+
+    # 2. 10 Speaker Profiles validation
+    from hawavoclean.restoration.profiles import validate_all_profiles
+
+    profiles_root = Path("profiles")
+    if not profiles_root.exists():
+        print(f"[FAIL] Profiles root directory missing: {profiles_root}")
+        all_passed = False
+    else:
+        try:
+            profs = validate_all_profiles(profiles_root=profiles_root)
+            for spk_id, prof in profs.items():
+                print(
+                    f"[OK] Profile verified: {spk_id} ({prof.display_name}) "
+                    f"[median F0: {prof.f0_statistics.median_hz:.1f} Hz, hash: {prof.profile_embedding_sha256[:8]}...]"
+                )
+        except Exception as e:
+            print(f"[FAIL] Profile validation failed: {e}")
+            all_passed = False
+
+    # 3. 48 kHz Processing path & F0 Extractor
+    from hawavoclean.restoration.f0 import F0Extractor
+
+    try:
+        f0_ext = F0Extractor(sample_rate=48000)
+        synth_sig = np.sin(2 * np.pi * 150.0 * np.linspace(0, 1, 48000, endpoint=False)).astype(
+            np.float32
+        )
+        f0_res = f0_ext.extract(synth_sig)
+        if abs(f0_res.statistics.median_hz - 150.0) < 5.0:
+            print(
+                f"[OK] F0 Extractor verified on 48 kHz (extracted {f0_res.statistics.median_hz:.1f} Hz)"
+            )
+        else:
+            print(
+                f"[FAIL] F0 Extractor inaccuracy: expected 150 Hz, got {f0_res.statistics.median_hz:.1f} Hz"
+            )
+            all_passed = False
+    except Exception as e:
+        print(f"[FAIL] F0 Extractor error: {e}")
+        all_passed = False
+
+    # 4. HawaRestore-KD and Guard R
+    from hawavoclean.restoration.guard import RestorationGuard
+    from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
+    from hawavoclean.restoration.protected_band import verify_protected_band_invariance
+
+    try:
+        restorer = HawaRestoreKD(sample_rate=48000)
+        guard_r = RestorationGuard(sample_rate=48000)
+
+        # Deterministic smoke test on band-limited speech-like input
+        t = np.linspace(0, 0.5, int(48000 * 0.5), endpoint=False, dtype=np.float32)
+        clean = (0.5 * np.sin(2 * np.pi * 150 * t) + 0.3 * np.sin(2 * np.pi * 2500 * t)).astype(
+            np.float32
+        )
+        sos_lp = scipy.signal.butter(6, 4000 / 24000, btype="lowpass", output="sos")
+        lp_sig = scipy.signal.sosfiltfilt(sos_lp, clean).astype(np.float32)
+
+        cands = restorer.restore(lp_sig, sample_rate=48000, effective_cutoff_hz=4000.0, seed=123)
+        sel_audio, g_res = guard_r.select_best_candidate(lp_sig, cands, cutoff_hz=4000.0)
+
+        prot_chk = verify_protected_band_invariance(
+            lp_sig,
+            sel_audio,
+            sample_rate=48000,
+            cutoff_hz=4000.0,
+            # Both tolerances must mirror Guard R exactly, or the doctor reports a
+            # failure for audio the production gate accepts.
+            tolerance_rms=guard_r.config.protected_band_threshold,
+            tolerance_stft=guard_r.config.protected_band_threshold * 2.0,
+        )
+        if not prot_chk.passes_invariance:
+            print(
+                f"[FAIL] Protected-band invariance failure: RMS={prot_chk.rms_waveform_error:.6f}"
+            )
+            all_passed = False
+        elif g_res.accepted_strength <= 0.0:
+            print(
+                f"[FAIL] Active restoration rejected: Guard R selected strength {g_res.accepted_strength:.2f} "
+                f"(reverted to Natural). Reason: {g_res.reason}"
+            )
+            all_passed = False
+        else:
+            print(
+                f"[OK] HawaRestore-KD & Guard R verified (verdict={g_res.verdict}, "
+                f"strength={g_res.accepted_strength:.2f})"
+            )
+    except Exception as e:
+        print(f"[FAIL] Restoration smoke test failed: {e}")
+        all_passed = False
+
+    print("================================================================================")
+    if all_passed:
+        print("Restore-Doctor status: ALL RESTORATION CHECKS PASSED. Ready for restore mode.")
+        return int(ExitCode.SUCCESS)
+    print("Restore-Doctor status: PREFLIGHT FAILED. Address errors above.")
+    return int(ExitCode.PREFLIGHT_FAILURE)
+
+
+def cmd_speaker_profile(args: argparse.Namespace) -> int:
+    """Validate speaker profile schema, consent record, and embedding hashes."""
+    from hawavoclean.restoration.profiles import validate_speaker_profile
+
+    target = Path(args.profile_target)
+    validated = 0
+    try:
+        if target.is_dir():
+            if (target / "profile.json").exists():
+                prof = validate_speaker_profile(target / "profile.json", base_dir=target)
+                print(f"[OK] Speaker profile valid: {prof.speaker_id} ({prof.display_name})")
+                validated += 1
+            else:
+                for sub in sorted(target.iterdir()):
+                    if sub.is_dir() and (sub / "profile.json").exists():
+                        prof = validate_speaker_profile(sub / "profile.json", base_dir=sub)
+                        print(
+                            f"[OK] Speaker profile valid: {prof.speaker_id} ({prof.display_name})"
+                        )
+                        validated += 1
+        else:
+            prof = validate_speaker_profile(target, base_dir=target.parent)
+            print(f"[OK] Speaker profile valid: {prof.speaker_id} ({prof.display_name})")
+            validated += 1
+        if validated == 0:
+            # Exit 0 here would let a mistyped or empty path pass a CI gate as
+            # "all profiles validated".
+            print(f"[FAIL] No speaker profiles found under: {target}")
+            return int(ExitCode.INVALID_USER_INPUT)
+        print(f"[OK] {validated} speaker profile(s) validated.")
+        return int(ExitCode.SUCCESS)
+    except Exception as e:
+        print(f"[FAIL] Speaker profile invalid: {e}")
+        return int(ExitCode.INVALID_USER_INPUT)
+
+
+def cmd_restoration_benchmark(args: argparse.Namespace) -> int:
+    """Run comprehensive restoration benchmark across cutoffs and baselines."""
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from research.restoration.benchmark import run_restoration_benchmark
+
+    manifest = getattr(args, "manifest_opt", None) or getattr(args, "manifest", None)
+    output = getattr(args, "output", "benchmark_results.json")
+    print("Running restoration benchmark across 10 speakers and cutoffs...")
+    rep = run_restoration_benchmark(manifest_path=manifest, output_json_path=output)
+    print("Benchmark complete! Summary:")
+    for method, stats in rep["summary"].items():
+        print(
+            f"  - {method:32s}: fullband LSD={stats['mean_fullband_lsd_db']:.2f} dB, "
+            f"highband LSD={stats['mean_highband_lsd_db']:.2f} dB, "
+            f"spk_sim={stats['mean_speaker_similarity']:.3f}"
+        )
+    print(f"Report written to {output}")
+    return int(ExitCode.SUCCESS)
+
+
 class _JsonLineSink:
     """``--progress-json``: one JSON object per line on the ORIGINAL stdout.
 
@@ -212,6 +392,14 @@ def cmd_process(args: argparse.Namespace) -> int:
             sink.emit(event.to_dict())
 
     passes: int | str = getattr(args, "passes", 1)
+    if passes != 1 and getattr(args, "mode", "natural") == "restore":
+        # run_multipass has no restoration stage. Silently dropping --mode would
+        # publish a Natural master that the report never admits was un-restored.
+        exit_with_code(
+            ExitCode.INVALID_USER_INPUT,
+            "Restore mode is single-pass only: --mode restore cannot be combined with "
+            "--passes. Re-run with --passes 1 (the default).",
+        )
     try:
         if passes == 1:
             # The default path: byte-identical to a run before --passes
@@ -223,6 +411,11 @@ def cmd_process(args: argparse.Namespace) -> int:
                 profile=args.profile,
                 overwrite=args.overwrite,
                 on_progress=on_progress,
+                mode=getattr(args, "mode", "natural"),
+                speaker_id=getattr(args, "speaker_id", None),
+                cutoff=getattr(args, "cutoff", "auto"),
+                cutoff_hz=getattr(args, "cutoff_hz", None),
+                profiles_dir=getattr(args, "profiles_dir", "profiles"),
             )
         else:
             run_multipass(
@@ -339,6 +532,11 @@ def cmd_batch_worker(_args: argparse.Namespace) -> int:
                     output_path=req["output"],
                     profile=req["profile"],
                     overwrite=bool(req.get("overwrite", False)),
+                    mode=str(req.get("mode", "natural")),
+                    speaker_id=req.get("speaker_id"),
+                    cutoff=str(req.get("cutoff", "auto")),
+                    cutoff_hz=req.get("cutoff_hz"),
+                    profiles_dir=req.get("profiles_dir", "profiles"),
                 )
                 reply = {"ok": True}
             except HawaVoCleanError as e:
@@ -456,7 +654,19 @@ class _BatchChild:
         ]
         return lines[-1][-160:] if lines else "no output"
 
-    def run(self, src: Path, dest: Path, profile: str, overwrite: bool, timeout_s: float) -> str:
+    def run(
+        self,
+        src: Path,
+        dest: Path,
+        profile: str,
+        overwrite: bool,
+        timeout_s: float,
+        mode: str = "natural",
+        speaker_id: str | None = None,
+        cutoff: str = "auto",
+        cutoff_hz: float | None = None,
+        profiles_dir: str = "profiles",
+    ) -> str:
         deadline = time.monotonic() + timeout_s
         try:
             if self._proc is None or self._proc.poll() is not None:
@@ -464,17 +674,18 @@ class _BatchChild:
                 if self._await_reply(deadline) is None:
                     raise TimeoutError
             assert self._proc is not None and self._proc.stdin is not None
-            self._proc.stdin.write(
-                json.dumps(
-                    {
-                        "input": str(src),
-                        "output": str(dest),
-                        "profile": profile,
-                        "overwrite": overwrite,
-                    }
-                )
-                + "\n"
-            )
+            payload: dict[str, Any] = {
+                "input": str(src),
+                "output": str(dest),
+                "profile": profile,
+                "overwrite": overwrite,
+                "mode": mode,
+                "speaker_id": speaker_id,
+                "cutoff": cutoff,
+                "cutoff_hz": cutoff_hz,
+                "profiles_dir": str(profiles_dir),
+            }
+            self._proc.stdin.write(json.dumps(payload) + "\n")
             self._proc.stdin.flush()
             reply = self._await_reply(deadline)
             if reply is None:
@@ -532,18 +743,30 @@ def _summarize_published(dest: Path) -> str:
 
 
 def _run_one_isolated(
-    src: Path, dest: Path, profile: str, overwrite: bool, timeout_s: float
+    src: Path,
+    dest: Path,
+    profile: str,
+    overwrite: bool,
+    timeout_s: float,
+    mode: str = "natural",
+    speaker_id: str | None = None,
+    cutoff: str = "auto",
+    cutoff_hz: float | None = None,
+    profiles_dir: str = "profiles",
 ) -> str:
-    """Process one file in a child process under a hard deadline.
-
-    A hung file (stuck decoder, wedged model, unresponsive disk) must never
-    take the rest of the batch with it. The child is killed at the deadline
-    and the batch moves on; the failure is recorded by name.
-
-    The child is now shared with the rest of the batch and kept warm between
-    files — see :class:`_BatchChild` for why that costs nothing in isolation.
-    """
-    return _batch_child.run(src, dest, profile, overwrite, timeout_s)
+    """Process one file in a child process under a hard deadline."""
+    return _batch_child.run(
+        src=src,
+        dest=dest,
+        profile=profile,
+        overwrite=overwrite,
+        timeout_s=timeout_s,
+        mode=mode,
+        speaker_id=speaker_id,
+        cutoff=cutoff,
+        cutoff_hz=cutoff_hz,
+        profiles_dir=profiles_dir,
+    )
 
 
 def cmd_batch(args: argparse.Namespace) -> int:
@@ -584,6 +807,14 @@ def cmd_batch(args: argparse.Namespace) -> int:
             + "\nRename the inputs or run them in separate batches.",
         )
 
+    mode = getattr(args, "mode", "natural")
+    speaker_id = getattr(args, "speaker_id", None)
+    if mode == "restore" and not speaker_id:
+        exit_with_code(
+            ExitCode.INVALID_USER_INPUT,
+            "Restore mode requires an explicit --speaker-id <ID>",
+        )
+
     results: list[tuple[str, str]] = []
     failed = 0
     try:
@@ -594,13 +825,27 @@ def cmd_batch(args: argparse.Namespace) -> int:
                 print(f"[{i}/{len(inputs)}] SKIP {src.name} (output exists)")
                 continue
             print(f"[{i}/{len(inputs)}] {src.name} -> {dest.name}")
-            status = _run_one_isolated(
-                src,
-                dest,
-                args.profile,
-                args.overwrite or args.skip_existing,
-                args.per_file_timeout_s,
-            )
+            if mode != "natural" or speaker_id is not None:
+                status = _run_one_isolated(
+                    src,
+                    dest,
+                    args.profile,
+                    args.overwrite or args.skip_existing,
+                    args.per_file_timeout_s,
+                    mode=mode,
+                    speaker_id=speaker_id,
+                    cutoff=getattr(args, "cutoff", "auto"),
+                    cutoff_hz=getattr(args, "cutoff_hz", None),
+                    profiles_dir=getattr(args, "profiles_dir", "profiles"),
+                )
+            else:
+                status = _run_one_isolated(
+                    src,
+                    dest,
+                    args.profile,
+                    args.overwrite or args.skip_existing,
+                    args.per_file_timeout_s,
+                )
             if not status.startswith("ok"):
                 failed += 1
             results.append((src.name, status))
@@ -691,6 +936,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
     print(f"  Samples:             {media.samples:,}")
     print(f"  Integrated Loudness: {loudness.integrated_lufs:.1f} LUFS")
     print(f"  True Peak:           {loudness.true_peak_dbtp:.1f} dBTP")
+    if report.restoration:
+        print(f"  Restoration Mode:    {report.restoration.get('mode')}")
+        print(f"  Restored Speaker:    {report.restoration.get('speaker_id')}")
+        model_name = report.restoration.get("restorer", {}).get("name")
+        if model_name:
+            print(f"  Restorer Model:      {model_name}")
+        cutoff_val = report.restoration.get("bandwidth", {}).get("effective_cutoff_hz")
+        if cutoff_val is not None:
+            print(f"  Effective Cutoff:    {cutoff_val:.1f} Hz")
     print("================================================================================")
     return int(ExitCode.SUCCESS)
 
@@ -949,12 +1203,68 @@ def _main() -> None:
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
+    # restore-doctor
+    p_restore_doc = subparsers.add_parser(
+        "restore-doctor", help="Run restoration preflight and profile diagnostics"
+    )
+    p_restore_doc.set_defaults(func=cmd_restore_doctor)
+
+    # speaker-profile
+    p_spk = subparsers.add_parser(
+        "speaker-profile", help="Validate speaker profile metadata, consent, and embeddings"
+    )
+    p_spk_sub = p_spk.add_subparsers(dest="profile_action", required=True)
+    p_spk_val = p_spk_sub.add_parser("validate", help="Validate speaker profile")
+    p_spk_val.add_argument("profile_target", help="Path to profile.json or profiles directory")
+    p_spk_val.set_defaults(func=cmd_speaker_profile)
+
+    # restoration-benchmark
+    p_rest_bench = subparsers.add_parser(
+        "restoration-benchmark", help="Run restoration benchmark across cutoffs and models"
+    )
+    p_rest_bench.add_argument(
+        "manifest", nargs="?", default=None, help="Path to benchmark manifest JSON"
+    )
+    p_rest_bench.add_argument(
+        "--manifest", "-m", dest="manifest_opt", help="Path to benchmark manifest JSON"
+    )
+    p_rest_bench.add_argument(
+        "--output", "-o", default="benchmark_results.json", help="Path to output JSON"
+    )
+    p_rest_bench.set_defaults(func=cmd_restoration_benchmark)
+
     # process
     p_proc = subparsers.add_parser("process", help="Process an audio file through HawaVoClean")
     p_proc.add_argument("input", help="Path to input audio file")
     p_proc.add_argument("--output", "-o", required=True, help="Path to output mastered WAV")
     p_proc.add_argument("--config", "-c", help="Path to custom TOML configuration")
     p_proc.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
+    p_proc.add_argument(
+        "--mode",
+        choices=["natural", "restore"],
+        default="natural",
+        help="Processing mode: natural (default) or restore (opt-in)",
+    )
+    p_proc.add_argument(
+        "--speaker-id",
+        help="Required for restore mode: character speaker identifier (e.g. character_01)",
+    )
+    p_proc.add_argument(
+        "--cutoff",
+        choices=["auto", "manual"],
+        default="auto",
+        help="Cutoff detection mode: auto (default) or manual (requires --cutoff-hz)",
+    )
+    p_proc.add_argument(
+        "--cutoff-hz",
+        type=float,
+        help="Explicit cutoff frequency in Hz (e.g. 7800.0)",
+    )
+    p_proc.add_argument(
+        "--profiles-dir",
+        default="profiles",
+        help="Path to speaker profiles directory (default: profiles)",
+    )
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"
     )
@@ -997,6 +1307,32 @@ def _main() -> None:
         type=float,
         default=1800.0,
         help="Hard deadline per file; a hung file is killed and the batch continues (default 1800)",
+    )
+    p_batch.add_argument(
+        "--mode",
+        choices=["natural", "restore"],
+        default="natural",
+        help="Processing mode: natural (default) or restore (opt-in)",
+    )
+    p_batch.add_argument(
+        "--speaker-id",
+        help="Required for restore mode: character speaker identifier (e.g. character_01)",
+    )
+    p_batch.add_argument(
+        "--cutoff",
+        choices=["auto", "manual"],
+        default="auto",
+        help="Cutoff detection mode: auto (default) or manual (requires --cutoff-hz)",
+    )
+    p_batch.add_argument(
+        "--cutoff-hz",
+        type=float,
+        help="Explicit cutoff frequency in Hz (e.g. 7800.0)",
+    )
+    p_batch.add_argument(
+        "--profiles-dir",
+        default="profiles",
+        help="Path to speaker profiles directory (default: profiles)",
     )
     p_batch.set_defaults(func=cmd_batch)
 

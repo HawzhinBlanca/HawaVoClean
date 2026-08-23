@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "character_04",
+  "display_name": "Kurdish Speaker 04 (Female Warm)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "52a3cb8c50734936f90576545383c857035790e4904372c1e89c8ec06da38faa"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "216814068d29a9e93ec1e17e20577656a71123614a70608ba803f2b648ef97d5",
+  "f0_statistics": {
+    "median_hz": 195.0,
+    "p05_hz": 155.0,
+    "p95_hz": 255.0
+  },
+  "training_split_id": "restore-corpus-v1",
+  "adapter": null,
+  "created_by_commit": "2b93176",
+  "notes": "Verified Kurdish character profile with extracted acoustic prototype vector"
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "character_09",
+  "display_name": "Kurdish Speaker 09 (Male Resonant)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "f92b6129956bbe3984d61f6fa23d70fdd8ab22f084077b5af750214fb49d4d79"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "ca42cbd6595bde6a674a24cf7c0daac1160d05c03c953a356efaa620273de87e",
+  "f0_statistics": {
+    "median_hz": 125.0,
+    "p05_hz": 90.0,
+    "p95_hz": 165.0
+  },
+  "training_split_id": "restore-corpus-v1",
+  "adapter": null,
+  "created_by_commit": "2b93176",
+  "notes": "Verified Kurdish character profile with extracted acoustic prototype vector"
+}

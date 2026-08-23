@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "character_08",
+  "display_name": "Kurdish Speaker 08 (Female Bright)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "7f55aadcfede0894f9af770523877a00f47fb934bf97621810f3b564e97e9477"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "8ce49a280721e1822302e2d52e1f982b0255b8b7b3db55ca0607226377a5439e",
+  "f0_statistics": {
+    "median_hz": 240.0,
+    "p05_hz": 195.0,
+    "p95_hz": 305.0
+  },
+  "training_split_id": "restore-corpus-v1",
+  "adapter": null,
+  "created_by_commit": "2b93176",
+  "notes": "Verified Kurdish character profile with extracted acoustic prototype vector"
+}

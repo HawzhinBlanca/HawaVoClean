@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "character_01",
+  "display_name": "Kurdish Speaker 01 (Male Deep)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "ceb519556c3497d0f5ab817b1cf6a0344feb6b13e130a16eec57df4b75286de5"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "42aa4c8016659dccbd04851ffb87414ee7dee418668cd1821f39ff440e29f208",
+  "f0_statistics": {
+    "median_hz": 115.0,
+    "p05_hz": 85.0,
+    "p95_hz": 155.0
+  },
+  "training_split_id": "restore-corpus-v1",
+  "adapter": null,
+  "created_by_commit": "2b93176",
+  "notes": "Verified Kurdish character profile with extracted acoustic prototype vector"
+}

@@ -5,6 +5,7 @@ report always describes the run that produced it. The scratch workspace is
 removed on success and survives only a genuine crash, for forensics.
 """
 
+import hashlib
 import os
 import platform
 import time
@@ -42,6 +43,7 @@ from hawavoclean.errors import (
     CalibrationError,
     ConfigError,
     HawaVoCleanError,
+    InvalidUserInputError,
     PreflightError,
     PublicationError,
     WorkerCrashError,
@@ -98,6 +100,16 @@ from hawavoclean.report.schema import (
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import serialize_json_report
+from hawavoclean.restoration import (
+    BandwidthDetector,
+    HawaRestoreKD,
+    RestorationConfig,
+    RestorationGuard,
+    RestorationPolicyManager,
+    RestorationReport,
+    RestorationSegmentCounts,
+    load_speaker_profile,
+)
 from hawavoclean.segmentation.types import SpeechUnit
 from hawavoclean.segmentation.utterances import build_speech_units
 
@@ -206,6 +218,11 @@ def run_pipeline(
     overwrite: bool = False,
     probe_override: SpectralProbe | None = None,
     on_progress: ProgressCallback | None = None,
+    mode: str = "natural",
+    speaker_id: str | None = None,
+    cutoff: str = "auto",
+    cutoff_hz: float | None = None,
+    profiles_dir: str | Path = "profiles",
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
@@ -215,7 +232,22 @@ def run_pipeline(
     in_path = Path(input_path).resolve()
     out_path = public_output_path(output_path)
 
-    logger.info(f"Starting HawaVoClean pipeline on {in_path} -> {out_path} [profile={profile}]")
+    if mode not in ("natural", "restore"):
+        raise InvalidUserInputError(f"Unknown processing mode: '{mode}' (expected natural|restore)")
+    if mode == "restore" and not speaker_id:
+        raise InvalidUserInputError("Restore mode requires an explicit --speaker-id <ID>")
+    if cutoff not in ("auto", "manual"):
+        raise InvalidUserInputError(f"Unknown cutoff mode: '{cutoff}' (expected auto|manual)")
+    if cutoff == "manual" and cutoff_hz is None:
+        raise InvalidUserInputError("--cutoff manual requires an explicit --cutoff-hz <Hz>")
+    # An explicit frequency *is* manual selection. Deriving the mode here keeps
+    # the report's cutoff_mode truthful whichever way the caller spelled it,
+    # instead of recording "auto" over an operator-asserted boundary.
+    cutoff = "manual" if cutoff_hz is not None else "auto"
+
+    logger.info(
+        f"Starting HawaVoClean pipeline on {in_path} -> {out_path} [profile={profile}, mode={mode}]"
+    )
     _preflight_destination(in_path, out_path, overwrite)
 
     # 1. Configuration, calibration, and core provenance preflight
@@ -289,6 +321,11 @@ def run_pipeline(
             overwrite,
             probe_override,
             on_progress,
+            mode=mode,
+            speaker_id=speaker_id,
+            cutoff=cutoff,
+            cutoff_hz=cutoff_hz,
+            profiles_dir=profiles_dir,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
@@ -311,6 +348,11 @@ def _run_after_preflight(
     overwrite: bool,
     probe_override: SpectralProbe | None,
     on_progress: ProgressCallback | None = None,
+    mode: str = "natural",
+    speaker_id: str | None = None,
+    cutoff: str = "auto",
+    cutoff_hz: float | None = None,
+    profiles_dir: str | Path = "profiles",
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
     # 4. Decode and classify channels
@@ -710,6 +752,82 @@ def _run_after_preflight(
     )
     workspace.journal.append(JournalEvent.ASSEMBLY_COMPLETE)
 
+    # 10.5. Spectral Restoration Subsystem (HawaRestore-KD)
+    restoration_report: dict[str, Any] | None = None
+    if mode == "restore":
+        assert speaker_id is not None
+        speaker_profile = load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+
+        # Target sample rate for restored output is 48000 Hz
+        target_sr = 48000
+        current_data = assembled_buffer.data
+        if assembled_buffer.sample_rate != target_sr:
+            gcd = np.gcd(assembled_buffer.sample_rate, target_sr)
+            down = assembled_buffer.sample_rate // gcd
+            up = target_sr // gcd
+            current_data = scipy.signal.resample_poly(current_data, up, down, axis=-1).astype(
+                np.float32
+            )
+
+        # Detect bandwidth and effective cutoff
+        bw_detector = BandwidthDetector(sample_rate=target_sr)
+        bw_est = bw_detector.detect(current_data, override_cutoff_hz=cutoff_hz)
+
+        # Run HawaRestore-KD and Guard R
+        restorer = HawaRestoreKD(sample_rate=target_sr)
+        guard_r = RestorationGuard(sample_rate=target_sr)
+        rest_cfg = RestorationConfig(mode="explicit", enabled=True)
+        policy_mgr = RestorationPolicyManager(config=rest_cfg, restorer=restorer, guard=guard_r)
+
+        seed_val = int(hashlib.sha256(workspace.job_id.encode("utf-8")).hexdigest()[:8], 16)
+        restored_data, rest_dec = policy_mgr.process_segment(
+            natural_audio=current_data,
+            sample_rate=target_sr,
+            bandwidth_est=bw_est,
+            speaker_profile=speaker_profile,
+            segment_seed=seed_val,
+        )
+
+        assembled_buffer = AudioBuffer(
+            data=restored_data,
+            sample_rate=target_sr,
+            channel_mode=channel_mode,
+        )
+
+        rest_rep = RestorationReport(
+            mode="restore",
+            speaker_id=speaker_id,
+            profile_hash=speaker_profile.compute_hash(),
+            natural_output_hash=hash_bytes(assembled_data.tobytes()),
+            # ``cutoff_mode`` records whether the protected-band boundary was
+            # measured or asserted by the operator — the reader cannot tell them
+            # apart from the frequency alone.
+            bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
+            restorer={
+                "name": "hawarestore-kd",
+                "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
+                # Reported by the restorer itself, so the hash can only describe
+                # weights that were actually loaded into the network.
+                "weights_sha256": restorer.weights_sha256,
+                "checkpoint_path": str(restorer.checkpoint_path),
+                "device": restorer.device,
+                "seed_policy": "deterministic_job_id",
+                "solver": "midpoint",
+                "steps": 4,
+                "guidance_scale": 0.0,
+            },
+            segments=RestorationSegmentCounts(
+                restored=1 if rest_dec.action == "restored" else 0,
+                reduced=1 if rest_dec.action == "reduced" else 0,
+                reverted=1 if rest_dec.action == "reverted" else 0,
+                bypassed=1 if rest_dec.action == "bypassed" else 0,
+                errors=1 if rest_dec.action == "error" else 0,
+            ),
+            guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
+            review_timecodes=[],
+        )
+        restoration_report = rest_rep.to_dict()
+
     # 11. Loudness normalization and true-peak limiting
     initial_loudness = measure_loudness_and_peaks(
         assembled_buffer.data, assembled_buffer.sample_rate
@@ -883,6 +1001,7 @@ def _run_after_preflight(
         ),
         review_timecodes=review_timecodes,
         units=unit_decision_records,
+        restoration=restoration_report,
     )
 
     json_str = serialize_json_report(report)

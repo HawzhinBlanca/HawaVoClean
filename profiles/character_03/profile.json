@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "character_03",
+  "display_name": "Kurdish Speaker 03 (Male Baritone)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "83040d86148c891f602570ace6d9ad87711b691bab9975cd0939c81e0a190cd7"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "475f26c90b8c74f4c9b831188091712f8b144f20446479b8775d8f1f4e4e83bf",
+  "f0_statistics": {
+    "median_hz": 130.0,
+    "p05_hz": 95.0,
+    "p95_hz": 175.0
+  },
+  "training_split_id": "restore-corpus-v1",
+  "adapter": null,
+  "created_by_commit": "2b93176",
+  "notes": "Verified Kurdish character profile with extracted acoustic prototype vector"
+}

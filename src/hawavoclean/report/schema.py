@@ -1,6 +1,6 @@
 """Pydantic v2 schemas for audit reports, unit decisions, and corpus manifests."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -224,6 +224,7 @@ class HawaVoCleanReport(ReportBaseModel):
     #: report's ``units`` are always the FINAL (shipped) pass's records;
     #: this list is the journey, including any auto-discarded pass.
     passes: list[PassRecord] = Field(default_factory=list)
+    restoration: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def release_matches_schema(self) -> "HawaVoCleanReport":
