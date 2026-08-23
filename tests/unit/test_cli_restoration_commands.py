@@ -47,60 +47,101 @@ def _stub_heavy_engines(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_restore_doctor_missing_vendors_dir_fails(
+def test_restore_doctor_survives_a_fresh_clone_without_the_research_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An empty working directory must fail preflight, naming every missing piece."""
+    """A missing vendors/universr must never gate restore preflight.
+
+    vendors/ is an upstream clone carrying its own .git and is therefore
+    gitignored, so it is absent in every fresh checkout — including every CI
+    job. Nothing in restore mode imports it: HawaRestoreKD is self-contained
+    and UniverSRBaseline is a research-only benchmark baseline. Hard-failing
+    here reported a broken installation on machines whose restore install was
+    complete, which is exactly how this broke the first CI run.
+    """
     _stub_heavy_engines(monkeypatch)
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("hawavoclean.cli._repo_root", lambda: tmp_path)
+    monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(_REPO_PROFILES))
 
     code = _run_cli(monkeypatch, "restore-doctor")
 
-    assert code == int(ExitCode.PREFLIGHT_FAILURE)
     out = capsys.readouterr().out
-    assert "[FAIL] Upstream UniverSR directory missing" in out
-    assert "[FAIL] Profiles root directory missing" in out
-    # The stubbed engines exercise the exception branches of checks 3 and 4.
-    assert "[FAIL] F0 Extractor error" in out
-    assert "[FAIL] Restoration smoke test failed" in out
-    assert "PREFLIGHT FAILED" in out
-    assert "ALL RESTORATION CHECKS PASSED" not in out
+    assert "[INFO] Upstream UniverSR checkout absent" in out
+    assert "not required for restore mode" in out
+    # The absent checkout contributes no FAIL of its own; the only failures
+    # here are the deliberately stubbed engines.
+    assert "[FAIL] Upstream" not in out
+    assert "[OK] Profile verified: character_01" in out
+    assert code == int(ExitCode.PREFLIGHT_FAILURE)  # from the stubbed engines alone
 
 
-def test_restore_doctor_missing_license_fails(
+def test_restore_doctor_warns_but_does_not_gate_on_a_licence_less_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A vendored UniverSR checkout without its LICENSE must not pass provenance."""
+    """A vendored checkout without its LICENSE is reported, not treated as a gate."""
     _stub_heavy_engines(monkeypatch)
     (tmp_path / "vendors" / "universr").mkdir(parents=True)
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("hawavoclean.cli._repo_root", lambda: tmp_path)
+    monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(_REPO_PROFILES))
 
-    code = _run_cli(monkeypatch, "restore-doctor")
+    _run_cli(monkeypatch, "restore-doctor")
 
-    assert code == int(ExitCode.PREFLIGHT_FAILURE)
     out = capsys.readouterr().out
-    assert "[FAIL] Upstream UniverSR LICENSE missing" in out
-    assert "[OK] Upstream foundation" not in out
+    assert "[WARN] Upstream UniverSR checkout has no LICENSE file" in out
+    assert "[FAIL] Upstream" not in out
 
 
-def test_restore_doctor_profile_validation_error_fails(
+def test_restore_doctor_reports_a_complete_research_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A profiles root that cannot validate all 10 speakers is a preflight failure."""
+    """A vendored checkout with its LICENSE is reported as present, with the pin."""
     _stub_heavy_engines(monkeypatch)
     vendor = tmp_path / "vendors" / "universr"
     vendor.mkdir(parents=True)
     (vendor / "LICENSE").write_text("MIT License\n")
-    (tmp_path / "profiles").mkdir()  # exists, but holds no speaker directories
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("hawavoclean.cli._repo_root", lambda: tmp_path)
+    monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(_REPO_PROFILES))
+
+    _run_cli(monkeypatch, "restore-doctor")
+
+    out = capsys.readouterr().out
+    assert "[OK] Upstream research baseline present: UniverSR" in out
+    assert "26dc21c4" in out
+
+
+def test_restore_doctor_fails_on_a_profiles_root_that_cannot_validate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A profiles root that cannot validate all 10 speakers IS a preflight failure.
+
+    Resolved through paths.profiles_root(), not the working directory, so the
+    doctor reports on the profiles the pipeline would really load.
+    """
+    _stub_heavy_engines(monkeypatch)
+    empty = tmp_path / "profiles"
+    empty.mkdir()
+    monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(empty))
 
     code = _run_cli(monkeypatch, "restore-doctor")
 
     assert code == int(ExitCode.PREFLIGHT_FAILURE)
     out = capsys.readouterr().out
-    assert "[OK] Upstream foundation: UniverSR" in out
     assert "[FAIL] Profile validation failed" in out
     assert "character_01" in out  # the first missing speaker is named
+    assert "ALL RESTORATION CHECKS PASSED" not in out
+
+
+def test_restore_doctor_fails_when_the_profiles_root_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No profiles at all is still a hard preflight failure — restore needs them."""
+    _stub_heavy_engines(monkeypatch)
+    monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(tmp_path / "nowhere"))
+
+    code = _run_cli(monkeypatch, "restore-doctor")
+
+    assert code == int(ExitCode.PREFLIGHT_FAILURE)
+    assert "[FAIL] Profiles root directory missing" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
