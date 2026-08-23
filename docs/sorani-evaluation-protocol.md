@@ -1,7 +1,7 @@
 # Sorani Human Acceptance Protocol
 
 Status: **valid draft, pending explicit user approval; no held-out results examined**  
-Protocol: `hawavoclean-sorani-acceptance-v1` revision `1.0.0`  
+Protocol: `hawavoclean-sorani-acceptance-v1` revision `1.1.0`  
 Machine lock: `evidence/release/sorani-evaluation-protocol.json`
 
 This protocol is the boundary between an extensively tested audio program and a product whose
@@ -10,9 +10,11 @@ The four bundled synthetic files and the automated `hawavoclean eval` gate do no
 
 ## Release decision in one page
 
-The exact 3.3.0 release artifacts will render `production`, `studio`, and `lowband` outputs. Each
-compatible profile must have at least **450 held-out Sorani source units**, from at least **45 held-out
-speakers**, with no speaker contributing more than ten units. Calibration, acceptance, and reserve
+The exact 3.3.0 release artifacts will render `production`, `studio`, `lowband`, and `restore`
+outputs. Each compatible profile must have at least **450 held-out Sorani source units**, from at least
+**45 held-out speakers**, with no speaker contributing more than ten units. Restore is evaluated as a
+fourth shipped condition under an explicit generative addendum: its outputs are labeled
+reconstructions, never recovered speech, and it carries three additional stop rules of its own. Calibration, acceptance, and reserve
 speakers are disjoint. Two Sorani-capable reviewers independently compare every source/candidate pair;
 a third qualified reviewer adjudicates every disagreement while the profile identity remains hidden.
 ASR may only direct attention to a timecode. It can never clear linguistic content.
@@ -23,6 +25,8 @@ Release is stopped by any of the following:
   element in shipped audio;
 - one guard false accept, meaning changed content passed through to the shipped output;
 - one processing-induced severe or unusable artifact;
+- (restore only) one confirmed speaker-identity mismatch, one protected-band alteration beyond the
+  locked tolerance, or one shipped restore unit distributed without its reconstruction disclosure;
 - failure of the locked intelligibility or P.835 SIG/BAK/OVRL non-inferiority gates;
 - failure to demonstrate at least one locked value improvement for an intended use of each profile;
 - leakage, unblinding, post-output exclusion, replacement of a failed unit, or a render that is not the
@@ -36,13 +40,30 @@ newly rights-cleared holdout.
 
 For zero observed events in `n` independent units, the exact one-sided binomial 95% upper bound is
 `1 - 0.05^(1/n)`. At `n = 450`, that is 0.6636% for one profile. Conservatively assigning alpha
-`0.05 / 3` to each of the three shipped profiles gives a simultaneous upper bound of 0.9058%, below
-1%. This is stronger than the original 300-unit floor.
+`0.05 / 4` to each of the four shipped conditions gives a simultaneous upper bound of 0.9691%, below
+1%. This is stronger than the original 300-unit floor, and it held when restore was added as the
+fourth condition — the same 450-unit floor still clears the bound.
 
 That calculation does **not** make repeated speech from one speaker independent or turn a convenience
 sample into the Sorani population. The corpus therefore caps speaker concentration, reports
 speaker-block sensitivity and effective sample size, and must add units if clustering weakens the
 bound. No release document may quote the sub-1% figure without those qualifications.
+
+## Restore-mode addendum
+
+Restore mode is generative: content below the detected cutoff is protected by construction and
+re-verified, and everything above it is synthesized conditioned on an enrolled speaker profile.
+The protocol therefore refuses to treat it as another enhancement profile:
+
+- **Disclosure is part of the design.** Outputs are labeled reconstructions, not recovered speech.
+  A shipped restore unit distributed without that disclosure is a stop event regardless of scores.
+- **Speaker identity is its own gate.** Every restore unit receives a blinded native-listener
+  speaker match against the enrollment audio, in addition to the dual content-integrity review.
+  One confirmed mismatch stops release.
+- **The protected band is re-verified on shipped units.** One alteration beyond the locked
+  tolerance stops release.
+- **Sources must be genuinely band-limited** (telephony, codec, archival), with the detected
+  cutoff recorded per unit. Full-band sources are bypass cases and count toward no restore stratum.
 
 ## Corpus and split lock
 

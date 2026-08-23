@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "protocol_id": "hawavoclean-sorani-acceptance-v1",
-  "protocol_revision": "1.0.0",
+  "protocol_revision": "1.1.0",
   "release": {
     "product": "hawavoclean",
     "version": "3.3.0"
   },
-  "frozen_at": "2026-08-21T00:00:00Z",
+  "frozen_at": "2026-08-24T00:00:00Z",
   "scope": {
     "claim": "For intended Sorani dialogue inputs, HawaVoClean 3.3.0 preserves spoken content and provides profile-appropriate quality that is superior or non-inferior to the original under the locked rules below.",
     "unit_of_analysis": "one source speech unit and one compatible shipped profile output",
@@ -17,7 +17,8 @@
       "semantic correctness inferred by ASR",
       "performance for languages other than Sorani",
       "performance outside the declared input and host support contract",
-      "a population prevalence below the statistical bound when speaker clustering or sampling bias invalidates independence"
+      "a population prevalence below the statistical bound when speaker clustering or sampling bias invalidates independence",
+      "recovery of recorded high-frequency content in restore mode; restored bandwidth is a labeled reconstruction conditioned on an enrolled speaker profile"
     ]
   },
   "systems": [
@@ -51,6 +52,13 @@
       "role": "shipped profile",
       "shipped_candidate": true,
       "render_rule": "exact release artifact and lowband profile on compatible inputs; no post-processing"
+    },
+    {
+      "id": "restore",
+      "role": "shipped generative candidate",
+      "shipped_candidate": true,
+      "generative": true,
+      "render_rule": "exact release candidate in --mode restore with the locked speaker profile; Guard R verdicts recorded per unit; reverted units ship the Natural master"
     }
   ],
   "population_and_splits": {
@@ -69,10 +77,10 @@
       "maximum_units_per_speaker": 10,
       "minimum_independent_content_reviews_per_profile": 900,
       "one_sided_alpha": 0.05,
-      "bonferroni_alpha_per_profile": 0.016666666666666666,
+      "bonferroni_alpha_per_profile": 0.0125,
       "zero_event_upper_95_per_profile": 0.006635072879038639,
-      "zero_event_upper_95_simultaneous_three_profiles": 0.009057276974793749,
-      "rationale": "With zero confirmed changes among 450 units, the exact one-sided binomial upper bound is 0.6636% per profile. Using alpha 0.05/3 gives a conservative simultaneous upper bound of 0.9058% across three profiles. These bounds assume independent representative units; speaker-block sensitivity and cluster-aware intervals are mandatory, and more units must be added if effective sample size is lower."
+      "rationale": "With zero confirmed changes among 450 units, the exact one-sided binomial upper bound is 0.6636% per profile. Using alpha 0.05/4 gives a conservative simultaneous upper bound of 0.9691% across the four shipped conditions (production, studio, lowband, restore). These bounds assume independent representative units; speaker-block sensitivity and cluster-aware intervals are mandatory, and more units must be added if effective sample size is lower.",
+      "zero_event_upper_95_simultaneous_four_profiles": 0.009690577756780838
     },
     "coverage_requirements": {
       "dialect": [
@@ -232,7 +240,8 @@
       "original",
       "production",
       "studio",
-      "lowband"
+      "lowband",
+      "restore"
     ],
     "quality_controls": [
       "Sorani comprehension and dialect screening",
@@ -374,6 +383,17 @@
   },
   "integrity": {
     "algorithm": "sha256-canonical-json-v1",
-    "design_sha256": "896dfc12be5600705cd279b367fe5e28e6dfd3c6543a14977b4aa8e981bedd82"
+    "design_sha256": "8eef3cec2f3715a631d1cf730da8e61718f936389e3f836a1332bcb939d473fe"
+  },
+  "restoration_addendum": {
+    "disclosure": "outputs are labeled reconstructions, not recovered speech",
+    "rationale": "Restore mode synthesizes bandwidth above the detected cutoff. Content below the cutoff is protected by construction and re-verified; everything above it is generated conditioned on a speaker profile. Evaluating it as recovery would be a false claim regardless of scores.",
+    "stop_rules": [
+      "confirmed speaker identity mismatch in any shipped restore unit",
+      "protected-band alteration beyond locked tolerance in any shipped restore unit",
+      "any shipped restore unit distributed without reconstruction disclosure"
+    ],
+    "source_strata": "restore units must come from genuinely band-limited sources (telephony, codec, archival) with the detected cutoff recorded per unit; full-band sources are bypass cases and count toward no restore stratum",
+    "speaker_identity_gate": "blinded native-listener speaker match against enrollment audio for every restore unit, in addition to the content-integrity dual review"
   }
 }

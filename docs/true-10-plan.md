@@ -244,6 +244,30 @@ evaluation that can actually falsify the quality promise.
 **Exit gate:** the strongest product promise is backed by locked held-out human evidence, with known
 limits stated. Any confirmed content alteration is a release blocker until understood and corrected.
 
+## Phase 5R — Make the generative restore mode's evidence real (extends Phase 5)
+
+The restore mode landed after this plan was frozen and is in scope for 3.3.0 by explicit user
+decision. Its engineering safety net is built and mutation-covered; every quality claim is
+currently synthetic. These tasks close that gap and are P0 for any release that ships the mode.
+
+- [ ] **T5.6 — Revise the locked Sorani protocol to four evaluated conditions** (P0, M; depends on T5.1)
+  - Add `restore` alongside production/studio/lowband: Bonferroni alpha 0.05/4 per profile (the
+    450-unit zero-event simultaneous bound stays below 1% at 0.969%), restore-specific stop rules
+    (confirmed speaker-identity mismatch, protected-band violation in a shipped unit, undisclosed
+    synthesis), and band-limited source strata. Changing the design digest resets U3 approval.
+  - **Proof:** revalidated protocol lock with the new digest recorded in the evidence ledger.
+- [ ] **T5.7 — Enroll real consented speakers and retire the synthetic fixtures** (P0, H; depends on U3)
+  - Real recordings, genuine consent records held with the corpus rights ledger, embeddings and F0
+    statistics extracted from the real audio; the ten generated fixtures remain only as clearly
+    labeled test fixtures outside the shipping profile tree.
+  - **Proof:** `speaker-profile validate` over the real profiles; consent custody documented.
+- [ ] **T5.8 — Train on the approved corpus and re-benchmark honestly** (P0, H; depends on T5.7)
+  - Use the wired split/loss pipeline (speaker-disjoint SplitManager, full composite loss); replace
+    the committed checkpoint only if held-out metrics beat the do-nothing baseline the current
+    benchmark records; publish the comparison either way.
+  - **Proof:** training manifest hashes, held-out benchmark JSON with `universr_mode` and
+    provenance fields, and the new checkpoint hash in the model lock.
+
 ## Phase 6 — Prove the actual DaVinci Resolve product
 
 Goal: the tested experience is the host workflow users will run, not just a standalone Electron shell.

@@ -8,13 +8,13 @@ has completed the human, host, governance, or final-release gates.
 | Fact | Evidence-derived value |
 |---|---|
 | Candidate identity | HawaVoClean 3.3.0; report schema 2 |
-| True-10 plan | 17/31 tasks have committed completion proof |
+| True-10 plan | 17/34 tasks have committed completion proof |
 | Last full local gate | Passed on `2b93176d735d746ebfc5865e7c40f2d36e5f5a3a`; 2 isolated passes × 41 steps |
 | Default suite in each full-gate pass | 1028 passed, 1 skipped, 41 fuzz-only deselected; 92.73% branch coverage (floor 92.49%) |
 | Separate mutation/fuzz/UI gates | 23/23 mutations; 41 fuzz cases; 342 UI tests per pass |
 | Reproduced release identities | Wheel, sdist, UI, Resolve engine/plugin, container, SBOM and engineering-audio identities matched across both passes |
 | CPU container at the full gate | 77/77 packages; 0 high/critical vulnerabilities; 0 high/critical configuration findings |
-| Sorani protocol | `pending_user_approval`; design `896dfc12be5600705cd279b367fe5e28e6dfd3c6543a14977b4aa8e981bedd82` |
+| Sorani protocol | `pending_user_approval`; design `8eef3cec2f3715a631d1cf730da8e61718f936389e3f836a1332bcb939d473fe` |
 | Sorani source route | `pending_user_approval`; design `1f46b23e37945f033eed961291bfc024e0ec2bf6cb388308342462914c2de816` |
 | Controlled standalone Electron | 43.4.1; 0 high/critical advisories at capture |
 | Resolve host boundary | Resolve 21.0.3 embeds Electron 36.3.2; 33 advisories including 7 high/critical; explicit acceptance/update required |

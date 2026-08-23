@@ -27,6 +27,7 @@ TOP_LEVEL_FIELDS = {
     "outcomes",
     "review",
     "listening_test",
+    "restoration_addendum",
     "analysis",
     "exclusions",
     "stopping_and_regression",
@@ -44,7 +45,7 @@ FORBIDDEN_RESULT_KEYS = {
     "measured_rate",
     "p_value",
 }
-PROFILE_IDS = {"production", "studio", "lowband"}
+PROFILE_IDS = {"production", "studio", "lowband", "restore"}
 STANDARD_IDS = {
     "ITU-T P.800",
     "ITU-T P.835",
@@ -183,8 +184,10 @@ def validate_protocol(protocol: dict[str, Any], *, require_approved: bool = Fals
     _require(set(protocol) == TOP_LEVEL_FIELDS, "protocol top-level fields differ from schema v1")
     _require(protocol["schema_version"] == 1, "unsupported protocol schema version")
     _require(protocol["protocol_id"] == "hawavoclean-sorani-acceptance-v1", "wrong protocol id")
-    _require(protocol["protocol_revision"] == "1.0.0", "wrong protocol revision")
-    _require(protocol["frozen_at"] == "2026-08-21T00:00:00Z", "unexpected freeze time")
+    # 1.1.0: restore added as the fourth evaluated condition (alpha 0.05/4,
+    # restoration addendum with disclosure and restore-specific stop rules).
+    _require(protocol["protocol_revision"] == "1.1.0", "wrong protocol revision")
+    _require(protocol["frozen_at"] == "2026-08-24T00:00:00Z", "unexpected freeze time")
     _reject_embedded_results(protocol)
 
     release = _object(protocol["release"], "release")
@@ -195,7 +198,7 @@ def validate_protocol(protocol: dict[str, Any], *, require_approved: bool = Fals
     systems = _objects_by_id(_list(protocol["systems"], "systems"), "systems")
     _require(
         set(systems) == {"original", "discarded_guard_candidate", *PROFILE_IDS},
-        "original, discarded guard candidate, and all three shipped profiles required",
+        "original, discarded guard candidate, and all four shipped profiles required",
     )
     for system_id, system in systems.items():
         if system_id in PROFILE_IDS:
@@ -207,6 +210,30 @@ def validate_protocol(protocol: dict[str, Any], *, require_approved: bool = Fals
                 system.get("shipped_candidate") is False,
                 "original and diagnostic guard candidates cannot be marked shipped",
             )
+
+    # The restore condition is generative: its shipped output contains
+    # synthesized bandwidth. The protocol refuses to evaluate it as if it were
+    # another enhancement profile — the disclosure and the restore-specific
+    # stop rules are part of the locked design, not of any later result.
+    _require(
+        systems["restore"].get("generative") is True,
+        "restore must be declared generative",
+    )
+    addendum = _object(protocol.get("restoration_addendum"), "restoration_addendum")
+    _require(
+        addendum.get("disclosure") == "outputs are labeled reconstructions, not recovered speech",
+        "restoration addendum must lock the reconstruction disclosure",
+    )
+    stop_rules = _list(addendum.get("stop_rules"), "restoration_addendum.stop_rules")
+    required_rules = {
+        "confirmed speaker identity mismatch in any shipped restore unit",
+        "protected-band alteration beyond locked tolerance in any shipped restore unit",
+        "any shipped restore unit distributed without reconstruction disclosure",
+    }
+    _require(
+        required_rules.issubset(set(stop_rules)),
+        "restoration addendum must contain the three restore-specific stop rules",
+    )
 
     population = _object(protocol["population_and_splits"], "population_and_splits")
     sample = _object(population.get("sample_size"), "population_and_splits.sample_size")
@@ -229,7 +256,7 @@ def validate_protocol(protocol: dict[str, Any], *, require_approved: bool = Fals
     alpha = _number(sample, "one_sided_alpha", "one_sided_alpha")
     family_alpha = _number(sample, "bonferroni_alpha_per_profile", "bonferroni_alpha_per_profile")
     _require(alpha == 0.05, "one-sided alpha must remain 0.05")
-    _require(math.isclose(family_alpha, 0.05 / 3, abs_tol=1e-15), "profile family alpha changed")
+    _require(math.isclose(family_alpha, 0.05 / 4, abs_tol=1e-15), "profile family alpha changed")
     exact = 1.0 - math.pow(alpha, 1.0 / n)
     simultaneous = 1.0 - math.pow(family_alpha, 1.0 / n)
     _require(
@@ -244,8 +271,8 @@ def validate_protocol(protocol: dict[str, Any], *, require_approved: bool = Fals
         math.isclose(
             _number(
                 sample,
-                "zero_event_upper_95_simultaneous_three_profiles",
-                "zero_event_upper_95_simultaneous_three_profiles",
+                "zero_event_upper_95_simultaneous_four_profiles",
+                "zero_event_upper_95_simultaneous_four_profiles",
             ),
             simultaneous,
             abs_tol=1e-15,

@@ -23,6 +23,13 @@ gate fails if that file drifts from its sources.
   audio, Resolve staging, container scanning, SBOM and reproducible artifact identities.
 - Result-free Sorani protocol and corpus-source designs that are machine-valid but deliberately
   refuse approval-dependent execution.
+- An opt-in generative restore mode (`--mode restore`) behind Restoration Guard R: protected-band
+  invariance by construction, fail-closed revert with the rejecting layer's evidence, CPU-pinned
+  deterministic inference, and a mandatory self-attested checkpoint. Its engineering behavior is
+  tested and mutation-covered; its *quality* evidence is currently synthetic-only — the committed
+  checkpoint has never seen real speech, the ten speaker profiles are generated fixtures, and the
+  committed benchmark records restoration degrading LSD on those fixtures. Real-corpus training,
+  real speaker enrollment, and the four-condition human protocol remain open (R-14, T5.6–T5.8).
 
 ## What the strongest proof currently establishes
 
