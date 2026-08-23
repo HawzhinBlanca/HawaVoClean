@@ -36,3 +36,22 @@ hawavoclean speaker-profile validate profiles/character_01/profile.json
 ```bash
 hawavoclean restore-doctor
 ```
+
+## Constraints and Failure Behaviour
+
+- **Restore mode requires a speaker ID.** `--mode restore` without `--speaker-id`
+  is rejected before any processing starts.
+- **Restore mode is single-pass.** It cannot be combined with `--passes`, which has
+  no restoration stage; the combination is refused rather than silently producing
+  an un-restored master.
+- **`--cutoff-hz` implies manual cutoff selection**, and `--cutoff manual` without a
+  frequency is rejected. The report records `bandwidth.cutoff_mode` so a reader can
+  tell a measured boundary from an asserted one.
+- **A missing or unloadable checkpoint is fatal.** Restore mode refuses to run on
+  untrained weights rather than publishing synthesised audio. Point
+  `HAWAVOCLEAN_RESTORATION_CHECKPOINT` at the model if it lives outside the repo.
+- **Restoration resamples the master to 48 kHz.** A 44.1 kHz input is published at
+  48 kHz with its duration preserved; the report's input and output stanzas record
+  both rates.
+- **Long files are processed in blocks.** Memory is flat in duration rather than
+  growing with it, so a feature-length file does not exhaust the machine.

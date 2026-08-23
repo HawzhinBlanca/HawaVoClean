@@ -59,7 +59,10 @@ guarantee, the guarantee is not made.
    worker to prove it.
 3. **Sample-exact timeline** — output duration, sample count, channel
    layout, and unit timing equal the input's, enforced by post-assembly
-   invariants and content-conservation tests.
+   invariants and content-conservation tests. Restore mode is the one
+   documented exception: it publishes at 48 kHz, so a 44.1 kHz input keeps
+   its duration and channel layout but not its sample count. The report
+   records both rates.
 4. **True-peak ceiling** — −1.0 dBTP, verified by 8× oversampled
    measurement inside the limiter and independently in tests. No hard
    clipping anywhere in the chain.
@@ -92,7 +95,12 @@ guarantee, the guarantee is not made.
    copying only the visible symlink can produce a dangling file.
 6. The supported container is CPU/production only. Studio/GPU container
    support and Windows are not claimed for 3.3.0.
-7. The Resolve plugin's application boundary is hardened, but Resolve 21.0.3
+7. Restore mode is generative and produces audio that was never recorded. It
+   is opt-in, per-speaker, consent-gated and guard-checked, but a restored
+   master is a plausible reconstruction of the missing band, not a recovery of
+   it. The acceptance evidence for it is synthetic; no human listening study
+   is claimed.
+8. The Resolve plugin's application boundary is hardened, but Resolve 21.0.3
    embeds a vendor-owned Electron 36.3.2 with unaccepted high-severity
    advisories. See [the runtime-risk assessment](docs/resolve-runtime-risk.md).
 
@@ -139,6 +147,28 @@ dependencies:
 ```bash
 uv sync --frozen --extra studio
 ```
+
+### Restore mode (opt-in, generative)
+
+Everything above is non-generative: the output only ever contains audio that
+was in the input. `--mode restore` is the exception. It extends band-limited
+Kurdish dialogue above its cutoff using the HawaRestore-KD model conditioned on
+a consent-backed speaker profile, and it is off by default.
+
+```bash
+uv sync --frozen --extra restoration
+hawavoclean restore-doctor
+hawavoclean process telephony.wav --output restored.wav \
+  --mode restore --speaker-id character_01
+```
+
+Content below the detected cutoff is preserved by construction and re-verified
+afterwards; the generated band is only kept if Restoration Guard R accepts it,
+and otherwise the Natural master ships unchanged with verdict `FAIL` and the
+rejecting layer's metrics in the report. Restore mode requires `--speaker-id`,
+requires a loadable checkpoint (it refuses to run on untrained weights), is
+single-pass, and publishes at 48 kHz. `--cutoff-hz` asserts the cutoff instead
+of measuring it, and the report records which of the two happened.
 
 Development and evaluation commands:
 

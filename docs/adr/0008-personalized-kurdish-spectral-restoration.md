@@ -35,6 +35,8 @@ Rather than maintaining ten separate models, we train a single shared HawaRestor
 ### 4. Candidate High-Band Strength Ladder
 Restoration generates candidate high-band residual strengths: `[1.00, 0.75, 0.50, 0.25, 0.00]`. The protected band is identical across all candidates.
 
+The `0.00` entry is the Natural-safe candidate itself and is **not** submitted to Guard R. Scoring it would compare the Natural audio against itself, clearing every layer trivially and returning before any real candidate could be judged — which would report a total revert as a passing verdict. It is the fallback, not a proposal.
+
 ### 5. Multi-Layer Restoration Guard R
 Each candidate is evaluated through Guard R:
 - **Structural Integrity**: Sample count conservation, channel count, duration, clipping, NaN/Inf, discontinuity.
@@ -45,7 +47,13 @@ Each candidate is evaluated through Guard R:
 - **Speaker Identity**: Restored segments must match the speaker's canonical prototype vector.
 
 ### 6. Fail-Closed Fallback
-If any candidate fails Guard R, the policy evaluates the next lower strength. If all active strengths fail or an error occurs, the system automatically falls back to the **Natural-safe candidate**.
+If any candidate fails Guard R, the policy evaluates the next lower strength. If all active strengths fail or an error occurs, the system automatically falls back to the **Natural-safe candidate**, and the report records verdict `FAIL` (or `ERROR`) together with the rejection reason and the failing layer's metrics.
+
+### 7. Reproducible Inference
+The vector field is integrated on **CPU by default**. `torch.manual_seed` does not produce the same stream on CUDA or MPS as on CPU, and the ODE solver starts from a random draw, so an auto-selected accelerator would make the restored master differ between a workstation and CI while the report still claimed a fixed seed policy. Randomness comes from an explicit `torch.Generator` seeded per block from the job ID, never from the process-global RNG.
+
+### 8. Weights Are Mandatory
+Restore mode refuses to start without a checkpoint it can load, and the reported `weights_sha256` is computed by the restorer from the file it loaded into the network. There is no untrained-weights fallback: it could only ever publish audio synthesised by a randomly initialised model, and the report would still attest a checkpoint.
 
 ## Consequences
 
@@ -53,3 +61,5 @@ If any candidate fails Guard R, the policy evaluates the next lower strength. If
 - Trusted speech below the cutoff frequency cannot be altered.
 - Kurdish phonemic integrity is verified prior to and after restoration.
 - All decisions, cutoff measurements, model hashes, and guard scores are recorded in the immutable `.hawavoclean.json` report.
+- Restoration cost is flat in file duration: the spectrogram is processed in overlapping blocks with a cross-faded seam, rather than as one whole-file tensor.
+- Restore mode is single-pass; it is refused in combination with `--passes`, which has no restoration stage.

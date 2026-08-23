@@ -11,6 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > repository milestones; they are not evidence of a signed, tagged, protected-branch publication.
 > Current proof and blockers are authoritative in `docs/generated-release-status.md` and `STATUS.md`.
 
+### Added — opt-in Kurdish spectral restoration (`--mode restore`)
+
+- Added the HawaRestore-KD restoration subsystem: continuous cutoff detection, a flow-matching
+  vector-field model conditioned on speaker identity and a canonical prototype embedding, ten
+  consent-backed speaker profiles with hash-verified embeddings, and Restoration Guard R. It runs as
+  pipeline stage 10.5, between assembly and loudness, and is off unless `--mode restore` is given.
+  This is the first generative path in the product: everything else only ever emits audio that was
+  in the input.
+- Content below the detected cutoff is preserved by construction and re-verified afterwards. Guard R
+  checks structural integrity, protected-band invariance, high-band event consistency, harmonic
+  pitch divergence, speaker similarity against the profile prototype, and Sorani acoustic-posterior
+  divergence, descending a strength ladder and reverting to the Natural master if none pass.
+- The zero-strength entry of that ladder is the Natural candidate and is deliberately not scored.
+  Evaluating it would clear every layer trivially and return first, so a run in which every real
+  candidate was rejected would have been audited as having passed the guard. A total revert now
+  reports verdict `FAIL` with the rejecting layer's metrics.
+- Restoration is processed in overlapping blocks with a cross-faded seam, so memory is flat in file
+  duration rather than growing with it.
+- Inference is pinned to CPU and draws from an explicit per-block generator seeded from the job ID:
+  `torch.manual_seed` does not give the same stream on CUDA/MPS as on CPU, so an auto-selected
+  accelerator would have made the master depend on the host while the report claimed a fixed seed
+  policy.
+- Restore mode fails closed on weights: a checkpoint that cannot be resolved or loaded raises rather
+  than falling back to the random initialisation, the checkpoint is resolved independently of the
+  working directory, and the reported `weights_sha256` is computed from the file actually loaded.
+- Restore mode requires `--speaker-id`, is refused in combination with `--passes` (which has no
+  restoration stage), and publishes at 48 kHz. `--cutoff-hz` asserts the cutoff rather than measuring
+  it, and the report records which happened via `bandwidth.cutoff_mode`.
+- Added `restore-doctor`, `speaker-profile validate`, and `restoration-benchmark` CLI verbs, and a
+  `restoration` section in the JSON report and human summary carrying the bandwidth estimate, model
+  provenance, segment counts, and the full Guard R verdict.
+
 ### Changed — evidence-backed release hardening and truthful product boundary
 
 - Replaced independent flat-file publication with immutable content-addressed WAV/JSON/TXT

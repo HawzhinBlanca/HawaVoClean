@@ -16,6 +16,14 @@ Every output report generated in `--mode restore` embeds:
 - `restoration.profile_hash`
 - `restoration.natural_output_hash`
 - `restoration.bandwidth`
-- `restoration.restorer` metadata (name, commit, weights_sha256, solver, steps)
+- `restoration.restorer` metadata (name, commit, weights_sha256, checkpoint_path,
+  device, solver, steps, guidance_scale)
 - `restoration.segments` counts
-- `restoration.guard_r` metrics
+- `restoration.guard_r` verdict, accepted strength, reason, and per-layer metrics
+
+`weights_sha256` is reported by the restorer itself, computed from the checkpoint
+it loaded into the network. A checkpoint that cannot be resolved or loaded raises
+`ModelProvenanceError`, so the field can never describe weights that were not used.
+The checkpoint is resolved independently of the working directory, via
+`HAWAVOCLEAN_RESTORATION_CHECKPOINT`, then the packaged models directory, then the
+in-repo `models/` tree.
