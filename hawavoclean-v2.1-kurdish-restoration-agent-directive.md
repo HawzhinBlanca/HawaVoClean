@@ -594,15 +594,35 @@ Do not accept a result merely because one embedding model scores highly.
 
 ## 6.7 Guard policy
 
+The descent through the strength ladder happens during candidate selection, per
+4.6: candidates are guarded strongest to weakest and the first one to clear every
+layer is accepted. The verdict is emitted once, after selection has concluded. It
+reports what was decided; it is never an instruction to retry.
+
 Per segment:
 
 ```text
-PASS        → accept strongest safe high-band strength
-WARN        → try lower high-band strength
-FAIL        → Natural-safe candidate
-ERROR       → Natural-safe candidate + report flag
-NO_RESTORE  → Natural-safe candidate
+PASS        → accepted; strength ≥ 0.75 cleared every layer
+WARN        → accepted at a reduced strength below 0.75; the ladder already descended
+FAIL        → every active candidate rejected → Natural-safe candidate
+ERROR       → restorer or guard raised, or input was degenerate → Natural-safe candidate + report flag
+NO_RESTORE  → nothing was judged: bandwidth healthy, cutoff confidence too low,
+              or no active candidate offered → Natural-safe candidate
 ```
+
+PASS and WARN both ship generated content and differ only in how much of it
+survived. FAIL, ERROR and NO_RESTORE all ship the Natural-safe candidate and
+differ only in why: FAIL means the guard refused what the model produced, ERROR
+means the attempt did not complete, NO_RESTORE means no attempt was made.
+
+The zero-strength entry of the ladder is the Natural-safe candidate. It is never
+submitted to the guard: scored against itself it clears every layer trivially and
+returns first, so a segment whose every real candidate was rejected would be
+recorded as having passed. It is what the guard falls back to, never something the
+guard approves.
+
+A FAIL verdict must carry the rejection reason and the failing layer's
+measurements. "Reverted" without the evidence for it is not an audit trail.
 
 Never output silence, truncated audio, or an unchecked generated segment.
 
