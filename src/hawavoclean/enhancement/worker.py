@@ -16,7 +16,9 @@ import contextlib
 import multiprocessing as mp
 import os
 import queue
+import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -80,6 +82,37 @@ RESERVED_CPUS = 2
 POOL_SIZE_ENV = "HAWAVOCLEAN_ENHANCE_WORKERS"
 
 
+def _request_kernel_parent_death_signal() -> bool:
+    """Ask Linux to SIGKILL this process the instant its parent dies.
+
+    The polling watchdog below is portable but has two gaps a kernel
+    guarantee does not: the poll interval itself, and any state in which the
+    watchdog thread cannot be scheduled. ``PR_SET_PDEATHSIG`` closes both —
+    the kernel delivers the signal as part of the parent's exit, so there is
+    no window at all.
+
+    It is Linux-only and inherited across ``exec`` but cleared on ``fork``,
+    which is exactly right for a spawned worker. Returns whether it armed, so
+    the caller keeps the portable watchdog on every other platform.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        _PR_SET_PDEATHSIG = 1
+        if libc.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0) != 0:
+            return False
+    except Exception:  # pragma: no cover - non-glibc or restricted sandbox
+        return False
+    # The parent can already have died between its fork and this call, which
+    # would leave the signal armed against a parent that will never exit.
+    if os.getppid() == 1:
+        os._exit(0)
+    return True
+
+
 def _arm_parent_death_watchdog(poll_s: float = WATCHDOG_POLL_S) -> threading.Thread:
     """Exit this process as soon as the process that spawned it is gone.
 
@@ -122,6 +155,14 @@ def _worker_process_entry(
     # would be watching the *test runner's* parent with an os._exit(0) on the
     # end of it.
     if mp.parent_process() is not None:
+        # Both, deliberately. The kernel signal is immediate and immune to a
+        # blocked interpreter but exists only on Linux; the polling thread
+        # covers every other platform. A SIGKILLed parent runs no atexit
+        # handler, so multiprocessing's daemon=True reaping never happens and
+        # the worker is on its own — measured on Linux CI, where workers
+        # outlived a SIGKILLed parent by more than thirty seconds while the
+        # same test passed on macOS.
+        _request_kernel_parent_death_signal()
         _arm_parent_death_watchdog()
 
     try:

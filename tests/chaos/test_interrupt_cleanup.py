@@ -44,6 +44,7 @@ from tests.chaos.procwatch import (
     alive,
     children_of,
     contents,
+    describe,
     freeze,
     kill_tree,
     thaw,
@@ -158,9 +159,13 @@ def test_interrupt_leaves_no_partials_and_no_orphans(
 
             # Children must notice and exit on their own (watchdog polls at 0.5 s).
             survivors, waited = wait_all_gone(children, ORPHAN_EXIT_TIMEOUT_S)
+            # Name what survived: "two pids" is not enough to tell an orphaned
+            # enhancement worker from a multiprocessing resource tracker, and
+            # the two call for different fixes.
+            described = [f"{pid} ({describe(pid)})" for pid in survivors]
             assert not survivors, (
                 f"{sig.name}: orphaned worker child survived the parent by "
-                f"{waited:.1f}s: {survivors}"
+                f"{waited:.1f}s: {described}"
             )
             assert not contents(dest_dir), (
                 f"{sig.name}: partial outputs at destination: {contents(dest_dir)} "

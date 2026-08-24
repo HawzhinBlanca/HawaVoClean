@@ -95,3 +95,16 @@ def contents(directory: Path) -> list[str]:
     """Sorted names in ``directory`` — every entry, dotfiles included: a
     publish staging directory left behind is litter at the destination too."""
     return sorted(p.name for p in directory.iterdir())
+
+
+def describe(pid: int) -> str:
+    """Best-effort command line for ``pid``, for diagnostics in assertions.
+
+    A bare pid says a process survived but not *what* did, and an orphaned
+    enhancement worker and a lingering multiprocessing resource tracker are
+    different bugs with different fixes.
+    """
+    out = subprocess.run(
+        ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
+    ).stdout.strip()
+    return out[:120] if out else "gone"
