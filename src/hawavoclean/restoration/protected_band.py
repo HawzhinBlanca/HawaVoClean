@@ -5,6 +5,14 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import signal
 
+#: Third-octave band ratio used to judge the protected region band by band.
+_THIRD_OCTAVE = 2.0 ** (1.0 / 3.0)
+#: Bands below this frequency are pooled into the first band.
+_MIN_BAND_HZ = 50.0
+#: A band holding this little of the loudest bin's energy is numerical noise,
+#: and a large relative error on silence is not a violation of anything.
+_BAND_ENERGY_FLOOR_RATIO = 1e-4
+
 
 @dataclass(frozen=True)
 class ProtectedBandVerification:
@@ -14,6 +22,11 @@ class ProtectedBandVerification:
     rms_waveform_error: float
     complex_stft_relative_error: float
     max_phase_deviation_rad: float
+    #: Largest third-octave relative error inside the protected region, and the
+    #: centre of the band that produced it. The global norm alone cannot see a
+    #: gutted sub-band; this is the number that can.
+    worst_band_relative_error: float
+    worst_band_center_hz: float
     passes_invariance: bool
 
 
@@ -97,6 +110,8 @@ def verify_protected_band_invariance(
             rms_waveform_error=0.0,
             complex_stft_relative_error=0.0,
             max_phase_deviation_rad=0.0,
+            worst_band_relative_error=0.0,
+            worst_band_center_hz=0.0,
             passes_invariance=True,
         )
 
@@ -112,6 +127,8 @@ def verify_protected_band_invariance(
             rms_waveform_error=rms_err,
             complex_stft_relative_error=0.0,
             max_phase_deviation_rad=0.0,
+            worst_band_relative_error=0.0,
+            worst_band_center_hz=0.0,
             passes_invariance=(rms_err <= tolerance_rms),
         )
 
@@ -148,6 +165,8 @@ def verify_protected_band_invariance(
             rms_waveform_error=0.0,
             complex_stft_relative_error=0.0,
             max_phase_deviation_rad=0.0,
+            worst_band_relative_error=0.0,
+            worst_band_center_hz=0.0,
             passes_invariance=True,
         )
 
@@ -156,6 +175,44 @@ def verify_protected_band_invariance(
 
     diff = Z_rest_prot - Z_orig_prot
     stft_rel_err = float(np.linalg.norm(diff) / (np.linalg.norm(Z_orig_prot) + 1e-9))
+
+    # Per-band error, because the global norm above cannot enforce the promise
+    # this function exists to make. Protected-band energy is dominated by
+    # sub-1 kHz speech, so a whole multi-kHz slice holding a small share of it
+    # can be deleted, phase-inverted or fabricated and still land two orders of
+    # magnitude inside tolerance. Measured: a band-stop from 2.6 kHz to the
+    # protected boundary removed 20.7 dB from inside the protected region and
+    # the guard returned verdict=PASS at strength 1.00, handing back the gutted
+    # audio with passes_invariance=true. Each third-octave band is therefore
+    # normalised by its OWN energy and judged on its own.
+    prot_freqs = freqs[protected_bins]
+    band_energy = np.abs(Z_orig_prot) ** 2
+    per_band_energy = np.sum(band_energy, axis=1)
+    loudest_bin = float(np.max(per_band_energy)) if per_band_energy.size else 0.0
+
+    worst_band_error = 0.0
+    worst_band_hz = 0.0
+    if loudest_bin > 0.0:
+        lo_hz = max(float(prot_freqs[0]), _MIN_BAND_HZ)
+        while lo_hz < protected_boundary:
+            hi_hz = min(lo_hz * _THIRD_OCTAVE, protected_boundary)
+            in_band = (prot_freqs >= lo_hz) & (prot_freqs < hi_hz)
+            lo_hz = hi_hz
+            if not np.any(in_band):
+                continue
+            orig_band = Z_orig_prot[in_band, :]
+            energy = float(np.sum(np.abs(orig_band) ** 2))
+            # Bands carrying essentially nothing are numerical noise: a large
+            # relative error on silence is not a violation of anything.
+            if energy <= loudest_bin * _BAND_ENERGY_FLOOR_RATIO:
+                continue
+            band_err = float(
+                np.linalg.norm(Z_rest_prot[in_band, :] - orig_band)
+                / (np.linalg.norm(orig_band) + 1e-12)
+            )
+            if band_err > worst_band_error:
+                worst_band_error = band_err
+                worst_band_hz = float(np.mean(prot_freqs[in_band]))
 
     # Phase deviation
     phase_diff = np.angle(Z_rest_prot * np.conj(Z_orig_prot))
@@ -170,12 +227,18 @@ def verify_protected_band_invariance(
     max_abs = float(np.max(np.abs(lp_diff)))
     rms_err = float(np.sqrt(np.mean(lp_diff**2)))
 
-    passes = (rms_err <= tolerance_rms) and (stft_rel_err <= tolerance_stft)
+    passes = (
+        rms_err <= tolerance_rms
+        and stft_rel_err <= tolerance_stft
+        and worst_band_error <= tolerance_stft
+    )
 
     return ProtectedBandVerification(
         max_waveform_abs_error=max_abs,
         rms_waveform_error=rms_err,
         complex_stft_relative_error=stft_rel_err,
         max_phase_deviation_rad=max_phase_dev,
+        worst_band_relative_error=worst_band_error,
+        worst_band_center_hz=worst_band_hz,
         passes_invariance=passes,
     )

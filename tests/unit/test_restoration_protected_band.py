@@ -79,3 +79,71 @@ def test_verify_protected_band_invariance_passes() -> None:
 
     assert chk.passes_invariance is True
     assert chk.rms_waveform_error < 1e-4
+
+
+def test_a_gutted_sub_band_inside_the_protected_region_is_refused() -> None:
+    """Deleting a slice of the protected band must fail invariance.
+
+    The check used to be a single relative norm over the whole protected
+    region. Protected-band energy is dominated by sub-1 kHz speech, so an
+    entire multi-kHz slice holding a small share of it could be removed and
+    still land two orders of magnitude inside tolerance: measured, a band-stop
+    from 2.6 kHz up to the protected boundary took 20.7 dB out of the region
+    the guard calls protected, and Guard R returned PASS at strength 1.00 and
+    handed back the gutted audio. That is the product's central safety claim
+    failing open, so the region is now judged band by band.
+    """
+    sr = 48000
+    rng = np.random.default_rng(3)
+    t = np.arange(int(sr * 2.0)) / sr
+    harmonics = np.zeros_like(t)
+    k = 1
+    while 120.0 * k < sr / 2:
+        harmonics += (1.0 / (k**1.5)) * np.sin(
+            2 * np.pi * 120.0 * k * t + rng.uniform(0, 2 * np.pi)
+        )
+        k += 1
+    voiced = harmonics * (0.5 + 0.5 * np.sin(2 * np.pi * 2.3 * t))
+    band_limited = signal.sosfiltfilt(
+        signal.butter(12, 4000 / (sr / 2), btype="lowpass", output="sos"), voiced
+    )
+    natural = (band_limited / np.max(np.abs(band_limited)) * 0.7).astype(np.float32)
+
+    cutoff_hz = 4094.0
+    boundary = max(500.0, cutoff_hz - 250.0)
+    gutted = signal.sosfiltfilt(
+        signal.butter(8, [2600.0, boundary], btype="bandstop", fs=sr, output="sos"), natural
+    ).astype(np.float32)
+
+    verified = verify_protected_band_invariance(
+        natural,
+        gutted,
+        sample_rate=sr,
+        cutoff_hz=cutoff_hz,
+        tolerance_rms=0.05,
+        tolerance_stft=0.10,
+    )
+
+    assert not verified.passes_invariance, (
+        "a sub-band of the protected region was deleted and invariance still passed"
+    )
+    assert verified.worst_band_relative_error > 0.10
+    assert 2600.0 <= verified.worst_band_center_hz <= boundary, (
+        "the report must name the band that actually failed"
+    )
+    # The global norm alone would have missed it — that is the whole point.
+    assert verified.complex_stft_relative_error < 0.10
+
+
+def test_untouched_audio_still_passes_band_by_band() -> None:
+    """The per-band test must not reject a candidate that changed nothing."""
+    sr = 48000
+    t = np.arange(int(sr * 1.0)) / sr
+    sig = (0.4 * np.sin(2 * np.pi * 220 * t) + 0.2 * np.sin(2 * np.pi * 1400 * t)).astype(
+        np.float32
+    )
+    verified = verify_protected_band_invariance(
+        sig, sig.copy(), sample_rate=sr, cutoff_hz=6000.0, tolerance_rms=0.05, tolerance_stft=0.10
+    )
+    assert verified.passes_invariance
+    assert verified.worst_band_relative_error == 0.0
