@@ -4,7 +4,27 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
-from scipy import signal
+from scipy import ndimage, signal
+
+#: Half-octave span used to measure the local slope at a candidate band edge.
+_HALF_OCTAVE = 1.4142135623730951
+#: Bins of log-spectrum smoothing, to suppress harmonic ripple before slope
+#: estimation without blurring a genuine cliff.
+_SMOOTH_BINS = 9
+#: Minimum fall, in dB per octave, for a candidate to count as a filter cliff
+#: rather than the natural tilt of a voice.
+_CLIFF_DB_PER_OCTAVE = 35.0
+#: How far below the voice band the region above the cliff must sit.
+_FLOOR_MARGIN_DB = 45.0
+#: Maximum spread of that region: a floor is flat, a roll-off is not.
+_PLATEAU_FLAT_DB = 9.0
+#: How far the loudest bin above a candidate edge may stand above its own
+#: local median. A floor is featureless; a surviving tone is not.
+_ABOVE_PEAKINESS_DB = 20.0
+#: Content is "present" until it falls this far below the in-band peak.
+_EDGE_DROP_DB = 75.0
+#: The walk from cliff foot to band edge never exceeds half an octave.
+_EDGE_WALK_LIMIT = 1.5
 
 
 @dataclass(frozen=True)
@@ -130,40 +150,7 @@ class BandwidthDetector:
             else peak_db
         )
 
-        thresh_db = peak_db - 35.0
-        active_bins = np.where((freqs >= self.min_cutoff_hz) & (psd_db >= thresh_db))[0]
-
-        detected_cutoff = float(self.max_cutoff_hz)
-        detected_shape = "fullband"
-        detected_conf = 0.95
-        rolloff_rate = 0.0
-
-        if len(active_bins) > 0:
-            highest_active_freq = float(freqs[active_bins[-1]])
-            if highest_active_freq < (self.sample_rate / 2.0 - 2500.0):
-                detected_cutoff = float(
-                    np.clip(highest_active_freq + 250.0, self.min_cutoff_hz, self.max_cutoff_hz)
-                )
-                detected_conf = 0.99
-                # Calculate local slope around detected cutoff
-                f_low = max(500.0, detected_cutoff - 500.0)
-                f_high = min(self.sample_rate / 2.0, detected_cutoff + 500.0)
-                idx_low = int(np.argmin(np.abs(freqs - f_low)))
-                idx_high = int(np.argmin(np.abs(freqs - f_high)))
-                log_ratio = np.log2(max(1.01, f_high / max(1.0, f_low)))
-                slope = float((psd_db[idx_low] - psd_db[idx_high]) / max(0.01, log_ratio))
-                rolloff_rate = slope
-                if slope > 36.0:
-                    detected_shape = "steep_brickwall"
-                elif slope > 18.0:
-                    detected_shape = "codec_lowpass"
-                else:
-                    detected_shape = "gentle_rolloff"
-        else:
-            detected_cutoff = float(self.min_cutoff_hz)
-            detected_shape = "steep_brickwall"
-
-        # Evidence statistics
+        # Evidence statistics, independent of how the cutoff is decided.
         fullband_hf_mask = freqs >= 18000.0
         if np.any(fullband_hf_mask):
             fullband_hf_db = float(np.median(psd_db[fullband_hf_mask]))
@@ -172,21 +159,116 @@ class BandwidthDetector:
         snr_above = float(np.clip(ref_db - fullband_hf_db, 0.0, 100.0))
         ratio_db = float(ref_db - fullband_hf_db)
 
-        # Stationarity / variance of HF frames
-        hf_band_frames = mag_sq[freqs >= detected_cutoff, :]
-        if hf_band_frames.shape[0] > 0 and hf_band_frames.shape[1] > 1:
-            frame_energies = np.sum(hf_band_frames, axis=0) + 1e-12
-            stationarity = float(np.std(frame_energies) / (np.mean(frame_energies) + 1e-6))
-        else:
-            stationarity = 0.0
+        # --- Band-limit detection --------------------------------------------
+        #
+        # A band limit is a CLIFF into a FLAT FLOOR, and that is what this
+        # detects. The previous rule -- "the highest bin still within 35 dB of
+        # the in-band peak" -- measured spectral TILT instead. Natural voiced
+        # speech falls much further than 35 dB from its low-frequency peak to
+        # the top of its range, so genuinely full-band speech read as
+        # band-limited: measured across spectral tilts 1.0-3.4, four of five
+        # unfiltered signals came back restore_recommended=True at 0.90-0.99
+        # confidence, the reported cutoff tracking the tilt rather than any
+        # real band edge. Restoration would then synthesise over recorded
+        # content -- exactly the false restoration this subsystem promises not
+        # to perform.
+        #
+        # Three conditions must hold together, because ordinary speech
+        # satisfies any one of them on its own:
+        #   1. a steep local slope in dB/octave -- the cliff;
+        #   2. everything above it far below the voice band -- the floor;
+        #   3. that region flat -- a floor, not a continuing roll-off.
+        smoothed = ndimage.uniform_filter1d(psd_db, size=_SMOOTH_BINS)
+        nyquist = self.sample_rate / 2.0
+        qualifying: list[tuple[float, float, float, float]] = []
+        for freq in freqs:
+            freq_f = float(freq)
+            if freq_f < self.min_cutoff_hz or freq_f <= 0.0:
+                continue
+            f_lo, f_hi = freq_f / _HALF_OCTAVE, freq_f * _HALF_OCTAVE
+            if f_hi > nyquist:
+                break
+            i_lo = int(np.argmin(np.abs(freqs - f_lo)))
+            i_hi = int(np.argmin(np.abs(freqs - f_hi)))
+            octaves = float(np.log2(freqs[i_hi] / max(float(freqs[i_lo]), 1e-9)))
+            if octaves <= 0.0:
+                continue
+            slope = float((smoothed[i_lo] - smoothed[i_hi]) / octaves)
+            if slope < _CLIFF_DB_PER_OCTAVE:
+                continue
+            above = freqs >= min(freq_f * 1.15, nyquist * 0.99)
+            if not np.any(above):
+                continue
+            drop = ref_db - float(np.median(smoothed[above]))
+            flat = float(np.std(smoothed[above]))
+            # Above a real band edge the spectrum is FEATURELESS floor. A
+            # median test is not enough: a sparse signal with a genuine tone at
+            # 18 kHz is mostly floor above 11 kHz, so the median reads as
+            # band-limited and licenses the model to synthesise over that tone.
+            # Measuring the peak against its own local median needs no absolute
+            # reference and separates the two cleanly -- a surviving tone stood
+            # 59 dB above its surroundings where a true edge showed under 5.
+            peakiness = float(np.max(smoothed[above]) - np.median(smoothed[above]))
+            if (
+                drop >= _FLOOR_MARGIN_DB
+                and flat <= _PLATEAU_FLAT_DB
+                and peakiness <= _ABOVE_PEAKINESS_DB
+            ):
+                qualifying.append((freq_f, slope, drop, flat))
 
+        if not qualifying:
+            return BandwidthEstimate(
+                effective_cutoff_hz=float(self.max_cutoff_hz),
+                confidence=0.95,
+                shape="fullband",
+                restore_recommended=False,
+                evidence=BandwidthEvidence(
+                    spectral_rolloff=0.0,
+                    above_cutoff_snr_db=snr_above,
+                    stationarity=0.0,
+                    high_band_energy_ratio_db=ratio_db,
+                ),
+            )
+
+        # The band edge is the LOWEST qualifying frequency. Every bin above the
+        # cliff also satisfies the test -- the floor stays flat and deep -- so
+        # taking the highest, or the steepest, reports an edge far above the
+        # real one.
+        cliff_hz, rolloff_rate, drop_db, flatness = min(qualifying, key=lambda q: q[0])
+
+        # That frequency is where the cliff BEGINS; real content continues into
+        # the transition above it. Reporting the foot would end the protected
+        # band below the genuine edge and let the model overwrite recorded
+        # audio -- the one error direction that is never acceptable -- so walk
+        # up to where content actually stops. Contiguously, and bounded to half
+        # an octave: taking the last member of a sparse match set lets a single
+        # isolated numerical spike drag the estimate up with it.
+        edge_floor = peak_db - _EDGE_DROP_DB
+        walk_limit = cliff_hz * _EDGE_WALK_LIMIT
+        start_idx = int(np.searchsorted(freqs, cliff_hz))
+        edge_idx = start_idx
+        for j in range(start_idx, len(freqs)):
+            if float(freqs[j]) > walk_limit or smoothed[j] < edge_floor:
+                break
+            edge_idx = j
+        detected_cutoff = float(
+            np.clip(float(freqs[edge_idx]), self.min_cutoff_hz, self.max_cutoff_hz)
+        )
+        detected_shape = "steep_brickwall" if rolloff_rate >= 60.0 else "codec_lowpass"
+        stationarity = flatness
+
+        # Above 16 kHz is not the telephony/codec case restoration exists for.
         restore_recommended = bool(detected_cutoff <= 16000.0)
-        if restore_recommended:
-            detected_conf = float(np.clip(0.70 + (ref_db - fullband_hf_db) / 100.0, 0.60, 0.99))
-        else:
+        if not restore_recommended:
             detected_cutoff = float(self.max_cutoff_hz)
             detected_shape = "fullband"
             detected_conf = 0.95
+        else:
+            # Confidence follows the evidence that made the call: a steeper
+            # cliff into a deeper floor is a more certain band limit.
+            detected_conf = float(
+                np.clip(0.70 + (rolloff_rate / 400.0) + (drop_db / 400.0), 0.60, 0.99)
+            )
 
         return BandwidthEstimate(
             effective_cutoff_hz=detected_cutoff,

@@ -335,12 +335,29 @@ def test_bandwidth_manual_override_is_clipped_to_valid_range() -> None:
 
 
 def test_bandwidth_speech_mask_restricts_evidence_to_masked_frames() -> None:
-    """A speech mask excluding the broadband half must lower the detected cutoff."""
+    """A speech mask excluding the full-band half must change what is detected.
+
+    The signal has to be speech-like in both halves: the detector separates a
+    filter cliff from spectral tilt, and a spectrum of two pure tones is
+    numerical floor everywhere between them, so masking would change which
+    fixture artefact is measured rather than which bandwidth is seen.
+    """
+    rng = np.random.default_rng(5)
     t = np.arange(SR, dtype=np.float32) / SR
-    sig = (0.4 * np.sin(2 * np.pi * 1000 * t) + 0.2 * np.sin(2 * np.pi * 3000 * t)).astype(
-        np.float32
-    )
-    sig[SR // 2 :] += (0.3 * np.sin(2 * np.pi * 14000 * t[SR // 2 :])).astype(np.float32)
+    dense = np.zeros_like(t)
+    harmonic = 1
+    while 130.0 * harmonic < SR / 2:
+        dense += (1.0 / (harmonic**1.6)) * np.sin(
+            2 * np.pi * 130.0 * harmonic * t + rng.uniform(0, 2 * np.pi)
+        )
+        harmonic += 1
+    dense = (dense / np.max(np.abs(dense))).astype(np.float32)
+    # First half band-limited at 4 kHz, second half left full-band.
+    limited = signal.sosfiltfilt(
+        signal.butter(16, 4000 / (SR / 2), btype="lowpass", output="sos"), dense
+    ).astype(np.float32)
+    sig = dense.copy()
+    sig[: SR // 2] = limited[: SR // 2]
 
     detector = BandwidthDetector(sample_rate=SR)
     _, _, Zxx = signal.stft(
@@ -353,7 +370,6 @@ def test_bandwidth_speech_mask_restricts_evidence_to_masked_frames() -> None:
         padded=False,
     )
     n_frames = Zxx.shape[1]
-    # Frames fully inside the low-band first half of the signal.
     limit = (SR // 2 - detector.n_fft) // detector.hop_length + 1
     mask = np.zeros(n_frames, dtype=np.float32)
     mask[:limit] = 1.0
@@ -361,9 +377,11 @@ def test_bandwidth_speech_mask_restricts_evidence_to_masked_frames() -> None:
     unmasked = detector.detect(sig)
     masked = detector.detect(sig, speech_mask=mask)
 
-    assert unmasked.effective_cutoff_hz > 10000.0
-    assert masked.effective_cutoff_hz < 6000.0
+    # Whole file: full-band content is present, so nothing is restored.
+    assert unmasked.restore_recommended is False
+    # Masked to the band-limited half: the 4 kHz edge becomes visible.
     assert masked.restore_recommended is True
+    assert 3600.0 <= masked.effective_cutoff_hz <= 6000.0
 
     evidence = masked.to_dict()["evidence"]
     assert set(evidence) == {
@@ -375,20 +393,18 @@ def test_bandwidth_speech_mask_restricts_evidence_to_masked_frames() -> None:
     assert evidence["stationarity"] >= 0.0
 
 
-def test_bandwidth_no_active_bins_snaps_to_min_cutoff_brickwall() -> None:
-    """A signal with no energy above the search floor reports a brickwall at min cutoff."""
+def test_a_pure_tone_is_not_offered_for_restoration() -> None:
+    """A signal with no speech structure must not be restored.
+
+    This used to snap to the 2 kHz floor and report a steep brickwall with
+    restore_recommended=True, which would have licensed the model to
+    synthesise a high band onto a bare sine. Nothing above the tone is a
+    filtered-away band; it is simply a signal that has no content there, and
+    the detector now declines rather than inventing an edge.
+    """
     est = BandwidthDetector(sample_rate=SR).detect(_tone(300.0, 0.3))
-    assert est.effective_cutoff_hz == 2000.0
-    assert est.shape == "steep_brickwall"
-    assert est.restore_recommended is True
-    assert 0.6 <= est.confidence <= 0.99
-    assert est.evidence.above_cutoff_snr_db > 20.0
-    assert est.evidence.high_band_energy_ratio_db > 20.0
-
-
-# ---------------------------------------------------------------------------
-# Protected band
-# ---------------------------------------------------------------------------
+    assert est.restore_recommended is False
+    assert est.shape == "fullband"
 
 
 def test_transition_mask_empty_for_nonpositive_bin_count() -> None:
