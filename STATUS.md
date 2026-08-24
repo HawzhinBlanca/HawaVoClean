@@ -90,6 +90,16 @@ version-seeded PCM24 dither identity.
    `report_sha256` re-pinned in `evidence/release/audio-regressions.json`, which is a user-held
    artifact and a ledger change. Latent rather than red today because this gate runs only in the
    self-hosted Apple-silicon job that U1 has not enabled.
+7. **The Resolve engine is built by no hosted job (U1):** `scripts/build_resolve_engine.py` assembles
+   a shipped surface, and only the self-hosted release gate runs it. It installs the wheel without
+   the optional extras, so while `import hawavoclean.cli` briefly required torch the engine could not
+   have started either, and no hosted job would have said so — the wheel smoke in `core` caught the
+   same defect for the CLI. Verified by hand on this branch: the engine builds, and
+   `hawavoclean-engine --version` and `doctor` both succeed with torch absent. The fix is a step in
+   the existing macos-15 `web-resolve` job, which `required` already depends on, so it needs no new
+   check name and no branch-protection change — but `.github/workflows/ci.yml` is pinned by
+   `ci.workflow_sha256` in the governance contract and attested in ledger entry 38, so editing it
+   amends an approved design and belongs with U1 rather than to a passing change.
 
 ## Historical correction
 
