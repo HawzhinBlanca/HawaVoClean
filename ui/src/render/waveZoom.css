@@ -138,7 +138,6 @@
     inset 0 0 0 1px rgba(57, 208, 255, 0.45),
     0 0 10px rgba(57, 208, 255, 0.22);
   cursor: grab;
-  will-change: left, width;
   z-index: 1;
 }
 

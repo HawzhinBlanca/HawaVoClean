@@ -1,7 +1,8 @@
-import { useReducedMotion } from 'motion/react';
+
 import { useEffect, useRef } from 'react';
 import type { JobStage, JobStatus } from '../api/types';
 import { cancelJob, startJob } from '../state/actions';
+import { useReducedMotion } from '../state/reducedMotion';
 import { useStore } from '../state/store';
 import { IconBolt, IconCheck, IconWarn } from './Icons';
 import '../styles/process.css';

@@ -48,10 +48,10 @@
   align-items: center;
   transition:
     transform var(--ix-mid, 160ms) var(--ease-out),
-    box-shadow var(--ix-slow, 260ms) var(--ease-out),
-    filter var(--ix-slow, 260ms) var(--ease-out),
-    opacity var(--ix-slow, 260ms) var(--ease-out),
-    --pb 320ms var(--ease-out);
+    box-shadow var(--ix-slow, 300ms) var(--ease-out),
+    filter var(--ix-slow, 300ms) var(--ease-out),
+    opacity var(--ix-slow, 300ms) var(--ease-out),
+    --pb var(--ix-slow, 300ms) var(--ease-out);
 }
 
 .process.plate.running {
@@ -89,7 +89,7 @@
     color-mix(in srgb, var(--pb) 13%, transparent),
     transparent 58%
   );
-  transition: opacity 300ms var(--ease-out);
+  transition: opacity var(--ix-slow, 300ms) var(--ease-out);
 }
 
 .process.plate.running::after,
@@ -136,14 +136,14 @@
   filter: drop-shadow(0 0 5px rgba(255, 179, 71, 0.45));
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--pb) 55%, transparent));
   transition:
-    stroke-dashoffset 260ms var(--ease-out),
-    filter var(--ix-slow, 260ms) var(--ease-out);
+    stroke-dashoffset var(--ix-slow, 300ms) var(--ease-out),
+    filter var(--ix-slow, 300ms) var(--ease-out);
 }
 
 .process.plate.running .ring circle.bar,
 .process.plate.smooth .ring circle.bar {
   /* the rAF loop owns the offset frame by frame; a transition would chase it */
-  transition: filter var(--ix-slow, 260ms) var(--ease-out);
+  transition: filter var(--ix-slow, 300ms) var(--ease-out);
 }
 
 .process.plate .ring .arc-a {
@@ -163,7 +163,7 @@
 /* the head of the arc, and the glow that rides it */
 .process.plate .ring .head {
   opacity: 0;
-  transition: opacity 260ms var(--ease-out);
+  transition: opacity var(--ix-slow, 300ms) var(--ease-out);
 }
 
 .process.plate.running .ring .head {
@@ -251,7 +251,7 @@
   background: var(--pb);
   box-shadow: 0 0 5px -1px var(--pb);
   opacity: 0;
-  transition: opacity 280ms var(--ease-out);
+  transition: opacity var(--ix-slow, 300ms) var(--ease-out);
 }
 
 .process.plate .rail .lamp.past::after {

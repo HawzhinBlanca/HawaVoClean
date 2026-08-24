@@ -1,5 +1,5 @@
-import { useReducedMotion } from 'motion/react';
 import { useEffect, useRef, useState } from 'react';
+import { useReducedMotion } from '../state/reducedMotion';
 import { useStore } from '../state/store';
 import { Led, type LedState } from './Led';
 
@@ -20,6 +20,14 @@ const SWAP_MS = 240;
 function useSwap(text: string, enabled: boolean): string | null {
   const [prev, setPrev] = useState<string | null>(null);
   const last = useRef(text);
+  // Turning the preference on *during* a cross-fade cancels the timeout that
+  // would have cleared the outgoing word, so it would overprint the incoming
+  // one permanently — worse than the 240 ms overprint being avoided. Dropping
+  // the held word whenever motion is switched off is the whole fix. (Dormant
+  // until this file's hook became live; `motion/react`'s latched at mount.)
+  useEffect(() => {
+    if (!enabled) setPrev(null);
+  }, [enabled]);
   useEffect(() => {
     if (last.current === text) return;
     const before = last.current;

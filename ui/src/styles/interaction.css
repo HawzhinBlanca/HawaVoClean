@@ -280,7 +280,7 @@ input:focus-visible,
 
 .process .ring .bar {
   transition:
-    stroke-dashoffset 260ms var(--ease-out),
+    stroke-dashoffset var(--ix-slow) var(--ease-out),
     stroke var(--ix-slow) var(--ease-out),
     filter var(--ix-slow) var(--ease-out);
 }
@@ -303,6 +303,10 @@ input:focus-visible,
   opacity: 0;
   transform: scale(0.7);
   pointer-events: none;
+  /* Deliberately faster than the --ix-slow phase change washing behind it:
+     the glyph is a discrete symbol being swapped, not a state being crossed,
+     and it has to have landed before the wash finishes or it reads as lagging
+     the thing it labels. Not drift from the token — a different class. */
   transition:
     opacity 220ms var(--ease-out),
     transform 220ms var(--ease-out);
@@ -1125,9 +1129,13 @@ input:focus-visible,
  * it takes every animation and transition off `document.getAnimations()`
  * entirely, so the guarantee is checkable rather than merely fast. It is safe
  * here because nothing in the app listens for `transitionend`/`animationend` —
- * no state machine depends on an animation completing. JS-driven motion
- * (`motion/react` in the error bar, and the progress-ring interpolator) reads
- * the same preference in code. */
+ * no state machine depends on an animation completing. JS-driven motion — the
+ * header's readout cross-fade and the progress-ring interpolator — reads the
+ * same preference in code, through `state/reducedMotion.ts`, which queries the
+ * media string on this very line. (This used to credit `motion/react` "in the
+ * error bar", which was never true: the error bar is pure CSS, and the library
+ * was only ever asked for a hook that read the preference once at mount and
+ * then never again.) */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
