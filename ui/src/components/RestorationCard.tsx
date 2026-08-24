@@ -11,7 +11,10 @@
 
 import { classifyRestorationVerdict, type RestorationSection } from '../api/types';
 
-function Row({ k, v, title }: { k: string; v: string; title?: string }) {
+// `title?: string | undefined` rather than `title?: string`: under
+// exactOptionalPropertyTypes the two differ, and the Model row below passes an
+// explicit `undefined` when there are no weights to name.
+function Row({ k, v, title }: { k: string; v: string; title?: string | undefined }) {
   return (
     <div className="insp-row">
       <span className="k">{k}</span>

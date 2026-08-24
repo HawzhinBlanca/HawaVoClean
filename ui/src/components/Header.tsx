@@ -175,9 +175,16 @@ export function Header() {
     <header className="panel header">
       {/* D1 · the page had no h1 at all. The wordmark is the document's one
           top-level heading; nothing about how it is drawn changes. */}
+      {/* The UI's own version, injected from ui/package.json at build time
+          (vite.config.ts). It was the literal string "v3.2" from the commit
+          that created this file — one titled "v3.3.0-dev" — so the wordmark
+          named the wrong product version on every screenshot in the perfection
+          log and through three adversarial audits. The lamp's `v{engineVersion}`
+          to the right is a different fact (what the engine answering us is),
+          and the two are worth being able to see disagree. */}
       <h1 className="wordmark">
         <span className="name">HAWAVOCLEAN</span>
-        <span className="ver">v3.2</span>
+        <span className="ver">v{__UI_VERSION__}</span>
       </h1>
       <div className="header-mid">
         <span className={`badge${host === 'resolve' ? ' accent' : ''}`}>
