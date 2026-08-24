@@ -84,7 +84,8 @@ def _wait_until_enhancing(proc: "subprocess.Popen[str]") -> None:
 
     Reads the ``--progress-json`` stream, which is one JSON object per line on
     the original stdout. Returning means the worker subprocess exists *and* has
-    finished warmup, so its parent-death watchdog is running.
+    finished warmup, so its parent-death watchdog is running -- which holds
+    only because the run below pins the pool to a single worker.
     """
     assert proc.stdout is not None
     deadline = time.time() + START_TIMEOUT_S
@@ -114,7 +115,23 @@ def _start_run(long_input: Path, dest_dir: Path, work_dir: Path) -> "subprocess.
             "--overwrite",
             "--progress-json",
         ],
-        env={**os.environ, "HAWAVOCLEAN_WORK_DIR": str(work_dir)},
+        # One worker, deliberately. The first "enhance" progress event means
+        # ONE worker is warm; with a pool sized to the machine the others can
+        # still be inside multiprocessing's spawn_main bootstrap, where none of
+        # our code has run and no watchdog exists to arm. This test then
+        # collected every child and required all of them to notice a SIGKILLed
+        # parent, which a bootstrapping interpreter cannot do -- and whether one
+        # was still bootstrapping at kill time is a race, which is exactly how
+        # this failed: 2 of 4 ubuntu jobs, then 0 of 4, then 1 of 4. The
+        # survivor named itself once the diagnostic could print it:
+        # "spawn_main(tracker_fd=9, pipe_handle=15) --multiprocessing-fork".
+        # Pinning the pool makes the assertion test the guarantee the docstring
+        # above describes. The bootstrap window is a real and separate gap.
+        env={
+            **os.environ,
+            "HAWAVOCLEAN_WORK_DIR": str(work_dir),
+            "HAWAVOCLEAN_ENHANCE_WORKERS": "1",
+        },
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
