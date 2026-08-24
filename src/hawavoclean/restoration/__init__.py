@@ -1,5 +1,7 @@
 """HawaVoClean spectral restoration subsystem (HawaRestore-KD)."""
 
+import importlib
+
 from hawavoclean.restoration.bandwidth import (
     BandwidthDetector,
     BandwidthEstimate,
@@ -19,7 +21,6 @@ from hawavoclean.restoration.guard import (
     GuardRResult,
     RestorationGuard,
 )
-from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
 from hawavoclean.restoration.highband_events import (
     HighBandEventDetector,
     HighBandEventResult,
@@ -45,7 +46,37 @@ from hawavoclean.restoration.report import (
     RestorationReport,
     RestorationSegmentCounts,
 )
-from hawavoclean.restoration.universr_upstream import UniverSRBaseline
+
+#: Names whose modules define ``torch.nn.Module`` subclasses, so importing
+#: them needs torch at class-definition time. Torch is an optional extra: a
+#: natural-mode-only install is a supported configuration, and the CLI has to
+#: come up on one. Eagerly re-exporting these made ``import hawavoclean.cli``
+#: -- via multipass, via pipeline, via this package -- a hard torch
+#: dependency, so the published wheel could not even print its own version
+#: without the restore extra installed.
+_TORCH_BACKED: dict[str, str] = {
+    "HawaRestoreKD": "hawavoclean.restoration.hawarestore_kd",
+    "UniverSRBaseline": "hawavoclean.restoration.universr_upstream",
+}
+
+
+def __getattr__(name: str) -> object:
+    """Import a torch-backed restorer on first use (PEP 562)."""
+    module_path = _TORCH_BACKED.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    try:
+        module = importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:  # pragma: no cover - exercised without torch
+        raise ModuleNotFoundError(
+            f"{name} needs the optional restore dependencies: {exc}. "
+            "Install them with `pip install hawavoclean[restore]`; natural mode "
+            "does not require them."
+        ) from exc
+    value = getattr(module, name)
+    globals()[name] = value  # cache, so this runs once
+    return value
+
 
 __all__ = [
     "BandwidthDetector",

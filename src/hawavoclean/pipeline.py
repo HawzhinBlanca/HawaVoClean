@@ -103,7 +103,6 @@ from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import serialize_json_report
 from hawavoclean.restoration import (
     BandwidthDetector,
-    HawaRestoreKD,
     ProfileValidationError,
     RestorationConfig,
     RestorationGuard,
@@ -854,6 +853,13 @@ def _run_after_preflight(
     # 10.5. Spectral Restoration Subsystem (HawaRestore-KD)
     restoration_report: dict[str, Any] | None = None
     if mode == "restore":
+        # Imported here, not at module scope: HawaRestoreKD is a torch model,
+        # torch is an optional extra, and a natural-mode-only install is
+        # supported. At module scope this made every `import hawavoclean.cli`
+        # require torch, so the published wheel could not print its own
+        # version without the restore extra.
+        from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
+
         assert speaker_id is not None
         speaker_profile = load_speaker_profile(speaker_id, profiles_root=profiles_dir)
 
