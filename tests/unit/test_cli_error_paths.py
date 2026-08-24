@@ -148,3 +148,36 @@ def test_eval_command_prints_failures(monkeypatch: Any, tmp_path: Path) -> None:
         str(tmp_path),
     )
     assert rc == int(ExitCode.PUBLICATION_FAILURE)
+
+
+def test_a_non_wav_output_name_is_refused(monkeypatch: Any, tmp_path: Path) -> None:
+    """The published master is RIFF/WAVE, so the name has to say so.
+
+    ``-o take.mp3`` used to succeed: the bytes were WAVE -- ``file`` reported
+    "WAVE audio, Microsoft PCM, 24 bit" -- under an extension that every
+    consumer trusting the suffix would mis-handle. The server refuses exactly
+    this with "output_path must end in .wav"; the two surfaces disagreed.
+    """
+    code = _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(tmp_path / "take.mp3"))
+    assert code == int(ExitCode.PUBLICATION_FAILURE)
+    assert not (tmp_path / "take.mp3").exists(), "a mislabelled master was still written"
+
+
+def test_an_uppercase_wav_suffix_is_still_a_wav(monkeypatch: Any, tmp_path: Path) -> None:
+    """The check is about the container, not about typography."""
+    out = tmp_path / "TAKE.WAV"
+    assert _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(out)) == 0
+    assert out.exists()
+
+
+def test_a_directory_as_output_says_so(monkeypatch: Any, tmp_path: Path) -> None:
+    """Pointing -o at a directory reported the publisher's internal state.
+
+    It surfaced as "Incomplete legacy output triplet cannot be migrated
+    safely", which describes a half-written publication rather than the
+    caller's mistake.
+    """
+    target = tmp_path / "out.wav"
+    target.mkdir()
+    code = _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(target), "--overwrite")
+    assert code == int(ExitCode.PUBLICATION_FAILURE)

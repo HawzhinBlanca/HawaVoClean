@@ -134,6 +134,25 @@ def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> No
       minutes of processing.
     - an unwritable destination directory is refused here, cleanly.
     """
+    # The published master is a RIFF/WAVE stream, so the name has to say so.
+    # ``-o take.mp3`` used to succeed: the file was WAVE, ``file`` reported
+    # "WAVE audio, Microsoft PCM, 24 bit", and every consumer that trusts the
+    # extension -- players, DAWs, an ffmpeg step keyed on suffix -- would have
+    # been handed a mislabelled file. The server already refuses this with
+    # "output_path must end in .wav"; the two surfaces now agree.
+    if out_path.suffix.lower() != ".wav":
+        raise PublicationError(
+            f"Output must be a .wav file, got {out_path.name!r}. "
+            "The published master is RIFF/WAVE audio and the name has to match."
+        )
+    # An existing directory here otherwise surfaced as "Incomplete legacy
+    # output triplet cannot be migrated safely", which describes the
+    # publisher's internal state rather than what the caller did.
+    if out_path.is_dir():
+        raise PublicationError(
+            f"Output path is a directory: {out_path}. Give the path of the .wav to write."
+        )
+
     sidecars = publication_paths(out_path).public
     for candidate in sidecars:
         if candidate == in_path:

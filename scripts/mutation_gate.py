@@ -684,6 +684,17 @@ _TORCH_BACKED: dict[str, str] = {
         ),
     ),
     Mutation(
+        "M41",
+        "a master may be published under any extension",
+        "src/hawavoclean/pipeline.py",
+        '    if out_path.suffix.lower() != ".wav":',
+        "    if False:",
+        # Owner: the bytes are RIFF/WAVE. Published as .mp3 they are a
+        # mislabelled file for every consumer that trusts the suffix, and
+        # the server refuses the same thing at its own boundary.
+        owners=("tests/unit/test_cli_error_paths.py::test_a_non_wav_output_name_is_refused",),
+    ),
+    Mutation(
         "M34",
         "terminal cleanup callbacks run inside the job lock again",
         "src/hawavoclean/server/jobs.py",
