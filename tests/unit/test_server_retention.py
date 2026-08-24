@@ -280,3 +280,87 @@ def test_restart_scavenges_expired_input_and_preserves_output(
         assert app.state.upload_store.usage_bytes() == 0
     finally:
         manager.shutdown()
+
+
+@pytest.mark.unit
+def test_a_finished_job_does_not_delete_an_upload_another_job_still_needs(
+    tmp_path: Path,
+) -> None:
+    """One upload can back several jobs — the same file under two profiles, or
+    natural and restore. Deleting it when the FIRST finishes destroys the input
+    the others have yet to decode, so the user's upload vanishes and their
+    second job fails preflight on a file they never removed.
+
+    This reproduces the production wiring in ``app.py``: a terminal callback
+    that hands the record's input to ``UploadStore.cleanup_input``.
+    """
+    store = UploadStore(root=tmp_path / "uploads")
+    shared = store.stage("shared.wav")
+    shared.write_bytes(b"RIFF" + b"\x00" * 2048)
+
+    def factory(record: Any) -> list[str]:
+        # The first job finishes promptly, the second lingers.
+        delay = 0.1 if record.output_path.name == "a.wav" else 3.0
+        return [
+            sys.executable,
+            "-u",
+            "-c",
+            textwrap.dedent(f"""
+                import json, sys, time
+                def emit(o):
+                    sys.stdout.write(json.dumps(o) + "\\n"); sys.stdout.flush()
+                emit({{"event":"progress","stage":"preflight","progress":0.1,"message":"p"}})
+                time.sleep({delay})
+                open({str(record.report_path)!r}, "w").write('{{"schema_version": 1}}')
+                open({str(record.output_path)!r}, "wb").write(b"RIFF")
+                emit({{"event":"done","progress":1.0,
+                       "output_path":{str(record.output_path)!r},
+                       "report_path":{str(record.report_path)!r}}})
+            """),
+        ]
+
+    manager = JobManager(command_factory=factory, max_active_jobs=4)
+    manager.add_terminal_callback(
+        lambda record: (
+            None
+            if record.input_path.resolve() in manager.active_input_paths()
+            else store.cleanup_input(record.input_path)
+        )
+    )
+    try:
+        first = manager.submit(
+            input_path=shared, output_path=tmp_path / "a.wav", profile="studio", overwrite=False
+        )["job_id"]
+        second = manager.submit(
+            input_path=shared, output_path=tmp_path / "b.wav", profile="production", overwrite=False
+        )["job_id"]
+
+        deadline = time.monotonic() + 30.0
+        checked = False
+        while time.monotonic() < deadline:
+            one = manager.get_status(first)
+            two = manager.get_status(second)
+            assert one is not None and two is not None
+            if one["state"] in TERMINAL_STATES and two["state"] not in TERMINAL_STATES:
+                assert shared.exists(), "the upload was deleted while a second job still needed it"
+                checked = True
+                break
+            if two["state"] in TERMINAL_STATES:
+                break
+            time.sleep(0.02)
+        assert checked, "the first job never finished while the second was still active"
+
+        # Once BOTH are terminal, the upload is nobody's and must be reclaimed.
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            two = manager.get_status(second)
+            assert two is not None
+            if two["state"] in TERMINAL_STATES:
+                break
+            time.sleep(0.02)
+        record = manager._jobs[second]
+        if record.input_path.resolve() not in manager.active_input_paths():
+            store.cleanup_input(record.input_path)
+        assert not shared.exists(), "the upload leaked once every job was done with it"
+    finally:
+        manager.shutdown()

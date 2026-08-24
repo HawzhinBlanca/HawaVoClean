@@ -490,6 +490,14 @@ def create_app(
     upload_store.scavenge(manager.active_input_paths())
 
     def _cleanup_terminal_input(record: JobRecord) -> None:
+        # One upload can back several jobs — the same file processed under two
+        # profiles, or in natural and restore mode. Deleting it the moment the
+        # FIRST of them finishes destroys the input the others are still going
+        # to decode, so the user's upload disappears and their second job fails
+        # preflight on a file they never removed. ``scavenge`` already honours
+        # this set; the terminal path has to as well.
+        if record.input_path.resolve() in manager.active_input_paths():
+            return
         upload_store.cleanup_input(record.input_path)
 
     manager.add_terminal_callback(_cleanup_terminal_input)
