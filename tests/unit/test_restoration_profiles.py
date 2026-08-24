@@ -1,6 +1,7 @@
 """Unit tests for speaker profile loading, schema validation, and consent verification."""
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 
 from hawavoclean.errors import InvalidUserInputError
 from hawavoclean.restoration.profiles import (
+    ProfileValidationError,
     SpeakerProfile,
     load_speaker_profile,
     validate_speaker_profile,
@@ -73,3 +75,25 @@ def test_validate_speaker_profile_corrupted_consent(tmp_path: Path) -> None:
 
     with pytest.raises(InvalidUserInputError, match="Invalid or revoked consent"):
         validate_speaker_profile(tmp_path / "profile.json", base_dir=tmp_path)
+
+
+def test_a_profile_may_not_be_looked_up_under_another_speakers_name(tmp_path: Path) -> None:
+    """The lookup key and the profile's declared identity must be one person.
+
+    They were not required to agree, so a directory named ``character_09``
+    holding ``character_01``'s profile loaded without complaint. The report
+    then attributed the reconstruction to character_09, while the consent
+    record -- which is validated against the DECLARED id -- belonged to
+    character_01. A reconstruction credited to someone who never agreed to it
+    is the exact failure this project's restore mode is gated on avoiding.
+    """
+    genuine = Path("profiles") / "character_01"
+    shutil.copytree(genuine, tmp_path / "character_09")
+
+    with pytest.raises(ProfileValidationError, match="must agree"):
+        load_speaker_profile("character_09", profiles_root=tmp_path)
+
+    # The honest lookup is untouched.
+    assert load_speaker_profile("character_01", profiles_root=Path("profiles")).speaker_id == (
+        "character_01"
+    )

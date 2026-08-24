@@ -612,6 +612,20 @@ MUTATIONS: list[Mutation] = [
         ),
     ),
     Mutation(
+        "M36",
+        "a profile may be loaded under another speaker's name",
+        "src/hawavoclean/restoration/profiles.py",
+        "    if profile.speaker_id != speaker_id:",
+        "    if False:",
+        # Owner: consent is validated against the id the profile DECLARES,
+        # while the report attributes the run to the name it was looked up
+        # by. Let those differ and a reconstruction is credited to someone
+        # who never agreed to it.
+        owners=(
+            "tests/unit/test_restoration_profiles.py::test_a_profile_may_not_be_looked_up_under_another_speakers_name",
+        ),
+    ),
+    Mutation(
         "M34",
         "terminal cleanup callbacks run inside the job lock again",
         "src/hawavoclean/server/jobs.py",

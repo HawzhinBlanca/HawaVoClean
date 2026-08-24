@@ -211,7 +211,23 @@ def load_speaker_profile(
     if not profile_json.exists():
         raise ProfileValidationError(f"Profile for speaker '{speaker_id}' not found under {root}")
 
-    return validate_speaker_profile(profile_json, base_dir=profile_json.parent, verify_files=True)
+    profile = validate_speaker_profile(
+        profile_json, base_dir=profile_json.parent, verify_files=True
+    )
+    if profile.speaker_id != speaker_id:
+        # The name a caller looks a profile up by and the identity the profile
+        # declares must be the same person. They were not required to match, so
+        # a directory named ``character_09`` holding ``character_01``'s profile
+        # loaded without complaint -- and the report then attributed the
+        # reconstruction to character_09 while the consent record, which is
+        # checked against the DECLARED id, was character_01's. That is a
+        # reconstruction credited to someone who never agreed to it.
+        raise ProfileValidationError(
+            f"Profile at {profile_json} declares speaker_id "
+            f"'{profile.speaker_id}' but was looked up as '{speaker_id}'; "
+            "the directory name and the profile's own identity must agree"
+        )
+    return profile
 
 
 def validate_all_profiles(profiles_root: Path | str = "profiles") -> dict[str, SpeakerProfile]:
