@@ -80,6 +80,16 @@ version-seeded PCM24 dither identity.
    the plugin has not completed the real in-host workflow, timeline, keyboard or VoiceOver matrix.
 5. **Final release (T7.2–T7.4/U4):** the eventual source commit must be rebuilt twice, challenged,
    signed, merged through protection, tagged and published with matching hashes.
+6. **Audio-regression references are stale (U4):** the committed reference reports record a bug that
+   has since been fixed, so `scripts/audio_regression_gate.py` fails on `flute-production` with
+   "unexplained semantic report drift". `input.integrated_lufs` and `input.true_peak_dbtp` used to be
+   measured on the pre-master buffer — the audio after enhancement — while every other field in that
+   block described the source. The references therefore hold -24.107 LUFS / -2.306 dBTP where the
+   input file actually measures -24.887 / -1.195. The audio itself has not drifted; only the report
+   field that was wrong. Fixing this needs the private reference reports regenerated and their
+   `report_sha256` re-pinned in `evidence/release/audio-regressions.json`, which is a user-held
+   artifact and a ledger change. Latent rather than red today because this gate runs only in the
+   self-hosted Apple-silicon job that U1 has not enabled.
 
 ## Historical correction
 
