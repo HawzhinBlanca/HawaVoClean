@@ -17,8 +17,11 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import soundfile as sf
 from scipy import signal
 
+from hawavoclean.restoration.config import RestorationConfig
+from hawavoclean.restoration.f0 import F0Extractor
 from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
 from hawavoclean.restoration.highband_events import HighBandEventDetector
 from hawavoclean.restoration.profiles import load_speaker_profile
@@ -129,3 +132,48 @@ def test_the_fixture_profiles_are_not_distinct_enough_for_the_speaker_layer() ->
         "against real audio, and revisit RISKS R-14."
     )
     assert len(pairs) == 45
+
+
+def test_the_harmonic_layer_bites_where_a_listener_would_notice() -> None:
+    """Pin where the pitch check actually refuses, on real speech.
+
+    The layer exists so a generative model cannot hand back the right words in
+    the wrong voice, and nothing recorded where its 0.35 mean-relative-F0
+    bound lands in terms anyone can hear. Measured on the character_01
+    canonical reference: a shift of about 0.8 semitones scores 0.219 and is
+    allowed, 1.7 semitones scores 0.447 and is refused. Tolerant of the
+    fraction of a semitone a faithful restoration moves -- faithful output
+    scores 0.00000 -- and closed well before a listener would call it a
+    different voice.
+    """
+    reference, _ = sf.read(
+        str(REPO / "profiles" / "character_01" / "canonical" / "character_01_ref.wav"),
+        dtype="float32",
+    )
+    sos = signal.butter(10, 3800 / (SR / 2), btype="lowpass", output="sos")
+    natural = np.asarray(signal.sosfiltfilt(sos, reference), dtype=np.float32)
+
+    def shifted(factor: float) -> np.ndarray:
+        """Resample for pitch, then restore the original length."""
+        y = np.asarray(signal.resample(natural, int(len(natural) / factor)))
+        if len(y) >= len(natural):
+            return np.asarray(y[: len(natural)], dtype=np.float32)
+        return np.asarray(np.pad(y, (0, len(natural) - len(y)), mode="edge"), dtype=np.float32)
+
+    extractor = F0Extractor(sample_rate=SR)
+
+    def pitch_difference(other: np.ndarray) -> float:
+        a, b = extractor.extract(natural), extractor.extract(other)
+        n = min(len(a.f0_hz), len(b.f0_hz))
+        voiced = (a.vuv_mask[:n] > 0.5) & (b.vuv_mask[:n] > 0.5)
+        assert voiced.any(), "fixture produced no commonly voiced frames"
+        return float(
+            np.mean(
+                np.abs(a.f0_hz[:n][voiced] - b.f0_hz[:n][voiced]) / (a.f0_hz[:n][voiced] + 1e-6)
+            )
+        )
+
+    bound = RestorationConfig().guard.harmonic_threshold
+    assert pitch_difference(natural) <= 0.01, "an untouched signal must score ~0"
+    assert pitch_difference(shifted(1.05)) <= bound, "under a semitone must be tolerated"
+    assert pitch_difference(shifted(1.10)) > bound, "1.7 semitones must be refused"
