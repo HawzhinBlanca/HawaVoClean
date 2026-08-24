@@ -42,7 +42,7 @@ def _speech_like(sr: int, seconds: float = 1.0, tilt: float = 1.6, seed: int = 1
             2 * np.pi * 130.0 * harmonic * t + rng.uniform(0, 2 * np.pi)
         )
         harmonic += 1
-    return (out / np.max(np.abs(out))).astype(np.float32)
+    return (out / float(np.max(np.abs(out)))).astype(np.float32)
 
 
 def test_bandwidth_detector_lowpass_cutoff() -> None:
