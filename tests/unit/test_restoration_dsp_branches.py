@@ -215,7 +215,7 @@ def test_highband_too_short_input_passes_with_zero_metrics() -> None:
     assert res.speech_window_leakage == 0.0
     assert res.spurious_burst_count == 0
     assert res.hf_envelope_divergence == 0.0
-    assert res.boundary_discontinuity_score == 0.0
+    assert res.impulse_discontinuity_ratio == 0.0
 
 
 def test_highband_spurious_bursts_outside_speech_are_counted_and_rejected() -> None:
@@ -287,14 +287,44 @@ def test_highband_inaudible_residue_is_suppressed_by_absolute_floor() -> None:
     assert res.passes_event_check
 
 
-def test_highband_boundary_discontinuity_fails() -> None:
-    """A click at the very first sample must fail the boundary check with its amplitude."""
+def test_highband_click_is_rejected_wherever_it_lands() -> None:
+    """A click is a local outlier, and it counts anywhere -- not only at an edge.
+
+    The check read exactly two samples of the segment, |rest[0] - nat[0]| and
+    |rest[-1] - nat[-1]|, so a click one sample further in was invisible while
+    an ordinary endpoint offset failed the whole candidate.
+    """
     nat = _tone(1000.0, 0.4, amp=0.3)
-    rest = nat.copy()
-    rest[0] += 0.5
+    detector = HighBandEventDetector(sample_rate=SR)
+
+    for where in (0, len(nat) // 2, len(nat) - 1):
+        rest = nat.copy()
+        rest[where] += 0.5
+        res = detector.evaluate(nat, rest, cutoff_hz=8000.0)
+        assert not res.passes_event_check, f"a 0.5 click at sample {where} was accepted"
+        assert res.impulse_discontinuity_ratio > detector.impulse_threshold
+
+
+def test_highband_accepts_a_restoration_that_only_added_a_high_band() -> None:
+    """Added high-frequency content is not a click, and must not read as one.
+
+    At the old threshold the shipped model failed at every non-zero strength
+    (0.14-0.21 against 0.08) while the untouched candidate scored exactly
+    0.0 -- the layer admitted only the candidate that changes nothing.
+    """
+    nat = _tone(1000.0, 0.4, amp=0.3)
+    rng = np.random.default_rng(7)
+    # A dense, quiet high band: every sample moves, no sample jumps.
+    hf = signal.sosfiltfilt(
+        signal.butter(8, 6000 / (SR / 2), btype="highpass", output="sos"),
+        rng.standard_normal(len(nat)) * 0.05,
+    )
+    rest = (nat + hf).astype(np.float32)
+
     res = HighBandEventDetector(sample_rate=SR).evaluate(nat, rest, cutoff_hz=8000.0)
-    assert not res.passes_event_check
-    assert res.boundary_discontinuity_score == pytest.approx(0.5, abs=1e-6)
+    assert res.impulse_discontinuity_ratio < 8.0, (
+        "broadly added high-band content was mistaken for an impulse"
+    )
 
 
 # ---------------------------------------------------------------------------

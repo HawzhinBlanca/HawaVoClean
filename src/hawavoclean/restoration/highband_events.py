@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import signal
+from scipy import ndimage, signal
 
 
 @dataclass(frozen=True)
@@ -13,7 +13,10 @@ class HighBandEventResult:
     speech_window_leakage: float  # High-band energy ratio in non-speech vs speech
     spurious_burst_count: int  # Spurious transient bursts outside speech
     hf_envelope_divergence: float  # Divergence between 3-8 kHz envelope and >8 kHz envelope
-    boundary_discontinuity_score: float  # Boundary jump / click metric
+    #: Largest single-sample step in the restored audio, measured against the
+    #: typical step in its own neighbourhood. A click is a local outlier; the
+    #: model's own high-band content is broadly elevated activity, not a spike.
+    impulse_discontinuity_ratio: float
     passes_event_check: bool
 
 
@@ -26,14 +29,14 @@ class HighBandEventDetector:
         frame_ms: float = 10.0,
         leakage_threshold: float = 0.25,
         envelope_threshold: float = 0.35,
-        boundary_threshold: float = 0.08,
+        impulse_threshold: float = 8.0,
         max_spurious_bursts: int = 0,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_length = int(sample_rate * (frame_ms / 1000.0))
         self.leakage_threshold = leakage_threshold
         self.envelope_threshold = envelope_threshold
-        self.boundary_threshold = boundary_threshold
+        self.impulse_threshold = impulse_threshold
         self.max_spurious_bursts = max_spurious_bursts
 
     def evaluate(
@@ -56,7 +59,7 @@ class HighBandEventDetector:
                 speech_window_leakage=0.0,
                 spurious_burst_count=0,
                 hf_envelope_divergence=0.0,
-                boundary_discontinuity_score=0.0,
+                impulse_discontinuity_ratio=0.0,
                 passes_event_check=True,
             )
 
@@ -141,22 +144,50 @@ class HighBandEventDetector:
         else:
             envelope_div = 0.0
 
-        # 4. Boundary discontinuity check (energy jump at start/end of audio)
-        start_jump = float(np.abs(rest_mono[0] - nat_mono[0]))
-        end_jump = float(np.abs(rest_mono[-1] - nat_mono[-1]))
-        boundary_disc = max(start_jump, end_jump)
+        # 4. Impulse discontinuity: a click anywhere in the restored audio.
+        #
+        # This used to read exactly two samples of the whole segment --
+        # |rest[0] - nat[0]| and |rest[-1] - nat[-1]| -- and call the larger a
+        # "boundary discontinuity". That is not a discontinuity, it is the
+        # endpoint OFFSET from the natural, and any restoration that adds a
+        # high band moves those samples. Measured against the shipped model at
+        # a 0.08 threshold: every non-zero strength failed (0.14-0.21, and
+        # 0.5 scored the same as 1.0), while the untouched strength-0.0
+        # candidate scored exactly 0.0. The layer admitted one candidate, the
+        # one that changes nothing -- the mirror of a guard that cannot fail.
+        # It could not see real damage either: a +0.5 step, a full-scale
+        # single-sample click and a polarity flip all landed inside the range
+        # legitimate restorations already occupied.
+        #
+        # A click is a LOCAL outlier: one sample-to-sample step far larger
+        # than the steps around it. Synthesised high-band content raises those
+        # steps everywhere, so comparing each step to the local average
+        # separates the two. Measured over eight runs spanning strengths
+        # 0.25-1.0: legitimate output scores 2.54-4.63, while injected steps
+        # and clicks of 0.2 full-scale score 10.4 and above.
+        window = max(64, int(self.sample_rate * 0.02))
+        steps = np.abs(np.diff(rest_mono.astype(np.float64)))
+        if steps.size == 0:
+            impulse_ratio = 0.0
+        else:
+            # ``reflect``, not ``nearest``: nearest extends the edge VALUE
+            # outward, so a click on the first or last sample becomes its own
+            # local baseline and hides -- measured 1.89, where the same click
+            # one sample further in scored 20.77.
+            local = ndimage.uniform_filter1d(steps, size=min(window, steps.size), mode="reflect")
+            impulse_ratio = float(np.max(steps / (local + 1e-12)))
 
         passes = (
             (leakage <= self.leakage_threshold)
             and (spurious_bursts <= self.max_spurious_bursts)
             and (envelope_div <= self.envelope_threshold)
-            and (boundary_disc <= self.boundary_threshold)
+            and (impulse_ratio <= self.impulse_threshold)
         )
 
         return HighBandEventResult(
             speech_window_leakage=leakage,
             spurious_burst_count=spurious_bursts,
             hf_envelope_divergence=envelope_div,
-            boundary_discontinuity_score=boundary_disc,
+            impulse_discontinuity_ratio=impulse_ratio,
             passes_event_check=passes,
         )

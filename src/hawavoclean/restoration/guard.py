@@ -143,9 +143,9 @@ class RestorationGuard:
                         hf_res.hf_envelope_divergence <= hf_cfg.envelope_threshold,
                     ),
                     (
-                        f"boundary discontinuity {hf_res.boundary_discontinuity_score:.4f} > "
-                        f"{hf_cfg.boundary_threshold}",
-                        hf_res.boundary_discontinuity_score <= hf_cfg.boundary_threshold,
+                        f"impulse discontinuity {hf_res.impulse_discontinuity_ratio:.2f}x "
+                        f"local step > {hf_cfg.impulse_threshold}x",
+                        hf_res.impulse_discontinuity_ratio <= hf_cfg.impulse_threshold,
                     ),
                 )
                 if not ok

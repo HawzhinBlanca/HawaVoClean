@@ -626,6 +626,32 @@ MUTATIONS: list[Mutation] = [
         ),
     ),
     Mutation(
+        "M37",
+        "high-band layer stops seeing a click as a local outlier",
+        "src/hawavoclean/restoration/highband_events.py",
+        '            local = ndimage.uniform_filter1d(steps, size=min(window, steps.size), mode="reflect")',
+        '            local = ndimage.uniform_filter1d(steps, size=min(window, steps.size), mode="nearest")',
+        # Owner: "nearest" extends the edge value outward, so a click on
+        # the first or last sample becomes its own baseline and hides --
+        # exactly the seam a segmented restoration stitches on.
+        owners=(
+            "tests/unit/test_restoration_dsp_branches.py::test_highband_click_is_rejected_wherever_it_lands",
+        ),
+    ),
+    Mutation(
+        "M38",
+        "high-band layer vetoes every candidate that changed anything",
+        "src/hawavoclean/restoration/highband_events.py",
+        "            impulse_ratio = float(np.max(steps / (local + 1e-12)))",
+        "            impulse_ratio = float(np.max(np.abs(rest_mono - nat_mono)))",
+        # Owner: the old endpoint-offset metric scored 0 only for the
+        # untouched candidate, so the layer admitted the one that changes
+        # nothing and rejected every real restoration.
+        owners=(
+            "tests/unit/test_restoration_dsp_branches.py::test_highband_accepts_a_restoration_that_only_added_a_high_band",
+        ),
+    ),
+    Mutation(
         "M34",
         "terminal cleanup callbacks run inside the job lock again",
         "src/hawavoclean/server/jobs.py",
