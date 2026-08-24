@@ -82,3 +82,50 @@ def test_the_shipped_checkpoint_adds_less_than_the_guard_can_judge() -> None:
     assert result.spurious_burst_count == 0
     assert result.hf_envelope_divergence == 0.0
     assert result.impulse_discontinuity_ratio > 0.0, "the one live layer must still measure"
+
+
+def test_the_fixture_profiles_are_not_distinct_enough_for_the_speaker_layer() -> None:
+    """The speaker layer cannot separate the speakers currently shipped.
+
+    Guard R rejects a candidate whose speaker similarity falls under 0.75. The
+    ten profiles are generated fixtures (RISKS R-14), and 14 of their 45
+    pairings sit at or above that very threshold -- the closest, character_03
+    against character_09, at 0.96. Measured end to end, character_05's own
+    canonical audio passes when judged against character_07's embedding
+    (their profiles are 0.91 apart), which is the misattribution the layer
+    exists to prevent.
+
+    ``validate_all_profiles`` would never notice: its "embedding distinctness"
+    compares SHA-256 hashes, so any two vectors that are not byte-identical
+    pass however close they point.
+
+    A tripwire, like the audibility one above. It is expected to fail when real
+    consented speakers replace the fixtures (U3) -- and that failure is the
+    point: it marks the moment the speaker layer can finally do its job, and
+    the moment this number becomes worth trusting.
+    """
+    ids = [f"character_{i:02d}" for i in range(1, 11)]
+    embeddings = {
+        s: np.asarray(
+            load_speaker_profile(s, profiles_root=REPO / "profiles").embedding_vector,
+            dtype=np.float64,
+        )
+        for s in ids
+    }
+
+    def cosine(a: np.ndarray, b: np.ndarray) -> float:
+        return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+    pairs = [
+        (cosine(embeddings[a], embeddings[b]), a, b)
+        for i, a in enumerate(ids)
+        for b in ids[i + 1 :]
+    ]
+    confusable = [p for p in pairs if p[0] >= 0.75]
+
+    assert confusable, (
+        "the fixture profiles now separate at the guard's own threshold. The "
+        "speaker-identity layer has become able to discriminate: validate it "
+        "against real audio, and revisit RISKS R-14."
+    )
+    assert len(pairs) == 45
