@@ -118,9 +118,41 @@ class RestorationGuard:
             cutoff_hz=cutoff_hz,
         )
         if not hf_res.passes_event_check:
+            # Name the metric that actually failed. Quoting leakage and burst
+            # count unconditionally produced audit reasons reading
+            # "leakage=0.000, bursts=0" — both passing — while the real cause
+            # was the envelope or the boundary check, which sends a reader
+            # looking in the wrong place.
+            hf_cfg = self.hf_event_detector
+            failed = [
+                name
+                for name, ok in (
+                    (
+                        f"non-speech leakage {hf_res.speech_window_leakage:.3f} > "
+                        f"{hf_cfg.leakage_threshold}",
+                        hf_res.speech_window_leakage <= hf_cfg.leakage_threshold,
+                    ),
+                    (
+                        f"{hf_res.spurious_burst_count} spurious burst(s) > "
+                        f"{hf_cfg.max_spurious_bursts}",
+                        hf_res.spurious_burst_count <= hf_cfg.max_spurious_bursts,
+                    ),
+                    (
+                        f"envelope divergence {hf_res.hf_envelope_divergence:.3f} > "
+                        f"{hf_cfg.envelope_threshold}",
+                        hf_res.hf_envelope_divergence <= hf_cfg.envelope_threshold,
+                    ),
+                    (
+                        f"boundary discontinuity {hf_res.boundary_discontinuity_score:.4f} > "
+                        f"{hf_cfg.boundary_threshold}",
+                        hf_res.boundary_discontinuity_score <= hf_cfg.boundary_threshold,
+                    ),
+                )
+                if not ok
+            ]
             return (
                 False,
-                f"High-band event inconsistency: leakage={hf_res.speech_window_leakage:.3f}, bursts={hf_res.spurious_burst_count}",
+                "High-band event inconsistency: " + "; ".join(failed or ["unspecified"]),
                 {"highband_events": asdict(hf_res)},
             )
 
