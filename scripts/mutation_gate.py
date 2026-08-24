@@ -549,9 +549,31 @@ MUTATIONS: list[Mutation] = [
         "M30",
         "bandwidth detector recommends restoring full-band audio",
         "src/hawavoclean/restoration/bandwidth.py",
+        """                confidence=0.95,
+                shape="fullband",
+                restore_recommended=False,""",
+        """                confidence=0.95,
+                shape="fullband",
+                restore_recommended=True,""",
+        # Owner: this early return is where full-band audio is decided now
+        # that the detector requires a cliff rather than a slope. The gate
+        # caught the drift: this mutation used to sit on the 16 kHz rule
+        # below, which no signal reaches, so it went green while the
+        # behaviour it names was in another branch entirely.
+        owners=("tests/unit/test_restoration_bandwidth.py::test_bandwidth_detector_fullband",),
+    ),
+    Mutation(
+        "M35",
+        "detector offers to restore a band edge above 16 kHz",
+        "src/hawavoclean/restoration/bandwidth.py",
         "        restore_recommended = bool(detected_cutoff <= 16000.0)",
         "        restore_recommended = True",
-        owners=("tests/unit/test_restoration_bandwidth.py::test_bandwidth_detector_fullband",),
+        # Owner: an edge that high is an anti-alias filter on a full-rate
+        # recording, not a codec, and synthesising over it invents content
+        # nobody removed.
+        owners=(
+            "tests/unit/test_restoration_bandwidth.py::test_an_edge_above_16_khz_is_not_a_restoration_case",
+        ),
     ),
     Mutation(
         "M31",

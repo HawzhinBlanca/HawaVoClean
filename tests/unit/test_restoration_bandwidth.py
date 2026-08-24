@@ -91,3 +91,29 @@ def test_bandwidth_detector_multichannel() -> None:
 
     assert est.restore_recommended is True
     assert 5000.0 <= est.effective_cutoff_hz <= 7000.0
+
+
+def test_an_edge_above_16_khz_is_not_a_restoration_case() -> None:
+    """A band edge up in the ultrasonic range is normal capture, not a codec.
+
+    Restoration exists for telephony and codec band limits. A recording whose
+    edge sits above 16 kHz is simply a full-rate recording with its
+    anti-alias filter showing, and synthesising on top of it would invent
+    content over audio nobody removed. The detector reports it as full-band
+    and declines.
+
+    The search itself cannot place an edge that high at 48 kHz -- the cliff
+    test needs half an octave of floor above the candidate, which runs out at
+    roughly 17 kHz -- so the fixture reaches the rule the way a caller would:
+    by telling the detector it only cares about limits above 17 kHz.
+    """
+    sr = 48000
+    sos = signal.butter(16, 12000 / (sr / 2), btype="lowpass", output="sos")
+    limited = signal.sosfiltfilt(sos, _speech_like(sr)).astype(np.float32)
+
+    detector = BandwidthDetector(sample_rate=sr, min_cutoff_hz=17000.0)
+    est = detector.detect(limited)
+
+    assert est.restore_recommended is False
+    assert est.shape == "fullband"
+    assert est.effective_cutoff_hz == detector.max_cutoff_hz
