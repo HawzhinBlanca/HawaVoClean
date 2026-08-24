@@ -32,6 +32,7 @@ class JobWorkspace:
         guard_id: str,
         base_work_dir: Path | None = None,
         tool_version: str = "1.0.0",
+        restore_context: str | None = None,
     ) -> None:
         self.input_path = input_path.resolve()
         self.input_sha256 = input_sha256
@@ -47,6 +48,7 @@ class JobWorkspace:
             core_hash=self.core_id,
             guard_hash=self.guard_id,
             tool_version=self.tool_version,
+            restore_context=restore_context,
         )
 
         if base_work_dir is None:

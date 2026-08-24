@@ -37,9 +37,31 @@ def compute_job_id(
     core_hash: str,
     guard_hash: str,
     tool_version: str,
+    restore_context: str | None = None,
 ) -> str:
-    """Derive unique, deterministic job ID as specified in BLUEPRINT.md section 17.1."""
+    """Derive unique, deterministic job ID as specified in BLUEPRINT.md section 17.1.
+
+    ``restore_context`` carries the restore-only inputs -- mode, speaker id and
+    any asserted cutoff. Without them, a natural master and a generative
+    reconstruction of the same file claimed the SAME identity, and so did two
+    reconstructions built from two different speaker profiles: measured, one
+    input produced four runs (natural, character_01, character_07, natural
+    again) all reporting job_id 19ddba6060ac85c9. That identity is what the
+    report, the provenance record and the dither seed are keyed on, so an
+    auditor holding two such reports had no field that told them apart -- in a
+    system whose stated top risk is restored audio being mistaken for recorded
+    speech.
+
+    It is appended rather than folded in unconditionally so that a natural
+    job's id is exactly what it always was. The id seeds the dither, the
+    dither is in the published bytes, and the release evidence pins those
+    bytes per case; renaming every natural job would rewrite audio that has
+    not changed in any way a listener could hear or an auditor should care
+    about.
+    """
     composite = f"{input_hash}:{config_hash}:{core_hash}:{guard_hash}:{tool_version}"
+    if restore_context:
+        composite = f"{composite}:{restore_context}"
     return hashlib.sha256(composite.encode("utf-8")).hexdigest()[:16]
 
 

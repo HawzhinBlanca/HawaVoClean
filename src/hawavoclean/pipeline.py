@@ -308,6 +308,12 @@ def run_pipeline(
         core_id=config.enhancement.core_id,
         guard_id=active_guard_cfg.guard_id,
         tool_version=__version__,
+        # Restore-only inputs belong in the job identity: without them a
+        # natural master and a reconstruction of the same file shared an id,
+        # as did two reconstructions from two different speaker profiles.
+        restore_context=(
+            f"{mode}:{speaker_id}:{cutoff}:{cutoff_hz}" if mode == "restore" else None
+        ),
     )
     workspace.journal.append(
         JournalEvent.JOB_STARTED, {"input": str(in_path), "job_id": workspace.job_id}

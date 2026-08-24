@@ -595,6 +595,23 @@ MUTATIONS: list[Mutation] = [
         owners=("tests/unit/test_server_api.py::test_restore_job_request_validation",),
     ),
     Mutation(
+        "M35",
+        "job identity ignores which speaker rebuilt the audio",
+        "src/hawavoclean/hashing.py",
+        '''    if restore_context:
+        composite = f"{composite}:{restore_context}"''',
+        '''    if False:
+        composite = f"{composite}:{restore_context}"''',
+        # Owner: the report, the provenance record and the dither seed are
+        # all keyed on job_id. Drop the restore inputs and a natural master,
+        # a reconstruction of it, and a second speaker's reconstruction all
+        # claim one identity -- in a system whose stated top risk is exactly
+        # that confusion.
+        owners=(
+            "tests/unit/test_hashing_journal.py::test_job_id_separates_a_restoration_from_the_master_it_replaces",
+        ),
+    ),
+    Mutation(
         "M34",
         "terminal cleanup callbacks run inside the job lock again",
         "src/hawavoclean/server/jobs.py",
