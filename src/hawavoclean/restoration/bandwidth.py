@@ -257,7 +257,18 @@ class BandwidthDetector:
         detected_shape = "steep_brickwall" if rolloff_rate >= 60.0 else "codec_lowpass"
         stationarity = flatness
 
-        # Above 16 kHz is not the telephony/codec case restoration exists for.
+        # Above 16 kHz is not the telephony/codec case restoration exists for:
+        # an edge that high is an anti-alias filter on a full-rate recording,
+        # and synthesising over it would invent content nobody removed.
+        #
+        # Deliberately kept although no input is known to reach it. The cliff
+        # test needs half an octave of floor above its candidate, so the search
+        # cannot place an edge past nyquist/sqrt(2) -- about 17 kHz at 48 kHz --
+        # and a sweep over four sample rates and three filter orders produced
+        # no detection above 16 kHz at all. That is evidence, not a proof, and
+        # the case it guards is the dangerous direction, so it stays. It
+        # carries no mutation for the same reason: a mutation on a branch
+        # nothing reaches can never be caught, and the gate would be lying.
         restore_recommended = bool(detected_cutoff <= 16000.0)
         if not restore_recommended:
             detected_cutoff = float(self.max_cutoff_hz)

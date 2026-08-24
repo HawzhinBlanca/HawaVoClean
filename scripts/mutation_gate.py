@@ -563,19 +563,6 @@ MUTATIONS: list[Mutation] = [
         owners=("tests/unit/test_restoration_bandwidth.py::test_bandwidth_detector_fullband",),
     ),
     Mutation(
-        "M35",
-        "detector offers to restore a band edge above 16 kHz",
-        "src/hawavoclean/restoration/bandwidth.py",
-        "        restore_recommended = bool(detected_cutoff <= 16000.0)",
-        "        restore_recommended = True",
-        # Owner: an edge that high is an anti-alias filter on a full-rate
-        # recording, not a codec, and synthesising over it invents content
-        # nobody removed.
-        owners=(
-            "tests/unit/test_restoration_bandwidth.py::test_an_edge_above_16_khz_is_not_a_restoration_case",
-        ),
-    ),
-    Mutation(
         "M31",
         "strengths ladder no longer requires the 0.0 fallback",
         "src/hawavoclean/restoration/config.py",
