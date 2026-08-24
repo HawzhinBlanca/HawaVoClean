@@ -653,6 +653,24 @@ MUTATIONS: list[Mutation] = [
         ),
     ),
     Mutation(
+        "M39",
+        "restoration package re-exports its torch models eagerly again",
+        "src/hawavoclean/restoration/__init__.py",
+        """_TORCH_BACKED: dict[str, str] = {
+    "HawaRestoreKD": "hawavoclean.restoration.hawarestore_kd",""",
+        """from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD  # noqa: E402, F401
+
+_TORCH_BACKED: dict[str, str] = {
+    "HawaRestoreKD": "hawavoclean.restoration.hawarestore_kd",""",
+        # Owner: torch is an optional extra and a natural-mode-only install
+        # is supported, so the entry point must import without it. Eager
+        # re-export made `hawavoclean --version` impossible on the base
+        # wheel, and only the post-suite smoke step noticed.
+        owners=(
+            "tests/unit/test_optional_torch_dependency.py::test_the_cli_imports_without_torch",
+        ),
+    ),
+    Mutation(
         "M34",
         "terminal cleanup callbacks run inside the job lock again",
         "src/hawavoclean/server/jobs.py",
