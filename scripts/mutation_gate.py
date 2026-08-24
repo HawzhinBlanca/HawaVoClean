@@ -695,6 +695,20 @@ _TORCH_BACKED: dict[str, str] = {
         owners=("tests/unit/test_cli_error_paths.py::test_a_non_wav_output_name_is_refused",),
     ),
     Mutation(
+        "M42",
+        "tonal gain caps stop being checked for sign",
+        "src/hawavoclean/finishing/eq.py",
+        "    negative = sorted(name for name, value in caps.items() if value < 0.0)",
+        "    negative = []",
+        # Owner: the cut cap is negated to build the lower bound, so a
+        # negative one collapses the clip range onto a single value and
+        # np.clip returns it silently -- pinning the low shelf to full LIFT
+        # on audio measured as needing a cut.
+        owners=(
+            "tests/unit/test_finishing_tonal_restoration.py::test_tonal_gain_caps_are_magnitudes_and_say_so",
+        ),
+    ),
+    Mutation(
         "M34",
         "terminal cleanup callbacks run inside the job lock again",
         "src/hawavoclean/server/jobs.py",
