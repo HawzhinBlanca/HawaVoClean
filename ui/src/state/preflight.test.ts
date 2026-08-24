@@ -4,8 +4,9 @@
 // CHANNELS cell, and then fail with the engine's own words — "Multi-channel
 // audio with 8 channels is not supported without explicit split_speakers
 // declaration." `split_speakers` is a `channel_mode` value in the engine's
-// config file; the web API's JobRequest carries `input_path`, `profile` and
-// `overwrite` and nothing else, so there is no control on the screen, and no
+// config file; the web API's JobRequest carries no `channel_mode` field at all
+// (input_path, profile, output_path, overwrite, and the restore trio mode /
+// speaker_id / cutoff_hz), so there is no control on the screen, and no
 // request this page could send, that would satisfy that sentence. It was also
 // long enough to be cut mid-word in the status line and in the run list.
 //
