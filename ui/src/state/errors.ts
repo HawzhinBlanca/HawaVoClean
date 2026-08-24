@@ -70,6 +70,11 @@ export function sanitizeEngineMessage(message: string): string {
   // Any absolute POSIX path collapses to its last component. Paths are taken
   // up to whitespace or a quote; a trailing ':' or ',' is punctuation, not name.
   out = out.replace(/\/(?:[^\s'"<>|]+\/)*[^\s'"<>|]*/g, (p) => {
+    // An API route is not a work-directory path: it is where the message is
+    // sending the reader. Collapsing it turned "see /api/health" into
+    // 'see "health"' and 'no such endpoint: /api/x' into 'no such endpoint:
+    // "x"', deleting the only actionable part of the sentence.
+    if (p.startsWith('/api/')) return p;
     const trimmed = p.replace(/[.,;:]+$/, '');
     const base = trimmed.slice(trimmed.lastIndexOf('/') + 1);
     return base ? `"${base}"` : p;
