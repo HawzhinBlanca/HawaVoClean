@@ -191,3 +191,37 @@ def test_cutoff_hz_accepts_a_real_frequency() -> None:
     """The guard must not reject the values it exists to let through."""
     assert cli._cutoff_hz_arg("7800.0") == 7800.0
     assert cli._cutoff_hz_arg("2000") == 2000.0
+
+
+def test_verify_says_whether_anything_anchors_its_answer(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """The same PASSED line covered two very different claims.
+
+    With a committed publication bundle beside the audio, the generation's own
+    digests anchor the check and a report edited in step with the audio is
+    caught. With no bundle the report is simply taken as given -- so a pair an
+    attacker had rewritten to agree printed the identical "VERIFICATION
+    PASSED" and exited 0. Callers reading only the exit code still cannot tell
+    those apart; callers reading the output now can.
+    """
+    published = tmp_path / "master.wav"
+    assert _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(published)) == 0
+    capsys.readouterr()
+
+    report = published.with_suffix(".hawavoclean.json")
+    assert _run_cli(monkeypatch, "verify", str(published), "--report", str(report)) == 0
+    anchored = capsys.readouterr().out
+    assert "the committed generation's own digests" in anchored
+
+    # The same audio and report, moved away from their bundle.
+    loose_audio = tmp_path / "moved" / "master.wav"
+    loose_audio.parent.mkdir()
+    loose_audio.write_bytes(published.read_bytes())
+    loose_report = loose_audio.with_suffix(".hawavoclean.json")
+    loose_report.write_bytes(report.read_bytes())
+
+    assert _run_cli(monkeypatch, "verify", str(loose_audio), "--report", str(loose_report)) == 0
+    loose = capsys.readouterr().out
+    assert "no committed publication bundle" in loose
+    assert "the committed generation's own digests" not in loose

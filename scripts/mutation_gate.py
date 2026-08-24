@@ -671,6 +671,19 @@ _TORCH_BACKED: dict[str, str] = {
         ),
     ),
     Mutation(
+        "M40",
+        "verify stops saying whether anything anchors its answer",
+        "src/hawavoclean/cli.py",
+        '    if committed is None:\n        print("  Anchored by:         nothing — no committed publication bundle was found")',
+        '    if False:\n        print("  Anchored by:         nothing — no committed publication bundle was found")',
+        # Owner: a loose audio/report pair rewritten to agree passes with
+        # exit 0. That is honest only while the output says the report was
+        # taken on trust rather than anchored by a generation digest.
+        owners=(
+            "tests/unit/test_cli_surface.py::test_verify_says_whether_anything_anchors_its_answer",
+        ),
+    ),
+    Mutation(
         "M34",
         "terminal cleanup callbacks run inside the job lock again",
         "src/hawavoclean/server/jobs.py",

@@ -918,7 +918,17 @@ def cmd_batch(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Verify an output audio master against its immutable JSON report."""
+    """Check an output audio master against its JSON report.
+
+    Two different strengths of answer come out of this, and the caller is
+    told which one they got. When a committed publication bundle sits beside
+    the audio, the generation's own digests anchor the check and a report
+    edited in step with the audio is caught. With no bundle -- a moved or
+    hand-assembled pair -- the report is taken as given, and all that can be
+    established is that the two agree with each other. Both used to print the
+    same "VERIFICATION PASSED" and exit 0, so a pair an attacker had rewritten
+    was indistinguishable from an anchored one.
+    """
     public_audio = public_output_path(args.output)
     public_report = public_output_path(args.report)
     expected_report = publication_paths(public_audio).json
@@ -987,6 +997,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     print("================================================================================")
     print(f"VERIFICATION PASSED: {audio_path}")
+    if committed is None:
+        print("  Anchored by:         nothing — no committed publication bundle was found")
+        print("                       beside this audio, so the report was taken as given.")
+        print("                       A report edited together with the audio would still")
+        print("                       pass. Verify the file where it was published to get")
+        print("                       the generation digests behind this answer.")
+    else:
+        print("  Anchored by:         the committed generation's own digests")
     print(f"  SHA-256:             {actual_sha256}")
     print(f"  Samples:             {media.samples:,}")
     print(f"  Integrated Loudness: {loudness.integrated_lufs:.1f} LUFS")
