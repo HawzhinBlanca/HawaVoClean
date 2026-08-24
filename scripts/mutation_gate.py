@@ -585,6 +585,23 @@ MUTATIONS: list[Mutation] = [
         "        if False:",
         owners=("tests/unit/test_server_api.py::test_restore_job_request_validation",),
     ),
+    Mutation(
+        "M34",
+        "terminal cleanup callbacks run inside the job lock again",
+        "src/hawavoclean/server/jobs.py",
+        """        # Queue the callbacks; ``_locked`` runs them once the lock is released.
+        self._pending_terminal.append(record)""",
+        """        for callback in self._terminal_callbacks:
+            callback(record)""",
+        # Owner: the callbacks the manager invites callers to register have to
+        # be able to ask it a question -- retention checks active_input_paths()
+        # before deleting an upload. Under the lock that is a self-deadlock on
+        # a non-reentrant Lock, which is why the owning test asserts from a
+        # watcher thread: once wedged, every in-line assertion blocks too.
+        owners=(
+            "tests/unit/test_server_retention.py::test_a_terminal_callback_may_ask_the_manager_a_question",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")

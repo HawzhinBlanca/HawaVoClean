@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import textwrap
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -320,13 +321,15 @@ def test_a_finished_job_does_not_delete_an_upload_another_job_still_needs(
         ]
 
     manager = JobManager(command_factory=factory, max_active_jobs=4)
-    manager.add_terminal_callback(
-        lambda record: (
-            None
-            if record.input_path.resolve() in manager.active_input_paths()
-            else store.cleanup_input(record.input_path)
-        )
-    )
+
+    def cleanup_terminal_input(record: Any) -> None:
+        # Mirrors the server's terminal hook: skip the delete while another
+        # live job still names this upload as its input.
+        if record.input_path.resolve() in manager.active_input_paths():
+            return
+        store.cleanup_input(record.input_path)
+
+    manager.add_terminal_callback(cleanup_terminal_input)
     try:
         first = manager.submit(
             input_path=shared, output_path=tmp_path / "a.wav", profile="studio", overwrite=False
@@ -364,3 +367,63 @@ def test_a_finished_job_does_not_delete_an_upload_another_job_still_needs(
         assert not shared.exists(), "the upload leaked once every job was done with it"
     finally:
         manager.shutdown()
+
+
+def test_a_terminal_callback_may_ask_the_manager_a_question(tmp_path: Path) -> None:
+    """Cleanup callbacks run with the job lock released.
+
+    Terminal callbacks exist to clean up, and cleanup has to look before it
+    deletes -- retention asks ``active_input_paths()`` whether another live
+    job still needs an upload. That question was once asked from inside the
+    manager's own non-reentrant lock, which deadlocked the ``hawavoclean-jobs``
+    thread outright: no exception, no failed test, just a suite that stopped.
+
+    The polling runs on its own thread on purpose. Once that lock is held for
+    good, every public method blocks on it, so an in-line deadline loop never
+    gets a turn to notice the time -- the regression would hang the run
+    instead of reporting. Joining a watcher with a timeout turns the wedge
+    into an ordinary failure.
+    """
+    manager = JobManager(command_factory=_success, max_active_jobs=2)
+    seen: list[int] = []
+
+    def ask_the_manager(record: JobRecord) -> None:
+        # Every one of these re-enters the lock the callback used to hold.
+        manager.active_input_paths()
+        manager.list_jobs()
+        manager.get_status(record.job_id)
+        seen.append(len(manager.list_jobs()))
+
+    manager.add_terminal_callback(ask_the_manager)
+    source = tmp_path / "in.wav"
+    source.write_bytes(b"RIFF")
+    job_id = manager.submit(
+        input_path=source,
+        output_path=tmp_path / "out.wav",
+        profile="studio",
+        overwrite=False,
+    )["job_id"]
+
+    reached: list[str] = []
+
+    def poll() -> None:
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            status = manager.get_status(job_id)
+            if status is not None and status["state"] in TERMINAL_STATES:
+                reached.append(str(status["state"]))
+                return
+            time.sleep(0.02)
+
+    watcher = threading.Thread(target=poll, daemon=True)
+    watcher.start()
+    watcher.join(timeout=25.0)
+
+    # Deliberately no ``finally: shutdown()`` -- shutdown takes the same lock,
+    # so on a regression it would hang the very run this assert is rescuing.
+    assert not watcher.is_alive(), (
+        "the jobs thread is wedged: a terminal callback re-entered the job lock"
+    )
+    assert reached and reached[0] in TERMINAL_STATES
+    assert seen, "the terminal callback never completed"
+    manager.shutdown()

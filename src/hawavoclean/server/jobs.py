@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -195,6 +195,7 @@ class JobManager:
         self._wake = threading.Condition(self._lock)
         self._subscribers: dict[str, list[_Subscriber]] = {}
         self._terminal_callbacks: list[TerminalCallback] = []
+        self._pending_terminal: deque[JobRecord] = deque()
         self._closed = False
         self._worker = threading.Thread(target=self._run_loop, name="hawavoclean-jobs", daemon=True)
         self._worker.start()
@@ -262,6 +263,48 @@ class JobManager:
                 if record.state not in TERMINAL_STATES
             }
 
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the job lock, then run terminal cleanup *outside* it.
+
+        Terminal callbacks are caller-supplied cleanup, and cleanup routinely
+        has to ask this manager a question before it acts -- retention must
+        know whether another live job still names an upload as its input
+        before deleting it. Invoking callbacks from inside ``_finish_locked``
+        meant asking that question re-entered a non-reentrant ``Lock`` and
+        deadlocked the ``hawavoclean-jobs`` thread permanently: not an
+        exception the surrounding ``try`` could log, just a thread that never
+        came back, taking every later job with it.
+
+        Callbacks also do filesystem work, which has no business holding a
+        lock that every status query needs. So ``_finish_locked`` records who
+        became terminal and this wrapper delivers them after the release.
+        """
+        try:
+            with self._lock:
+                yield
+        finally:
+            # ``finally``, not a plain suffix: a body that raises has still
+            # marked jobs terminal, and their cleanup must not wait for the
+            # next unrelated caller to flush the queue.
+            self._drain_terminal_callbacks()
+
+    def _drain_terminal_callbacks(self) -> None:
+        """Deliver queued terminal records. Safe to call with the lock free."""
+        while True:
+            with self._lock:
+                if not self._pending_terminal:
+                    return
+                record = self._pending_terminal.popleft()
+                callbacks = list(self._terminal_callbacks)
+            for callback in callbacks:
+                try:
+                    callback(record)
+                except Exception as exc:  # cleanup cannot change the job verdict
+                    logger.error(
+                        f"Terminal cleanup for {record.job_id} failed: {exc}", exc_info=True
+                    )
+
     def add_terminal_callback(self, callback: TerminalCallback) -> None:
         """Register idempotent, bounded cleanup invoked when any job becomes terminal."""
         with self._lock:
@@ -270,7 +313,7 @@ class JobManager:
     def cancel(self, job_id: str) -> bool:
         """Cancel a queued or running job. Returns False for an unknown id;
         True otherwise (including the no-op on an already finished job)."""
-        with self._lock:
+        with self._locked():
             self._prune_locked()
             record = self._jobs.get(job_id)
             if record is None:
@@ -312,7 +355,7 @@ class JobManager:
     def shutdown(self, grace_s: float = 0.5) -> None:
         """Cancel everything: queued jobs are marked cancelled, the running
         child gets SIGTERM then SIGKILL after ``grace_s``. Idempotent."""
-        with self._lock:
+        with self._locked():
             if self._closed:
                 return
             self._closed = True
@@ -391,11 +434,8 @@ class JobManager:
         elif state == "failed":
             record.stage = "error"
         self._notify_locked(record)
-        for callback in self._terminal_callbacks:
-            try:
-                callback(record)
-            except Exception as exc:  # cleanup cannot change the authoritative job verdict
-                logger.error(f"Terminal cleanup for {record.job_id} failed: {exc}", exc_info=True)
+        # Queue the callbacks; ``_locked`` runs them once the lock is released.
+        self._pending_terminal.append(record)
 
     def _prune_locked(self) -> None:
         """Expire terminal snapshots by age/count; never evict active jobs or subscribers."""
@@ -435,7 +475,7 @@ class JobManager:
                 self._run_job(record)
             except Exception as e:  # a bug in the runner must not kill the worker thread
                 logger.error(f"Job {record.job_id} runner crashed: {e}", exc_info=True)
-                with self._lock:
+                with self._locked():
                     if record.state not in TERMINAL_STATES:
                         record.error = {"code": "INTERNAL", "message": str(e)}
                         self._finish_locked(record, "failed", str(e))
@@ -468,7 +508,7 @@ class JobManager:
                 env=self._child_env(),
             )
         except OSError as e:
-            with self._lock:
+            with self._locked():
                 record.error = {"code": "SPAWN_FAILED", "message": str(e)}
                 self._finish_locked(record, "failed", f"Could not start worker: {e}")
             return
@@ -526,7 +566,7 @@ class JobManager:
         returncode = proc.wait()
         stderr_thread.join(timeout=2.0)
 
-        with self._lock:
+        with self._locked():
             if record.state in TERMINAL_STATES:  # pragma: no cover - defensive
                 return
             if done_event is not None and returncode == 0:
