@@ -122,6 +122,18 @@ def _worker_process_entry(
     # would be watching the *test runner's* parent with an os._exit(0) on the
     # end of it.
     if mp.parent_process() is not None:
+        # The polling watchdog only. PR_SET_PDEATHSIG was armed here as well,
+        # for the SIGKILLed-parent case the poll loop cannot cover, and it had
+        # to come out: on Linux that signal fires when the parent THREAD that
+        # forked exits, not when the parent process dies. The pool spawns its
+        # workers from a thread, that thread returns as soon as the child is
+        # up, and the kernel then killed perfectly healthy workers. Eight CI
+        # jobs showed it -- "unit 3 was collateral damage of unit 1's crash",
+        # ten identical runs disagreeing on their output bytes, and a pool of
+        # four no longer matching a pool of one -- because which units lost
+        # their worker, and so reverted, varied run to run. Any future attempt
+        # must be armed from a thread that outlives the worker, and must prove
+        # itself against tests/integration/test_pool_is_bit_identical.py.
         _arm_parent_death_watchdog()
 
     try:
@@ -208,7 +220,7 @@ class IsolatedEnhancementWorker:
 
         # Wait for READY signal with timeout
         try:
-            msg = self.resp_queue.get(timeout=15.0)
+            msg = self.resp_queue.get(timeout=30.0)
             if msg.get("type") == "INIT_ERROR":
                 raise RuntimeError(f"Worker init error: {msg.get('error')}")
             if msg.get("type") != "READY":
@@ -216,7 +228,7 @@ class IsolatedEnhancementWorker:
         except queue.Empty as e:
             self._kill_worker()
             raise WorkerCrashError(
-                "Failed to start isolated enhancement worker: no READY within 15s "
+                "Failed to start isolated enhancement worker: no READY within 30s "
                 "(model load too slow, or the worker crashed during init)"
             ) from e
         except Exception as e:

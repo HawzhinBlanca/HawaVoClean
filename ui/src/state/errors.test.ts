@@ -221,3 +221,25 @@ describe('installFailureNet', () => {
     expect(prevented).toHaveBeenCalled();
   });
 });
+
+describe('an API route is not a work-directory path', () => {
+  // The sanitizer collapses absolute paths to a basename because in web mode
+  // they point at the upload work directory the user never sees. It did the
+  // same to the routes the engine deliberately sends the reader to, so
+  // "see /api/health" reached the UI as 'see "health"' and
+  // 'no such endpoint: /api/x' as 'no such endpoint: "x"' — deleting the only
+  // actionable part of the sentence.
+  it.each([
+    ['mode "restore" requires speaker_id (see /api/health)', '/api/health'],
+    ["unknown speaker_id 'character_99' (see /api/health for installed speakers)", '/api/health'],
+    ['no such endpoint: /api/nope', '/api/nope'],
+  ])('keeps %s intact', (message, route) => {
+    expect(sanitizeEngineMessage(message)).toContain(route);
+  });
+
+  it('still collapses a real work-directory path', () => {
+    const out = sanitizeEngineMessage('cannot read /Users/x/.cache/hawavoclean/work/ab12/take.wav');
+    expect(out).not.toContain('/Users/x/.cache');
+    expect(out).toContain('take.wav');
+  });
+});

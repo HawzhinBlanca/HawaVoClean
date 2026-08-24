@@ -1,9 +1,15 @@
 """Pydantic v2 schemas for audit reports, unit decisions, and corpus manifests."""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from hawavoclean.provenance import (
+    ProvenanceError,
+    current_build_report_fields,
+    verify_report_build,
+)
+from hawavoclean.release import RELEASE_IDENTITY, REPORT_SCHEMA_VERSION
 from hawavoclean.runtime import active_device
 
 
@@ -34,6 +40,8 @@ class CoreMetadata(ReportBaseModel):
     algorithm: str
     params_hash: str
     phase_coherent: bool = True
+    lock_sha256: str | None = None
+    weight_sha256: dict[str, str] = Field(default_factory=dict)
 
 
 class GuardMetadata(ReportBaseModel):
@@ -45,6 +53,7 @@ class GuardMetadata(ReportBaseModel):
     id: str
     probe_hash: str
     calibration_id: str
+    calibration_sha256: str | None = None
 
 
 class EnvironmentMetadata(ReportBaseModel):
@@ -57,6 +66,8 @@ class EnvironmentMetadata(ReportBaseModel):
     scipy_version: str
     soundfile_version: str
     cpu_model: str | None = None
+    runtime_versions: dict[str, str] = Field(default_factory=dict)
+    deterministic_settings: dict[str, str | int | bool] = Field(default_factory=dict)
     #: The compute device the enhancement core actually ran on. A GPU does not
     #: compute the same samples as the CPU, so a result that did not say which
     #: one produced it could be attributed to the wrong compute path — and two
@@ -68,6 +79,53 @@ class EnvironmentMetadata(ReportBaseModel):
     compute_device: str = Field(default_factory=active_device)
 
 
+class BuildMetadata(ReportBaseModel):
+    """Exact source, dependency lock and installed-distribution identity."""
+
+    provenance_schema_version: Literal[1]
+    artifact_type: Literal["wheel", "sdist", "source-tree"]
+    source_revision: str
+    source_date_epoch: int
+    source_dirty: bool
+    dependency_lock_sha256: str
+    release_identity_sha256: str
+    build_id: str
+    distribution_record_sha256: str | None = None
+
+    @model_validator(mode="after")
+    def identity_is_self_verifying(self) -> "BuildMetadata":
+        try:
+            verify_report_build(self.model_dump())
+        except ProvenanceError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
+
+
+class ReleaseMetadata(ReportBaseModel):
+    """Release identity copied from, and checked against, packaged bytes."""
+
+    product: str
+    version: str
+    report_schema_version: int
+    identity_sha256: str
+
+    @model_validator(mode="after")
+    def matches_packaged_release(self) -> "ReleaseMetadata":
+        if self.model_dump() != RELEASE_IDENTITY.report_fields():
+            raise ValueError("report release identity does not match the packaged release")
+        return self
+
+
+def current_release_metadata() -> ReleaseMetadata:
+    """Construct the only release identity valid for a newly emitted report."""
+    return ReleaseMetadata(**RELEASE_IDENTITY.report_fields())
+
+
+def current_build_metadata() -> BuildMetadata:
+    """Construct provenance for the code and distribution running now."""
+    return BuildMetadata(**current_build_report_fields())
+
+
 class UnitSummary(ReportBaseModel):
     """Aggregate statistics of all processed units."""
 
@@ -77,6 +135,10 @@ class UnitSummary(ReportBaseModel):
     unverified: int = 0
     error_passthrough: int = 0
     continuity_reverted: int = 0
+    #: Enhanced units that kept their enhancement across a forced mid-speech
+    #: cut by fading back to the original recording at the joint, instead of
+    #: being reverted whole. See :mod:`hawavoclean.policy.continuity`.
+    continuity_crossfaded: int = 0
     no_speech: int = 0
     finish_applied: int = 0
     finish_bypassed: int = 0
@@ -144,7 +206,9 @@ class UnitDecisionRecord(ReportBaseModel):
 class HawaVoCleanReport(ReportBaseModel):
     """Master immutable JSON audit report format as defined in BLUEPRINT.md section 18.1."""
 
-    schema_version: int = 1
+    schema_version: Literal[1, 2] = REPORT_SCHEMA_VERSION
+    release: ReleaseMetadata | None = None
+    build: BuildMetadata | None = None
     job_id: str
     config_hash: str
     input: MediaStats
@@ -160,6 +224,69 @@ class HawaVoCleanReport(ReportBaseModel):
     #: report's ``units`` are always the FINAL (shipped) pass's records;
     #: this list is the journey, including any auto-discarded pass.
     passes: list[PassRecord] = Field(default_factory=list)
+    restoration: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def release_matches_schema(self) -> "HawaVoCleanReport":
+        if self.schema_version == 1:
+            if self.release is not None:
+                raise ValueError("schema-v1 reports cannot claim schema-v2 release identity")
+            if self.build is not None:
+                raise ValueError("schema-v1 reports cannot claim schema-v2 build identity")
+            return self
+        if self.schema_version != REPORT_SCHEMA_VERSION:
+            raise ValueError("report schema does not match the packaged release identity")
+        if self.release is None:
+            raise ValueError("schema-v2 reports require release identity")
+        if self.release.report_schema_version != self.schema_version:
+            raise ValueError("report schema and embedded release identity disagree")
+        if self.build is None:
+            raise ValueError("schema-v2 reports require build provenance")
+        if self.core.lock_sha256 is None:
+            raise ValueError("schema-v2 reports require the selected core lock digest")
+        if self.guard.calibration_sha256 is None:
+            raise ValueError("schema-v2 reports require the guard calibration digest")
+        required_versions = {
+            "hawavoclean",
+            "numpy",
+            "scipy",
+            "soundfile",
+            "pyloudnorm",
+            "pydantic",
+            "libsndfile",
+            "ffmpeg",
+            "ffprobe",
+        }
+        missing_versions = required_versions - self.environment.runtime_versions.keys()
+        if missing_versions:
+            raise ValueError(
+                "schema-v2 reports are missing runtime versions: "
+                + ", ".join(sorted(missing_versions))
+            )
+        settings = self.environment.deterministic_settings
+        required_settings = {
+            "compute_device",
+            "requested_device",
+            "worker_pool_size",
+            "threads_per_worker",
+            "omp_num_threads",
+            "mkl_num_threads",
+            "python_hash_seed",
+            "output_bit_depth",
+            "tpdf_dither",
+            "dither_seed_derivation",
+            "result_order",
+            "torch_deterministic_algorithms",
+        }
+        missing_settings = required_settings - settings.keys()
+        if missing_settings:
+            raise ValueError(
+                "schema-v2 reports are missing deterministic settings: "
+                + ", ".join(sorted(missing_settings))
+            )
+        if settings.get("compute_device") != self.environment.compute_device:
+            raise ValueError("report device disagrees with deterministic settings")
+        return self
 
 
 class CorpusItem(ReportBaseModel):

@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+import hawavoclean.enhancement.worker as worker_mod
 from hawavoclean.enhancement.production import NoOpEnhancer, WienerSpectralEnhancer
 from hawavoclean.enhancement.protocol import EnhancementResult, EnhancerMetadata
 from hawavoclean.enhancement.worker import (
@@ -121,11 +122,21 @@ def _spec(cls: type[Any], timeout_s: float = 30.0) -> WorkerSpec:
 
 
 @pytest.mark.unit
-def test_answers_are_indexed_by_unit_not_by_completion_order() -> None:
+def test_answers_are_indexed_by_unit_not_by_completion_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Four units answered in reverse order still land on their own indices."""
+    # The pool sizes itself to the machine, and the memory cap is the binding
+    # one: at a 1 GB assumed footprint and a quarter of RAM, a 7 GB runner
+    # staffs exactly ONE worker -- which is what every macOS CI job reported.
+    # Interleaved completion cannot be observed with one worker, so the cap is
+    # lifted here rather than the assertion lowered again: this test is about
+    # where an answer lands, not about how much RAM the host happens to have.
+    monkeypatch.setattr(worker_mod, "memory_worker_cap", lambda _rss: 4)
     pool = EnhancementWorkerPool(_spec(_ReverseOrderEnhancer), max_size=4, prewarm=4)
     try:
-        assert _wait_live(pool, 4) == 4, "prewarm must staff the whole pool"
+        live = _wait_live(pool, 4)
+        assert live >= 2, f"need at least two workers for completions to interleave, got {live}"
         items = [(_tagged(i), SR) for i in range(4)]
         out = pool.map_enhance(items)
         assert [o.ok for o in out] == [True, True, True, True]
@@ -170,7 +181,7 @@ def test_one_worker_means_no_threads_and_the_callers_own_order() -> None:
 
 
 @pytest.mark.unit
-def test_pool_size_is_bounded_by_cores_memory_and_work() -> None:
+def test_pool_size_is_bounded_by_cores_memory_and_work(monkeypatch: pytest.MonkeyPatch) -> None:
     cpu_cap = cpu_worker_cap()
     assert 1 <= cpu_cap <= (os.cpu_count() or 1)
 
@@ -186,7 +197,11 @@ def test_pool_size_is_bounded_by_cores_memory_and_work() -> None:
     assert memory_worker_cap(None) == memory_worker_cap(FALLBACK_WORKER_RSS_BYTES)
 
     # And the pool never starts more workers than there is work: a ceiling of
-    # 8 with two units to do is two processes, not eight.
+    # 8 with two units to do is two processes, not eight. The memory cap is
+    # lifted for this part only -- the real one is asserted above, and on a
+    # 7 GB runner it allows a single worker, which would make this assertion
+    # measure the host instead of the ceiling-vs-work rule it is about.
+    monkeypatch.setattr(worker_mod, "memory_worker_cap", lambda _rss: 8)
     pool = EnhancementWorkerPool(_spec(NoOpEnhancer), max_size=8, prewarm=2)
     try:
         assert _wait_live(pool, 2) == 2

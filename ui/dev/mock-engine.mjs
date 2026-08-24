@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 // Mock HawaVoClean engine for UI development (Node 22, no dependencies).
-// Implements docs/ui-contract.md §1 with synthetic data: a fake 60 s clip,
-// real peaks/spectrum computed from the synthesized signal, a job that walks
-// through the stages over ~6 s and returns a plausible HawaVoCleanReport,
-// and /api/audio serving a generated WAV with Range support.
+// Implements docs/ui-contract.md §1 (with addenda 1 and 2) with synthetic
+// data: a fake 60 s clip, real peaks/spectrum computed from the synthesized
+// signal, windowed /api/peaks over the same signal, a job that walks through
+// the stages over ~6 s and returns a plausible schema-v2 HawaVoCleanReport
+// (restore mode included), and /api/audio serving a generated WAV with Range
+// support.
 //
 //   node dev/mock-engine.mjs [--port 8765] [--token dev] [--ui-dir dist]
+//                            [--speakers character_01,character_02] [--speed 1]
+//
+// --speakers "" simulates an engine with no speaker profiles (the UI must
+// hide the restore control); --speed N divides every job-stage delay by N so
+// a scripted round-trip does not have to sit through the six real seconds.
 
 import { createServer } from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
@@ -25,8 +32,41 @@ const PORT = Number(arg('--port', '8765'));
 const HOST = arg('--host', '127.0.0.1');
 const TOKEN = arg('--token', 'dev');
 const UI_DIR = arg('--ui-dir', null);
+// Speaker profiles the fake engine claims to have (contract addendum 2).
+// The real engine recomputes this per health request from profiles/ on disk;
+// here it is fixed for the process, which is enough to drive the UI.
+const SPEAKERS = arg('--speakers', 'character_01,character_02')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .sort();
+// Delay divisor for the staged job walk (tests pass e.g. --speed 25).
+const SPEED = Math.max(1, Number(arg('--speed', '1')) || 1);
 const WORK_DIR = join(tmpdir(), 'hawavoclean-mock');
-const VERSION = '3.2.0';
+const RELEASE_IDENTITY_BYTES = await readFile(
+  new URL('../../src/hawavoclean/release.json', import.meta.url),
+);
+const RELEASE_IDENTITY = JSON.parse(RELEASE_IDENTITY_BYTES.toString('utf8'));
+const VERSION = RELEASE_IDENTITY.version;
+const REPORT_RELEASE = {
+  product: RELEASE_IDENTITY.product,
+  version: RELEASE_IDENTITY.version,
+  report_schema_version: RELEASE_IDENTITY.report_schema_version,
+  identity_sha256: createHash('sha256').update(RELEASE_IDENTITY_BYTES).digest('hex'),
+};
+// Schema-v2 build provenance; field names mirror BuildMetadata in
+// src/hawavoclean/report/schema.py (values are honest fakes, not claims).
+const REPORT_BUILD = {
+  provenance_schema_version: 1,
+  artifact_type: 'source-tree',
+  source_revision: 'mock-engine',
+  source_date_epoch: 0,
+  source_dirty: false,
+  dependency_lock_sha256: createHash('sha256').update('mock-lock').digest('hex'),
+  release_identity_sha256: REPORT_RELEASE.identity_sha256,
+  build_id: 'mock-build',
+  distribution_record_sha256: null,
+};
 
 // ---------------------------------------------------------------------------
 // Deterministic synthesis
@@ -58,15 +98,18 @@ const UNITS = [
   { id: 4, start: 44.0, end: 60.0, speech: true, decision: 'enhanced' },
 ];
 
+/** Engine-side default output suffix per profile (server/app.py `_OUTPUT_SUFFIX`). */
+const OUTPUT_SUFFIX = { studio: 'studio', lowband: 'lowband', production: 'clean' };
+
 function isCleanedPath(p) {
   const b = basename(p).toLowerCase();
-  return b.includes('_studio') || b.includes('_clean');
+  return Object.values(OUTPUT_SUFFIX).some((s) => b.includes(`_${s}`));
 }
 
 /** Synthesize a speech-like mono signal. Cleaned variant: lower noise floor. */
 function synthesize(path) {
   const cleaned = isCleanedPath(path);
-  const stemSeed = seedFrom(basename(path).replace(/_(studio|clean)\.wav$/i, ''));
+  const stemSeed = seedFrom(basename(path).replace(/_(studio|lowband|clean)\.wav$/i, ''));
   const rnd = mulberry32(stemSeed);
   const out = new Float32Array(N);
 
@@ -251,6 +294,41 @@ function analyze(path, buckets) {
   };
 }
 
+/**
+ * `PeaksWindow` over `[startS, endS)` — the shape and rounding of the real
+ * `compute_peaks_window` (server/analysis.py): the span snaps to the sample
+ * grid, `buckets` is clamped down so every bucket covers >= 1 sample, and
+ * `samples_per_bucket` is the ceiling, so 1 means raw samples on screen.
+ */
+function peaksWindow(path, startS, endS, buckets) {
+  const s = getSignal(path);
+  const startSample = Math.floor(startS * SR);
+  const endSample = Math.min(N, Math.round(Math.min(endS, DURATION_S) * SR));
+  const n = endSample - startSample;
+  const b = Math.min(buckets, n);
+  const min = new Array(b), max = new Array(b), rms = new Array(b);
+  for (let i = 0; i < b; i++) {
+    const i0 = startSample + Math.floor((i / b) * n), i1 = startSample + Math.floor(((i + 1) / b) * n);
+    let lo = Infinity, hi = -Infinity, sq = 0;
+    for (let j = i0; j < i1; j++) { const v = s[j]; if (v < lo) lo = v; if (v > hi) hi = v; sq += v * v; }
+    const cnt = Math.max(1, i1 - i0);
+    min[i] = Number(lo.toFixed(6)); max[i] = Number(hi.toFixed(6));
+    const r = Math.sqrt(sq / cnt);
+    rms[i] = r > 1e-6 ? Number((20 * Math.log10(r)).toFixed(2)) : -120;
+  }
+  return {
+    path,
+    start_s: Number((startSample / SR).toFixed(6)),
+    end_s: Number((endSample / SR).toFixed(6)),
+    sample_rate: SR,
+    channels: 1,
+    duration_s: Number(DURATION_S.toFixed(4)),
+    samples_per_bucket: Math.ceil(n / b),
+    peaks: { min, max },
+    rms_db: rms,
+  };
+}
+
 const signalCache = new Map();
 function getSignal(path) {
   let s = signalCache.get(path);
@@ -279,6 +357,77 @@ function cleanStem(p) {
     b = b.slice(0, -e.length);
   }
   return b;
+}
+
+/**
+ * Restoration section of a restore-mode report. Field names are copied from
+ * `hawavoclean.restoration.report.RestorationReport` (the engine serialises
+ * the dataclass verbatim), so the UI reads the same wire shape it will get
+ * from a real run. Dev hook: an input whose name contains "revert" makes
+ * Guard R reject everything, so the honest-FAIL presentation (the Natural
+ * master shipped) can be exercised.
+ */
+function makeRestoration(job) {
+  const failed = /revert/i.test(basename(job.input_path));
+  const manual = job.cutoff_hz !== null && job.cutoff_hz !== undefined;
+  const cutoff = manual ? job.cutoff_hz : 7800.0;
+  return {
+    mode: 'restore',
+    speaker_id: job.speaker_id,
+    profile_hash: createHash('sha256').update(`profile:${job.speaker_id}`).digest('hex'),
+    natural_output_hash: createHash('sha256').update(`natural:${job.id}`).digest('hex'),
+    bandwidth: {
+      effective_cutoff_hz: cutoff,
+      confidence: manual ? 1.0 : 0.92,
+      shape: manual ? 'manual_override' : 'codec_lowpass',
+      restore_recommended: true,
+      evidence: {
+        spectral_rolloff: cutoff * 0.96,
+        above_cutoff_snr_db: -14.2,
+        stationarity: 0.83,
+        high_band_energy_ratio_db: -41.6,
+      },
+      cutoff_mode: manual ? 'manual' : 'auto',
+    },
+    restorer: {
+      name: 'hawarestore-kd',
+      commit: '26dc21c44e11f9f19e823f02b0d4641dd5ea5af2',
+      weights_sha256: createHash('sha256').update('mock-weights').digest('hex'),
+      checkpoint_path: '/mock/models/hawarestore-kd/checkpoint.pt',
+      device: 'cpu',
+      seed_policy: 'deterministic_job_id',
+      solver: 'midpoint',
+      steps: 4,
+      guidance_scale: 0.0,
+    },
+    segments: failed
+      ? { restored: 0, reduced: 0, reverted: 1, bypassed: 0, errors: 0 }
+      : { restored: 1, reduced: 0, reverted: 0, bypassed: 0, errors: 0 },
+    guard_r: failed
+      ? {
+          verdict: 'FAIL',
+          accepted_strength: 0.0,
+          reason:
+            'All candidate strengths rejected; reverted to Natural-safe audio. ' +
+            'Last rejection — strength 0.35: protected band deviation 1.9 dB exceeds 1.0 dB',
+          protected_band: {},
+          ctc: {},
+          highband_events: {},
+          harmonic: {},
+          speaker: {},
+        }
+      : {
+          verdict: 'PASS',
+          accepted_strength: 0.7,
+          reason: 'Accepted strength 0.70: all guard layers passed',
+          protected_band: {},
+          ctc: {},
+          highband_events: {},
+          harmonic: {},
+          speaker: {},
+        },
+    review_timecodes: [],
+  };
 }
 
 function makeReport(job) {
@@ -314,16 +463,21 @@ function makeReport(job) {
   const noSpeech = units.filter((u) => u.final_decision === 'original_no_speech').length;
   const media = (p, lufs, tp) => ({ path: p, sha256: createHash('sha256').update(p).digest('hex'), sample_rate: SR, channels: 1, samples: N, duration_s: DURATION_S, integrated_lufs: lufs, true_peak_dbtp: tp });
   return {
-    schema_version: 1, job_id: job.id, config_hash: createHash('sha256').update('mock-config').digest('hex'),
+    schema_version: RELEASE_IDENTITY.report_schema_version, release: REPORT_RELEASE, build: REPORT_BUILD,
+    job_id: job.id, config_hash: createHash('sha256').update('mock-config').digest('hex'),
     input: media(job.input_path, -23.4, -3.1), output: media(job.output_path, -19.0, -1.0),
-    core: job.profile === 'studio'
-      ? { id: 'studio-dfn3-48k-v1', algorithm: 'WPE + DeepFilterNet3', params_hash: 'b1f7' + '0'.repeat(60), phase_coherent: true }
-      : { id: 'wiener-dd-48k-v1', algorithm: 'Wiener decision-directed', params_hash: 'a9c2' + '0'.repeat(60), phase_coherent: true },
-    guard: { id: 'spectral-guard-v1', probe_hash: 'c3d4' + '0'.repeat(60), calibration_id: job.profile === 'studio' ? 'guard-calibration-studio' : 'guard-calibration' },
+    core: {
+      studio: { id: 'studio-dfn3-48k-v1', algorithm: 'WPE + DeepFilterNet3', params_hash: 'b1f7' + '0'.repeat(60), phase_coherent: true },
+      lowband: { id: 'studio-dfn3-lowband-48k-v1', algorithm: 'DeepFilterNet3 crossed over with the original at 1000 Hz', params_hash: 'd5e8' + '0'.repeat(60), phase_coherent: false },
+      production: { id: 'wiener-dd-48k-v1', algorithm: 'Wiener decision-directed', params_hash: 'a9c2' + '0'.repeat(60), phase_coherent: true },
+    }[job.profile],
+    guard: { id: 'spectral-guard-v1', probe_hash: 'c3d4' + '0'.repeat(60), calibration_id: job.profile === 'production' ? 'guard-calibration' : 'guard-calibration-studio' },
     environment: { platform: 'mock', os_version: process.version, python_version: 'n/a', numpy_version: 'n/a', scipy_version: 'n/a', soundfile_version: 'n/a', cpu_model: null },
     summary: { units_total: units.length, enhanced, reverted, unverified: 0, error_passthrough: 0, continuity_reverted: 0, no_speech: noSpeech, finish_applied: enhanced, finish_bypassed: units.length - enhanced },
     review_timecodes: units.filter((u) => u.final_decision === 'original_reverted').map((u) => ({ unit_id: u.unit_id, start_time_s: u.start_time_s, end_time_s: u.end_time_s, channel: 0, verdict: 'REVERT', reason: u.decision_reason })),
     units,
+    passes: [],
+    ...(job.mode === 'restore' ? { restoration: makeRestoration(job) } : {}),
   };
 }
 
@@ -331,8 +485,14 @@ function publicStatus(job) {
   const o = {
     job_id: job.id, state: job.state, stage: job.stage, progress: job.progress, message: job.message,
     unit: job.unit, input_path: job.input_path, output_path: job.output_path, report_path: job.report_path,
-    profile: job.profile, started_at: job.started_at, finished_at: job.finished_at,
+    profile: job.profile, mode: job.mode, started_at: job.started_at, finished_at: job.finished_at,
   };
+  // Contract addendum 2: `mode` is always present; the restore parameters
+  // appear only on a restore snapshot (natural stays revision-1 compatible).
+  if (job.mode === 'restore') {
+    o.speaker_id = job.speaker_id;
+    o.cutoff_hz = job.cutoff_hz;
+  }
   if (job.state === 'failed') o.error = job.error;
   if (job.state === 'done') o.report = job.report;
   return o;
@@ -399,7 +559,8 @@ function runJob(job) {
       runningJob = null; schedule();
       return;
     }
-    const [delay, stage, progress, message, unit] = steps[idx++];
+    const [rawDelay, stage, progress, message, unit] = steps[idx++];
+    const delay = rawDelay / SPEED;
     job.timer = setTimeout(() => {
       if (job.state !== 'running') return;
       job.stage = stage; job.progress = progress; job.message = message; job.unit = unit;
@@ -458,6 +619,13 @@ function pathAllowed(p) {
   const home = process.env.HOME || '/';
   // Contract path policy: under $HOME, /Volumes, or the work dir — nothing else.
   return underRoot(n, home) || underRoot(n, '/Volumes') || underRoot(n, WORK_DIR);
+}
+
+// The real engine pins every request model `extra="forbid"`: a misspelled
+// field is refused with 422, never silently dropped (contract addendum 2).
+// The mock refuses the same way so the UI's error path is exercisable.
+function unknownField(body, allowed) {
+  return Object.keys(body).find((k) => !allowed.includes(k)) ?? null;
 }
 
 const MIME = { '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.mp4': 'audio/mp4', '.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.aac': 'audio/aac', '.mov': 'video/quicktime' };
@@ -536,29 +704,76 @@ const server = createServer(async (req, res) => {
 
   try {
     if (p === '/api/health' && req.method === 'GET') {
-      return json(res, 200, { ok: true, version: VERSION, profiles: ['studio', 'production'], engine_pid: process.pid });
+      return json(res, 200, {
+        ok: true, version: VERSION, profiles: ['studio', 'lowband', 'production'],
+        speakers: SPEAKERS, restore_available: SPEAKERS.length > 0,
+        engine_pid: process.pid,
+      });
     }
     if (p === '/api/analyze' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const unknown = unknownField(body, ['path', 'buckets']);
+      if (unknown !== null) return err(res, 422, 'bad_request', `unknown field: ${unknown}`);
       if (!pathAllowed(body.path)) return err(res, 403, 'forbidden', 'Path outside allowed roots');
       const buckets = Math.max(16, Math.min(8000, Number(body.buckets) || 1200));
       await new Promise((r) => setTimeout(r, 350)); // feel like real decode
       return json(res, 200, analyze(body.path, buckets));
     }
+    if (p === '/api/peaks' && req.method === 'POST') {
+      // Contract addendum 1: same semantics as /api/analyze's waveform
+      // fields, computed over [start_s, end_s) of the synthesized signal.
+      const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const unknown = unknownField(body, ['path', 'start_s', 'end_s', 'buckets']);
+      if (unknown !== null) return err(res, 422, 'bad_request', `unknown field: ${unknown}`);
+      if (!pathAllowed(body.path)) return err(res, 403, 'forbidden', 'Path outside allowed roots');
+      const start = Number(body.start_s), end = Number(body.end_s);
+      // Real engine: only unknown fields earn 422 — malformed values and an
+      // out-of-range window keep the historical 400.
+      if (!Number.isFinite(start) || start < 0 || !Number.isFinite(end) || end <= start) {
+        return err(res, 400, 'bad_request', `bad window: start_s=${body.start_s}, end_s=${body.end_s}`);
+      }
+      if (start >= DURATION_S) {
+        return err(res, 400, 'bad_request', `start_s ${start} is at or past the end of the file (${DURATION_S.toFixed(4)} s)`);
+      }
+      const buckets = Math.max(1, Math.min(8000, Number(body.buckets) || 1200));
+      return json(res, 200, peaksWindow(body.path, start, end, buckets));
+    }
     if (p === '/api/jobs' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const unknown = unknownField(body, ['input_path', 'profile', 'output_path', 'overwrite', 'mode', 'speaker_id', 'cutoff_hz']);
+      if (unknown !== null) return err(res, 422, 'bad_request', `unknown field: ${unknown}`);
+      // Restore-mode cross-field rules, exactly the real engine's 422s
+      // (contract addendum 2). A JSON null reads as "not sent", as pydantic's
+      // `str | None = None` does.
+      const mode = body.mode === 'restore' ? 'restore' : 'natural';
+      if (mode === 'restore') {
+        if (body.speaker_id == null || body.speaker_id === '') {
+          return err(res, 422, 'bad_request', 'mode "restore" requires speaker_id (see /api/health)');
+        }
+      } else {
+        if (body.speaker_id != null) return err(res, 422, 'bad_request', 'speaker_id is only valid when mode is "restore"');
+        if (body.cutoff_hz != null) return err(res, 422, 'bad_request', 'cutoff_hz is only valid when mode is "restore"');
+      }
+      if (body.speaker_id != null && !/^[a-z0-9_]{1,64}$/.test(body.speaker_id)) {
+        return err(res, 422, 'bad_request', 'speaker_id must match ^[a-z0-9_]{1,64}$');
+      }
+      if (body.cutoff_hz != null && !(Number.isFinite(body.cutoff_hz) && body.cutoff_hz > 0)) {
+        return err(res, 400, 'bad_request', 'cutoff_hz must be a positive finite number');
+      }
       if (!pathAllowed(body.input_path)) return err(res, 403, 'forbidden', 'Path outside allowed roots');
       if (body.output_path !== undefined && !pathAllowed(body.output_path)) {
         return err(res, 403, 'forbidden', 'Output path outside allowed roots');
       }
-      const profile = body.profile === 'production' ? 'production' : 'studio';
+      const profile = ['production', 'lowband'].includes(body.profile) ? body.profile : 'studio';
       const dir = body.input_path.slice(0, body.input_path.lastIndexOf('/'));
       const stem = cleanStem(body.input_path);
-      const output_path = body.output_path || `${dir}/${stem}_${profile === 'studio' ? 'studio' : 'clean'}.wav`;
+      const output_path = body.output_path || `${dir}/${stem}_${OUTPUT_SUFFIX[profile]}.wav`;
       const report_path = output_path.replace(/\.wav$/i, '') + '.hawavoclean.json';
       const job = {
         id: `j_${randomUUID().replace(/-/g, '').slice(0, 12)}`, state: 'queued', stage: 'preflight', progress: 0,
         message: 'Queued', unit: null, input_path: body.input_path, output_path, report_path, profile,
+        mode, speaker_id: mode === 'restore' ? body.speaker_id : null,
+        cutoff_hz: mode === 'restore' ? (body.cutoff_hz ?? null) : null,
         started_at: null, finished_at: null, error: null, report: null, listeners: new Set(), version: 0, timer: null,
       };
       jobs.set(job.id, job);

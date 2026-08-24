@@ -1,0 +1,119 @@
+# HawaVoClean - Band-Split Restoration Profile
+#
+# For muffled recordings whose noise is low-frequency tonal rumble: an air
+# handler, traffic, a room mode, a preamp hum with harmonics. On that
+# material the other two profiles each fail in their own way — the
+# production profile's Wiener filter cannot get under the rumble without
+# hitting its gain floor, and the full-band studio profile removes the
+# rumble but takes enough of the consonant band with it that the guard
+# reverts the take.
+#
+# This profile runs `studio-dfn3-lowband-48k-v1`: DeepFilterNet3 over the
+# full band with unlimited attenuation, of which only the output BELOW a
+# 1000 Hz crossover is kept — the ORIGINAL signal is handed back above it.
+# Consonants survive by construction rather than by the model's good
+# judgement (measured retention 0.999).
+#
+# Guarded in INTEGRITY mode, on the same measured thresholds as the studio
+# profile: spectral identity is not enforced (removing rumble changes the
+# spectrum, that is the point), while timing, envelope, artifact, and
+# signal-collapse protections stay fully enforced. Every unit is judged, and
+# any unit the guard rejects keeps its original audio.
+#
+# For the measured best result on this material, follow this profile with a
+# production pass over its output: the band split gets out from under the
+# rumble, the Wiener pass takes the rest of the floor down, and the guard
+# judges every unit in both runs. Measured on the Teat1vo lab fixture:
+# speech-to-floor separation 15.1 -> 29.4 dB here, 35.2 dB after that pass.
+#
+# Scope note: DFN3's effect is confined to the band under 1000 Hz, so
+# sustained musical tones above the crossover pass through untouched — but
+# bass lines and low drones below it are treated as noise. For music-heavy
+# material, listen to the flagged review timecodes in the report.
+
+[runtime]
+device = "auto"
+isolated_worker = true
+worker_timeout_s = 300.0
+worker_memory_limit_mb = 8192
+development = false
+num_threads = 1
+
+[input]
+max_sample_rate = 48000
+supported_sample_rates = [8000, 16000, 22050, 24000, 32000, 44100, 48000]
+channel_mode = "auto"
+output_bit_depth = "pcm24"
+
+[segmentation]
+vad_mode = "energy"
+min_speech_ms = 300
+target_speech_group_s = 20.0
+hard_max_group_s = 30.0
+pause_merge_threshold_ms = 400
+context_duration_s = 1.0
+min_boundary_non_speech_ms = 200
+
+[enhancement]
+core_id = "studio-dfn3-lowband-48k-v1"
+model_sample_rate = 48000
+phase_coherent = false
+warmup_cycles = 1
+
+[alignment]
+max_delay_ms = 50.0
+min_coherence = 0.60
+fractional_delay = true
+
+[guard]
+guard_id = "spectral-guard-v1"
+probe_id = "spectral-signature-v1"
+calibration_file = "guard-calibration-studio.json"
+mode = "integrity"
+min_anchor_confidence = 0.50
+max_posterior_js_div = 0.30
+max_peak_js_div = 0.90
+max_timing_drift_ms = 75.0
+enforce_signal_integrity = true
+spectral_hole_thresh = 0.10
+musical_noise_thresh = 0.30
+min_hf_preservation_ratio = 0.50
+
+[policy]
+# The core is not phase-coherent, so a partial-strength blend of enhanced
+# and original would comb-filter rather than soften; only the full-strength
+# candidate is offered to the guard.
+strength_ladder = [1.0]
+clean_audio_bypass = false
+clean_bypass_snr_db = 35.0
+enforce_continuity = true
+
+[finishing]
+enabled = true
+preset = "gentle"
+dc_subsonic_cutoff_hz = 75.0
+dehum_50_60hz = true
+declick = true
+plosive_attenuation = true
+dynamic_eq = true
+# Measured tonal restoration: band levels against a speech-intelligibility
+# target, corrected by the bounded difference, or 0.0 dB when the voice is
+# already inside the target band. max_tonal_gain_db is a hard ceiling on the
+# filter bank, verified against its own measured response on every call.
+tonal_restoration = true
+max_tonal_gain_db = 12.0
+deess_band = true
+max_deess_gr_db = 4.0
+level_rider = true
+max_compression_gr_db = 3.0
+
+[loudness]
+target_lufs_stereo = -16.0
+target_lufs_mono = -19.0
+true_peak_ceiling_dbtp = -1.0
+max_limiter_reduction_db = 2.5
+dither = true
+
+[reporting]
+schema_version = 1
+include_review_timecodes = true

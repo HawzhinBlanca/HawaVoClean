@@ -610,3 +610,43 @@ def test_real_reported_recording_is_restored_above_3k_only() -> None:
     assert tilt.low_shelf_db == 0.0, tilt.summary()
     assert tilt.presence_db == 0.0, tilt.summary()
     assert 5.0 < tilt.brilliance_db <= TILT_MAX_BRILLIANCE_LIFT_DB, tilt.summary()
+
+
+def test_tonal_gain_caps_are_magnitudes_and_say_so() -> None:
+    """A cut cap passed with the obvious negative sign must be refused, loudly.
+
+    ``solve_tonal_gains`` negates ``max_low_cut_db`` to build the lower bound,
+    so the caller passes a magnitude: 6.0 means "cut by at most 6 dB". Pass
+    -6.0 -- the obvious reading of "max cut" -- and the bound became +6.0
+    while the upper bound was already +6.0. ``np.clip`` against a collapsed
+    range returns that single value without complaint, so the low shelf pinned
+    to full LIFT on every input, including audio measured as needing a cut,
+    and nothing said a word. Found by making the mistake in a probe.
+    """
+    with pytest.raises(ValueError, match="max_low_cut_db"):
+        solve_tonal_gains(
+            48000,
+            -3.0,
+            2.0,
+            1.5,
+            max_low_cut_db=-TILT_MAX_LOW_CUT_DB,
+            max_low_lift_db=6.0,
+            max_presence_db=4.0,
+            max_brilliance_db=3.0,
+        )
+
+
+def test_a_low_band_measured_as_hot_is_actually_cut() -> None:
+    """The bound this protects: a negative request must produce a real cut."""
+    low, _, _ = solve_tonal_gains(
+        48000,
+        -3.0,
+        2.0,
+        1.5,
+        max_low_cut_db=TILT_MAX_LOW_CUT_DB,
+        max_low_lift_db=6.0,
+        max_presence_db=4.0,
+        max_brilliance_db=3.0,
+    )
+    assert low < 0.0, f"a low band asked to come down was moved by {low:+.2f} dB"
+    assert low >= -TILT_MAX_LOW_CUT_DB

@@ -1,0 +1,358 @@
+{
+  "advisory_source": {
+    "documentation": "https://docs.github.com/en/rest/security-advisories/global-advisories",
+    "provider": "GitHub Advisory Database API"
+  },
+  "assessment": {
+    "controlled_high_or_critical_count": 0,
+    "dependency_estate_clean": false,
+    "requires_explicit_user_acceptance": true,
+    "vendor_high_or_critical_count": 7
+  },
+  "captured_at": "2026-08-21T11:42:10Z",
+  "controlled_advisories": {
+    "advisory_ids": [],
+    "high_or_critical": [],
+    "package": "electron",
+    "query_url": "https://api.github.com/advisories?ecosystem=npm&affects=electron%4043.4.1&per_page=100",
+    "response_canonical_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "severity_counts": {},
+    "total": 0,
+    "version": "43.4.1"
+  },
+  "controlled_runtime": {
+    "electron": "43.4.1",
+    "owner": "HawaVoClean",
+    "package_path": "/Users/hawzhin/HawaVoClean/resolve-plugin/com.hawavoclean.resolve/package.json",
+    "supported_major_at_capture": true
+  },
+  "resolve_host": {
+    "build": "21.0.30007",
+    "bundle_identifier": "com.blackmagic-design.DaVinciResolve",
+    "path": "/Applications/DaVinci Resolve/DaVinci Resolve.app",
+    "version": "21.0.3"
+  },
+  "schema_version": 1,
+  "support_policy": {
+    "rule": "latest three stable major versions",
+    "source": "https://www.electronjs.org/docs/latest/tutorial/electron-timelines",
+    "supported_majors_at_capture": [
+      41,
+      42,
+      43
+    ]
+  },
+  "vendor_advisories": {
+    "advisory_ids": [
+      "GHSA-3c8v-cfp5-9885",
+      "GHSA-4f78-qhmw-8j8m",
+      "GHSA-4p4r-m79c-wq3v",
+      "GHSA-532v-xpq5-8h95",
+      "GHSA-5c9j-mhmv-5xgx",
+      "GHSA-5rqw-r77c-jp79",
+      "GHSA-8337-3p73-46f4",
+      "GHSA-8x5q-pvf5-64mp",
+      "GHSA-9899-m83m-qhpj",
+      "GHSA-9f4c-93c8-jc8g",
+      "GHSA-9pf5-hg6p-4pwp",
+      "GHSA-9w97-2464-8783",
+      "GHSA-9wfr-w7mm-pc7f",
+      "GHSA-f2r8-jv7c-xqmp",
+      "GHSA-f37v-82c4-4x64",
+      "GHSA-f3pv-wv63-48x8",
+      "GHSA-ff2p-hmqr-hxm4",
+      "GHSA-h7rp-cf8h-j98x",
+      "GHSA-jfqx-fxh3-c62j",
+      "GHSA-jjp3-mq3x-295m",
+      "GHSA-jm7p-cc5g-qwxx",
+      "GHSA-m55f-7gqj-fr98",
+      "GHSA-mwmh-mq4g-g6gr",
+      "GHSA-p2rr-rvmm-c5fp",
+      "GHSA-pfmc-3mgc-p6fp",
+      "GHSA-r5p7-gp4j-qhrx",
+      "GHSA-v3j7-r9gq-3gjw",
+      "GHSA-v64r-4m7r-3mvq",
+      "GHSA-v93f-fgjr-hjrj",
+      "GHSA-vmqv-hx8q-j7mg",
+      "GHSA-x8rc-wpg4-grpf",
+      "GHSA-xj5x-m3f3-5x3h",
+      "GHSA-xwr5-m59h-vwqr"
+    ],
+    "high_or_critical": [
+      {
+        "cve_id": "CVE-2026-34774",
+        "electron_ranges": [
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": "< 39.8.1"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 40.0.0-alpha.1, < 40.7.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 41.0.0-alpha.1, < 41.0.0"
+          }
+        ],
+        "ghsa_id": "GHSA-532v-xpq5-8h95",
+        "published_at": "2026-04-03T02:42:27Z",
+        "severity": "high",
+        "summary": "Electron: Use-after-free in offscreen child window paint callback",
+        "updated_at": "2026-04-06T23:10:56Z",
+        "url": "https://github.com/advisories/GHSA-532v-xpq5-8h95"
+      },
+      {
+        "cve_id": "CVE-2026-34771",
+        "electron_ranges": [
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": "< 38.8.6"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 39.0.0-alpha.1, < 39.8.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 40.0.0-alpha.1, < 40.7.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 41.0.0-alpha.1, < 41.0.0-beta.8"
+          }
+        ],
+        "ghsa_id": "GHSA-8337-3p73-46f4",
+        "published_at": "2026-04-03T02:40:24Z",
+        "severity": "high",
+        "summary": "Electron: Use-after-free in WebContents fullscreen, pointer-lock, and keyboard-lock permission callbacks",
+        "updated_at": "2026-04-06T23:10:45Z",
+        "url": "https://github.com/advisories/GHSA-8337-3p73-46f4"
+      },
+      {
+        "cve_id": "CVE-2026-70608",
+        "electron_ranges": [
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 42.0.0-alpha.1, < 42.0.1"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 40.0.0-alpha.1, < 41.10.3"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": "< 39.8.10"
+          }
+        ],
+        "ghsa_id": "GHSA-9f4c-93c8-jc8g",
+        "published_at": "2026-08-05T17:27:18Z",
+        "severity": "high",
+        "summary": "Electron: Sandboxed iframe can bypass the allow-popups restriction via the OpenURL navigation path",
+        "updated_at": "2026-08-05T17:27:20Z",
+        "url": "https://github.com/advisories/GHSA-9f4c-93c8-jc8g"
+      },
+      {
+        "cve_id": "CVE-2026-34769",
+        "electron_ranges": [
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": "< 38.8.6"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 39.0.0-alpha.1, < 39.8.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 40.0.0-alpha.1, < 40.7.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 41.0.0-alpha.1, < 41.0.0-beta.8"
+          }
+        ],
+        "ghsa_id": "GHSA-9wfr-w7mm-pc7f",
+        "published_at": "2026-04-03T02:39:15Z",
+        "severity": "high",
+        "summary": "Electron: Renderer command-line switch injection via undocumented commandLineSwitches webPreference",
+        "updated_at": "2026-04-06T23:10:38Z",
+        "url": "https://github.com/advisories/GHSA-9wfr-w7mm-pc7f"
+      },
+      {
+        "cve_id": "CVE-2026-70601",
+        "electron_ranges": [
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": "< 39.8.9"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 40.0.0-alpha.1, < 40.9.2"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 41.0.0-alpha.1, < 41.2.2"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 42.0.0-alpha.1, < 42.0.0-beta.5"
+          }
+        ],
+        "ghsa_id": "GHSA-h7rp-cf8h-j98x",
+        "published_at": "2026-08-05T15:46:08Z",
+        "severity": "high",
+        "summary": "Electron: Context isolation bypass via Function.prototype.bind hijack",
+        "updated_at": "2026-08-05T15:46:10Z",
+        "url": "https://github.com/advisories/GHSA-h7rp-cf8h-j98x"
+      },
+      {
+        "cve_id": "CVE-2026-34770",
+        "electron_ranges": [
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": "< 38.8.6"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 39.0.0-alpha.1, < 39.8.1"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 40.0.0-alpha.1, < 40.8.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 41.0.0-alpha.1, < 41.0.0-beta.8"
+          }
+        ],
+        "ghsa_id": "GHSA-jjp3-mq3x-295m",
+        "published_at": "2026-04-03T02:39:52Z",
+        "severity": "high",
+        "summary": "Electron: Use-after-free in PowerMonitor on Windows and macOS",
+        "updated_at": "2026-04-06T23:10:42Z",
+        "url": "https://github.com/advisories/GHSA-jjp3-mq3x-295m"
+      },
+      {
+        "cve_id": "CVE-2026-70604",
+        "electron_ranges": [
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 42.0.0-alpha.1, < 42.0.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 41.0.0-alpha.1, < 41.4.0"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": ">= 40.0.0-alpha.1, < 40.9.3"
+          },
+          {
+            "first_patched_version": null,
+            "vulnerable_version_range": "< 39.8.10"
+          }
+        ],
+        "ghsa_id": "GHSA-v3j7-r9gq-3gjw",
+        "published_at": "2026-08-05T15:59:45Z",
+        "severity": "high",
+        "summary": "Electron: Custom protocol with supportFetchAPI but not corsEnabled allows cross-origin reads",
+        "updated_at": "2026-08-05T15:59:46Z",
+        "url": "https://github.com/advisories/GHSA-v3j7-r9gq-3gjw"
+      }
+    ],
+    "package": "electron",
+    "query_url": "https://api.github.com/advisories?ecosystem=npm&affects=electron%4036.3.2&per_page=100",
+    "response_canonical_sha256": "c26fc3cfc8c0fd6a4f773c5a41cb9d2b52c3e152f470051373d1dca59b005a41",
+    "severity_counts": {
+      "high": 7,
+      "low": 6,
+      "medium": 20
+    },
+    "total": 33,
+    "version": "36.3.2"
+  },
+  "vendor_runtime": {
+    "app_transport_security": {
+      "NSAllowsArbitraryLoads": true
+    },
+    "bundle_identifier": "com.github.Electron",
+    "declares_camera_usage": true,
+    "declares_microphone_usage": true,
+    "electron": "36.3.2",
+    "executable_sha256": "c925e48e8e7effdd84680cf067d9d2abea2449754e5fda35a72ab7b6532a315e",
+    "owner": "Blackmagic Design",
+    "path": "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Applications/.hidden/Electron.app",
+    "signature": {
+      "authority": [
+        "Developer ID Application: Blackmagic Design Inc (9ZGFBWLSYP)",
+        "Developer ID Certification Authority",
+        "Apple Root CA"
+      ],
+      "cdhash": "fd2abf1024cf603fe07cee3f6d6d9d90efaf6225",
+      "hardened_runtime": true,
+      "identifier": "com.github.Electron",
+      "team_identifier": "9ZGFBWLSYP",
+      "timestamp": "21 Jul 2026 at 3:31:06 PM",
+      "valid_on_disk": true
+    },
+    "supported_major_at_capture": false
+  },
+  "task_id": "T4.6",
+  "source_commit": "d61299c25cee90a985e7698f855a9372ade2a292",
+  "stage_proof": {
+    "path": "build/resolve-plugin/stages/7c9734b0015f79af3ba4/com.hawavoclean.resolve",
+    "sha256sums_sha256": "7c9734b0015f79af3ba4bb469b6a6d41a5100bfc68827005ec0de39b1e09aadd",
+    "symlinks_sha256": "f20a8ee4d74295e95bfaceed4f7b238d8def18bb5df746373dcec79f0a261777",
+    "source_and_stage_main_sha256": "c92da4666bd2712b37ea7e42339a13f7f2e29cb758e14b2df658324ac0f781f3",
+    "stage_index_sha256": "74d333ecc1dbd8ac686a5efd5db1785393bfa623e4fe72e62265c8975b85fabb",
+    "workflow_integration_node_sha256": "91705298c56b649a75bf76be101fea28fbe41b1e88adf4778490ce8b2d14b3e2",
+    "engine_manifest_sha256": "43a0542a0d5fc1201f450db5a2880b97f80d90c733bf1fb63ebe35765502489f",
+    "engine_checksums_sha256": "17465aeb0b5045f5888c73c2f5086505ffcc5e0f32872a4393a7ac6ccfdd88a1",
+    "engine_symlinks_sha256": "7745bd4e01234d52ed70ea6cf61d691cc83709c06090c1bc5cd114645bec888d"
+  },
+  "verification": {
+    "full_default_pytest": "965 passed, 41 deselected",
+    "ui_vitest": "342 passed",
+    "ruff_format": "242 files formatted",
+    "ruff_check": "passed",
+    "mypy_strict": "212 source files",
+    "source_boundary_pytest": "6 passed",
+    "standalone_electron_scenarios": "4/4 passed; no orphan engine",
+    "staged_real_engine_lifecycle": true,
+    "security_probes": {
+      "inline_script_blocked": true,
+      "remote_fetch_blocked": true,
+      "popup_blocked": true,
+      "navigation_blocked": true,
+      "unexpected_permission_denied": true,
+      "app_protocol_traversal_blocked": true,
+      "service_worker_registration_blocked": true,
+      "declared_blob_worker_operational": true,
+      "authenticated_health_status": 200,
+      "unauthenticated_health_status": 401
+    },
+    "lock_audits": {
+      "python_pip_audit_2_10_1_known_vulnerabilities": 0,
+      "ui_pnpm_known_vulnerabilities": 0,
+      "plugin_pnpm_known_vulnerabilities": 0,
+      "toolchain_npm_known_vulnerabilities": 0
+    }
+  },
+  "failed_attempts_retained": [
+    {
+      "command": "pip-audit --locked .",
+      "failure": "pip-audit 2.10.1 has no native uv.lock reader; the result was rejected rather than treated as a pass"
+    },
+    {
+      "command": "pip-audit with resolver over the all-groups/all-extras export",
+      "failure": "mutually exclusive locked platform/extras selections cannot be installed as one environment; rerun with resolution disabled audited every exact hashed pin and passed"
+    }
+  ],
+  "known_limits": [
+    "DaVinci Resolve has not yet launched this commit in-host; T6/U2 must capture process.versions and the workflow matrix from the actual host.",
+    "The user has not yet accepted the documented vendor-owned Electron 36.3.2 high-severity residual risk, so T4.6 remains open.",
+    "The staged self-contained engine was reused from the earlier T4.5 proof; final release artifacts must rebuild the wheel, engine and stage from the final release commit.",
+    "The GitHub advisory result is a 2026-08-21 snapshot and must be refreshed if the Resolve build, embedded binary hash or advisory database changes."
+  ]
+}

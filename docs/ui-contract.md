@@ -1,4 +1,4 @@
-# HawaVoClean UI contract (v1)
+# HawaVoClean UI contract (contract revision 2; product 3.3)
 
 One web UI bundle, three shells, one engine. This document is the binding contract
 between the three parts. Anything not written here is the implementer's call, but
@@ -9,8 +9,8 @@ every name, path and shape written here is fixed.
 | Part | Location | Runtime |
 |------|----------|---------|
 | Engine bridge | `src/hawavoclean/server/` + `hawavoclean serve` + `hawavoclean process --progress-json` | Python (FastAPI + uvicorn), binds 127.0.0.1 only |
-| UI bundle | `ui/` (Vite 8 + React 19 + TypeScript), builds to `ui/dist/` with `base: './'` | Any Chromium 136+ page: browser, Electron, Resolve's Electron |
-| Resolve / desktop shell | `resolve-plugin/com.hawavoclean.resolve/` (`manifest.xml`, `package.json`, `main.js`, `preload.js`) + `resolve-plugin/install.sh` | Resolve's bundled Electron 36.3.2 (sandbox + contextIsolation), or plain `electron .` for desktop |
+| UI bundle | `ui/` (Vite 8 + React 19 + TypeScript), builds to `ui/dist/` with `base: './'` | Supported browser, the pinned standalone Electron test runtime, or Resolve's vendor-owned embedded runtime |
+| Resolve / desktop shell | `resolve-plugin/com.hawavoclean.resolve/` (`manifest.xml`, `package.json`, `main.js`, `preload.js`) + `resolve-plugin/install.sh` | DaVinci Resolve Studio 21 host, or exact standalone Electron 43.4.1 for controlled testing |
 
 ## 1. Engine HTTP API
 
@@ -18,7 +18,7 @@ Base URL: `http://127.0.0.1:{port}`. The server prints exactly one JSON line to 
 it is listening and then nothing else on stdout (all logs go to stderr):
 
 ```json
-{"event":"ready","port":54321,"pid":12345,"version":"3.2.0"}
+{"event":"ready","port":54321,"pid":12345,"version":"3.3.0"}
 ```
 
 CLI: `hawavoclean serve [--host 127.0.0.1] [--port 0] --token TOKEN [--ui-dir DIR]`.
@@ -26,14 +26,15 @@ CLI: `hawavoclean serve [--host 127.0.0.1] [--port 0] --token TOKEN [--ui-dir DI
 (optional; when absent `/` returns 404 JSON). Token: every `/api/*` request must carry the token as
 header `X-Hawa-Token: TOKEN` **or** query `?token=TOKEN` (query form exists for `EventSource` and
 `<audio src>` which cannot set headers). Missing/wrong token → 401 `{"error":"unauthorized"}`.
-CORS: allow all origins (`*`), all methods, headers `X-Hawa-Token, Content-Type`. The UI in Resolve
-loads from `file://` (origin `null`), so this is required.
+CORS: allow all origins (`*`), all methods, headers `X-Hawa-Token, Content-Type, Range`. The shared UI
+can be served from a browser origin or the private `hawa://app` Resolve origin; token authentication
+and request filtering remain mandatory even when origin varies.
 
 All errors: JSON `{"error": "<code>", "message": "<human text>"}` with 4xx/5xx.
 
 ### `GET /api/health`
 ```json
-{"ok":true,"version":"3.2.0","profiles":["studio","production"],"engine_pid":12345}
+{"ok":true,"version":"3.3.0","profiles":["studio","lowband","production"],"engine_pid":12345}
 ```
 
 ### `POST /api/analyze`
@@ -59,9 +60,10 @@ of the per-bucket `rms_db` over buckets above −120. Loudness via the existing
 
 ### `POST /api/jobs`
 Request `{"input_path": "/abs/in.m4a.mp4", "profile": "studio", "output_path": "/abs/out.wav" (optional), "overwrite": false}`
-Default `output_path`: same directory as input, `<stem>_studio.wav` for `studio`, `<stem>_clean.wav`
-for `production`, where `<stem>` strips **all** audio/container suffixes (`Flute 09.m4a.mp4` → `Flute 09`,
-same rule as `cli._clean_stem`). Response `202`:
+Default `output_path`: same directory as input, `<stem>_studio.wav` for `studio`,
+`<stem>_lowband.wav` for `lowband`, and `<stem>_clean.wav` for `production`, where `<stem>` strips
+**all** audio/container suffixes (`Flute 09.m4a.mp4` → `Flute 09`, same rule as
+`cli._clean_stem`). Response `202`:
 ```json
 {"job_id":"j_8f2a...","output_path":"/abs/Flute 09_studio.wav","report_path":"/abs/Flute 09_studio.hawavoclean.json"}
 ```
@@ -165,11 +167,23 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
 
 ## 4. Shell behaviour (main.js)
 
-* Reads `engine.json` next to `main.js`: `{"command":["/abs/.venv/bin/hawavoclean","serve"],"cwd":"/abs/repo","env":{}}`.
+* Reads `engine.json` next to `main.js`. The shipped file is relocatable:
+  `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1"}}`.
+  Relative executable and working-directory paths are resolved below the plugin directory and may not
+  escape it. Absolute paths remain available only for explicit developer configurations.
   Spawns `command + ["--port","0","--token",TOKEN,"--ui-dir",__dirname]` with a fresh random 32-hex TOKEN,
   waits for the `ready` stdout line (timeout 60 s → show an error page with the stderr tail).
-* `BrowserWindow` 1280×820 (min 960×640), dark background `#0e1013`, `webPreferences: {preload, sandbox:true,
-  contextIsolation:true, nodeIntegration:false}`; `loadFile('index.html')`. `HAWA_DEVTOOLS=1` opens devtools.
+* Registers a standard secure `hawa://app` protocol on a private in-memory session. Its handler serves
+  only canonical regular files below the plugin root; CORS is enabled while service workers and CSP
+  bypass are disabled. `BrowserWindow` loads `hawa://app/index.html` at 1280×820 (min 960×640), dark
+  background `#0e1013`.
+* Window preferences are fixed: `sandbox:true`, `contextIsolation:true`, `nodeIntegration:false`,
+  `webSecurity:true`, `allowRunningInsecureContent:false`, `webviewTag:false`. All popups, foreign
+  navigation and webview attachments are denied. Renderer requests are limited to the app protocol,
+  its confined backing files, and exactly the spawned `http://127.0.0.1:<port>` engine.
+* The session denies all device permissions and every permission except sanitized clipboard write
+  from the exact main renderer. Every privileged IPC handler validates the exact main frame and app
+  URL before acting. `HAWA_DEVTOOLS=1` opens devtools for explicit standalone diagnostics.
 * `WorkflowIntegration.node` is `require`d in **main** (sandboxed preload cannot load native modules);
   `Initialize('com.hawavoclean.resolve')` failing ⇒ `host='electron'` and no `resolve` bridge (standalone run).
   Registers `ResolveQuit` callback → quit.
@@ -181,14 +195,18 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
 resolve-plugin/
   com.hawavoclean.resolve/      # shell sources (no built UI, no .node committed)
     manifest.xml  package.json  main.js  preload.js  engine.json.example
-  install.sh                    # builds ui/, assembles build/resolve-plugin/com.hawavoclean.resolve/, installs
+  install.sh                    # locked build, immutable staging and staged lifecycle self-test
+  activate.sh                   # privileged, build-tool-free transactional activation + rollback
+scripts/build_resolve_engine.py # exact-wheel → relocatable macOS arm64 CPython 3.11 engine
 ui/                             # Vite + React + TS sources; ui/dist is gitignored
 src/hawavoclean/server/         # app.py (FastAPI), jobs.py (child-process job manager), analysis.py, auth/paths helpers
 src/hawavoclean/progress.py     # ProgressEvent + ProgressCallback types
 ```
-Assembled plugin directory (what Resolve loads), at
+The content-addressed stage and installed plugin contain
+`manifest.xml package.json main.js preload.js engine.json index.html assets/ engine/ PLUGIN_ID VERSION
+SHA256SUMS SYMLINKS`, plus `WorkflowIntegration.node` for a Resolve build. The installed directory is
 `/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins/com.hawavoclean.resolve/`:
-`manifest.xml package.json main.js preload.js engine.json WorkflowIntegration.node index.html assets/`.
+the engine is self-contained and does not refer to the source checkout or a mutable virtual environment.
 
 `manifest.xml`:
 ```xml
@@ -197,7 +215,7 @@ Assembled plugin directory (what Resolve loads), at
   <Plugin>
     <Id>com.hawavoclean.resolve</Id>
     <Name>HawaVoClean</Name>
-    <Version>0.1.0</Version>
+    <Version>3.3.0</Version>
     <Description>HawaVoClean voice restoration for DaVinci Resolve Studio.</Description>
     <FilePath>main.js</FilePath>
   </Plugin>
@@ -207,6 +225,8 @@ Assembled plugin directory (what Resolve loads), at
 ## 6. Non-negotiables
 
 * Engine binds 127.0.0.1 only, token required, path policy enforced. No arbitrary file reads.
+* The Resolve-owned Electron version is not inferred from the standalone lock. Capture and assess it
+  separately as specified in `docs/resolve-runtime-risk.md`; never describe a vulnerable host as clean.
 * The UI never drives per-frame drawing through React state: waveform in a Worker via `OffscreenCanvas`
   (WebGL2), spectrum/analyser via `requestAnimationFrame` + refs. React owns layout/controls only.
 * Dependencies: Python extra `ui = [fastapi, uvicorn, python-multipart]`; UI deps: react, react-dom,
@@ -250,3 +270,68 @@ only the requested span (ffmpeg `-ss <start> -t <len>` before `-i` for fast seek
 
 `samples_per_bucket` lets the client decide when it has reached 1 sample/bucket (no more detail to
 fetch). Clients should re-query on zoom/pan and cache by `(path, start_s, end_s, buckets)`.
+
+---
+
+## Addendum 2 — restore mode (contract revision 2)
+
+Restore mode (personalized Kurdish spectral restoration, ADR 0008) is a first-class 3.3.0
+feature: the same `POST /api/jobs` endpoint drives it, opt-in per job.
+
+### Request fields (`POST /api/jobs`)
+
+Three fields join the revision-1 request:
+
+```json
+{"input_path": "/abs/in.wav", "profile": "studio",
+ "mode": "restore", "speaker_id": "character_01", "cutoff_hz": 7800.0}
+```
+
+* `mode` — `"natural"` (default; byte-identical behaviour to revision 1) or `"restore"`.
+* `speaker_id` — required when `mode` is `"restore"`; must match `^[a-z0-9_]{1,64}$` (it is
+  passed to the child argv and joined into the profiles path — nothing else is accepted).
+* `cutoff_hz` — optional, restore-only, a positive finite float. When present the child runs
+  with a manual cutoff (`--cutoff-hz`); when absent the cutoff is auto-detected.
+
+Validation (all `422 {"error":"bad_request"}` with a one-line human message):
+
+* `mode:"restore"` without `speaker_id` → 422.
+* `speaker_id` or `cutoff_hz` in natural mode → 422 (never silently ignored).
+* `speaker_id` outside `^[a-z0-9_]{1,64}$` → 422.
+* **Unknown fields → 422.** Every request model (`/api/jobs`, `/api/analyze`, `/api/peaks`)
+  is pinned `extra="forbid"`: a misspelled field is refused, not dropped (revision 1 silently
+  accepted unknown fields — an audit finding). Malformed values and missing required fields
+  keep the revision-1 `400`.
+
+Execution: for a restore job the child command gains
+`--mode restore --speaker-id <id> --profiles-dir <abs profiles root> [--cutoff-hz <val>]`.
+The profiles root is the engine's `HAWAVOCLEAN_PROFILES_DIR` override, else the in-repo
+`profiles/` tree — resolved absolute so the child never depends on its working directory.
+
+### Capabilities (`GET /api/health`)
+
+Two fields join the health body:
+
+```json
+{"ok":true, ..., "speakers":["character_01","character_02"], "restore_available":true}
+```
+
+`speakers` is the sorted list of speaker ids that have a `profile.json` under the engine's
+profiles root (recomputed per request; empty list when the tree is absent). The UI populates
+the restore control from it. `restore_available` is `true` iff `speakers` is non-empty —
+when `false` the UI hides restore entirely.
+
+### `JobStatus` fields
+
+`mode` is always present in a job snapshot. `speaker_id` and `cutoff_hz` appear **only** when
+`mode` is `"restore"` (`cutoff_hz` is `null` for auto-detection); natural-mode snapshots are
+byte-compatible with revision 1.
+
+```json
+{"job_id":"j_8f2a...","state":"running","mode":"restore",
+ "speaker_id":"character_01","cutoff_hz":null, ...}
+```
+
+A done restore job's `report` is a schema-v2 `HawaVoCleanReport` and carries the
+`restoration` section (speaker id, bandwidth estimate with `effective_cutoff_hz` and
+`cutoff_mode`, guard verdicts) — the UI reads it from `report.restoration`.

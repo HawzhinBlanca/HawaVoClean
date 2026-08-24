@@ -1,0 +1,43 @@
+# Band-Split Restoration Core Lock
+#
+# DeepFilterNet3 runs over the full band; only its output BELOW the crossover
+# is kept, and the original signal is handed back above it.
+#
+# `crossover_hz` is inside params_hash, and that is the point of this lock.
+# The crossover is not a taste setting — it is the line between a core that
+# ships audio and one whose every unit the guard reverts. Measured on the
+# Teat1vo lab fixture against the guard's spectral-hole threshold of 0.100:
+# 1000 Hz scores 0.066 with consonant retention ~1.0; 1500 Hz scores 0.103
+# and 2500 Hz scores 0.187, both rejected. Moving it is a new core and a
+# relock, not an edit.
+#
+# The weights are the SAME vendored DeepFilterNet3 files the studio core
+# uses; they are digested here as well so this lock stands on its own.
+# `hawavoclean audit-models` and pipeline preflight verify every digest below
+# and fail on mismatch.
+
+schema_version = 2
+core_id = "studio-dfn3-lowband-48k-v1"
+version = "1.0.0"
+algorithm = "DeepFilterNet3 (unlimited attenuation) crossed over with the original at 1000 Hz: model below, untouched original above, complementary zero-phase split"
+implementation = "hawavoclean.enhancement.studio_lowband.StudioLowBandCore"
+code_license = "Proprietary / All Rights Reserved"
+model_upstream = "https://github.com/Rikorose/DeepFilterNet"
+model_license = "MIT"
+expected_sample_rates = [48000]
+phase_coherent = false
+params_hash = "a5a207009987d8943347df930862831cf442c2dfa52d132ccc9fbb6260c2feeb"
+
+[params]
+model = "DeepFilterNet3"
+internal_sample_rate = 48000
+crossover_hz = 1000.0
+crossover_order = 4
+crossover_form = "complementary_zero_phase_butterworth"
+atten_lim_db = 0
+wpe_dereverb = false
+tail_suppress = false
+
+[weight_sha256]
+"deepfilternet3/config.ini" = "415eb925d44990d938fb739f514aa3662c1ec0ea836cff044fa1291b82cb4290"
+"deepfilternet3/checkpoints/model_120.ckpt.best" = "23b92884f63ccf54bb026014604625ab231657b6480df65db4095c4c171e6003"

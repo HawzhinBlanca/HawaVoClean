@@ -3,6 +3,7 @@ import type { EngineClient } from '../api/client';
 import type {
   AudioAnalysis,
   HawaVoCleanReport,
+  JobMode,
   JobStatus,
   Profile,
   UnitDecisionRecord,
@@ -176,6 +177,25 @@ export interface AppState {
   cleaned: AudioAnalysis | null;
 
   profile: Profile;
+  /**
+   * Restore capability, from `GET /api/health` (contract addendum 2). The
+   * engine recomputes both per probe, so they can change while the app is
+   * open — a profile trained mid-session appears, a deleted one stops being
+   * offered — and `setCapabilities` reconciles the selection below with them.
+   */
+  speakers: string[];
+  restoreAvailable: boolean;
+  /**
+   * The next run's mode and its restore parameters. Like `profile` these are
+   * a control setting, not a property of any one run: they survive a new
+   * source and are read once at submit time. Invariant the control and
+   * `setCapabilities` maintain together: `speakerId` is non-null whenever
+   * `speakers` is non-empty, so a restore-mode submit always has the
+   * `speaker_id` the engine requires. `cutoffHz` null means auto-detect.
+   */
+  mode: JobMode;
+  speakerId: string | null;
+  cutoffHz: number | null;
   job: JobInfo | null;
   report: HawaVoCleanReport | null;
   cleanedPath: string | null;
@@ -251,6 +271,10 @@ export interface AppState {
   setOriginal(a: AudioAnalysis | null): void;
   setCleaned(a: AudioAnalysis | null, path: string | null): void;
   setProfile(p: Profile): void;
+  setCapabilities(speakers: string[], restoreAvailable: boolean): void;
+  setMode(m: JobMode): void;
+  setSpeakerId(id: string | null): void;
+  setCutoffHz(hz: number | null): void;
   setJob(job: JobInfo | null): void;
   patchJob(patch: Partial<JobInfo>): void;
   setReport(r: HawaVoCleanReport | null): void;
@@ -293,6 +317,11 @@ export const useStore = create<AppState>((set) => ({
   cleaned: null,
 
   profile: 'studio',
+  speakers: [],
+  restoreAvailable: false,
+  mode: 'natural',
+  speakerId: null,
+  cutoffHz: null,
   job: null,
   report: null,
   cleanedPath: null,
@@ -344,6 +373,24 @@ export const useStore = create<AppState>((set) => ({
     set({ original, duration: original ? original.duration_s : 0 }),
   setCleaned: (cleaned, cleanedPath) => set({ cleaned, cleanedPath }),
   setProfile: (profile) => set({ profile }),
+  // Capabilities can change under a made selection, so this reconciles rather
+  // than just stores: a speaker the engine no longer offers cannot stay
+  // selected (the submit it fed would 422), and when restore goes away
+  // entirely the mode falls back to natural — silently, because the control
+  // that would have explained it is hidden at the same moment.
+  setCapabilities: (speakers, restoreAvailable) =>
+    set((s) => ({
+      speakers,
+      restoreAvailable,
+      speakerId:
+        s.speakerId !== null && speakers.includes(s.speakerId)
+          ? s.speakerId
+          : (speakers[0] ?? null),
+      mode: restoreAvailable ? s.mode : 'natural',
+    })),
+  setMode: (mode) => set({ mode }),
+  setSpeakerId: (speakerId) => set({ speakerId }),
+  setCutoffHz: (cutoffHz) => set({ cutoffHz }),
   setJob: (job) => set({ job }),
   patchJob: (patch) =>
     set((s) => (s.job ? { job: { ...s.job, ...patch } } : {})),

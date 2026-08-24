@@ -7,6 +7,225 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> Release-state note: 3.3.0 is still a candidate. Version/date headings below record internal
+> repository milestones; they are not evidence of a signed, tagged, protected-branch publication.
+> Current proof and blockers are authoritative in `docs/generated-release-status.md` and `STATUS.md`.
+
+### Added — opt-in Kurdish spectral restoration (`--mode restore`)
+
+- Added the HawaRestore-KD restoration subsystem: continuous cutoff detection, a flow-matching
+  vector-field model conditioned on speaker identity and a canonical prototype embedding, ten
+  consent-backed speaker profiles with hash-verified embeddings, and Restoration Guard R. It runs as
+  pipeline stage 10.5, between assembly and loudness, and is off unless `--mode restore` is given.
+  This is the first generative path in the product: everything else only ever emits audio that was
+  in the input.
+- Content below the detected cutoff is preserved by construction and re-verified afterwards. Guard R
+  checks structural integrity, protected-band invariance, high-band event consistency, harmonic
+  pitch divergence, speaker similarity against the profile prototype, and Sorani acoustic-posterior
+  divergence, descending a strength ladder and reverting to the Natural master if none pass.
+- The zero-strength entry of that ladder is the Natural candidate and is deliberately not scored.
+  Evaluating it would clear every layer trivially and return first, so a run in which every real
+  candidate was rejected would have been audited as having passed the guard. A total revert now
+  reports verdict `FAIL` with the rejecting layer's metrics.
+- Restoration is processed in overlapping blocks with a cross-faded seam, so memory is flat in file
+  duration rather than growing with it.
+- Inference is pinned to CPU and draws from an explicit per-block generator seeded from the job ID:
+  `torch.manual_seed` does not give the same stream on CUDA/MPS as on CPU, so an auto-selected
+  accelerator would have made the master depend on the host while the report claimed a fixed seed
+  policy.
+- Restore mode fails closed on weights: a checkpoint that cannot be resolved or loaded raises rather
+  than falling back to the random initialisation, the checkpoint is resolved independently of the
+  working directory, and the reported `weights_sha256` is computed from the file actually loaded.
+- Restore mode requires `--speaker-id`, is refused in combination with `--passes` (which has no
+  restoration stage), and publishes at 48 kHz. `--cutoff-hz` asserts the cutoff rather than measuring
+  it, and the report records which happened via `bandwidth.cutoff_mode`.
+- Added `restore-doctor`, `speaker-profile validate`, and `restoration-benchmark` CLI verbs, and a
+  `restoration` section in the JSON report and human summary carrying the bandwidth estimate, model
+  provenance, segment counts, and the full Guard R verdict.
+
+### Changed — evidence-backed release hardening and truthful product boundary
+
+- Replaced independent flat-file publication with immutable content-addressed WAV/JSON/TXT
+  generations committed by one verified `current` pointer. Fault injection, real interruption,
+  overwrite, recovery, concurrent-reader/publisher, APFS and Linux-overlayfs tests prove that a mixed
+  generation is never authoritative and the prior complete generation is retained.
+- Canonicalized the 3.3.0 release/report identity and schema-v2 provenance; synchronized Python, UI,
+  Resolve and package manifests; generated an artifact-bound CycloneDX 1.6 SBOM; and made stale
+  generated release status a failing gate.
+- Rebuilt the supported container as CPU/production-only, non-root and read-only-root compatible with
+  exact Wolfi packages. Studio/CUDA, GPU-container and Windows support are explicitly absent.
+- Bounded loopback-server jobs, history, upload concurrency/size/total/age and free-space reserve;
+  startup/terminal cleanup owns only marker-scoped uploads and never committed outputs.
+- Replaced checkout/virtual-environment Resolve installation with a manifest-bearing relocatable
+  CPython 3.11 engine, content-addressed stage, real staged lifecycle test and transactional
+  activation/rollback. The actual in-Resolve workflow/accessibility matrix is still open.
+- Hardened the Electron renderer boundary with a private `hawa://app` origin, fixed IPC sender checks,
+  sandbox/context isolation, CSP and complete navigation/popup/permission/network denial. Resolve
+  21.0.3's vendor-owned Electron 36.3.2 still has 33 captured advisories including seven high; this
+  remains an explicit acceptance/update blocker, not a clean scan.
+- Locked a result-free Sorani evaluation protocol and rights-safe corpus-source route. Both require
+  explicit user approval before acquisition/execution; no held-out content/listening result exists and
+  quarantined or speaker-opaque corpora cannot support the product claim.
+- Established a two-pass clean-checkout local release gate covering tests/coverage, fuzz, mutations,
+  real engineering audio, UI, packaging, Resolve staging, container, audits, SBOM and reproducible
+  identities. The last proof is bound to its recorded source commit; final-commit rerun, remote CI,
+  human evaluation, real Resolve acceptance, signing and protected publication remain required.
+- Rewrote architecture, model provenance, operations, security, risks and status around the actual
+  three-core system, committed-generation behavior, qualification boundaries, known limitations and
+  open human/vendor/governance gates.
+
+### Added — one v3.3 identity and a measured three-profile regression gate
+
+- `src/hawavoclean/release.json` is now the sole authored product/report
+  version. Python reads the packaged identity directly; Python/UI/Resolve
+  package manifests are checked generated mirrors. Schema-v2 reports embed
+  its exact SHA-256 and reject missing or altered identity, while schema-v1
+  reports remain readable without a fabricated backfill.
+- The integrated release tree now contains production, studio and lowband
+  together across factory, CLI, server, UI, docs and model locks. Lowband's
+  two real-audio masters reproduced their branch references byte for byte
+  before the version bump.
+- `scripts/audio_regression_gate.py` runs all three profiles on both private
+  real recordings twice. All six v3.3 masters are deterministic and retain
+  identical audio/decision report semantics against their frozen references.
+  Their changed WAV hashes are fully explained by the version-keyed TPDF
+  dither seed: same rate/layout/count, maximum difference exactly 2 PCM24
+  least-significant bits (RMS 0.708–0.709 LSB).
+
+### Fixed — one failing unit no longer discards a whole file of passing ones
+
+The continuity rule forbids enhanced audio from butting against original audio
+across a *forced* cut — a boundary the segmenter made inside continuous speech
+because a speech interval outran the maximum unit length. The remedy was to
+revert the enhanced unit, and reverting is symmetric: it creates a seam on the
+unit's far side. Iterated to a fixed point on a recording whose every boundary
+is forced — continuous speech, no pauses to cut at — **one failing unit
+reverted the entire file**.
+
+Measured on Flute 09 (94.6 s, production profile): five of six units passed the
+guard, and the report read `enhanced: 0/6`, `continuity_reverted: 5`. The
+listener received original audio with loudness normalisation and nothing else.
+
+The remedy is now a fade. An enhanced unit that meets original audio across a
+forced cut fades its own enhancement back to the original recording over the
+30 ms before the joint (and/or after it, when the cut is on its left). At the
+joint both sides are then the original recording **bit for bit**, so the step
+is exactly zero rather than merely small, and the difference between the two
+renderings is spread over 30 ms instead of one sample.
+
+- **Flute 09, production: `enhanced: 0/6` → `5/6`.** Speech/floor separation
+  **27.65 dB → 34.88 dB (+7.23 dB)**; `continuity_reverted: 5 → 0`,
+  `continuity_crossfaded: 0 → 1`; `finish_bypassed: 6 → 1`.
+- **Nothing else moved.** Of the four committed reference masters
+  (`test_output/perf-ref-hashes.txt`), three reproduce **byte for byte** —
+  Flute 09 studio and both teat1vo profiles have no continuity reverts, so
+  they have no seams to fade. Only the one file the rule was damaging changed.
+  No configuration key was added, renamed or removed, so `config_hash` — and
+  with it the dither seed and the last bit of every sample — is untouched.
+
+What the fade costs, and what the seam was actually worth
+(`docs/continuity-taper.md` carries the full evidence):
+
+- Sample step at the joint, hard cut: **4.7% of local RMS**. Faded: **0**.
+- Spectral difference between the two renderings over the final 30 ms:
+  **3.05 dB**, at a local level of **-51 dBFS**. The old remedy spent 7.23 dB
+  of separation to hide it.
+- In the assembled timeline the cut is not even an outlier: mean
+  frame-to-frame spectral change **6.1 dB** across the joint against a
+  file-wide mean of **7.3 dB**. A 5–150 ms sweep of the fade length moved no
+  spectral or separation metric, so 30 ms is set by the one thing that does
+  constrain it — the enhancement residual's fade is an amplitude modulation
+  at ~17 Hz, below where modulation reads as texture rather than transition.
+- The seam is small because it is *placed* small: the segmenter hunts a ±1 s
+  window for the quietest zero crossing, and Flute 09's five forced cuts landed
+  **13.6 to 22.8 dB below the file's median frame RMS**. That search is
+  bounded and 13.6 dB is not silence, so the seam is still guarded — cheaply.
+
+Fail-closed is intact. A unit too short to afford the fade (under 4× its
+length, i.e. 120 ms at 48 kHz) still reverts, and the fixed-point iteration
+still converges. The fade material is the unit's **own** original audio, never
+the enhanced context the pipeline computes and discards: the neighbour across
+the cut ships original *because the guard rejected its candidate*, so
+extending this unit's enhanced context into that neighbour's territory would
+publish audio no guard ever scored for that time range.
+
+- `hawavoclean/policy/continuity.py`: `enforce_source_continuity` becomes
+  `resolve_source_continuity`, returning a `ContinuityResolution` — the
+  decisions, the reverts it still had to make, and a per-unit fade plan. The
+  new `apply_continuity_taper` blends as `(1 - w) * original + w * finished`
+  with a raised-cosine `w` whose endpoints are pinned to exactly 0.0 and 1.0,
+  so the outer sample is the original to the bit and the audio outside the
+  fade windows is untouched.
+- The fade is applied **after** finishing, because the seam is between the
+  *finished* enhanced audio and the original — fading any earlier would leave
+  the finishing EQ's own step sitting at the joint.
+- Report: new `summary.continuity_crossfaded`, and a
+  `continuity_taper(in=…,out=…)` entry in the unit's `finish_actions`. A faded
+  unit's `final_decision` stays `enhanced`, because it is.
+- Mutation gate: **M14–M21** — fade on the wrong edge, left-edge seams
+  ignored, a too-short unit faded instead of reverted, the pipeline planning a
+  fade it never applies, the ramp becoming a hard step, the fade resolving to
+  the candidate instead of the original, the fade planned at the wrong sample
+  rate, and a continuity revert filed under the guard's own REVERT. 23/23
+  caught, every mutation owner-credited.
+
+**Adversarial audit, and what it broke.** Seven independent auditors attacked
+the change and every finding was handed to a second agent whose job was to
+refute it; 4 of 16 survived. All four are now closed, and each was re-derived
+here before being acted on rather than taken on report:
+
+- **The "nothing can cancel" justification was false for the `studio`
+  profile.** The fade was defended on the grounds that the two renderings are
+  phase-coherent, so the blend is the original with its residual scaled and
+  cannot cancel. That holds for `wiener-dd-48k-v1` (measured worst dip below
+  `min(original, enhanced)`: **−0.02 dB** over 435 windows) and not for
+  `studio-dfn3-48k-v1`, which ships `phase_coherent = false` — the very reason
+  `policy/strength.py` refuses to residual-blend it — where the measured worst
+  is **−3.63 dB** (**−1.87 dB** restricted to windows above −40 dBFS; median
+  **+0.07 dB**, whole-file correlation with the input +0.9896). The fade is
+  still applied to both, deliberately: studio's `strength_ladder = [1.0]`
+  leaves the guard no partial rung, so reverting costs the unit's whole
+  enhancement — 7.23 dB — against at most 1.87 dB in one band for part of
+  30 ms. The docstring and `docs/continuity-taper.md` now carry the measured
+  distribution instead of the false premise, the 30 ms rationale that rested on
+  it has been rewritten as the reasoned choice it is, and
+  `test_continuity_blend_cannot_cancel.py` pins the bound so a core that made
+  the fade destructive could not arrive unnoticed.
+- **A hard step passed the whole suite.** Replacing the raised cosine with
+  `w = (t >= 0.5)` kept the joint sample original, stayed monotone and bounded,
+  and shipped a discontinuity 15 ms upstream of the low-energy zero crossing
+  the segmenter chose — worse than the seam the fade exists to remove. The
+  monotonicity test now bounds the ramp's slope (M18).
+- **The joint sample was never asserted where it can be violated.** Fading
+  toward `dec.selected_waveform` instead of the original, and applying the fade
+  before finishing rather than after, both passed everything. Neither could be
+  caught by a fixture with no forced cuts, and no shipped fixture can have one
+  — every fixture is 8 s while `hard_max_group_s` has a schema floor of 10.0.
+  `test_the_joint_of_a_real_forced_cut_is_the_original_recording` tiles a real
+  fixture into an unbroken 24 s speech interval so the **segmenter** makes the
+  cut and the **policy** plans the fade, then asserts the joint sample of the
+  assembled pre-master timeline is the decoded original bit for bit (M19). It
+  also pins the fade's absolute length, so passing a wrong sample rate at the
+  call site — which silently ships a 10 ms fade — now fails (M20).
+- **Pre-existing: a continuity revert could be filed under the guard's own
+  REVERT** and nothing noticed. They are different events and only the second
+  is a cost this rule is accountable for; conflating them is how the cascade
+  stayed invisible as long as it did (M21).
+
+Refuted and recorded as such: the reference-hash reproducibility complaint (all
+four reproduced first try by two independent auditors, and again here), the
+report schema/UI compatibility complaints, the `MAX_TAPER_FRACTION` bound
+complaint (unreachable — the shortest real unit adjacent to a forced cut in a
+full segmenter sweep was 11.1 s, 93× the threshold), and three documentation
+arithmetic complaints.
+
+Still unproven rather than disproven, and stated as such in
+`docs/continuity-taper.md`: **the fade's audible benefit**. Every spectral and
+separation metric is identical for a hard cut, 5 ms, 30 ms, 150 ms, and for
+deleting the continuity rule outright. All measured benefit belongs to removing
+the cascade. The fade is justified by argument; only the cascade removal is
+justified by measurement.
+
 ### Fixed — four config keys that were declared and never read
 
 `runtime.device`, `runtime.num_threads`, `runtime.worker_memory_limit_mb` and
@@ -197,13 +416,84 @@ file produce one SHA-256.
   removed on success, error, and SIGINT/SIGTERM (chaos-tested with the
   SIGSTOP freeze protocol); any pass raising fails the whole run — auto's
   discard applies only to a completed pass that failed the criteria. The
-  final master + amended report publish through the same atomic staging as a
-  single-pass run (`JobWorkspace.publish_atomically`, now a staticmethod).
+  final master + amended report publish through the same committed-generation
+  transaction as a single-pass run (`JobWorkspace.publish_atomically`, now a
+  staticmethod preserving its public API name).
 - `--progress-json` with multiple passes: each pass's events are rescaled
   into its share ([k-1, k]/N; auto treats the current pass as the last until
   another starts) and carry `"pass":{"index":k,"total":N|null}`. The
   single-pass stream is unchanged, byte for byte. Mutation gate: M13 deletes
   the auto discard and must be caught by its owning test.
+
+### Added — `studio-dfn3-lowband-48k-v1`, a band-split restoration core
+
+A muffled recording whose noise is low-frequency tonal rumble defeats both
+existing cores, and the lab evidence says so precisely. On the Teat1vo
+fixture (`test_output/teat1vo-lab/`, 24 s, mono, speech-to-floor separation
+15.1 dB):
+
+| profile | separation | 60–300 Hz pause rumble | guard |
+| --- | --- | --- | --- |
+| source | 15.1 dB | −32.3 dB rel. speech | — |
+| production (Wiener) | 19.8 dB | −34.6 dB | enhanced |
+| studio (full-band DFN3) | 15.1 dB | −30.5 dB | **all units reverted** |
+| lowband | 29.4 dB | −71.6 dB | enhanced |
+| lowband → production | **35.2 dB** | **−83.3 dB** | enhanced in both runs |
+
+The studio core reverts because full-band DeepFilterNet3 keeps only 0.22 of
+the original 2–8 kHz energy on this material — it takes the consonants with
+the rumble. The new core runs DFN3 over the full band (the distribution it
+was trained on) but keeps only its output below a crossover, handing the
+untouched original back above it:
+
+```
+enhanced = DFN3(x)                       # unlimited attenuation
+out      = lowpass(enhanced) + (x - lowpass(x))
+```
+
+- **Consonants are preserved by construction.** Measured consonant
+  retention 0.999; the guard's spectral-hole score is 0.066 against its
+  0.100 threshold, versus 0.585 for the naive alternative of feeding DFN3 a
+  pre-lowpassed signal (which the guard reverts).
+- **One filter, subtracted — not two.** Both bands come from the same
+  lowpass, so an identity enhancement reconstructs the input to a float
+  rounding error and the crossover cannot colour anything. Two
+  independently designed Butterworths would sum to a ripple and a phase
+  step exactly where the first formant is. Pinned by
+  `test_crossover_reconstructs_the_input_when_the_model_changes_nothing`
+  and by mutation **M23**.
+- **The crossover is locked, because it is the core.** Measured against the
+  guard's own threshold: 700 Hz → 0.050, **1000 Hz → 0.066 (shipped)**,
+  1300 Hz → 0.088, 1500 Hz → 0.103 (rejected), 2500 Hz → 0.187 (rejected).
+  Above ~1.1 kHz DFN3 reaches into the consonant band and every unit is
+  reverted, so `crossover_hz` is inside `params_hash`: moving it is a new
+  core and a relock, enforced by preflight, `audit-models`, and mutation
+  **M22**.
+- **Note on the lab's 40.0 dB figure.** The prototype chain reached it by
+  running the band split as an unguarded script and feeding the raw,
+  unmastered result to a production pass. Productized, the split is judged
+  by the guard like everything else and the intermediate is a real master,
+  which lands the same chain at 35.2 dB. The number is lower because the
+  aggressive step is now accountable.
+
+Shipped as: `studio-lowband-core.lock.toml` (shares the studio core's
+vendored DFN3 weights, digested independently; no WPE, so `nara_wpe` is not
+a dependency), the `lowband` profile (`--profile lowband`, engine API, and
+a third segment in the web UI's profile control), and
+`tests/unit/test_studio_lowband_core.py`.
+
+### Changed
+- `hawavoclean doctor` now validates **every** profile config the CLI
+  offers, not just `production` — a missing or invalid profile config was
+  previously only discovered after a user had committed to a run.
+- `StudioVoiceCore`'s DFN3 loading and inference moved into
+  `load_deepfilternet3()` / `run_deepfilternet3()` so both DFN3 cores name
+  the vendored weight directory and the "0 means unlimited" attenuation
+  convention exactly once. Output is bit-identical and `studio_params_hash`
+  is unchanged; Flute 09's studio run reproduces every per-unit output hash.
+- `.seg button` no longer wraps: a hyphenated segment label ("LOW-BAND")
+  broke onto a second line inside a fixed-height pill and stopped matching
+  its own thumb.
 
 ### Added — engine bridge for the first UI screen (`docs/ui-contract.md`)
 - `hawavoclean serve --port 0 --token TOKEN [--ui-dir DIR]`: a loopback-only

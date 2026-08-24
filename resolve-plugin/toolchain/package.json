@@ -1,0 +1,9 @@
+{
+  "name": "hawavoclean-resolve-build-toolchain",
+  "version": "3.3.0",
+  "private": true,
+  "description": "Integrity-locked package-manager bootstrap for the Resolve installer",
+  "dependencies": {
+    "pnpm": "11.22.0"
+  }
+}

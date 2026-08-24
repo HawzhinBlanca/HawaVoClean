@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "task_id": "T4.1",
+  "recorded_on": "2026-08-21",
+  "source_commit": "b18f808954b4902083058fcc0f7e533b14cb0d68",
+  "platform": {
+    "host_os": "macOS 27.0",
+    "host_architecture": "arm64",
+    "image_os": "linux",
+    "image_architecture": "arm64",
+    "docker": "29.7.2",
+    "trivy": "0.67.2",
+    "trivy_database_updated_at": "2026-08-21T07:04:30.810065873Z",
+    "trivy_check_bundle_sha256": "0491169789b867ae5a7353381220c1d4d97b3a0d6d9dfd84a25d06f0ba68aa93"
+  },
+  "image": {
+    "id": "sha256:7fd16bae77d3dc017b47374f39067781844f82860c9f073b0acf04d7dc4441c7",
+    "created": "2026-08-21T11:56:05Z",
+    "source_revision_label": "b18f808954b4902083058fcc0f7e533b14cb0d68",
+    "user": "10001:10001",
+    "base": "cgr.dev/chainguard/wolfi-base@sha256:bfcffaf1336b26a3fd33c8cb31a86a09324d2048420d7f49b983f323b0d33e8d",
+    "dockerfile_sha256": "5b03c30268b92fa6adad7f8ca60e3b32448f55b95adf55549126405469856c54",
+    "package_lock_sha256": "4d9f72ec88f1aedff9e241e4e5ce32cdaea258cf37dac2d610d1598a7808b1e0",
+    "locked_added_packages": 77,
+    "canonical_inspect_sha256": "9d3884d56ad84c805a1b686cfc35952003171e76d84207a76966f2e78726bfc7"
+  },
+  "reproducibility": {
+    "builds": 2,
+    "default_attestation_platform_manifest_sha256": "7fd16bae77d3dc017b47374f39067781844f82860c9f073b0acf04d7dc4441c7",
+    "default_attestation_config_sha256": "0ba507878ac2f449bb6af7e91faa580a6e951db8a3ad58916983f3b0cee35dea",
+    "default_attestation_indexes_identical": false,
+    "default_attestation_index_difference": "BuildKit generated a fresh provenance-attestation manifest for each invocation.",
+    "no_default_attestations_image_a_sha256": "7fd16bae77d3dc017b47374f39067781844f82860c9f073b0acf04d7dc4441c7",
+    "no_default_attestations_image_b_sha256": "7fd16bae77d3dc017b47374f39067781844f82860c9f073b0acf04d7dc4441c7",
+    "exact_image_match": true
+  },
+  "production_probe": {
+    "input": "tests/fixtures/sample_sorani_podcast.wav",
+    "input_sha256": "cf2f4cdff13af853fa43c485693c886f3f27f247c7e3f83e9b2568f977af6223",
+    "profile": "development",
+    "read_only_root": true,
+    "owned_tmpfs_work_cache": true,
+    "doctor_passed": true,
+    "process_passed": true,
+    "verify_passed": true,
+    "output_sha256": "f3f5794179368e6a756954a4ca62b9f0310b9c8c019d2e79a8c06fe58d4815a5",
+    "report_sha256": "c2026ed45dc0315d31b7b644bce41f9991d6ad8826797366c801ecc2f033a9b9"
+  },
+  "security": {
+    "exact_locked_packages_verified_installed": "77/77",
+    "image_high_or_critical_findings": 0,
+    "configuration_high_or_critical_findings": 0,
+    "image_scan_sha256": "f307ff9ea332892bb6e19e3c8c4886183051f7f2af6f532b751f8a2f3ee99a31",
+    "configuration_scan_sha256": "e191d8d31ad8315f6e21fdcce2fa7b2c76e58ac612316f0238a2f4d5864e9e19"
+  },
+  "failed_attempts_retained": [
+    {
+      "source_commit": "b35aaeb8d52420e9781e5ae4f1a3382ea7a9b985",
+      "failure": "Dockerfile omitted the declared custom build hook."
+    },
+    {
+      "source_commit": "1a83fe32a0e93190fb8ca032d9ca938c01de7e37",
+      "failure": "The copied hook assumed Git metadata existed inside the deliberately minimal build context."
+    },
+    {
+      "source_commit": "9d75db23ef85fa14fdff2fa1d047765096fea62d",
+      "failure": "The current vulnerability database invalidated the old Debian 12 security result with 12 critical and 179 high findings."
+    }
+  ],
+  "known_limits": [
+    "The supported container contract is CPU-only; no Studio/GPU image is claimed.",
+    "The local proof image is not the final release artifact; the final gate must rebuild, rescan and bind the eventual release commit.",
+    "Default BuildKit attestations are intentionally excluded from the reproducible local image manifest; the release evidence ledger and signed artifact-bound SBOM carry externally verifiable provenance."
+  ]
+}

@@ -16,6 +16,7 @@ from hawavoclean.server.jobs import (
     TERMINAL_STATES,
     JobManager,
     JobRecord,
+    QueueFullError,
     default_command,
     queue_position,
 )
@@ -104,6 +105,115 @@ def test_default_command_matches_contract(tmp_path: Path) -> None:
     ]
     rec.overwrite = False
     assert "--overwrite" not in default_command(rec)
+
+
+def test_default_command_restore_mode_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restore record adds exactly the contract flags, with the profiles dir
+    resolved absolute — the child must never depend on its working directory."""
+    profiles = tmp_path / "profiles"
+    monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(profiles))
+    rec = JobRecord(
+        job_id="j_r",
+        input_path=tmp_path / "in.wav",
+        output_path=tmp_path / "out.wav",
+        report_path=tmp_path / "out.hawavoclean.json",
+        profile="studio",
+        overwrite=False,
+        mode="restore",
+        speaker_id="character_01",
+        cutoff_hz=7800.0,
+    )
+    cmd = default_command(rec)
+    assert cmd[:4] == [sys.executable, "-m", "hawavoclean.cli", "process"]
+    assert cmd[4:] == [
+        str(tmp_path / "in.wav"),
+        "-o",
+        str(tmp_path / "out.wav"),
+        "--profile",
+        "studio",
+        "--mode",
+        "restore",
+        "--speaker-id",
+        "character_01",
+        "--profiles-dir",
+        str(profiles.resolve()),
+        "--cutoff-hz",
+        "7800.0",
+        "--progress-json",
+    ]
+    assert Path(cmd[cmd.index("--profiles-dir") + 1]).is_absolute()
+    # Auto cutoff: the flag is simply absent (the child detects the bandwidth).
+    rec.cutoff_hz = None
+    assert "--cutoff-hz" not in default_command(rec)
+    # A natural record's command is byte-identical to the revision-1 command.
+    rec.mode = "natural"
+    for flag in ("--mode", "--speaker-id", "--profiles-dir", "--cutoff-hz"):
+        assert flag not in default_command(rec)
+
+
+def test_snapshot_restore_fields_only_in_restore_mode(tmp_path: Path) -> None:
+    natural = JobRecord(
+        job_id="j_n",
+        input_path=tmp_path / "in.wav",
+        output_path=tmp_path / "out.wav",
+        report_path=tmp_path / "out.hawavoclean.json",
+        profile="studio",
+        overwrite=False,
+    ).snapshot()
+    assert natural["mode"] == "natural"
+    assert "speaker_id" not in natural and "cutoff_hz" not in natural
+    restore = JobRecord(
+        job_id="j_r",
+        input_path=tmp_path / "in.wav",
+        output_path=tmp_path / "out.wav",
+        report_path=tmp_path / "out.hawavoclean.json",
+        profile="studio",
+        overwrite=False,
+        mode="restore",
+        speaker_id="character_01",
+    ).snapshot()
+    assert restore["mode"] == "restore"
+    assert restore["speaker_id"] == "character_01"
+    # Auto cutoff is an explicit null, distinguishing "restore, auto" from a
+    # natural snapshot that has no such key at all.
+    assert restore["cutoff_hz"] is None
+
+
+def test_submit_threads_restore_fields_through_to_the_terminal_snapshot(
+    tmp_path: Path,
+) -> None:
+    manager = JobManager(command_factory=_success_factory)
+    try:
+        snap = manager.submit(
+            input_path=tmp_path / "in.wav",
+            output_path=tmp_path / "out.wav",
+            profile="studio",
+            overwrite=False,
+            mode="restore",
+            speaker_id="character_03",
+            cutoff_hz=6400.0,
+        )
+        assert snap["mode"] == "restore"
+        assert snap["speaker_id"] == "character_03" and snap["cutoff_hz"] == 6400.0
+        final = _wait_terminal(manager, snap["job_id"])
+        assert final["state"] == "done"
+        assert final["mode"] == "restore"
+        assert final["speaker_id"] == "character_03" and final["cutoff_hz"] == 6400.0
+        # The default submit stays natural: no restore keys anywhere.
+        snap = manager.submit(
+            input_path=tmp_path / "in2.wav",
+            output_path=tmp_path / "out2.wav",
+            profile="studio",
+            overwrite=False,
+        )
+        assert snap["mode"] == "natural"
+        assert "speaker_id" not in snap and "cutoff_hz" not in snap
+        final = _wait_terminal(manager, snap["job_id"])
+        assert "speaker_id" not in final and "cutoff_hz" not in final
+    finally:
+        manager.shutdown()
 
 
 def test_queue_position_does_not_depend_on_the_worker_thread() -> None:
@@ -505,7 +615,13 @@ def test_shutdown_cancels_queue_and_kills_running(tmp_path: Path) -> None:
         )
 
 
-def test_subscribers_receive_every_change_in_order(tmp_path: Path) -> None:
+def test_subscribers_receive_ordered_coalesced_changes(tmp_path: Path) -> None:
+    """Push delivery is deliberately coalescing: each subscriber queue holds at
+    most two snapshots and ``_put_latest`` drains older ones, so a slow consumer
+    always sees the freshest state instead of a growing backlog. The contract is
+    therefore an *ordered subsequence* of the change stream that always includes
+    the terminal snapshot — not lossless delivery, which would flake whenever
+    the collector loses the race for an intermediate snapshot."""
     manager = JobManager(command_factory=_success_factory)
 
     async def collect() -> tuple[list[dict[str, Any]], str]:
@@ -530,15 +646,23 @@ def test_subscribers_receive_every_change_in_order(tmp_path: Path) -> None:
 
     try:
         received, _job_id = asyncio.run(collect())
+        assert received, "the terminal snapshot must always arrive"
         states = [s["state"] for s in received]
-        assert states[0] == "running" and states[-1] == "done"
-        stages = [s["stage"] for s in received]
-        assert stages == ["preflight", "preflight", "enhance", "publish", "done"]
+        assert states[-1] == "done"
+        # Stages must be an order-preserving subsequence of the canonical
+        # progression — coalescing may drop intermediates, never reorder them.
+        canonical = ["preflight", "preflight", "enhance", "publish", "done"]
+        it = iter(canonical)
+        assert all(any(stage == c for c in it) for stage in (s["stage"] for s in received)), (
+            f"stages {[s['stage'] for s in received]} are not a subsequence of {canonical}"
+        )
         progress = [s["progress"] for s in received]
         assert progress == sorted(progress)
         seqs = [s["seq"] for s in received]
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)  # strictly increasing
-        assert received[2]["unit"] == {"index": 1, "total": 2}
+        enhance_snaps = [s for s in received if s["stage"] == "enhance"]
+        if enhance_snaps:  # may be coalesced away entirely under load
+            assert enhance_snaps[0]["unit"] == {"index": 1, "total": 2}
         assert "report" in received[-1]
     finally:
         manager.shutdown()
@@ -632,3 +756,130 @@ def test_non_object_json_lines_are_ignored(tmp_path: Path) -> None:
         assert _wait_terminal(manager, job_id)["state"] == "done"
     finally:
         manager.shutdown()
+
+
+def test_active_job_queue_is_hard_bounded(tmp_path: Path) -> None:
+    manager = JobManager(command_factory=lambda _record: _py(_SLOW), max_active_jobs=2)
+    try:
+        first = manager.submit(
+            input_path=tmp_path / "a.wav",
+            output_path=tmp_path / "a-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        _wait_state(manager, first, "running")
+        manager.submit(
+            input_path=tmp_path / "b.wav",
+            output_path=tmp_path / "b-out.wav",
+            profile="production",
+            overwrite=False,
+        )
+        with pytest.raises(QueueFullError, match=r"2/2 active jobs"):
+            manager.submit(
+                input_path=tmp_path / "c.wav",
+                output_path=tmp_path / "c-out.wav",
+                profile="production",
+                overwrite=False,
+            )
+    finally:
+        manager.shutdown(grace_s=0.2)
+
+
+def test_terminal_jobs_expire_by_fake_clock_without_touching_active_jobs(tmp_path: Path) -> None:
+    now = [100.0]
+    manager = JobManager(
+        command_factory=_success_factory,
+        terminal_ttl_s=10.0,
+        clock=lambda: now[0],
+    )
+    try:
+        finished = manager.submit(
+            input_path=tmp_path / "done.wav",
+            output_path=tmp_path / "done-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        assert _wait_terminal(manager, finished)["state"] == "done"
+        now[0] = 109.9
+        assert manager.get_status(finished) is not None
+        now[0] = 110.0
+        assert manager.get_status(finished) is None
+    finally:
+        manager.shutdown()
+
+
+def test_terminal_job_count_retains_only_newest_records(tmp_path: Path) -> None:
+    now = [0.0]
+    manager = JobManager(
+        command_factory=_success_factory,
+        max_terminal_jobs=2,
+        clock=lambda: now[0],
+    )
+    ids: list[str] = []
+    try:
+        for index in range(3):
+            now[0] = float(index)
+            job_id = manager.submit(
+                input_path=tmp_path / f"{index}.wav",
+                output_path=tmp_path / f"{index}-out.wav",
+                profile="production",
+                overwrite=False,
+            )["job_id"]
+            _wait_terminal(manager, job_id)
+            ids.append(job_id)
+        retained = {row["job_id"] for row in manager.list_jobs()}
+        assert retained == set(ids[-2:])
+        assert manager.get_status(ids[0]) is None
+    finally:
+        manager.shutdown()
+
+
+def test_terminal_callback_runs_for_success_failure_and_cancel(tmp_path: Path) -> None:
+    seen: list[tuple[str, str]] = []
+    manager = JobManager(command_factory=_success_factory)
+    manager.add_terminal_callback(lambda record: seen.append((record.job_id, record.state)))
+    try:
+        job_id = manager.submit(
+            input_path=tmp_path / "done.wav",
+            output_path=tmp_path / "done-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        _wait_terminal(manager, job_id)
+        assert seen == [(job_id, "done")]
+    finally:
+        manager.shutdown()
+
+
+def test_terminal_cleanup_failure_does_not_change_the_job_verdict(tmp_path: Path) -> None:
+    manager = JobManager(command_factory=_success_factory)
+
+    def fail_cleanup(_record: JobRecord) -> None:
+        raise OSError("cleanup failed")
+
+    manager.add_terminal_callback(fail_cleanup)
+    try:
+        job_id = manager.submit(
+            input_path=tmp_path / "done.wav",
+            output_path=tmp_path / "done-out.wav",
+            profile="production",
+            overwrite=False,
+        )["job_id"]
+        assert _wait_terminal(manager, job_id)["state"] == "done"
+    finally:
+        manager.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("max_active", "max_terminal", "ttl"),
+    [(0, 1, 1.0), (1, 0, 1.0), (1, 1, 0.0), (1, 1, -1.0)],
+)
+def test_retention_limits_must_remain_bounded(
+    max_active: int, max_terminal: int, ttl: float
+) -> None:
+    with pytest.raises(ValueError):
+        JobManager(
+            max_active_jobs=max_active,
+            max_terminal_jobs=max_terminal,
+            terminal_ttl_s=ttl,
+        )

@@ -70,6 +70,11 @@ export function sanitizeEngineMessage(message: string): string {
   // Any absolute POSIX path collapses to its last component. Paths are taken
   // up to whitespace or a quote; a trailing ':' or ',' is punctuation, not name.
   out = out.replace(/\/(?:[^\s'"<>|]+\/)*[^\s'"<>|]*/g, (p) => {
+    // An API route is not a work-directory path: it is where the message is
+    // sending the reader. Collapsing it turned "see /api/health" into
+    // 'see "health"' and 'no such endpoint: /api/x' into 'no such endpoint:
+    // "x"', deleting the only actionable part of the sentence.
+    if (p.startsWith('/api/')) return p;
     const trimmed = p.replace(/[.,;:]+$/, '');
     const base = trimmed.slice(trimmed.lastIndexOf('/') + 1);
     return base ? `"${base}"` : p;
@@ -217,9 +222,10 @@ export function classifyFailure(e: unknown, name?: string): UiFailure {
      * The engine refuses an 8-channel file with "Multi-channel audio with 8
      * channels is not supported without explicit split_speakers declaration."
      * `split_speakers` is a `channel_mode` value in the engine's config file;
-     * the web API's JobRequest carries `input_path`, `profile` and `overwrite`
-     * and nothing else, so there is no control on this screen — and no request
-     * this page could send — that would satisfy that sentence. Printing it put
+     * the web API's JobRequest carries no `channel_mode` field at all — its
+     * fields are input_path, profile, output_path, overwrite and the restore
+     * trio (mode, speaker_id, cutoff_hz) — so there is no control on this
+     * screen, and no request this page could send, that would satisfy it. Printing it put
      * the one word that sounds like the answer in front of the user and then
      * offered no way to type it, and it was long enough to be cut mid-word in
      * both the status line and the run list.

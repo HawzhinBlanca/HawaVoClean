@@ -4,10 +4,13 @@ artifact/timing/collapse protections but not identity."""
 from typing import Any
 
 import numpy as np
+import pytest
+from scipy import signal
 
-from hawavoclean.config import GuardConfig
+from hawavoclean.config import GuardConfig, load_config
 from hawavoclean.guard.spectral_probe import SpectralSignatureProbe
 from hawavoclean.guard.verdict import GuardVerdict, evaluate_guard_pass
+from hawavoclean.paths import profile_config_path
 
 SR = 16000
 
@@ -84,3 +87,60 @@ def test_integrity_mode_still_rejects_broken_audio() -> None:
     assert res.verdict == GuardVerdict.REVERT, (
         f"integrity mode accepted audio with a silenced span: {res.verdict}"
     )
+
+
+#: The damage matrix runs at 48 kHz, unlike the 16 kHz fixtures above.
+_MATRIX_SR = 48000
+
+
+def _lowpassed(x: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, np.dtype[np.float32]]:
+    sos = signal.butter(8, 2000 / (_MATRIX_SR / 2), btype="lowpass", output="sos")
+    return np.asarray(signal.sosfiltfilt(sos, x), dtype=np.float32)
+
+
+def _stretched(x: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, np.dtype[np.float32]]:
+    return np.asarray(signal.resample(x, len(x) * 2)[: len(x)], dtype=np.float32)
+
+
+def _noise(x: np.ndarray[Any, np.dtype[np.float32]]) -> np.ndarray[Any, np.dtype[np.float32]]:
+    return (np.random.default_rng(0).standard_normal(len(x)) * 0.05).astype(np.float32)
+
+
+@pytest.mark.parametrize(
+    ("damage", "make"),
+    [
+        ("silence", np.zeros_like),
+        ("white noise", _noise),
+        ("band gutted at 2 kHz", _lowpassed),
+        ("polarity inverted", lambda x: (-x).astype(np.float32)),
+        ("6 dB quieter", lambda x: (x * 0.5).astype(np.float32)),
+        ("time stretched", _stretched),
+        ("content reordered", lambda x: x[::-1].copy()),
+    ],
+)
+def test_integrity_mode_reverts_each_class_of_damage(damage: str, make: Any) -> None:
+    """One case per way a core can wreck a unit, on a signal the probe can read.
+
+    A frequency sweep rather than a speaker fixture: the canonical references
+    carry no confident token anchors, so their CTC posteriors are near-uniform
+    and reordering them is invisible. That is a property of the fixtures, not
+    of the guard -- a swept tone reversed scores 0.647 divergence and is
+    refused, while the same sweep against itself passes.
+    """
+    sr = _MATRIX_SR
+    t = np.arange(int(sr * 2.0)) / sr
+    original = (0.5 * signal.chirp(t, f0=200, f1=3500, t1=t[-1], method="linear")).astype(
+        np.float32
+    )
+    config = load_config(str(profile_config_path("studio"))).guard
+    probe = SpectralSignatureProbe(probe_id=config.probe_id, target_sr=16000)
+
+    unharmed, _ = evaluate_guard_pass(
+        original, original.copy(), sr, is_speech=True, probe=probe, config=config
+    )
+    assert unharmed.verdict == GuardVerdict.PASS, "an untouched candidate must pass"
+
+    res, _ = evaluate_guard_pass(
+        original, make(original), sr, is_speech=True, probe=probe, config=config
+    )
+    assert res.verdict != GuardVerdict.PASS, f"integrity mode accepted {damage}"

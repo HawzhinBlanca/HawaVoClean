@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HawaVoClean Speaker Profile Schema v1.0",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "speaker_id",
+    "display_name",
+    "consent_record",
+    "canonical_audio_manifest",
+    "canonical_audio_sha256",
+    "profile_embedding_path",
+    "profile_embedding_sha256",
+    "f0_statistics",
+    "training_split_id",
+    "created_by_commit"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": ["1.0"]
+    },
+    "speaker_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "display_name": {
+      "type": "string"
+    },
+    "consent_record": {
+      "type": "string"
+    },
+    "canonical_audio_manifest": {
+      "type": "string"
+    },
+    "canonical_audio_sha256": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+    },
+    "profile_embedding_path": {
+      "type": "string"
+    },
+    "profile_embedding_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "f0_statistics": {
+      "type": "object",
+      "required": ["median_hz", "p05_hz", "p95_hz"],
+      "properties": {
+        "median_hz": { "type": "number", "minimum": 0 },
+        "p05_hz": { "type": "number", "minimum": 0 },
+        "p95_hz": { "type": "number", "minimum": 0 }
+      }
+    },
+    "training_split_id": {
+      "type": "string"
+    },
+    "adapter": {
+      "type": ["string", "null"]
+    },
+    "created_by_commit": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

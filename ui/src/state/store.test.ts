@@ -357,3 +357,42 @@ describe('transient UI state', () => {
     expect(s().shortcutsOpen).toBe(true);
   });
 });
+
+describe('restore capability (contract addendum 2)', () => {
+  it('starts with no capability and the natural default', () => {
+    expect(s().speakers).toEqual([]);
+    expect(s().restoreAvailable).toBe(false);
+    expect(s().mode).toBe('natural');
+    expect(s().speakerId).toBeNull();
+    expect(s().cutoffHz).toBeNull();
+  });
+
+  it('offering speakers auto-selects the first, so restore is always submittable', () => {
+    s().setCapabilities(['character_01', 'character_02'], true);
+    expect(s().speakerId).toBe('character_01');
+    // A selection already made survives a re-probe that still offers it.
+    s().setSpeakerId('character_02');
+    s().setCapabilities(['character_01', 'character_02'], true);
+    expect(s().speakerId).toBe('character_02');
+  });
+
+  it('a speaker the engine no longer offers cannot stay selected', () => {
+    s().setCapabilities(['character_01', 'character_02'], true);
+    s().setSpeakerId('character_02');
+    // The profile tree changed under the app: character_02 is gone.
+    s().setCapabilities(['character_01'], true);
+    expect(s().speakerId).toBe('character_01');
+  });
+
+  it('restore going away entirely forces the mode back to natural', () => {
+    s().setCapabilities(['character_01'], true);
+    s().setMode('restore');
+    s().setCapabilities([], false);
+    expect(s().mode).toBe('natural');
+    expect(s().speakerId).toBeNull();
+    // The cutoff is a typed preference, not a capability; it survives.
+    s().setCutoffHz(7800);
+    s().setCapabilities([], false);
+    expect(s().cutoffHz).toBe(7800);
+  });
+});

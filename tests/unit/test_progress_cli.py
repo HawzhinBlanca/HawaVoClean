@@ -14,6 +14,7 @@ import soundfile as sf
 
 import hawavoclean.cli as cli
 from hawavoclean.errors import ExitCode, HawaVoCleanError
+from hawavoclean.publication import public_output_path
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -57,8 +58,8 @@ def test_progress_json_stdout_is_pure_json_lines(tmp_path: Path) -> None:
     assert "enhance" in stages and "guard" in stages and "finish" in stages
     done = events[-1]
     assert done["progress"] == 1.0
-    assert Path(done["output_path"]) == out.resolve()
-    assert Path(done["report_path"]) == (out.parent / "out.hawavoclean.json").resolve()
+    assert Path(done["output_path"]) == public_output_path(out)
+    assert Path(done["report_path"]) == public_output_path(out.parent / "out.hawavoclean.json")
     assert Path(done["report_path"]).exists()
     # Unit events carry the unit object with the contract keys.
     unit_events = [e for e in events if "unit" in e]
@@ -119,7 +120,7 @@ def test_cmd_process_emits_done_through_sink(monkeypatch: Any, tmp_path: Path) -
     assert sink.closed
     assert sink.events[0]["event"] == "progress" and sink.events[0]["stage"] == "preflight"
     assert sink.events[-1]["event"] == "done"
-    assert sink.events[-1]["output_path"] == str((tmp_path / "o.wav").resolve())
+    assert sink.events[-1]["output_path"] == str(public_output_path(tmp_path / "o.wav"))
 
 
 @pytest.mark.unit

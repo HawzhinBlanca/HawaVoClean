@@ -1344,6 +1344,7 @@ input:focus-visible,
  * for the same kind of statement. The badge now uses the verdict strip's
  * recipe, so a unit's decision looks the same wherever it is stated. */
 .insp-idhead .pill,
+.rest-head .pill,
 .tooltip .head .pill {
   --seg: 122, 133, 150;
   color: rgb(var(--seg));
@@ -1355,16 +1356,19 @@ input:focus-visible,
 }
 
 .insp-idhead .pill.enhanced,
+.rest-head .pill.enhanced,
 .tooltip .head .pill.enhanced {
   --seg: 154, 232, 255;
 }
 
 .insp-idhead .pill.reverted,
+.rest-head .pill.reverted,
 .tooltip .head .pill.reverted {
   --seg: 255, 210, 138;
 }
 
 .insp-idhead .pill.error,
+.rest-head .pill.error,
 .tooltip .head .pill.error {
   --seg: 255, 138, 141;
 }
@@ -2239,6 +2243,74 @@ input:focus-visible,
   min-width: 0;
 }
 
+/* --- the restore control (contract addendum 2) ---------------------------
+ * Same two-line grammar as the profile control above it: a segmented key on
+ * the caps row, one sentence of truth underneath. The speaker and cutoff
+ * fields exist only in restore mode, and the whole control exists only when
+ * the engine's health answer offers speakers — so nothing here reserves
+ * space for a capability the engine does not have. */
+.restorectl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.rc-fields {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.rc-field {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The two inputs are sunk wells, same recipe as the display surfaces. */
+.rc-field select,
+.rc-field input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 6px;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  background: var(--display);
+  border: none;
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-display);
+}
+
+.rc-field select:disabled,
+.rc-field input:disabled {
+  color: var(--fg-4);
+}
+
+.rc-field select:focus-visible {
+  outline: 2px solid var(--ix-focus, rgba(120, 222, 255, 0.95));
+  outline-offset: 2px;
+}
+
+/* Typed text that will not be sent (unparseable, zero) is flagged where it
+ * was typed; the run itself would simply auto-detect. */
+.rc-field input[aria-invalid='true'] {
+  box-shadow:
+    var(--shadow-display),
+    inset 0 0 0 1px rgba(255, 210, 138, 0.55);
+}
+
+.rc-field .rc-unit {
+  flex: none;
+  font-size: var(--fs-label);
+  color: var(--fg-4);
+}
+
 /* --- the header master readout ------------------------------------------
  * 46px of chassis between the wordmark and the engine lamp had nothing in it;
  * at 1920 that was a third of the window. It now carries what the screen is
@@ -2568,7 +2640,8 @@ input:focus-visible,
     padding: var(--pad-3);
   }
 
-  .profilectl {
+  .profilectl,
+  .restorectl {
     gap: 0;
   }
 

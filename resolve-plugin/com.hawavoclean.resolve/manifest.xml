@@ -3,7 +3,7 @@
   <Plugin>
     <Id>com.hawavoclean.resolve</Id>
     <Name>HawaVoClean</Name>
-    <Version>0.1.0</Version>
+    <Version>3.3.0</Version>
     <Description>HawaVoClean voice restoration for DaVinci Resolve Studio.</Description>
     <FilePath>main.js</FilePath>
   </Plugin>

@@ -1,0 +1,409 @@
+{
+  "schema_version": 1,
+  "assessment_id": "hawavoclean-sorani-corpus-sources-v1",
+  "assessment_revision": "1.0.0",
+  "release": {
+    "product": "hawavoclean",
+    "version": "3.3.0"
+  },
+  "assessed_at": "2026-08-21T00:00:00Z",
+  "protocol_design_sha256": "896dfc12be5600705cd279b367fe5e28e6dfd3c6543a14977b4aa8e981bedd82",
+  "scope": {
+    "purpose": "Select sources for the locked Sorani calibration, acceptance, reserve, and supporting-comparison splits before any candidate output or held-out verdict is examined.",
+    "not_legal_advice": true,
+    "principles": [
+      "A dataset licence and a defensible voice-recording consent or stewardship basis are separate checks.",
+      "No source enters calibration, acceptance, or reserve because it is merely downloadable or described as public.",
+      "Raw speech, direct identifiers, and source client identifiers remain outside Git and the release artifacts.",
+      "Every acquired archive and generated split manifest is hash-locked before processing.",
+      "The source custodian, reviewers, and release code never attempt to identify a Common Voice contributor."
+    ]
+  },
+  "selection_policy": {
+    "allowed_primary_dispositions": [
+      "proposed_primary",
+      "required_primary"
+    ],
+    "supporting_only_cannot_satisfy_primary_floors": true,
+    "quarantined_cannot_enter_any_evaluation_split": true,
+    "speaker_key_required_for_primary": true,
+    "commercially_compatible_rights_required": true,
+    "source_specific_terms_must_be_preserved": true,
+    "model_overlap_rule": "Record known upstream model training sources. Unknown overlap is a limitation; a named or fingerprint-confirmed overlap with a held-out item excludes that item.",
+    "minimum_source_checks": [
+      "immutable source version or revision",
+      "authoritative licence or agreement",
+      "voice-recording stewardship or consent basis",
+      "stable within-source speaker key",
+      "audio-to-metadata completeness",
+      "duplicate and prompt leakage scan",
+      "archive and manifest SHA-256"
+    ]
+  },
+  "recommended_route": {
+    "status": "proposed",
+    "acceptance": {
+      "common_voice_26_ckb": {
+        "minimum_units": 450,
+        "minimum_speakers": 45,
+        "maximum_units_per_speaker": 10,
+        "bucket": "validated only",
+        "speaker_key": "client_id",
+        "selection": "Freeze prompt-, clip-, and client-disjoint samples after archive verification; balance declared demographics where available without inferring missing attributes."
+      },
+      "fresh_consented_field": {
+        "minimum_units": 120,
+        "minimum_speakers": 24,
+        "maximum_units_per_speaker": 5,
+        "selection": "Natural, non-synthetic coverage of the locked dialect, room, device, noise, reverb, codec, clipping-risk, music-bleed, and low-bandwidth strata."
+      },
+      "minimum_combined_units": 570,
+      "all_three_profiles_use_the_same_source_units": true
+    },
+    "reserve": {
+      "common_voice_26_ckb": {
+        "minimum_units": 150,
+        "minimum_speakers": 30,
+        "maximum_units_per_speaker": 5
+      },
+      "fresh_consented_field": {
+        "minimum_units": 60,
+        "minimum_speakers": 12,
+        "maximum_units_per_speaker": 5
+      },
+      "disjoint_from_acceptance_and_calibration": true
+    },
+    "calibration": {
+      "fresh_consented_field": {
+        "minimum_units": 120,
+        "minimum_speakers": 24,
+        "speaker_disjoint_from_acceptance_and_reserve": true
+      },
+      "supporting_sources": [
+        "fleurs_ckb_iq",
+        "gigant_ktts"
+      ],
+      "heldout_outputs_or_verdicts_forbidden": true
+    },
+    "supporting_comparisons": [
+      "fleurs_ckb_iq"
+    ],
+    "fresh_collection_minimum_total_units": 300,
+    "fresh_collection_minimum_total_speakers": 60,
+    "rationale": "Common Voice supplies a current, versioned, speaker-keyed public backbone large enough for the statistical floor. Fresh consented recordings add the natural Sorani dialect and acoustic conditions that read-speech corpora cannot prove. FLEURS and Gigant are useful calibration or comparison material but do not count toward the primary speaker/diversity proof."
+  },
+  "sources": [
+    {
+      "id": "common_voice_26_ckb",
+      "name": "Common Voice Scripted Speech 26.0 - Central Kurdish",
+      "disposition": "proposed_primary",
+      "source_version": "cv-corpus-26.0-2026-06-12",
+      "authoritative_url": "https://mozilladatacollective.com/datasets/cmqino7ym00wqnq072h0gab54",
+      "licence": "CC0-1.0",
+      "rights_basis": "Mozilla Data Collective dataset licence and terms; user acceptance of the exact version terms is still required.",
+      "speaker_key": "client_id hashed UUID",
+      "declared_inventory": {
+        "clips": 170972,
+        "validated_clips": 121139,
+        "speakers": 2038,
+        "hours": 194.64,
+        "validated_hours": 137.9
+      },
+      "local_state": "not acquired",
+      "constraints": [
+        "Do not attempt to determine contributor identity.",
+        "Do not re-host or re-share the source dataset.",
+        "Use only validated clips and retain the hashed client_id solely for split integrity.",
+        "Self-declared demographic and accent metadata are sparse and must never be inferred.",
+        "Hash-lock the exact 3.62 GB archive and every selected clip before candidate generation."
+      ],
+      "blocking_conditions": [
+        "explicit source-route approval",
+        "exact archive acquisition and SHA-256 verification",
+        "machine validation of client-disjoint splits and source terms"
+      ]
+    },
+    {
+      "id": "fresh_consented_field",
+      "name": "Owner-commissioned Sorani field and studio collection",
+      "disposition": "required_primary",
+      "source_version": "not-yet-collected",
+      "authoritative_url": null,
+      "licence": "participant release and data-use agreement required before recording",
+      "rights_basis": "Direct, documented participant consent for commercial product validation, processing, qualified review, retained anonymized evidence, and publication of aggregate results.",
+      "speaker_key": "custodian-issued pseudonymous speaker ID",
+      "declared_inventory": {
+        "clips": 0,
+        "speakers": 0,
+        "hours": 0
+      },
+      "local_state": "not collected",
+      "constraints": [
+        "Consent must precede recording and define any withdrawal deadline before split freeze.",
+        "Collect the minimum necessary demographics; store contact and consent records outside Git.",
+        "Acceptance, reserve, and calibration speakers must be disjoint.",
+        "Record natural conditions rather than manufacturing all degradations after capture.",
+        "No minor is included without a separately reviewed guardian/participant protocol."
+      ],
+      "blocking_conditions": [
+        "approved collection and consent documents",
+        "at least 60 qualified speakers and 300 usable units",
+        "rights and audio-metadata completeness audit"
+      ]
+    },
+    {
+      "id": "fleurs_ckb_iq",
+      "name": "FLEURS Central Kurdish (ckb_iq)",
+      "disposition": "supporting_only",
+      "source_version": "d7c758a6dceecd54a98cac43404d3d576e721f07",
+      "authoritative_url": "https://huggingface.co/datasets/google/fleurs/blob/main/README.md",
+      "licence": "CC-BY-4.0",
+      "rights_basis": "Official FLEURS dataset card; attribution is required.",
+      "speaker_key": null,
+      "declared_inventory": {
+        "local_train_rows": 3040,
+        "local_dev_rows": 386,
+        "local_test_rows": 922
+      },
+      "local_state": "audio archives and TSV manifests present",
+      "local_artifact_sha256": {
+        "train_tsv": "e752342462b88198af48e51ef018a1b5e5259115b8743e7a676c449caf2b50cf",
+        "dev_tsv": "ef2aee781f92664715d15a8f17c2d788d5e6eeee5731eba2ec513bac32cfd248",
+        "test_tsv": "a68020821b6ca8a2787eeedb357b25046aa57d722b534495b36a254dbea9f04a",
+        "train_audio_archive": "60a8dc4e6988684cf7e34b9b8fc4f708601fea8ca031308d91699b47f9950a03",
+        "dev_audio_archive": "8de33e65ae9b312e8fdef7ac2d2c2264af98707e7231f1c8623c9b48db77b89b",
+        "test_audio_archive": "d50774dd1cb81bbbf366d1cfc53d703c64711daaaeeaf138bdf616f688f4a71f"
+      },
+      "constraints": [
+        "The local TSV has no stable speaker identifier.",
+        "Use only as calibration/supporting comparison under the official predefined split, never to satisfy the 45-speaker primary floor.",
+        "Keep attribution and the exact local revision/file hashes."
+      ],
+      "blocking_conditions": []
+    },
+    {
+      "id": "gigant_ktts",
+      "name": "Gigant KTTS / Bridging the Gap",
+      "disposition": "supporting_only",
+      "source_version": "Mendeley Data version 1; DOI 10.17632/zhnvwsd7hs.1",
+      "authoritative_url": "https://data.mendeley.com/datasets/zhnvwsd7hs/1",
+      "licence": "CC-BY-4.0",
+      "rights_basis": "Mendeley Data version-specific licence; attribution is required.",
+      "speaker_key": null,
+      "declared_inventory": {
+        "clips": 6078,
+        "hours": 13.63,
+        "speakers": 1
+      },
+      "local_state": "6078 WAV files and workbook present",
+      "local_artifact_sha256": {
+        "metadata_xlsx": "47de6069d307e36e542e6e32610aa10038290423f22255d467f1006b1860baf8"
+      },
+      "constraints": [
+        "The authoritative description identifies one Kurdish male dubber despite filename prefixes.",
+        "Use only for clean-studio calibration and supporting comparison; never count it as speaker diversity."
+      ],
+      "blocking_conditions": []
+    },
+    {
+      "id": "kaset_ldc2024s01",
+      "name": "KASET - Kurmanji and Sorani Kurdish Speech and Transcripts",
+      "disposition": "conditional_supporting",
+      "source_version": "LDC2024S01; DOI 10.35111/576n-ye16",
+      "authoritative_url": "https://catalog.ldc.upenn.edu/LDC2024S01",
+      "licence": "LDC User Agreement",
+      "rights_basis": "Use requires a qualifying LDC licence and compliance review; no package is currently held.",
+      "speaker_key": "documented for telephone collection; broadcast identity coverage requires package inspection",
+      "declared_inventory": {
+        "hours": 147,
+        "telephone_speakers": 21,
+        "telephone_recordings": 289,
+        "broadcast_recordings": 410
+      },
+      "local_state": "not licensed or acquired",
+      "constraints": [
+        "Contains both Kurmanji and Sorani and must be language-filtered.",
+        "Cannot enter any split until the exact LDC agreement and package metadata are reviewed.",
+        "May be valuable for telephone/broadcast supporting comparisons but cannot satisfy the primary speaker floor as currently documented."
+      ],
+      "blocking_conditions": [
+        "qualifying LDC licence",
+        "package-level language, speaker, consent/stewardship, and metadata audit"
+      ]
+    },
+    {
+      "id": "comprehensive_ckb_sound",
+      "name": "A Comprehensive Central Kurdish Sound Dataset",
+      "disposition": "quarantined",
+      "source_version": "Mendeley Data version 1; DOI 10.17632/gft65z43hs.1",
+      "authoritative_url": "https://data.mendeley.com/datasets/gft65z43hs/1",
+      "licence": "CC-BY-4.0",
+      "rights_basis": "Dataset licence is stated, but speaker-level stewardship/consent and complete audio-package identity are not documented in the local manifest.",
+      "speaker_key": null,
+      "declared_inventory": {
+        "published_entries": 1739089,
+        "published_hours": 1683,
+        "local_manifest_rows": 1739088,
+        "unique_local_paths": 1738887,
+        "duplicate_local_paths": 201
+      },
+      "local_state": "CSV/TSV metadata only; linked audio not present",
+      "local_artifact_sha256": {
+        "transcription_tsv": "ec9ba447efd126351aa56c01ff34c1feb5b8d0d7cf27d79f6cf9d19549f7d504"
+      },
+      "constraints": [
+        "No speaker identifier is available for speaker-disjoint splitting.",
+        "The local manifest has duplicate paths and does not bind the linked audio package.",
+        "Do not infer speaker identity from voice embeddings as a substitute for source consent or identity records."
+      ],
+      "blocking_conditions": [
+        "author-supplied speaker IDs and recording stewardship/consent basis",
+        "exact audio acquisition and complete hash/metadata reconciliation"
+      ]
+    },
+    {
+      "id": "asosoft_speech_subset",
+      "name": "AsoSoft Speech Corpus public subset",
+      "disposition": "quarantined",
+      "source_version": "a9ba8291b715a53e43f5ea646a8beedf74c3e1c9",
+      "authoritative_url": "https://github.com/AsoSoft/AsoSoft-Speech-Corpus",
+      "licence": "research and non-commercial use only",
+      "rights_basis": "The repository README does not grant the commercial compatibility required by this release evaluation.",
+      "speaker_key": "filename speaker ID",
+      "declared_inventory": {
+        "speakers": 45,
+        "utterances_per_speaker": 72
+      },
+      "local_state": "not acquired",
+      "constraints": [
+        "Do not use for HawaVoClean release evidence without written permission covering the intended commercial product validation."
+      ],
+      "blocking_conditions": [
+        "written commercial evaluation permission or a compatible version-specific licence"
+      ]
+    },
+    {
+      "id": "cordi",
+      "name": "CORDI - Corpus of Dialogues in Central Kurdish",
+      "disposition": "quarantined",
+      "source_version": "05f053849214e9703726d69c94b5d669440a30eb",
+      "authoritative_url": "https://github.com/sinaahmadi/CORDI",
+      "licence": "CC-BY-SA-4.0 repository declaration",
+      "rights_basis": "Repository licence is explicit, but the audio derives from movies and television; the paper documents volunteer annotator consent rather than performer or underlying-media permission.",
+      "speaker_key": "incomplete",
+      "declared_inventory": {
+        "utterances": 186038,
+        "hours": 100,
+        "movies_and_episodes": 311,
+        "documented_varieties": 6
+      },
+      "local_state": "not acquired",
+      "constraints": [
+        "Do not treat public broadcast or YouTube availability as performer or recording rights.",
+        "Do not use until counsel or the rightsholder supplies a source-specific commercial evaluation basis.",
+        "Speaker metadata is incomplete and source dialect can differ from a performer's native dialect."
+      ],
+      "blocking_conditions": [
+        "documented underlying media and performer rights suitable for this use",
+        "speaker and clip metadata completeness review"
+      ]
+    },
+    {
+      "id": "ckb_tts",
+      "name": "akam-ot/ckb_tts",
+      "disposition": "quarantined",
+      "source_version": "24ab1f1f4157318cda75df7fb78c6286328ca4e1",
+      "authoritative_url": "https://huggingface.co/datasets/akam-ot/ckb_tts",
+      "licence": "not declared in dataset card",
+      "rights_basis": "No authoritative licence, recording source, speaker identity key, or consent/stewardship basis is present.",
+      "speaker_key": null,
+      "declared_inventory": {
+        "local_rows": 9388
+      },
+      "local_state": "three Parquet shards and README present",
+      "local_artifact_sha256": {
+        "readme": "d0ad7557efa824d075b165c6b860f522c73a5cf971fed5af802d231bdaeb369a",
+        "shard_0": "c11ba1e45c36622cf01b86935e630bf0188da2d0043b541a96d1575c16de02e4",
+        "shard_1": "b24125a786851e9c0795d3b0332c6e489c6f755b51f9151e5421b22e613a834b",
+        "shard_2": "6612801890e2c65c1d8ef8816657b4d5e05f866a634ae537199e2864aa6259ce"
+      },
+      "constraints": [
+        "Do not use any audio until all rights and speaker metadata blockers close."
+      ],
+      "blocking_conditions": [
+        "authoritative compatible licence",
+        "recording provenance and consent/stewardship basis",
+        "stable speaker IDs"
+      ]
+    },
+    {
+      "id": "ckb_new_speech_corpus",
+      "name": "CKB-New-Speech-Corpus volunteer/YouTube proposal",
+      "disposition": "quarantined",
+      "source_version": "local README snapshot only",
+      "authoritative_url": null,
+      "licence": "not documented",
+      "rights_basis": "The local proposal describes Telegram volunteers and YouTube broadcast extraction without a source-specific licence or complete participant consent record.",
+      "speaker_key": null,
+      "declared_inventory": {
+        "local_audio_files": 0
+      },
+      "local_state": "README and collection script only",
+      "constraints": [
+        "YouTube or broadcast availability is not a licence.",
+        "Volunteer collection requires the same pre-recording consent and custody rules as fresh_consented_field."
+      ],
+      "blocking_conditions": [
+        "source-specific licences and participant consent records",
+        "stable speaker IDs and complete audio metadata"
+      ]
+    },
+    {
+      "id": "unclassified_private_audio",
+      "name": "Unclassified local or private Sorani recordings",
+      "disposition": "quarantined",
+      "source_version": "unclassified",
+      "authoritative_url": null,
+      "licence": "unknown",
+      "rights_basis": "No private recording is presumed reusable from its presence on disk.",
+      "speaker_key": null,
+      "declared_inventory": {},
+      "local_state": "not inventoried by this assessment",
+      "constraints": [
+        "Do not inspect, copy, hash, or use private recordings without source-specific user approval and a rights record.",
+        "Never commit private audio, direct identifiers, or consent documents."
+      ],
+      "blocking_conditions": [
+        "source-specific user approval",
+        "rights, consent, and speaker metadata record"
+      ]
+    }
+  ],
+  "upstream_model_overlap": {
+    "deepfilternet3": {
+      "authoritative_url": "https://arxiv.org/html/2305.08227v1",
+      "reported_training_sources": [
+        "full multilingual DNS4",
+        "PTDB-TUG oversampled",
+        "VCTK oversampled"
+      ],
+      "central_kurdish_source_named": false,
+      "limitation": "The paper-level list is not a per-file training manifest. Exact fingerprint exclusion remains impossible without an upstream manifest."
+    },
+    "project_calibration": {
+      "rule": "No acceptance or reserve item, output, verdict, aggregate, speaker key, prompt, or near-duplicate may enter HawaVoClean calibration."
+    }
+  },
+  "approval": {
+    "status": "pending_user_approval",
+    "approved_by": null,
+    "approved_at": null,
+    "approved_design_sha256": null,
+    "user_accepts_common_voice_terms": false,
+    "user_authorizes_fresh_collection": false
+  },
+  "integrity": {
+    "algorithm": "sha256-canonical-json-excluding-approval-and-integrity",
+    "design_sha256": "1f46b23e37945f033eed961291bfc024e0ec2bf6cb388308342462914c2de816"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "benchmark_name": "hawavoclean_kurdish_restoration_benchmark_v2.1",
+  "version": "1.1",
+  "target_sample_rate": 48000,
+  "seed": 42,
+  "test_set_provenance": "synthetic_profile_fixtures, non-holdout",
+  "speakers": [
+    "character_01",
+    "character_02",
+    "character_03",
+    "character_04",
+    "character_05",
+    "character_06",
+    "character_07",
+    "character_08",
+    "character_09",
+    "character_10"
+  ],
+  "cutoffs_hz": [
+    4000.0,
+    7500.0,
+    12000.0,
+    16000.0
+  ],
+  "candidate_strengths": [
+    1.0
+  ],
+  "evaluation_metrics": [
+    "fullband_lsd_db",
+    "highband_lsd_db",
+    "protected_band_rms_err",
+    "highband_energy_error_db",
+    "speaker_cosine_sim"
+  ],
+  "profiles_root": "profiles"
+}

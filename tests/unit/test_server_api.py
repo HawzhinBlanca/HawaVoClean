@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from hawavoclean import __version__
 from hawavoclean.server.app import (
+    PROFILES,
     create_app,
     default_output_path,
     parse_range,
@@ -32,6 +33,9 @@ H = {"X-Hawa-Token": TOKEN}
 def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The work dir is an allowed root for the path policy; put test media there."""
     monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path))
+    # Point the profiles root away from the checkout: health's speaker list
+    # must be what a test stages, not whatever the repo's profiles/ holds.
+    monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(tmp_path / "profiles"))
     return tmp_path
 
 
@@ -126,11 +130,35 @@ def test_token_by_header_or_query(client: TestClient) -> None:
     assert body == {
         "ok": True,
         "version": __version__,
-        "profiles": ["studio", "production"],
+        "profiles": ["studio", "lowband", "production"],
+        "speakers": [],  # the fixture's profiles root is empty
+        "restore_available": False,
         "engine_pid": body["engine_pid"],
+        "storage": {
+            "managed_upload_bytes": 0,
+            "managed_upload_limit_bytes": 16 * 1024 * 1024 * 1024,
+            "minimum_free_bytes": 512 * 1024 * 1024,
+        },
     }
     assert isinstance(body["engine_pid"], int)
     assert client.get(f"/api/health?token={TOKEN}", headers={"Origin": "null"}).status_code == 200
+
+
+def test_health_lists_speakers_from_the_profiles_root(client: TestClient, work: Path) -> None:
+    """`speakers` = sorted ids with a profile.json under HAWAVOCLEAN_PROFILES_DIR;
+    `restore_available` follows it. Recomputed per request, so a profile trained
+    while the engine is up shows without restart."""
+    body = client.get("/api/health", headers=H).json()
+    assert body["speakers"] == [] and body["restore_available"] is False  # dir absent
+    profiles = work / "profiles"
+    for spk in ("character_02", "character_01"):  # staged out of order: response sorts
+        (profiles / spk).mkdir(parents=True)
+        (profiles / spk / "profile.json").write_text("{}")
+    (profiles / "half_trained").mkdir()  # no profile.json: not offered to the UI
+    (profiles / "schema.json").write_text("{}")  # a stray file is not a speaker
+    body = client.get("/api/health", headers=H).json()
+    assert body["speakers"] == ["character_01", "character_02"]
+    assert body["restore_available"] is True
 
 
 def test_cors_preflight_needs_no_token(client: TestClient) -> None:
@@ -384,6 +412,93 @@ def test_job_request_validation(client: TestClient, work: Path) -> None:
     assert client.get(f"/api/jobs/j_nope/events?token={TOKEN}").status_code == 404
 
 
+def test_restore_job_request_validation(client: TestClient, work: Path) -> None:
+    """Contract addendum 2: the cross-field restore rules are 422s with one
+    clear message — a combination the schema knows but the contract refuses."""
+    src = _tiny_wav(work / "take.wav")
+    j = {"input_path": str(src), "profile": "studio"}
+    r = client.post("/api/jobs", headers=H, json={**j, "mode": "restore"})
+    assert r.status_code == 422 and r.json()["error"] == "bad_request"
+    assert "speaker_id" in r.json()["message"]
+    # An id that could not name a profile dir (or would need argv escaping)
+    # is refused before it can travel into a child command line.
+    for bad in ("Character_01", "char-01", "../evil", "a b", "ch;rm", "x" * 65):
+        r = client.post("/api/jobs", headers=H, json={**j, "mode": "restore", "speaker_id": bad})
+        assert r.status_code == 422, bad
+        assert r.json() == {
+            "error": "bad_request",
+            "message": "speaker_id must match ^[a-z0-9_]{1,64}$",
+        }
+    # Restore-only fields outside restore mode: 422, never silently dropped.
+    r = client.post("/api/jobs", headers=H, json={**j, "cutoff_hz": 7800.0})
+    assert r.status_code == 422 and "cutoff_hz" in r.json()["message"]
+    r = client.post("/api/jobs", headers=H, json={**j, "speaker_id": "character_01"})
+    assert r.status_code == 422 and "speaker_id" in r.json()["message"]
+    # Malformed values keep the revision-1 400 (only the cross-field rules 422).
+    r = client.post(
+        "/api/jobs", headers=H, json={**j, "mode": "restore", "speaker_id": "c", "cutoff_hz": -1}
+    )
+    assert r.status_code == 400 and r.json()["error"] == "bad_request"
+
+
+def test_unknown_request_fields_are_422_not_silently_ignored(
+    client: TestClient, work: Path
+) -> None:
+    """Every request model is pinned ``extra="forbid"``: a misspelled field
+    used to be dropped and the request would "succeed" (audit finding)."""
+    src = _tiny_wav(work / "take.wav")
+    r = client.post(
+        "/api/jobs",
+        headers=H,
+        json={"input_path": str(src), "profile": "studio", "speaker": "character_01"},
+    )
+    assert r.status_code == 422 and r.json()["error"] == "bad_request"
+    assert "speaker" in r.json()["message"]
+    r = client.post("/api/analyze", headers=H, json={"path": str(src), "bucket": 9})
+    assert r.status_code == 422 and r.json()["error"] == "bad_request"
+    r = client.post(
+        "/api/peaks",
+        headers=H,
+        json={"path": str(src), "start_s": 0.0, "end_s": 1.0, "bucketz": 9},
+    )
+    assert r.status_code == 422 and r.json()["error"] == "bad_request"
+
+
+def test_restore_job_submits_and_snapshots_its_mode(client: TestClient, work: Path) -> None:
+    src = _tiny_wav(work / "take.wav")
+    # Stage the speaker the job names. /api/health is the contract for which
+    # speakers exist, and a job may not name one it does not list.
+    (work / "profiles" / "character_01").mkdir(parents=True)
+    (work / "profiles" / "character_01" / "profile.json").write_text("{}")
+    r = client.post(
+        "/api/jobs",
+        headers=H,
+        json={
+            "input_path": str(src),
+            "profile": "studio",
+            "mode": "restore",
+            "speaker_id": "character_01",
+            "cutoff_hz": 7800.0,
+        },
+    )
+    assert r.status_code == 202, r.text
+    snap = client.get(f"/api/jobs/{r.json()['job_id']}", headers=H).json()
+    assert snap["mode"] == "restore"
+    assert snap["speaker_id"] == "character_01" and snap["cutoff_hz"] == 7800.0
+    _wait_done(client, r.json()["job_id"])
+    # A natural job's snapshot carries mode but no restore-only keys at all.
+    r = client.post(
+        "/api/jobs",
+        headers=H,
+        json={"input_path": str(src), "profile": "studio", "overwrite": True},
+    )
+    assert r.status_code == 202, r.text
+    snap = client.get(f"/api/jobs/{r.json()['job_id']}", headers=H).json()
+    assert snap["mode"] == "natural"
+    assert "speaker_id" not in snap and "cutoff_hz" not in snap
+    _wait_done(client, r.json()["job_id"])
+
+
 def test_job_cancel_running_child(work: Path) -> None:
     manager = JobManager(command_factory=lambda _r: _py(_SLOW))
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
@@ -596,6 +711,11 @@ def test_default_output_path_rule() -> None:
     )
     assert default_output_path(Path("/a/take.WAV"), "production") == Path("/a/take_clean.wav")
     assert default_output_path(Path("/a/x.mov"), "development") == Path("/a/x_dev.wav")
+    # Every offered profile needs its own suffix, or two profiles' masters
+    # collide on one name and the second silently overwrites the first.
+    assert default_output_path(Path("/a/take.wav"), "lowband") == Path("/a/take_lowband.wav")
+    suffixes = [str(default_output_path(Path("/a/t.wav"), p)) for p in PROFILES]
+    assert len(set(suffixes)) == len(suffixes), suffixes
 
 
 def test_shutdown_responds_then_calls_hook(work: Path) -> None:
@@ -717,3 +837,33 @@ def test_sse_keepalive_ping_and_submit_after_shutdown(
             assert r.status_code == 503 and r.json()["error"] == "unavailable"
     finally:
         manager.shutdown()
+
+
+def test_a_job_may_not_name_a_speaker_health_does_not_list(client: TestClient, work: Path) -> None:
+    """An unknown speaker_id is answerable at submit, so it is answered there.
+
+    The id used to pass the grammar check, get queued, and spawn a child that
+    enhanced the entire file before restoration looked the profile up and
+    failed. /api/health already publishes the installed speakers and the UI
+    builds its picker from that list -- the same list answers this now.
+    """
+    src = _tiny_wav(work / "take.wav")
+    (work / "profiles" / "character_01").mkdir(parents=True)
+    (work / "profiles" / "character_01" / "profile.json").write_text("{}")
+
+    listed = client.get("/api/health", headers=H).json()["speakers"]
+    assert listed == ["character_01"]
+
+    r = client.post(
+        "/api/jobs",
+        headers=H,
+        json={
+            "input_path": str(src),
+            "profile": "studio",
+            "mode": "restore",
+            "speaker_id": "character_99",
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"] == "bad_request"
+    assert "character_99" in r.json()["message"]

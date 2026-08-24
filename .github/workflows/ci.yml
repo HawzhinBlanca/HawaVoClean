@@ -1,37 +1,296 @@
-name: CI
+name: release
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.11.14"
+  NODE_VERSION: "22.13.1"
+  PYTHON_RELEASE_VERSION: "3.14.5"
+  COVERAGE_FLOOR: "92.49"
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  source-contract:
+    name: source contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - name: Check out the exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          version: "0.6.5"
-          enable-cache: true
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install release Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ env.PYTHON_RELEASE_VERSION }}
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
 
       - name: Install system audio libraries
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg libsndfile1
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg libsndfile1
 
-      - name: Install dependencies
-        run: uv sync --all-extras
+      - name: Synchronize the frozen dependency graph
+        run: uv sync --frozen --all-extras
 
-      - name: Format check (Ruff)
-        run: uv run ruff format --check .
+      - name: Enforce formatting, lint, and strict types
+        run: |
+          uv run --frozen ruff format --check .
+          uv run --frozen ruff check .
+          uv run --frozen mypy --strict src tests scripts data
 
-      - name: Lint check (Ruff)
-        run: uv run ruff check .
+      - name: Validate generated and evidence contracts
+        run: |
+          uv run --frozen python scripts/sync_release_identity.py
+          uv run --frozen python scripts/generate_schemas.py --check
+          uv run --frozen python scripts/generate_release_status.py
+          uv run --frozen python -m scripts.validate_sorani_protocol
+          uv run --frozen python -m scripts.validate_sorani_sources
+          uv run --frozen python scripts/validate_github_governance.py
+          uv run --frozen python scripts/release_evidence.py verify
+          git diff --exit-code
 
-      - name: Type check (Mypy strict)
-        run: uv run mypy --strict src tests scripts data
+      - name: Run adversarial and mutation gates
+        run: |
+          mkdir -p build/ci-evidence/source-contract
+          uv run --frozen pytest -q -m fuzz tests/fuzz \
+            --junitxml=build/ci-evidence/source-contract/fuzz-junit.xml
+          uv run --frozen python scripts/mutation_gate.py \
+            | tee build/ci-evidence/source-contract/mutation-gate.log
 
-      - name: Run Test Suite with Coverage
-        run: uv run pytest --cov=hawavoclean --cov-branch --cov-report=term-missing --cov-fail-under=90
+      - name: Upload immutable source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: source-contract-${{ github.sha }}
+          path: build/ci-evidence/source-contract/
+          if-no-files-found: warn
+          retention-days: 30
+
+  core-support:
+    name: core (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install matrix Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install Linux audio libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg libsndfile1
+
+      - name: Install macOS audio libraries
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg libsndfile
+
+      - name: Synchronize the frozen dependency graph
+        run: uv sync --frozen --all-extras --python "${{ matrix.python }}"
+
+      - name: Run the complete default suite at the release coverage floor
+        run: |
+          EVIDENCE_DIR="build/ci-evidence/${{ matrix.os }}-py${{ matrix.python }}"
+          mkdir -p "$EVIDENCE_DIR"
+          uv run --frozen --python "${{ matrix.python }}" pytest -q \
+            --cov=hawavoclean \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-report="xml:$EVIDENCE_DIR/coverage.xml" \
+            --cov-fail-under="$COVERAGE_FLOOR" \
+            --junitxml="$EVIDENCE_DIR/default-junit.xml"
+
+      - name: Build and smoke the wheel outside the repository environment
+        run: |
+          EVIDENCE_DIR="build/ci-evidence/${{ matrix.os }}-py${{ matrix.python }}"
+          DIST_DIR="$EVIDENCE_DIR/dist"
+          SMOKE_ROOT="$RUNNER_TEMP/hawavoclean-smoke-${{ matrix.os }}-py${{ matrix.python }}"
+          uv build --wheel --out-dir "$DIST_DIR"
+          uv export --quiet --frozen --no-dev --no-emit-project \
+            --output-file "$EVIDENCE_DIR/smoke-requirements.txt"
+          uv venv --python "${{ matrix.python }}" "$SMOKE_ROOT/venv"
+          uv pip sync --python "$SMOKE_ROOT/venv/bin/python" --require-hashes \
+            "$EVIDENCE_DIR/smoke-requirements.txt"
+          WHEEL="$(find "$DIST_DIR" -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
+          uv pip install --python "$SMOKE_ROOT/venv/bin/python" --no-deps "$WHEEL"
+          "$SMOKE_ROOT/venv/bin/hawavoclean" doctor
+          mkdir -p "$EVIDENCE_DIR/smoke"
+          "$SMOKE_ROOT/venv/bin/hawavoclean" process \
+            tests/fixtures/sample_sorani_podcast.wav \
+            --output "$EVIDENCE_DIR/smoke/output.wav" \
+            --profile production
+          "$SMOKE_ROOT/venv/bin/hawavoclean" verify \
+            "$EVIDENCE_DIR/smoke/output.wav" \
+            --report "$EVIDENCE_DIR/smoke/output.hawavoclean.json"
+
+      - name: Upload immutable matrix evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: core-${{ matrix.os }}-py${{ matrix.python }}-${{ github.sha }}
+          path: build/ci-evidence/${{ matrix.os }}-py${{ matrix.python }}/
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 30
+
+  web-resolve:
+    name: web and Resolve shell
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install locked Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Bootstrap the lockfile-pinned package manager
+        run: npm --prefix resolve-plugin/toolchain ci --ignore-scripts --audit=false --fund=false
+
+      - name: Install frozen JavaScript dependency graphs
+        run: |
+          PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
+          node "$PNPM" --dir ui install --frozen-lockfile
+          node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve install --frozen-lockfile
+
+      - name: Test and build the web surface
+        run: |
+          PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
+          mkdir -p build/ci-evidence/web-resolve
+          node "$PNPM" --dir ui typecheck
+          node "$PNPM" --dir ui test:run \
+            | tee build/ci-evidence/web-resolve/ui-tests.log
+          node "$PNPM" --dir ui build
+
+      - name: Audit all JavaScript dependency graphs
+        run: |
+          PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
+          node "$PNPM" --dir ui audit --audit-level low --json \
+            > build/ci-evidence/web-resolve/ui-audit.json
+          node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve audit --audit-level low --json \
+            > build/ci-evidence/web-resolve/plugin-audit.json
+          npm --prefix resolve-plugin/toolchain audit --audit-level=low --json \
+            > build/ci-evidence/web-resolve/toolchain-audit.json
+
+      - name: Upload immutable web and Resolve-shell evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-resolve-${{ github.sha }}
+          path: |
+            build/ci-evidence/web-resolve/
+            ui/dist/
+          if-no-files-found: warn
+          retention-days: 30
+
+  exact-release-gate:
+    name: exact Apple-silicon release gate
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64, hawavoclean-release]
+    environment: release-candidate
+    timeout-minutes: 720
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          clean: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      - name: Install locked Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Hydrate hash-locked private regression evidence
+        env:
+          HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT: ${{ vars.HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT }}
+        run: |
+          test -n "$HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT"
+          uv run --frozen python scripts/hydrate_release_evidence.py \
+            --source-root "$HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT"
+
+      - name: Run the exact two-checkout release contract
+        run: bash scripts/run_release_checks.sh
+
+      - name: Upload immutable full-gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: exact-release-gate-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/release-gate/
+          if-no-files-found: warn
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 90
+
+  required:
+    name: required
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [source-contract, core-support, web-resolve, exact-release-gate]
+    steps:
+      - name: Require every shipped-surface gate
+        env:
+          SOURCE_CONTRACT: ${{ needs.source-contract.result }}
+          CORE_SUPPORT: ${{ needs.core-support.result }}
+          WEB_RESOLVE: ${{ needs.web-resolve.result }}
+          EXACT_RELEASE_GATE: ${{ needs.exact-release-gate.result }}
+        run: |
+          test "$SOURCE_CONTRACT" = success
+          test "$CORE_SUPPORT" = success
+          test "$WEB_RESOLVE" = success
+          test "$EXACT_RELEASE_GATE" = success

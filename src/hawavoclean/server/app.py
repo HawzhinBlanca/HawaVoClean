@@ -13,10 +13,10 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import socket
 import sys
 import threading
-import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any, Literal
@@ -26,7 +26,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 from starlette.datastructures import Headers, QueryParams
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -36,7 +36,7 @@ from hawavoclean import __version__
 from hawavoclean.cli import _clean_stem
 from hawavoclean.errors import HawaVoCleanError, InvalidUserInputError
 from hawavoclean.logging import get_logger
-from hawavoclean.paths import work_root
+from hawavoclean.paths import profiles_root, work_root
 from hawavoclean.server.analysis import (
     DEFAULT_BUCKETS,
     MAX_BUCKETS,
@@ -44,13 +44,30 @@ from hawavoclean.server.analysis import (
     analyze_audio,
     compute_peaks_window,
 )
-from hawavoclean.server.jobs import TERMINAL_STATES, JobManager
-from hawavoclean.server.policy import PathPolicyError, resolve_client_path
+from hawavoclean.server.jobs import TERMINAL_STATES, JobManager, JobRecord, QueueFullError
+from hawavoclean.server.policy import (
+    PathPolicyError,
+    resolve_client_output_path,
+    resolve_client_path,
+)
+from hawavoclean.server.retention import (
+    DEFAULT_MAX_UPLOAD_TOTAL_BYTES,
+    DEFAULT_MIN_FREE_BYTES,
+    DEFAULT_UPLOAD_TTL_S,
+    DiskUsageFactory,
+    StoragePressureError,
+    UploadStore,
+)
 
 logger = get_logger("server")
 
-PROFILES: tuple[str, ...] = ("studio", "production")
-_OUTPUT_SUFFIX = {"studio": "_studio", "production": "_clean", "development": "_dev"}
+PROFILES: tuple[str, ...] = ("studio", "lowband", "production")
+_OUTPUT_SUFFIX = {
+    "studio": "_studio",
+    "lowband": "_lowband",
+    "production": "_clean",
+    "development": "_dev",
+}
 _AUDIO_MIME = {
     ".wav": "audio/wav",
     ".wave": "audio/wav",
@@ -81,6 +98,7 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 # client that declares nothing. Override with ``HAWAVOCLEAN_MAX_UPLOAD_BYTES``
 # (0 disables the cap) or ``create_app(max_upload_bytes=...)``.
 DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
+DEFAULT_MAX_CONCURRENT_UPLOADS = 2
 MAX_UPLOAD_BYTES_ENV = "HAWAVOCLEAN_MAX_UPLOAD_BYTES"
 UPLOAD_PATH = "/api/upload"
 SSE_MIN_INTERVAL_S = 0.05
@@ -99,6 +117,7 @@ _HTTP_CODES = {
     422: "bad_request",
     500: "internal_error",
     503: "unavailable",
+    507: "insufficient_storage",
 }
 
 
@@ -160,8 +179,8 @@ def configured_max_upload_bytes() -> int:
     except ValueError:
         logger.warning(f"{MAX_UPLOAD_BYTES_ENV}={raw!r} is not an integer; using the default")
         return DEFAULT_MAX_UPLOAD_BYTES
-    if value < 0:
-        logger.warning(f"{MAX_UPLOAD_BYTES_ENV}={raw!r} is negative; using the default")
+    if value <= 0:
+        logger.warning(f"{MAX_UPLOAD_BYTES_ENV}={raw!r} is not positive; using the default")
         return DEFAULT_MAX_UPLOAD_BYTES
     return value
 
@@ -176,13 +195,26 @@ class UploadSizeLimitMiddleware:
     bytes are counted as they arrive and the request is aborted the moment it
     passes the cap — before Starlette's spool file grows past it.
 
-    ``max_bytes <= 0`` disables the cap entirely.
+    Concurrent request bodies are bounded too: the middleware wraps multipart
+    parsing, so at most ``max_concurrent`` file parts can occupy Starlette's
+    spool area before the route enforces the persistent total quota.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int, path: str = UPLOAD_PATH) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        max_bytes: int,
+        path: str = UPLOAD_PATH,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_UPLOADS,
+    ) -> None:
+        if max_bytes < 1 or max_concurrent < 1:
+            raise ValueError("upload byte and concurrency limits must be positive")
         self.app = app
         self.max_bytes = max_bytes
         self.path = path
+        self.max_concurrent = max_concurrent
+        self._active = 0
+        self._lock = asyncio.Lock()
 
     def _too_large(self, seen: int) -> StarletteHTTPException:
         return StarletteHTTPException(
@@ -192,39 +224,57 @@ class UploadSizeLimitMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
-            self.max_bytes <= 0
-            or scope["type"] != "http"
+            scope["type"] != "http"
             or scope.get("method") != "POST"
             or str(scope.get("path", "")) != self.path
         ):
             await self.app(scope, receive, send)
             return
 
-        declared = Headers(scope=scope).get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
-            response = error_response(
-                413,
-                "payload_too_large",
-                f"upload declares {int(declared)} bytes, over the {self.max_bytes} byte limit",
-            )
-            await response(scope, receive, send)
-            return
+        async with self._lock:
+            if self._active >= self.max_concurrent:
+                response = error_response(
+                    503,
+                    "upload_busy",
+                    f"at most {self.max_concurrent} uploads may be received concurrently",
+                )
+                await response(scope, receive, send)
+                return
+            self._active += 1
+        try:
+            declared = Headers(scope=scope).get("content-length")
+            if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
+                response = error_response(
+                    413,
+                    "payload_too_large",
+                    f"upload declares {int(declared)} bytes, over the {self.max_bytes} byte limit",
+                )
+                await response(scope, receive, send)
+                return
 
-        seen = 0
+            seen = 0
 
-        async def counted() -> Any:
-            nonlocal seen
-            message = await receive()
-            if message["type"] == "http.request":
-                seen += len(message.get("body", b""))
-                if seen > self.max_bytes:
-                    raise self._too_large(seen)
-            return message
+            async def counted() -> Any:
+                nonlocal seen
+                message = await receive()
+                if message["type"] == "http.request":
+                    seen += len(message.get("body", b""))
+                    if seen > self.max_bytes:
+                        raise self._too_large(seen)
+                return message
 
-        await self.app(scope, counted, send)
+            await self.app(scope, counted, send)
+        finally:
+            async with self._lock:
+                self._active -= 1
 
 
 class AnalyzeRequest(BaseModel):
+    # ``extra="forbid"``: an unknown field is refused with 422, never silently
+    # ignored — a client that misspells a knob must hear about it (audit
+    # finding: a typo'd option used to be dropped and the request "succeed").
+    model_config = ConfigDict(extra="forbid")
+
     path: str
     buckets: int = Field(default=DEFAULT_BUCKETS, ge=1, le=MAX_BUCKETS)
 
@@ -234,17 +284,35 @@ class PeaksRequest(BaseModel):
     here rather than downstream: ``json.loads`` happily accepts ``NaN`` and
     ``Infinity`` literals, and a NaN window would silently decode nothing."""
 
+    model_config = ConfigDict(extra="forbid")
+
     path: str
     start_s: float = Field(ge=0.0, allow_inf_nan=False)
     end_s: float = Field(gt=0.0, allow_inf_nan=False)
     buckets: int = Field(default=DEFAULT_BUCKETS, ge=1, le=MAX_BUCKETS)
 
 
+# The speaker id is handed to a child argv (``--speaker-id``) and joined into
+# a profiles path, so it is held to the naming grammar the profile tree uses —
+# anything else (spaces, ``/``, ``-``, uppercase, leading dashes) is refused.
+SPEAKER_ID_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+
+
 class JobRequest(BaseModel):
+    """``POST /api/jobs`` (contract addendum 2 adds the restore-mode fields).
+    The cross-field rules — restore requires ``speaker_id``, ``speaker_id``/
+    ``cutoff_hz`` are restore-only — live in the submit endpoint so their 422s
+    carry one clear message instead of a pydantic error list."""
+
+    model_config = ConfigDict(extra="forbid")
+
     input_path: str
-    profile: Literal["studio", "production", "development"]
+    profile: Literal["studio", "lowband", "production", "development"]
     output_path: str | None = None
     overwrite: bool = False
+    mode: Literal["natural", "restore"] = "natural"
+    speaker_id: str | None = None
+    cutoff_hz: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
 
 
 def default_output_path(input_path: Path, profile: str) -> Path:
@@ -252,6 +320,21 @@ def default_output_path(input_path: Path, profile: str) -> Path:
     suffixes stripped (``Flute 09.m4a.mp4`` -> ``Flute 09``)."""
     suffix = _OUTPUT_SUFFIX.get(profile, "_clean")
     return input_path.parent / f"{_clean_stem(input_path)}{suffix}.wav"
+
+
+def available_speakers() -> list[str]:
+    """Sorted speaker ids with a ``profile.json`` under :func:`profiles_root`.
+
+    An absent or unreadable profiles tree is an empty list, not an error: a
+    natural-mode-only install must still answer ``GET /api/health``, and the
+    UI uses the emptiness itself (``restore_available``) to hide the restore
+    control.
+    """
+    try:
+        entries = list(profiles_root().iterdir())
+    except OSError:
+        return []
+    return sorted(p.name for p in entries if (p / "profile.json").is_file())
 
 
 def _safe_upload_name(raw: str | None) -> str:
@@ -375,17 +458,49 @@ def create_app(
     job_manager: JobManager | None = None,
     on_shutdown: Callable[[], None] | None = None,
     max_upload_bytes: int | None = None,
+    max_upload_total_bytes: int = DEFAULT_MAX_UPLOAD_TOTAL_BYTES,
+    upload_ttl_s: float = DEFAULT_UPLOAD_TTL_S,
+    min_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+    retention_clock: Callable[[], float] | None = None,
+    retention_disk_usage: DiskUsageFactory | None = None,
 ) -> FastAPI:
     """Build the engine app. ``on_shutdown`` runs (in a thread) shortly after
     ``POST /api/shutdown`` has been answered; when omitted the process hard-exits.
-    ``max_upload_bytes`` caps ``POST /api/upload`` (0 disables the cap); when
-    omitted it comes from ``HAWAVOCLEAN_MAX_UPLOAD_BYTES`` or the default."""
+    ``max_upload_bytes`` caps ``POST /api/upload`` and must be positive; when
+    omitted it comes from ``HAWAVOCLEAN_MAX_UPLOAD_BYTES`` or the default.
+    Total upload bytes, age, and the emergency free-space reserve are always
+    bounded; zero/negative values are rejected rather than becoming an
+    accidental unlimited mode."""
     if not token:
         raise ValueError("token must be non-empty")
     manager = job_manager if job_manager is not None else JobManager()
     upload_limit = (
         configured_max_upload_bytes() if max_upload_bytes is None else int(max_upload_bytes)
     )
+    if upload_limit < 1:
+        raise ValueError("max_upload_bytes must be positive")
+    upload_store = UploadStore(
+        work_root() / "uploads",
+        ttl_s=upload_ttl_s,
+        max_total_bytes=max_upload_total_bytes,
+        min_free_bytes=min_free_bytes,
+        clock=retention_clock,
+        disk_usage=retention_disk_usage,
+    )
+    upload_store.scavenge(manager.active_input_paths())
+
+    def _cleanup_terminal_input(record: JobRecord) -> None:
+        # One upload can back several jobs — the same file processed under two
+        # profiles, or in natural and restore mode. Deleting it the moment the
+        # FIRST of them finishes destroys the input the others are still going
+        # to decode, so the user's upload disappears and their second job fails
+        # preflight on a file they never removed. ``scavenge`` already honours
+        # this set; the terminal path has to as well.
+        if record.input_path.resolve() in manager.active_input_paths():
+            return
+        upload_store.cleanup_input(record.input_path)
+
+    manager.add_terminal_callback(_cleanup_terminal_input)
 
     def _hard_exit() -> None:  # pragma: no cover - process exit
         os._exit(0)
@@ -402,6 +517,8 @@ def create_app(
     app.state.token = token
     app.state.ui_dir = ui_dir
     app.state.max_upload_bytes = upload_limit
+    app.state.upload_store = upload_store
+    app.state.upload_lock = asyncio.Lock()
 
     # Middleware: the last one added is outermost, so CORS wraps auth and
     # browser preflights (which carry no token) are answered before auth, and
@@ -438,10 +555,17 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_req: Request, exc: RequestValidationError) -> JSONResponse:
         parts = []
+        unknown_field = False
         for err in exc.errors():
+            if err.get("type") == "extra_forbidden":
+                unknown_field = True
             loc = ".".join(str(x) for x in err.get("loc", ()) if x != "body")
             parts.append(f"{loc}: {err.get('msg', 'invalid')}")
-        return error_response(400, "bad_request", "; ".join(parts) or "invalid request")
+        # An unknown field is a well-formed request the schema rejects — 422,
+        # like the restore-mode cross-field rules. Malformed values and missing
+        # required fields keep the contract's historical 400.
+        status = 422 if unknown_field else 400
+        return error_response(status, "bad_request", "; ".join(parts) or "invalid request")
 
     @app.exception_handler(HawaVoCleanError)
     async def _engine_error(_req: Request, exc: HawaVoCleanError) -> JSONResponse:
@@ -456,11 +580,21 @@ def create_app(
     # --- routes ---------------------------------------------------------------
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
+        # Recomputed per request: a profile trained while the engine is up
+        # (or an env-pointed tree swapped underneath it) shows without restart.
+        speakers = available_speakers()
         return {
             "ok": True,
             "version": __version__,
             "profiles": list(PROFILES),
+            "speakers": speakers,
+            "restore_available": bool(speakers),
             "engine_pid": os.getpid(),
+            "storage": {
+                "managed_upload_bytes": upload_store.usage_bytes(),
+                "managed_upload_limit_bytes": upload_store.max_total_bytes,
+                "minimum_free_bytes": upload_store.min_free_bytes,
+            },
         }
 
     @app.post("/api/analyze")
@@ -480,9 +614,41 @@ def create_app(
 
     @app.post("/api/jobs", status_code=202)
     async def create_job(req: JobRequest) -> dict[str, Any]:
+        # Restore-mode cross-field rules (contract addendum 2). 422: the JSON
+        # is well-formed and every field is known — the *combination* is what
+        # the contract refuses.
+        if req.mode == "restore":
+            if not req.speaker_id:
+                raise ApiError(
+                    422, "bad_request", 'mode "restore" requires speaker_id (see /api/health)'
+                )
+        else:
+            if req.speaker_id is not None:
+                raise ApiError(
+                    422, "bad_request", 'speaker_id is only valid when mode is "restore"'
+                )
+            if req.cutoff_hz is not None:
+                raise ApiError(422, "bad_request", 'cutoff_hz is only valid when mode is "restore"')
+        if req.speaker_id is not None and not SPEAKER_ID_PATTERN.fullmatch(req.speaker_id):
+            # The id becomes a child argv and a path segment: reject anything
+            # outside the profile-tree grammar before it can travel.
+            raise ApiError(422, "bad_request", "speaker_id must match ^[a-z0-9_]{1,64}$")
+        if req.speaker_id is not None and req.speaker_id not in available_speakers():
+            # /api/health publishes the installed speakers and the UI builds
+            # its picker from that list, so a job naming one that is not there
+            # is answerable now. It used to be accepted, queued, and spawned,
+            # and the id was only checked once the child reached restoration --
+            # after it had enhanced the whole file. Same list, same answer,
+            # before any of that.
+            raise ApiError(
+                422,
+                "bad_request",
+                f"unknown speaker_id {req.speaker_id!r} (see /api/health for installed speakers)",
+            )
+        upload_store.scavenge(manager.active_input_paths())
         input_path = resolve_client_path(req.input_path, must_exist=True)
         if req.output_path:
-            output_path = resolve_client_path(req.output_path)
+            output_path = resolve_client_output_path(req.output_path)
         else:
             output_path = default_output_path(input_path, req.profile)
         if output_path.suffix.lower() != ".wav":
@@ -493,7 +659,12 @@ def create_app(
                 output_path=output_path,
                 profile=req.profile,
                 overwrite=req.overwrite,
+                mode=req.mode,
+                speaker_id=req.speaker_id,
+                cutoff_hz=req.cutoff_hz,
             )
+        except QueueFullError as e:
+            raise ApiError(503, "queue_full", str(e)) from e
         except RuntimeError as e:
             raise ApiError(503, "unavailable", str(e)) from e
         return {
@@ -594,36 +765,48 @@ def create_app(
         to raise ``ValueError`` out of ``open()`` as a 500.
         """
         name = _safe_upload_name(file.filename)
-        dest_dir = work_root() / "uploads" / uuid.uuid4().hex
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / name
         limit = int(getattr(app.state, "max_upload_bytes", 0))
-        written = 0
+        dest: Path | None = None
         try:
-            with open(dest, "wb") as out:
-                while chunk := await file.read(UPLOAD_CHUNK_BYTES):
-                    written += len(chunk)
-                    if 0 < limit < written:
-                        # Belt and braces: the middleware rejects an over-sized
-                        # body before it is spooled, but a spool that arrived
-                        # some other way must not be copied out in full either.
-                        raise ApiError(
-                            413,
-                            "payload_too_large",
-                            f"upload exceeds the {limit} byte limit",
-                        )
-                    out.write(chunk)
+            # Local UI uploads are serialized. That makes the total quota an
+            # exact reservation rather than a racy estimate across concurrent
+            # requests, while processing jobs continue independently.
+            async with app.state.upload_lock:
+                upload_store.scavenge(manager.active_input_paths())
+                existing = upload_store.usage_bytes()
+                expected = int(file.size) if file.size is not None else upload_store.max_total_bytes
+                upload_store.ensure_capacity(existing, expected)
+                dest = upload_store.stage(name)
+                written = 0
+                with open(dest, "xb") as out:
+                    while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+                        written += len(chunk)
+                        if 0 < limit < written:
+                            # Belt and braces: the middleware rejects an over-sized
+                            # body before it is spooled, but a spool that arrived
+                            # some other way must not be copied out in full either.
+                            raise ApiError(
+                                413,
+                                "payload_too_large",
+                                f"upload exceeds the {limit} byte limit",
+                            )
+                        upload_store.ensure_progress(existing, written)
+                        out.write(chunk)
+        except StoragePressureError as exc:
+            if dest is not None:
+                upload_store.cleanup_input(dest)
+            raise ApiError(507, "insufficient_storage", str(exc)) from exc
         except BaseException:
             # Cleanup must never raise over the failure it is cleaning up
             # after: an unlink that itself throws would replace the real
             # error with its own.
-            with contextlib.suppress(OSError, ValueError):
-                dest.unlink(missing_ok=True)
-            with contextlib.suppress(OSError, ValueError):
-                dest_dir.rmdir()
+            if dest is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    upload_store.cleanup_input(dest)
             raise
         finally:
             await file.close()
+        assert dest is not None
         return {"path": str(dest)}
 
     async def _shutdown_later() -> None:

@@ -2,6 +2,7 @@
 
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -78,16 +79,24 @@ def test_process_hawavoclean_error_exit_code(monkeypatch: Any, tmp_path: Path) -
 
 
 @pytest.fixture(scope="module")
-def published(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
-    """One processed output shared by the verify-mismatch tests."""
-    import os
+def published(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, Path]]:
+    """One processed output shared by the verify-mismatch tests.
 
+    The work-dir override is undone afterwards. It used to be a bare
+    ``os.environ[...] = ...`` in a module-scoped fixture, so every test that
+    ran after this module in the same process inherited a work root pointing
+    into this module's temp directory -- the sort of leak that makes a test
+    pass alone and fail in a suite, which is how it was noticed.
+    ``pytest.MonkeyPatch`` as a context manager is the supported way to do
+    this outside function scope.
+    """
     tmp = tmp_path_factory.mktemp("pub")
-    os.environ["HAWAVOCLEAN_WORK_DIR"] = str(tmp / "w")
-    from hawavoclean.pipeline import run_pipeline
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp / "w"))
+        from hawavoclean.pipeline import run_pipeline
 
-    run_pipeline(input_path=FIXTURE, output_path=tmp / "v.wav", overwrite=True)
-    return tmp / "v.wav", tmp / "v.hawavoclean.json"
+        run_pipeline(input_path=FIXTURE, output_path=tmp / "v.wav", overwrite=True)
+        yield tmp / "v.wav", tmp / "v.hawavoclean.json"
 
 
 def _tampered_report(report: Path, tmp_path: Path, field: str, value: object) -> Path:
@@ -148,3 +157,36 @@ def test_eval_command_prints_failures(monkeypatch: Any, tmp_path: Path) -> None:
         str(tmp_path),
     )
     assert rc == int(ExitCode.PUBLICATION_FAILURE)
+
+
+def test_a_non_wav_output_name_is_refused(monkeypatch: Any, tmp_path: Path) -> None:
+    """The published master is RIFF/WAVE, so the name has to say so.
+
+    ``-o take.mp3`` used to succeed: the bytes were WAVE -- ``file`` reported
+    "WAVE audio, Microsoft PCM, 24 bit" -- under an extension that every
+    consumer trusting the suffix would mis-handle. The server refuses exactly
+    this with "output_path must end in .wav"; the two surfaces disagreed.
+    """
+    code = _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(tmp_path / "take.mp3"))
+    assert code == int(ExitCode.PUBLICATION_FAILURE)
+    assert not (tmp_path / "take.mp3").exists(), "a mislabelled master was still written"
+
+
+def test_an_uppercase_wav_suffix_is_still_a_wav(monkeypatch: Any, tmp_path: Path) -> None:
+    """The check is about the container, not about typography."""
+    out = tmp_path / "TAKE.WAV"
+    assert _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(out)) == 0
+    assert out.exists()
+
+
+def test_a_directory_as_output_says_so(monkeypatch: Any, tmp_path: Path) -> None:
+    """Pointing -o at a directory reported the publisher's internal state.
+
+    It surfaced as "Incomplete legacy output triplet cannot be migrated
+    safely", which describes a half-written publication rather than the
+    caller's mistake.
+    """
+    target = tmp_path / "out.wav"
+    target.mkdir()
+    code = _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(target), "--overwrite")
+    assert code == int(ExitCode.PUBLICATION_FAILURE)

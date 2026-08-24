@@ -22,6 +22,7 @@ from hawavoclean.enhancement.worker import IsolatedEnhancementWorker
 from hawavoclean.errors import AmbiguousStereoError, PublicationError, WorkerError
 from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.pipeline import run_pipeline
+from hawavoclean.publication import publication_exists, publication_paths
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"
@@ -220,22 +221,13 @@ def test_chaos_disk_full_at_publish_leaves_no_partial_output(
 def test_chaos_interrupt_between_renames_rolls_back(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A Ctrl-C landing between two of the three publish renames must roll back.
-
-    Publication renames the master, then the JSON report, then the TXT
-    summary. ``KeyboardInterrupt`` is a ``BaseException``, so an
-    ``except Exception`` rollback lets it out of the middle of that loop with
-    the master already at the destination and no report beside it — the
-    partial publication the atomic publisher exists to prevent, and the one
-    an interrupt can actually cause (the CLI turns SIGTERM into the same
-    exception, and so does the parent-death watchdog).
-    """
+    """A Ctrl-C before the one pointer commit exposes no public generation."""
     real_replace = os.replace
     calls = {"n": 0}
 
     def interrupted_replace(src: Any, dst: Any) -> None:
         calls["n"] += 1
-        if calls["n"] >= 2:  # the master has landed; now the user hits Ctrl-C
+        if calls["n"] >= 2:  # prepared journal landed; alias creation is interrupted
             raise KeyboardInterrupt
         real_replace(src, dst)
 
@@ -254,8 +246,12 @@ def test_chaos_interrupt_between_renames_rolls_back(
 
     monkeypatch.setattr(os, "replace", real_replace)
     assert calls["n"] >= 2, "the publish never reached the rename that was interrupted"
-    leftovers = sorted(p.name for p in dest_dir.iterdir())
-    assert not leftovers, f"interrupted publish left artifacts at destination: {leftovers}"
+    paths = publication_paths(dest_dir / "out.wav")
+    assert not publication_exists(paths.audio)
+    assert all(not os.path.lexists(path) for path in paths.public)
+    # Hidden immutable staging/recovery evidence may remain, but there is no
+    # authoritative current pointer and no user-visible partial triplet.
+    assert not os.path.lexists(paths.current)
 
 
 @pytest.mark.chaos

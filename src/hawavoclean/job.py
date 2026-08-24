@@ -8,16 +8,16 @@ that produced it. On a crash the workspace survives for forensics only.
 """
 
 import json
-import os
 import shutil
 import tempfile
 from pathlib import Path
 
 from hawavoclean.config import HawaVoCleanConfig
-from hawavoclean.errors import PreflightError, PublicationError
+from hawavoclean.errors import PreflightError
 from hawavoclean.hashing import compute_job_id
 from hawavoclean.journal import JobJournal
 from hawavoclean.paths import work_root
+from hawavoclean.publication import publish_output_generation
 
 
 class JobWorkspace:
@@ -32,6 +32,7 @@ class JobWorkspace:
         guard_id: str,
         base_work_dir: Path | None = None,
         tool_version: str = "1.0.0",
+        restore_context: str | None = None,
     ) -> None:
         self.input_path = input_path.resolve()
         self.input_sha256 = input_sha256
@@ -47,6 +48,7 @@ class JobWorkspace:
             core_hash=self.core_id,
             guard_hash=self.guard_id,
             tool_version=self.tool_version,
+            restore_context=restore_context,
         )
 
         if base_work_dir is None:
@@ -106,74 +108,25 @@ class JobWorkspace:
         txt_summary_str: str,
         overwrite: bool = False,
     ) -> tuple[Path, Path, Path]:
-        """Atomically publish output audio, JSON report, and TXT summary.
+        """Publish output audio, JSON report, and TXT as one committed generation.
 
-        All three artifacts are staged in a temporary directory ON THE
-        DESTINATION FILESYSTEM, so the final renames are always intra-device
-        (no EXDEV) and effectively atomic. If any rename fails, the ones that
-        already happened are rolled back and nothing partial is left behind.
+        The familiar public paths are stable relative aliases through one
+        adjacent ``current`` pointer. Replacing that single pointer commits all
+        three artifacts together; immutable prior generations remain available
+        for recovery. See ADR 0005.
 
         A staticmethod on purpose: it touches no workspace state, and the
         multi-pass orchestrator publishes its amended final report through
         this exact code path rather than a second implementation of the
         atomic-publish discipline.
         """
-        dest_audio = Path(destination_audio_path).resolve()
-        dest_audio.parent.mkdir(parents=True, exist_ok=True)
-
-        dest_json = dest_audio.parent / f"{dest_audio.stem}.hawavoclean.json"
-        dest_txt = dest_audio.parent / f"{dest_audio.stem}.hawavoclean.txt"
-
-        if not overwrite and (dest_audio.exists() or dest_json.exists() or dest_txt.exists()):
-            raise PublicationError(
-                f"Destination output file already exists and overwrite=False: {dest_audio}"
-            )
-
-        if not temp_audio_path.exists():
-            raise PublicationError(f"Temporary candidate audio file missing: {temp_audio_path}")
-
-        staging = Path(tempfile.mkdtemp(prefix=".hawavoclean-publish-", dir=dest_audio.parent))
-        try:
-            staged_audio = staging / dest_audio.name
-            staged_json = staging / dest_json.name
-            staged_txt = staging / dest_txt.name
-
-            shutil.copyfile(temp_audio_path, staged_audio)
-            for staged, content in ((staged_json, json_report_str), (staged_txt, txt_summary_str)):
-                with open(staged, "w", encoding="utf-8") as f:
-                    f.write(content)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-            renamed: list[tuple[Path, Path]] = []
-            try:
-                for staged, dest in (
-                    (staged_audio, dest_audio),
-                    (staged_json, dest_json),
-                    (staged_txt, dest_txt),
-                ):
-                    os.replace(staged, dest)
-                    renamed.append((staged, dest))
-            except BaseException as e:
-                # BaseException, not Exception: a Ctrl-C (or the SIGTERM the
-                # CLI turns into one, or the parent-death watchdog's SIGINT)
-                # can land between two of these renames, and `except
-                # Exception` would let KeyboardInterrupt out of here with one
-                # or two of the three artifacts already at the destination —
-                # a master with no report beside it, which is exactly the
-                # partial publication this method exists to prevent.
-                for _, dest in renamed:
-                    import contextlib
-
-                    with contextlib.suppress(Exception):
-                        dest.unlink()
-                if isinstance(e, Exception):
-                    raise PublicationError(f"Atomic file publish failed: {e}") from e
-                raise  # an interrupt stays an interrupt: the run was cancelled
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-
-        return dest_audio, dest_json, dest_txt
+        return publish_output_generation(
+            temp_audio_path=temp_audio_path,
+            destination_audio_path=destination_audio_path,
+            json_report_str=json_report_str,
+            txt_summary_str=txt_summary_str,
+            overwrite=overwrite,
+        )
 
     def cleanup(self) -> None:
         """Remove the scratch workspace. Called on successful completion."""

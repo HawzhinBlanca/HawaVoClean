@@ -1,12 +1,13 @@
 {
   "name": "hawavoclean-resolve",
-  "version": "0.1.0",
+  "version": "3.3.0",
+  "packageManager": "pnpm@11.22.0",
   "main": "main.js",
   "private": true,
   "scripts": {
     "start": "electron ."
   },
   "devDependencies": {
-    "electron": "^36.3.2"
+    "electron": "43.4.1"
   }
 }

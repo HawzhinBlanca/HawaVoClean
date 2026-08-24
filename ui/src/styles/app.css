@@ -1255,6 +1255,12 @@ kbd {
   font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
+  /* A segment is one word on one line. The pill is a fixed 28px tall and the
+     thumb is measured from the button box, so a label allowed to wrap — the
+     hyphen in "LOW-BAND" was the first to try — breaks onto two lines inside
+     a box that has no room for a second, and the segment stops matching its
+     own thumb. */
+  white-space: nowrap;
   transition: color var(--dur) var(--ease-out);
 }
 
@@ -1973,6 +1979,70 @@ kbd {
   color: var(--fg-2);
 }
 
+/* ---- the restoration audit (Addendum 2) --------------------------------
+ * Rides the run summary as a full-width row under the lead + stats pair; it
+ * is a statement about the whole master, so it never fights them for width.
+ * The reverted state keeps the stats' amber language: the Natural master
+ * shipped, which is the guard succeeding, not the run failing. */
+.rest-card {
+  display: flex;
+  flex: 1 1 100%;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: var(--pad-3) var(--pad-4);
+  border-radius: var(--r-sm);
+  background: var(--glass), linear-gradient(180deg, #06070a, var(--display-2) 72%);
+  box-shadow: var(--shadow-display), var(--vignette-sm);
+}
+
+.rest-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rest-head .caps {
+  color: var(--fg-3);
+}
+
+.rest-head .rest-speaker {
+  font-size: var(--fs-sm);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rest-head .pill {
+  margin-left: auto;
+}
+
+.rest-ship {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--amber);
+}
+
+.rest-rows {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rest-card .insp-row .v {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rest-reason p {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--fg-2);
+}
+
 /* ---- selected unit */
 .insp-grid {
   display: grid;
@@ -2030,7 +2100,8 @@ kbd {
   color: var(--fg-3);
 }
 
-.insp-idhead .pill {
+.insp-idhead .pill,
+.rest-head .pill {
   font-size: var(--fs-label);
   font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
@@ -2512,6 +2583,7 @@ kbd {
 .insp-stats .stat .caps,
 .insp-verdict,
 .insp-idhead .pill,
+.rest-head .pill,
 .tooltip .head .pill,
 .sc-group h3,
 .process .text .stage,

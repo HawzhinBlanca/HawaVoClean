@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "task_id": "T4.2",
+  "recorded_on": "2026-08-21",
+  "source_commit": "6c5e3798fb910aa8b2ff9d038c3aefdce8ed8989",
+  "tools": {
+    "trivy": "0.67.2",
+    "check_jsonschema": "0.35.0",
+    "cyclonedx": "1.6",
+    "pnpm": "11.22.0",
+    "uv": "0.11.14"
+  },
+  "release_bindings": {
+    "container_image_id": "sha256:29019f3458204b18029b449655e94c40d0bc4ee2771695c150392e794b3bbd82",
+    "wheel_sha256": "fbc184afc02798c622600b4b3b768082921bae689ffddf9000dbcad42917ee88",
+    "sdist_sha256": "4046691fc429055f3254a879a95943c3a1a9b79852ac4d13ca7f16970ca557b0",
+    "ui_canonical_tree_sha256": "66050d512787116fd97a04a3a0af8ac219632ad9bad0bf9da031d881e05f4592",
+    "resolve_plugin_canonical_tree_sha256": "9ff91a8ded61b73725763474cca9e4c0d3d447aa6221945e75c0ed5998796e09",
+    "resolve_stage_checksums_sha256": "51fdb3a6cf7a6a7cd2497682f3384d7ac1fc31154c404df6c074ebac06c83fce",
+    "resolve_stage_symlinks_sha256": "f20a8ee4d74295e95bfaceed4f7b238d8def18bb5df746373dcec79f0a261777",
+    "resolve_engine_manifest_sha256": "2a52d9ee955fd92556a4df4f39502ed7f2a0b6dc3d90446eef92cfda40885109",
+    "resolve_engine_checksums_sha256": "3e45383d6ec4a98ee24a3719ce1aa5bbddbce042fc198e3b540ee553645e9b7b",
+    "resolve_engine_symlinks_sha256": "7745bd4e01234d52ed70ea6cf61d691cc83709c06090c1bc5cd114645bec888d"
+  },
+  "sbom": {
+    "path": "evidence/release/hawavoclean-3.3.0.cdx.json",
+    "sha256": "78c0f1488377b67b568a6aab5fcaf63ac61a4a1fdc45824179e8abdc32ca2643",
+    "checksum_file_sha256": "a2f87297d69e72c14a8239f03a34c602ce4eb5893633da47db7d22f508d442a9",
+    "serial_number": "urn:uuid:6b37a97c-e1ba-5744-a7e4-a24fe8d4a06f",
+    "timestamp": "2026-08-21T12:14:58Z",
+    "pinned_schema_sha256": "3e92dddbc30cf7f6a02b80f0942b1a4cfd4fb1c26f1dfc4310afa9d613cafb93",
+    "schema_validation_passed": true,
+    "checksum_validation_passed": true,
+    "byte_identical_regenerations": "2/2"
+  },
+  "inventory": {
+    "components": 303,
+    "dependency_rows": 292,
+    "dependency_edges": 905,
+    "apk_components": 92,
+    "npm_components": 104,
+    "pypi_components": 85,
+    "oci_components": 1,
+    "rpm_components": 1,
+    "vendored_model_files": 8,
+    "artifact_bindings": 4,
+    "components_without_explicit_license_result": 0,
+    "apk_npm_pypi_components_without_cryptographic_hash": 0,
+    "unknown_license_results_are_explicit_noassertion": true
+  },
+  "assertions": {
+    "source_inventory_exported_from_exact_git_commit": true,
+    "untracked_and_ignored_state_excluded": true,
+    "mutable_image_reference_resolved_to_immutable_id": true,
+    "image_source_version_and_date_labels_match": true,
+    "file_artifacts_bind_size_and_sha256": true,
+    "directory_artifacts_bind_paths_contents_modes_and_internal_symlinks": true,
+    "absolute_dangling_and_escaping_artifact_symlinks_rejected": true,
+    "pnpm_npm_uv_and_installed_wolfi_integrities_merged": true,
+    "model_lock_relationships_present": true,
+    "real_sdk_resolve_stage_selftest_passed": true
+  },
+  "failed_attempts_retained": [
+    {
+      "source_commit": "01558b4c7b2a5b392662c9429c293eae30280d18",
+      "failure": "Valid structure still omitted explicit license results and available lock hashes."
+    },
+    {
+      "source_commit": "5449d96a0bddd9f1a93276baa632b2b26a6b85fd",
+      "failure": "Filesystem scanning admitted ignored historical test output into the inventory."
+    },
+    {
+      "source_commit": "a956e9eb52192b9cc842e12335bd3370b5e8d12f",
+      "failure": "Trivy embedded a random temporary source path, breaking byte reproducibility."
+    },
+    {
+      "source_commit": "c63bc4e6a4c7c7ecac0b8caefa648bad5f71139d",
+      "failure": "Equivalent Wolfi source-lock and installed-image package PURLs were not merged across qualifiers."
+    }
+  ],
+  "known_limits": [
+    "This proof artifact is checksum-bound, not identity-signed. A release signature must be produced with the user's authorized release identity at checkpoint U4/T7.3; no signing identity was fabricated or used by the agent.",
+    "The final release gate must rebuild every bound artifact and regenerate, checksum, sign and verify the SBOM from the eventual release commit."
+  ]
+}

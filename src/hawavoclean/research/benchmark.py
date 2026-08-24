@@ -1,9 +1,8 @@
-"""Benchmark harness: measured statistics for the real production core.
+"""Benchmark harness: measured statistics for the production profile.
 
-Runs the actual pipeline over a corpus and reports counted outcomes. There
-is exactly one core; external candidates have never been evaluated and are
-therefore not listed. When a second runner exists, it gets benchmarked
-here — with measured numbers — before it may appear anywhere.
+Runs the actual production pipeline over a corpus and reports counted
+outcomes. It is not a three-profile comparison or evidence for unshipped
+external candidates.
 """
 
 import json

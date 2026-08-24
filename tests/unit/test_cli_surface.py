@@ -29,6 +29,28 @@ def test_doctor_via_main(monkeypatch: Any, tmp_path: Path) -> None:
     assert _run_cli(monkeypatch, "doctor") == 0
 
 
+def test_every_offered_profile_is_actually_runnable() -> None:
+    """The CLI's choices, the engine's profile list, the API's accepted values
+    and the packaged configs must describe the same set.
+
+    A profile offered in one place and missing in another is a run that fails
+    after the user has already committed to it — and `doctor` cannot warn about
+    a config nobody thought to ship.
+    """
+    import typing
+
+    from hawavoclean.cli import PROFILE_CHOICES
+    from hawavoclean.paths import profile_config_path
+    from hawavoclean.server.app import PROFILES, JobRequest
+
+    for name in PROFILE_CHOICES:
+        assert profile_config_path(name).exists(), f"{name}: no packaged config"
+    assert set(PROFILES) <= set(PROFILE_CHOICES), "engine offers a profile the CLI cannot run"
+    accepted = set(typing.get_args(JobRequest.model_fields["profile"].annotation))
+    assert set(PROFILES) <= accepted, "engine advertises a profile its API would reject"
+    assert accepted <= set(PROFILE_CHOICES), "API accepts a profile that has no config"
+
+
 def test_process_missing_input_is_invalid_user_input(monkeypatch: Any, tmp_path: Path) -> None:
     rc = _run_cli(monkeypatch, "process", str(tmp_path / "nope.wav"), "-o", str(tmp_path / "o.wav"))
     assert rc == int(ExitCode.INVALID_USER_INPUT)
@@ -138,3 +160,68 @@ def test_benchmark_command(monkeypatch: Any, tmp_path: Path) -> None:
 
     data = json.loads((tmp_path / "bench.json").read_text())
     assert data["measured"]["units_total"] > 0
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-500"])
+def test_cutoff_hz_refuses_values_that_are_not_frequencies(monkeypatch: Any, bad: str) -> None:
+    """A manual cutoff must be a real frequency, refused before any work starts.
+
+    ``type=float`` took ``nan`` because Python's float() does. It then survived
+    the detector's clamp -- every comparison against NaN is False -- and landed
+    in the report as a value ``json.dumps`` will not emit, so a single typo
+    bought a full enhancement run and then an unwritable report at the end of
+    it. ``inf``, ``0`` and negatives were silently clamped to a bound the user
+    never asked for and never told about.
+    """
+    code = _run_cli(
+        monkeypatch,
+        "process",
+        str(FIXTURE),
+        "-o",
+        "/tmp/hawavoclean-cutoff-check.wav",
+        "--cutoff",
+        "manual",
+        "--cutoff-hz",
+        bad,
+    )
+    assert code != 0, f"--cutoff-hz {bad!r} was accepted"
+
+
+def test_cutoff_hz_accepts_a_real_frequency() -> None:
+    """The guard must not reject the values it exists to let through."""
+    assert cli._cutoff_hz_arg("7800.0") == 7800.0
+    assert cli._cutoff_hz_arg("2000") == 2000.0
+
+
+def test_verify_says_whether_anything_anchors_its_answer(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    """The same PASSED line covered two very different claims.
+
+    With a committed publication bundle beside the audio, the generation's own
+    digests anchor the check and a report edited in step with the audio is
+    caught. With no bundle the report is simply taken as given -- so a pair an
+    attacker had rewritten to agree printed the identical "VERIFICATION
+    PASSED" and exited 0. Callers reading only the exit code still cannot tell
+    those apart; callers reading the output now can.
+    """
+    published = tmp_path / "master.wav"
+    assert _run_cli(monkeypatch, "process", str(FIXTURE), "-o", str(published)) == 0
+    capsys.readouterr()
+
+    report = published.with_suffix(".hawavoclean.json")
+    assert _run_cli(monkeypatch, "verify", str(published), "--report", str(report)) == 0
+    anchored = capsys.readouterr().out
+    assert "the committed generation's own digests" in anchored
+
+    # The same audio and report, moved away from their bundle.
+    loose_audio = tmp_path / "moved" / "master.wav"
+    loose_audio.parent.mkdir()
+    loose_audio.write_bytes(published.read_bytes())
+    loose_report = loose_audio.with_suffix(".hawavoclean.json")
+    loose_report.write_bytes(report.read_bytes())
+
+    assert _run_cli(monkeypatch, "verify", str(loose_audio), "--report", str(loose_report)) == 0
+    loose = capsys.readouterr().out
+    assert "no committed publication bundle" in loose
+    assert "the committed generation's own digests" not in loose

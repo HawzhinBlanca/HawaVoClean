@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "baseline_id": "true-10-2026-08-21",
+  "recorded_at": "2026-08-21T08:22:00Z",
+  "working_tree_clean": true,
+  "source_commits": {
+    "origin_main": "bdcaaf9660902a49b500be70b08be72239436b6e",
+    "continuity_taper": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+    "lowband_branch": "3f2ec25b0859ec6b58160bdf37bcd5f1b09308d9",
+    "release_plan": "e00bd1b851a26a52e5d2fa30bb18bc613ae37668",
+    "v3_2_0_tag": "99b0ddadbf4674e53d4fc6bc6fa05d758d2f0b9d"
+  },
+  "environment": {
+    "os": "macOS 27.0 (26A5406e)",
+    "architecture": "arm64",
+    "python": "3.14.6",
+    "uv": "0.11.14",
+    "git": "2.52.0"
+  },
+  "tracked_artifacts": [
+    {
+      "path": "docs/true-10-plan.md",
+      "source_commit": "e00bd1b851a26a52e5d2fa30bb18bc613ae37668",
+      "sha256": "78840657aff834e5e32d2ad9a83b6d7501f21896407c11f4a63e2760813b1124"
+    },
+    {
+      "path": "uv.lock",
+      "source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "sha256": "c86e7649de8c322182e8cc2f976a8fe3c035b65b2d880923a1a54dbaaf7b06e7"
+    },
+    {
+      "path": "ui/pnpm-lock.yaml",
+      "source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "sha256": "e635ffe3e359f56a7e5ded9dc6a06ebf9e07f46127971887a392156f4cedf37d"
+    },
+    {
+      "path": "src/hawavoclean/resources/models/production-core.lock.toml",
+      "source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "sha256": "ec69136b279426b3d40b2122feedc91fe7d08d054e1e8948cd02aa36c96d44d6"
+    },
+    {
+      "path": "src/hawavoclean/resources/models/studio-core.lock.toml",
+      "source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "sha256": "8af1e4a83c52b550910d3025f11d04d5dc941e33c898057a4350abf0c1991e9d"
+    },
+    {
+      "path": "tests/fixtures/sample_noisy_hum.wav",
+      "source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "sha256": "3df2fadc3a75b334ce412b42422713f171ad2d7f66cd65a1d5fe3e821692c7a9"
+    },
+    {
+      "path": "tests/fixtures/sample_sorani_podcast.wav",
+      "source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "sha256": "cf2f4cdff13af853fa43c485693c886f3f27f247c7e3f83e9b2568f977af6223"
+    }
+  ],
+  "local_external_artifacts": [
+    {
+      "path": "resolve-plugin/com.hawavoclean.resolve/package-lock.json",
+      "role": "ignored standalone-shell dependency lock",
+      "category": "dependency_lock",
+      "sha256": "80d63fd85d0d8ad5a7bb8c411491488420c95586125a4074617ca2f6050ac183"
+    },
+    {
+      "path": "test_output/ui-smoke/Flute 09.m4a.mp4",
+      "role": "private real-audio input",
+      "category": "private_audio",
+      "size_bytes": 3089235,
+      "sha256": "73fdacaf824651107864dcdafeabee4770de065ab34a94eba66eed8ef1508c0f"
+    },
+    {
+      "path": "test_output/deep-audit/Flute09_production.wav",
+      "role": "continuity-taper production reference",
+      "category": "private_audio",
+      "size_bytes": 13624364,
+      "sha256": "75f6a600a56e22bf509898ffbd63836e7846e3ec8d14e4494f65938a8dfd17cc"
+    },
+    {
+      "path": "test_output/deep-audit/Flute09_production.hawavoclean.json",
+      "role": "continuity-taper production report",
+      "category": "private_report",
+      "sha256": "1d5d36d043971ca6d2dce718401b8b19651858a3099121698cb315cf1d8dbe21"
+    },
+    {
+      "path": "test_output/deep-audit/Flute09_studio.wav",
+      "role": "continuity-taper studio reference",
+      "category": "private_audio",
+      "size_bytes": 13624364,
+      "sha256": "a5d418f21592620b71df95c0e208aa5507f1ba45909f86832d0d3ce7c64d0b97"
+    },
+    {
+      "path": "test_output/deep-audit/Flute09_studio.hawavoclean.json",
+      "role": "continuity-taper studio report",
+      "category": "private_report",
+      "sha256": "4b569a50a8e174433f33887a39a4917c957658614eea1809ad164300b8beefe6"
+    }
+  ],
+  "known_limits": [
+    "Local external artifacts are intentionally ignored and are not redistributed by the repository.",
+    "The ignored Resolve package lock records audit-time state but is not a reproducible release input; Phase 4 must replace it with a tracked lock or remove the standalone runtime claim.",
+    "The baseline records historical commit objects; it does not claim moving branch names remain fixed.",
+    "A baseline hash proves identity, not perceptual quality or Sorani content integrity."
+  ]
+}

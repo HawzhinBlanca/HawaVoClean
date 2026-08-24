@@ -10,6 +10,13 @@ import { Segmented } from './Segmented';
  * of a share of it — at every viewport, so there is only one layout to reason
  * about.
  */
+/** What each profile actually is, in the one line the control has for it. */
+const CORE_LINE: Record<Profile, string> = {
+  studio: 'DFN3 restoration core',
+  lowband: 'DFN3 under 1 kHz, original above',
+  production: 'Wiener DSP core',
+};
+
 export function ProfileControl() {
   const profile = useStore((s) => s.profile);
   const setProfile = useStore((s) => s.setProfile);
@@ -27,13 +34,12 @@ export function ProfileControl() {
           onChange={setProfile}
           options={[
             { value: 'studio', label: 'Studio' },
+            { value: 'lowband', label: 'Low-band' },
             { value: 'production', label: 'Production' },
           ]}
         />
       </div>
-      <span className="pc-sub">
-        {profile === 'studio' ? 'DFN3 restoration core' : 'Wiener DSP core'}
-      </span>
+      <span className="pc-sub">{CORE_LINE[profile]}</span>
     </div>
   );
 }

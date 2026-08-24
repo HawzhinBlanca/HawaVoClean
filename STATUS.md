@@ -1,51 +1,109 @@
-# Implementation Status
+# Implementation status
 
-All numbers below were measured on 2026-08-19 in a fresh clone with a fresh
-`uv sync --locked` environment (Python 3.14.5) and no prior state. To
-re-measure: `bash scripts/run_release_checks.sh` and
-`python scripts/mutation_gate.py`.
+HawaVoClean 3.3.0 is an evidence-backed **release candidate in progress**, not a finished release.
+The core code, crash-safe publication, integrated profiles, local release gate and controllable
+runtime hardening are strong. The project must not be called 10/10 or production-released until the
+remaining human, host, governance and vendor-risk gates close.
 
-## What this system is
+The exact volatile counts, proof commits, approval states and advisory totals are generated from
+tracked evidence in [the release-status snapshot](docs/generated-release-status.md). The release
+gate fails if that file drifts from its sources.
 
-An offline dialogue cleanup tool: Wiener spectral denoiser + spectral-change
-guard + deterministic finishing + BS.1770 mastering. No neural models, no
-speech recognition — see README "What it is not".
+## What is implemented
 
-## Measured verification results (fresh clone, 2026-08-19)
+- Three selectable profiles: classical production Wiener DSP, full-band studio DFN3/WPE restoration,
+  and DFN3-below-1-kHz lowband restoration with the original high band preserved.
+- Per-speech-unit fail-closed selection, two guards, sample-exact assembly, continuity taper,
+  deterministic finishing, BS.1770 loudness and 8×-oversampled true-peak limiting.
+- Immutable content-addressed output generations committed through one authoritative `current`
+  pointer. The previous complete generation survives failed overwrite and crash recovery.
+- Schema-v2 provenance, deterministic CycloneDX 1.6 SBOM, bounded loopback server storage/queues,
+  a CPU-only non-root read-only container, and a transactional self-contained Resolve installer.
+- One two-pass local release gate covering Python, fuzz, mutations, UI, packaging, real engineering
+  audio, Resolve staging, container scanning, SBOM and reproducible artifact identities.
+- Result-free Sorani protocol and corpus-source designs that are machine-valid but deliberately
+  refuse approval-dependent execution.
+- An opt-in generative restore mode (`--mode restore`) behind Restoration Guard R: protected-band
+  invariance by construction, fail-closed revert with the rejecting layer's evidence, CPU-pinned
+  deterministic inference, and a mandatory self-attested checkpoint. Its engineering behavior is
+  tested and mutation-covered; its *quality* evidence is currently synthetic-only — the committed
+  checkpoint has never seen real speech, the ten speaker profiles are generated fixtures, and the
+  committed benchmark records restoration degrading LSD on those fixtures. Real-corpus training,
+  real speaker enrollment, and the four-condition human protocol remain open (R-14, T5.6–T5.8).
 
-| Gate | Measured result |
-|---|---|
-| Test suite | 176 passed, 0 failed |
-| Branch coverage (cold, `--cov-fail-under=90`) | 90.82% (91.22% on Py 3.13) |
-| Cold vs warm coverage delta | 0.0 pp (identical) |
-| Mutation gate | 12/12 mutations each break the suite |
-| Ruff format / lint | exit 0 / exit 0 |
-| Mypy `--strict` (126 files) | 0 issues |
-| Doctor from clone dir and from `/` | exit 0 / exit 0 |
-| Re-run determinism (same file twice) | per-unit verdicts identical |
-| `verify` over all 18 produced outputs | 18/18 pass |
-| `audit-models` tamper checks | params tamper → exit 2; bad license → exit 2; clean → exit 0 |
-| Acceptance gates (`hawavoclean eval`) | PASSED 4/4 items; capable of FAILED, enforced under `python -O` |
-| True peak vs −1.0 dBTP ceiling | all outputs ≤ −5.2 dBTP; property-tested at 8× with zero tolerance |
-| Loudness targets | mono −19.0 LUFS, stereo −16.0 LUFS, exact on all samples |
-| Cross-filesystem publish (RAM disk) | process + verify exit 0; small-disk case refused at preflight |
-| Real-time factor (production profile, CPU) | 0.134 |
+## What the strongest proof currently establishes
 
-## Honest caveats that remain
+The latest full proof is bound to source commit `13d43a7`, not automatically to later evidence-summary
+or final-release commits. It passed twice from detached clean checkouts with 1,018 default tests, one
+skip, 41 separate fuzz cases, 23/23 declared mutations, 342 UI tests and 92.73% branch coverage in
+each pass. All ten promised release/engineering identities reproduced. The final candidate must still
+rerun this complete gate after every human, host and governance blocker closes.
 
-- The guard is very conservative on the bundled synthetic corpus: most
-  units come back UNVERIFIED (featureless tones give the probe too few
-  anchors, so it fails closed). Measured on the calibration corpus:
-  0/16 corrupted renderings accepted, 8/8 benign renderings rejected
-  (dominated by UNVERIFIED-on-identity). On real speech, richer spectral
-  structure yields more anchors; no claim is made until that is measured.
-- No Kurdish speech has been processed or evaluated by the maintainers.
+The proof is engineering evidence, not Sorani product validation. Private real speech regressions and
+tracked synthetic fixtures can detect drift; they cannot establish population-level content safety,
+listening quality or dialect coverage.
 
-## History note
+## Real-audio engineering measurements
 
-A previous revision of this file claimed "PRODUCTION READY", "100%
-blueprint-compliant", and a measured zero false-accept rate. Those claims
-were false: the metrics were hardcoded, the model registry was fabricated,
-and the audit trail misreported cached re-runs. The 2026-08-19 repair
-(v2.0.0) removed the fabrications; BLUEPRINT.md is retained as a historical
-design document only.
+The measurements below are frozen engineering references, not corpus averages.
+
+### Lowband reference (24 seconds)
+
+| Chain | Speech/floor separation | Pause rumble | Guard result |
+|---|---:|---:|---|
+| Source | 15.1 dB | −32.3 dB | — |
+| Production | 19.8 dB | −34.6 dB | Enhanced |
+| Studio | 15.1 dB | −30.5 dB | All speech units reverted |
+| Lowband | 29.4 dB | −71.6 dB | Enhanced; hole 0.066; consonants 0.999 |
+| Lowband → production | 35.2 dB | −83.3 dB | Enhanced in both runs |
+
+The earlier 40.0 dB prototype number came from an unguarded, unmastered intermediate. The guarded
+product chain's 35.2 dB is the valid comparison.
+
+### Continuity reference (94.6 seconds)
+
+The production continuity taper preserves five of six guard-passing units instead of cascading one
+failure across the file. Speech/floor separation improved by 7.23 dB over the old fixed-point revert
+behavior. Studio and unrelated lowband outputs remained unchanged except for the separately explained
+version-seeded PCM24 dither identity.
+
+## Open release blockers
+
+1. **GitHub governance (U1/T3.2–T3.3):** billing currently prevents required private-repository jobs;
+   the full matrix and protected `main` are not proved remotely.
+2. **Vendor Electron (T4.6):** Resolve 21.0.3 embeds Electron 36.3.2 with 33 captured advisories,
+   including seven high. HawaVoClean hardens reachable boundaries, but the residual vendor risk needs
+   explicit acceptance or a qualifying Resolve update.
+3. **Sorani evidence (U3/T5):** protocol `896dfc12…` and source design `1f46b23e…` are unapproved.
+   No licensed held-out split, dual-review verdict ledger or listening result exists.
+4. **Real Resolve product (U2/T6):** the transactional installer and staged lifecycle are proved, but
+   the plugin has not completed the real in-host workflow, timeline, keyboard or VoiceOver matrix.
+5. **Final release (T7.2–T7.4/U4):** the eventual source commit must be rebuilt twice, challenged,
+   signed, merged through protection, tagged and published with matching hashes.
+6. **Audio-regression references are stale (U4):** the committed reference reports record a bug that
+   has since been fixed, so `scripts/audio_regression_gate.py` fails on `flute-production` with
+   "unexplained semantic report drift". `input.integrated_lufs` and `input.true_peak_dbtp` used to be
+   measured on the pre-master buffer — the audio after enhancement — while every other field in that
+   block described the source. The references therefore hold -24.107 LUFS / -2.306 dBTP where the
+   input file actually measures -24.887 / -1.195. The audio itself has not drifted; only the report
+   field that was wrong. Fixing this needs the private reference reports regenerated and their
+   `report_sha256` re-pinned in `evidence/release/audio-regressions.json`, which is a user-held
+   artifact and a ledger change. Latent rather than red today because this gate runs only in the
+   self-hosted Apple-silicon job that U1 has not enabled.
+7. **The Resolve engine is built by no hosted job (U1):** `scripts/build_resolve_engine.py` assembles
+   a shipped surface, and only the self-hosted release gate runs it. It installs the wheel without
+   the optional extras, so while `import hawavoclean.cli` briefly required torch the engine could not
+   have started either, and no hosted job would have said so — the wheel smoke in `core` caught the
+   same defect for the CLI. Verified by hand on this branch: the engine builds, and
+   `hawavoclean-engine --version` and `doctor` both succeed with torch absent. The fix is a step in
+   the existing macos-15 `web-resolve` job, which `required` already depends on, so it needs no new
+   check name and no branch-protection change — but `.github/workflows/ci.yml` is pinned by
+   `ci.workflow_sha256` in the governance contract and attested in ledger entry 38, so editing it
+   amends an approved design and belongs with U1 rather than to a passing change.
+
+## Historical correction
+
+The 1.0-era repository claimed “production ready,” blueprint compliance, a Sorani ASR guard and zero
+false accepts. Those claims were false: the registry and metrics were fabricated and cached reruns
+could misreport decisions. The 2026-08-19 rebuild removed those mechanisms. `BLUEPRINT.md` and the
+old changelog entries are retained as historical context, not as current product evidence.

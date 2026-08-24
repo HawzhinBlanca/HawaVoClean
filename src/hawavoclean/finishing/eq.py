@@ -271,6 +271,25 @@ def solve_tonal_gains(
     talk its way past a bound; if the caps bind, the result under-corrects on
     purpose.
     """
+    # Every cap is a MAGNITUDE, and the cut one is negated below. Passing it
+    # already-negative -- the obvious reading of "max cut" -- makes ``lower``
+    # +max and ``upper`` +max, and ``np.clip`` against a collapsed range
+    # returns that single value without complaint: the low shelf then pins to
+    # full lift on every input, including audio measured as needing a cut, and
+    # nothing anywhere says so. Found by making the mistake.
+    caps = {
+        "max_low_cut_db": max_low_cut_db,
+        "max_low_lift_db": max_low_lift_db,
+        "max_presence_db": max_presence_db,
+        "max_brilliance_db": max_brilliance_db,
+    }
+    negative = sorted(name for name, value in caps.items() if value < 0.0)
+    if negative:
+        raise ValueError(
+            f"tonal gain caps are magnitudes and must be >= 0; got negative {', '.join(negative)}. "
+            "max_low_cut_db=6.0 means 'cut by at most 6 dB'."
+        )
+
     want = np.array([want_low_db, want_presence_db, want_brilliance_db], dtype=np.float64)
     gains = want.copy()
     lower = np.array([-max_low_cut_db, 0.0, 0.0])

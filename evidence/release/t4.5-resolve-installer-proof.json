@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "task_id": "T4.5",
+  "recorded_on": "2026-08-21",
+  "source_commit": "aeda2c0f4c9967cabbc1d8d5bd9b91d8754592a8",
+  "platform": {
+    "os": "macOS 27.0",
+    "architecture": "arm64",
+    "python_runtime": "CPython 3.11.15",
+    "node": "22.13.1",
+    "pnpm": "11.22.0",
+    "electron": "43.4.1"
+  },
+  "release_artifacts": {
+    "wheel_sha256": "1c10422df4c37121b66f27a8a78a678e0fc7ebdccd7549a42eae82f43f82d63b",
+    "sdist_sha256": "82aa5fef37b04d1bcb48e82fc9804fd5d6454f1c2bae6fe1d5550fe89a36d250",
+    "wheel_build_id": "1789f87018041269d88d1ab27e1c8c4d61093bf07bda2c2b4f4550936d6d04dc",
+    "engine_manifest_sha256": "43a0542a0d5fc1201f450db5a2880b97f80d90c733bf1fb63ebe35765502489f",
+    "engine_checksums_sha256": "17465aeb0b5045f5888c73c2f5086505ffcc5e0f32872a4393a7ac6ccfdd88a1",
+    "engine_symlinks_sha256": "7745bd4e01234d52ed70ea6cf61d691cc83709c06090c1bc5cd114645bec888d",
+    "engine_size_mib_rounded": 711,
+    "stage_checksums_sha256": "7de66e9e6fa89a05a4b6d72e936112b09eeaf92c29e1a9e447333ae9d7dab3f4",
+    "stage_symlinks_sha256": "f20a8ee4d74295e95bfaceed4f7b238d8def18bb5df746373dcec79f0a261777",
+    "workflow_integration_node_sha256": "91705298c56b649a75bf76be101fea28fbe41b1e88adf4778490ce8b2d14b3e2"
+  },
+  "production_probe": {
+    "input": "tests/fixtures/sample_sorani_podcast.wav",
+    "profile": "production",
+    "output_sha256": "186039f165286d1c0cb62a931db8116a9dcf437b04627b0f4e9040bb30758723",
+    "report_sha256": "271f74a9f36b735465b4fba0d98510aff46b16b3a6377195ea98957c8dc167c2",
+    "text_report_sha256": "cf2c7670df88c2a0f90c53f3986d5f658d768597bfad347f9a9b9efe21d8d9fb",
+    "report_schema_version": 2,
+    "distribution_record_sha256": "7edccd568e35a2978974c53023c64b5dcf070561f211ca1f4abfd138f3cf0410",
+    "verify_passed": true
+  },
+  "assertions": {
+    "independent_engine_build_manifests_identical": true,
+    "temporary_or_repository_path_references": 0,
+    "read_only_relocated_engine_process_passed": true,
+    "engine_checksum_replay_after_process": true,
+    "engine_checksum_replay_after_electron": true,
+    "bytecode_or_cache_files_after_execution": 0,
+    "stage_electron_health_auth_shutdown_passed": true,
+    "actual_sdk_bridge_included": true,
+    "disposable_activation_passed": true,
+    "exact_repeat_preserved_inode": true,
+    "rollback_failure_matrix_passed": "4/4",
+    "default_pytest": "959 passed, 41 deselected",
+    "ui_vitest": "342 passed",
+    "toolchain_audit_known_vulnerabilities": 0,
+    "ui_audit_known_vulnerabilities": 0,
+    "plugin_audit_known_vulnerabilities": 0
+  },
+  "failed_attempts_retained": [
+    {
+      "source_commit": "b3f719a83902702955b943d300ac2cd1f00a7ef9",
+      "failure": "unguarded launcher re-entered the CLI during macOS multiprocessing spawn"
+    },
+    {
+      "source_commit": "e10d0c3fd0be4b734eaf25c87f997af7752e8901",
+      "failure": "runtime bytecode writes invalidated the immutable engine checksum inventory"
+    },
+    {
+      "source_commit": "02b19278e10482299dd29f1897b603a086c7186a",
+      "failure": "temporary wheel URLs and generated script shebangs leaked build paths"
+    },
+    {
+      "source_commit": "02b19278e10482299dd29f1897b603a086c7186a",
+      "failure": "proposed npm 10.9.2 and pnpm 11.5.3 tool closure failed with high/critical advisories"
+    }
+  ],
+  "known_limits": [
+    "The actual Resolve-host workflow and vendor-owned Electron version remain T4.6/T6 work and require user checkpoint U2.",
+    "The self-contained v3.3 Resolve engine is qualified only for Apple silicon macOS.",
+    "FFmpeg and FFprobe remain explicit external prerequisites in /opt/homebrew/bin or /usr/local/bin.",
+    "Temporary proof artifacts are not release artifacts; the final release gate must rebuild and hash the final commit."
+  ]
+}

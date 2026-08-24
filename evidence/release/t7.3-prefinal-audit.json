@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "task_id": "T7.3",
+  "recorded_at": "2026-08-21T15:39:48Z",
+  "source_commit": "2b93176d735d746ebfc5865e7c40f2d36e5f5a3a",
+  "classification": "prefinal_self_audit_not_independent_t7_3_remains_open",
+  "status": "passed_no_open_p0_p1_within_executable_prefinal_scope",
+  "release_gate": {
+    "command": "bash scripts/run_release_checks.sh",
+    "retained_proof_path": "build/release-gate/20260821T151606.910830Z/release-gate-proof.json",
+    "full_proof_file_sha256": "dc410d96c478f1933ff484584c84e7fdb9ffc5de06c352f89ecfa72db478a480",
+    "full_proof_canonical_sha256": "bd32afdedd4a28e0c61dff44fab3b1c82e566d8ded0ee98748c6aac99d6b429b",
+    "clean_checkout_passes": 2,
+    "steps_per_pass": 41,
+    "default_suite_per_pass": {
+      "passed": 1028,
+      "skipped": 1,
+      "fuzz_deselected": 41,
+      "branch_coverage_percent": 92.73
+    },
+    "separate_fuzz_tests_per_pass": 41,
+    "mutations_caught_per_pass": "23/23",
+    "ui_tests_per_pass": 342,
+    "artifact_reproducibility": "passed"
+  },
+  "focused_execution": [
+    {
+      "scope": "publication_security_installer_governance",
+      "command": "uv run pytest -q tests/chaos tests/unit/test_publication_transaction.py tests/unit/test_server_api.py tests/unit/test_server_jobs.py tests/unit/test_server_retention.py tests/unit/test_server_policy.py tests/unit/test_resolve_installer.py tests/unit/test_resolve_security.py tests/unit/test_cli_surface.py tests/unit/test_release_identity.py tests/unit/test_corpus_loading.py tests/unit/test_sorani_evaluation_protocol.py tests/unit/test_sorani_source_assessment.py tests/unit/test_release_evidence.py tests/unit/test_release_gate_checkpoint.py tests/unit/test_generated_release_status.py tests/unit/test_release_sbom.py tests/unit/test_release_documentation.py tests/unit/test_readme_commands_exist.py",
+      "result": "272 passed"
+    },
+    {
+      "scope": "resource_race_determinism",
+      "command": "uv run pytest -q tests/unit/test_memory_bounded_mastering.py tests/unit/test_server_analyze_streaming.py tests/unit/test_server_peaks.py tests/unit/test_worker_stale_reply.py tests/unit/test_watchdog.py tests/unit/test_enhancement_pool.py tests/unit/test_truepeak_parallel.py tests/integration/test_pool_is_bit_identical.py tests/integration/test_report_is_stable_across_runs.py",
+      "result": "106 passed"
+    },
+    {
+      "scope": "ui_and_controlled_resolve_boundary",
+      "command": "pinned pnpm UI typecheck/test/build; bash resolve-plugin/dev/selftest.sh",
+      "result": "342 UI tests passed; staged security/lifecycle scenarios all passed"
+    },
+    {
+      "scope": "precommit_contract",
+      "command": "uv run --frozen pre-commit validate-config && uv run --frozen pre-commit run --all-files",
+      "result": "pinned lint, format, and strict-type hooks passed without rewriting files"
+    }
+  ],
+  "attack_surfaces": [
+    {
+      "surface": "publication",
+      "attacks": "fault injection across write, fsync, rename, pointer activation, alias repair, tamper, and recovery",
+      "result": "passed",
+      "evidence": "tests/unit/test_publication_transaction.py; tests/chaos/test_chaos_recovery.py"
+    },
+    {
+      "surface": "interruption",
+      "attacks": "SIGINT, SIGTERM, SIGKILL, parent death, hung workers, orphan descendants, and interrupted multipass",
+      "result": "passed",
+      "evidence": "tests/chaos; tests/unit/test_watchdog.py; tests/unit/test_enhancement_pool.py"
+    },
+    {
+      "surface": "overwrite",
+      "attacks": "existing destination, input/output collision, concurrent readers, old-generation retention, and rollback",
+      "result": "passed",
+      "evidence": "tests/unit/test_publication_transaction.py; mutation M9; tests/unit/test_cli_surface.py"
+    },
+    {
+      "surface": "provenance",
+      "attacks": "fabricated release identity, tampered report, stale ledger digest, broken ledger link, fabricated checkpoint count, altered raw proof log, and artifact-set removal",
+      "result": "passed_after_findings_closed",
+      "evidence": "tests/unit/test_release_identity.py; tests/unit/test_release_evidence.py; tests/unit/test_generated_release_status.py; tests/unit/test_release_gate_checkpoint.py"
+    },
+    {
+      "surface": "security_boundary",
+      "attacks": "missing/wrong token, traversal, hostile navigation/popup, permission request, remote fetch, service worker, unexpected IPC sender, query-token logging, dependency/image/configuration advisories",
+      "result": "passed_with_vendor_risk_still_unaccepted",
+      "evidence": "tests/unit/test_server_api.py; tests/unit/test_server_policy.py; tests/unit/test_server_serve.py; tests/unit/test_resolve_security.py; resolve-plugin/dev/selftest.sh; release-gate audit/scan steps"
+    },
+    {
+      "surface": "profile_routing",
+      "attacks": "production, studio, lowband, and development route drift across CLI/server/UI/schema/provenance",
+      "result": "passed",
+      "evidence": "tests/unit/test_cli_surface.py; tests/unit/test_release_identity.py; real-audio release-gate step"
+    },
+    {
+      "surface": "corpus_leakage",
+      "attacks": "duplicate IDs, path escape, missing speaker identity, calibration/acceptance speaker overlap, and post-lock mutation",
+      "result": "design_validators_passed_but_real_attack_blocked_without_u3_corpus",
+      "evidence": "tests/unit/test_corpus_loading.py; tests/unit/test_sorani_evaluation_protocol.py; tests/unit/test_sorani_source_assessment.py"
+    },
+    {
+      "surface": "installer_rollback",
+      "attacks": "tampered/unlisted stage files, unknown target ownership, injected activation failure, corrupted candidate, interrupted transaction, upgrade rollback, and idempotent recovery",
+      "result": "passed_in_disposable_target_real_host_still_requires_u2",
+      "evidence": "tests/unit/test_resolve_installer.py; release-gate staged Resolve self-test"
+    },
+    {
+      "surface": "long_run_resources",
+      "attacks": "long-file mastering/analyze/peaks memory, bounded uploads/jobs, worker stale reply, child shutdown, queue pressure, disk reserve, and retention restart",
+      "result": "passed",
+      "evidence": "106-test resource/race run; tests/unit/test_server_jobs.py; tests/unit/test_server_retention.py"
+    },
+    {
+      "surface": "documentation_claims",
+      "attacks": "stale generated status, unsupported commands, version/profile/default mismatch, invalid links, and proof/checkpoint drift",
+      "result": "passed",
+      "evidence": "tests/unit/test_release_documentation.py; tests/unit/test_readme_commands_exist.py; scripts/generate_release_status.py; scripts/validate_release_gate_checkpoint.py"
+    }
+  ],
+  "findings": [
+    {
+      "id": "PREFINAL-001",
+      "severity": "P1",
+      "title": "Generated release status accepted ledger entries without recomputing their self-digests",
+      "reproduction": "Alter the last ledger result summary while preserving its existing entry_sha256; the prior status validator accepted the entry when chain links remained shaped correctly.",
+      "resolution": "Recompute canonical SHA-256 for every entry before rendering status and reject stale digests.",
+      "regression": "tests/unit/test_generated_release_status.py::test_generator_rejects_ledger_content_with_a_stale_self_digest",
+      "closed_by": "2b93176d735d746ebfc5865e7c40f2d36e5f5a3a",
+      "status": "closed"
+    },
+    {
+      "id": "PREFINAL-002",
+      "severity": "P1",
+      "title": "The compact release-gate checkpoint was not mechanically bound to the retained raw proof and logs",
+      "reproduction": "A syntactically valid count or digest could be changed in the compact checkpoint without a derivation check against raw pass records and hash-bound logs.",
+      "resolution": "Add strict checkpoint validation plus optional full derivation of file/canonical hashes, external inputs, step records, logs, metrics, tools, artifacts, and cross-pass identities.",
+      "regression": "tests/unit/test_release_gate_checkpoint.py",
+      "closed_by": "2b93176d735d746ebfc5865e7c40f2d36e5f5a3a",
+      "status": "closed"
+    },
+    {
+      "id": "PREFINAL-003",
+      "severity": "P1",
+      "title": "Pre-commit used stale isolated Ruff/Mypy environments and a mutating lint command",
+      "reproduction": "The all-files hook rewrote 93 untouched files, then failed on stale Ruff rules and 700 Mypy errors caused by missing project dependencies.",
+      "resolution": "Use non-mutating lint/format/type commands from the frozen project environment with the same typed scope as the release gate.",
+      "regression": "tests/unit/test_precommit_contract.py; full pre-commit all-files execution",
+      "closed_by": "2b93176d735d746ebfc5865e7c40f2d36e5f5a3a",
+      "status": "closed"
+    }
+  ],
+  "rejected_hypotheses": [
+    {
+      "hypothesis": "SSE/media query tokens leak through production HTTP access logs",
+      "reason": "The production Uvicorn configuration disables access logging; a regression now pins access_log=false. Tokens are ephemeral, loopback-only, and required because EventSource/media elements cannot attach the custom header."
+    },
+    {
+      "hypothesis": "The Resolve development self-test eval exposes a shipped code-injection surface",
+      "reason": "The eval exists only in the developer shell self-test, receives fixed in-script property expressions, and is absent from the staged plugin and production engine."
+    },
+    {
+      "hypothesis": "The release-gate 0777 container smoke directory grants a shipped privilege",
+      "reason": "The mode applies only to a disposable ignored host bind directory so the pinned non-root container user can write a smoke output; it is neither packaged nor installed."
+    }
+  ],
+  "independent_signoff": {
+    "status": "not_performed",
+    "reason": "This was performed by the implementing agent. T7.3 explicitly requires an independent adversarial release audit and therefore remains unchecked."
+  },
+  "open_release_blockers": [
+    "T3.2/T3.3: GitHub CI and protected governance require U1.",
+    "T4.6: Resolve 21.0.3 vendor Electron risk requires explicit acceptance or a qualifying update.",
+    "T5.1-T5.5: protocol approval, U3 corpus acquisition, dual Sorani review, calibration, and locked listening evidence are absent.",
+    "T6.1-T6.3: U2 installation and actual DaVinci Resolve workflow/VoiceOver evidence are absent.",
+    "T7.2: final artifacts must be reproduced and signed from the eventual release commit.",
+    "T7.3: independent audit/signoff is absent.",
+    "T7.4: U4 protected merge, immutable tag, and publication are absent."
+  ],
+  "known_limits": [
+    "Passing this pre-final self-audit does not complete T7.3 or authorize a 10/10 claim.",
+    "No approved held-out Sorani corpus exists, so real leakage and reviewer-unblinding attacks cannot yet run.",
+    "The disposable installer matrix and standalone Electron shell do not substitute for an installed in-Resolve host matrix.",
+    "The two-pass release proof is bound to source commit 2b93176d735d746ebfc5865e7c40f2d36e5f5a3a; later evidence-only commits require the final T7.2 candidate rerun."
+  ],
+  "audit_sha256": "74427281305cd99d9ead5fa75f2b0ae45c9df5c2bdae64fbc01fc5eab3ecc997"
+}

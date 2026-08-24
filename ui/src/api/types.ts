@@ -7,6 +7,15 @@ export interface HealthResponse {
   version: string;
   profiles: string[];
   engine_pid: number;
+  /**
+   * Restore capability (docs/ui-contract.md, Addendum 2): the sorted speaker
+   * ids whose profiles the engine can load, recomputed per request, and the
+   * one flag the UI keys the restore control's existence on. Optional because
+   * a contract-revision-1 engine never sends them — absence reads exactly
+   * like `restore_available: false`, and the control stays hidden.
+   */
+  speakers?: string[];
+  restore_available?: boolean;
 }
 
 export interface AudioAnalysis {
@@ -47,13 +56,26 @@ export interface PeaksWindow {
   rms_db: number[];
 }
 
-export type Profile = 'studio' | 'production';
+export type Profile = 'studio' | 'lowband' | 'production';
+
+/** Per-job processing mode (docs/ui-contract.md, Addendum 2). */
+export type JobMode = 'natural' | 'restore';
 
 export interface CreateJobRequest {
   input_path: string;
   profile: Profile;
   output_path?: string;
   overwrite?: boolean;
+  /**
+   * Restore-mode fields (Addendum 2). The engine pins this request
+   * `extra="forbid"` and refuses `speaker_id`/`cutoff_hz` outside restore
+   * mode with a 422 — so a natural-mode submit must *omit* all three, never
+   * send null placeholders. `speaker_id` is required with `mode: 'restore'`;
+   * `cutoff_hz` absent means the cutoff is auto-detected.
+   */
+  mode?: JobMode;
+  speaker_id?: string;
+  cutoff_hz?: number;
 }
 
 export interface CreateJobResponse {
@@ -90,6 +112,16 @@ export interface JobStatus {
   output_path: string;
   report_path: string;
   profile: Profile;
+  /**
+   * Always present in a contract-revision-2 snapshot; optional here so a
+   * revision-1 snapshot (or a cached one) still types. `speaker_id` and
+   * `cutoff_hz` appear only when `mode` is `'restore'` — natural snapshots
+   * are byte-compatible with revision 1 — and `cutoff_hz` is null when the
+   * cutoff was auto-detected.
+   */
+  mode?: JobMode;
+  speaker_id?: string;
+  cutoff_hz?: number | null;
   started_at: string | null;
   finished_at: string | null;
   error?: JobError | null;
@@ -157,6 +189,11 @@ export interface UnitSummary {
   unverified?: number;
   error_passthrough?: number;
   continuity_reverted?: number;
+  /** Enhanced units that kept their enhancement across a forced mid-speech cut
+   *  by fading back to the original at the joint, rather than being reverted
+   *  whole. These units are `enhanced` in `final_decision`; the count is here
+   *  so the panel can say what a run paid for continuity. */
+  continuity_crossfaded?: number;
   no_speech?: number;
   finish_applied?: number;
   finish_bypassed?: number;
@@ -171,8 +208,100 @@ export interface ReviewTimecode {
   reason: string;
 }
 
+/** Release identity a schema-v2 report carries (`report.schema.py`). */
+export interface ReleaseMetadata {
+  product: string;
+  version: string;
+  report_schema_version: number;
+  identity_sha256: string;
+}
+
+/** One pass of a multi-pass run. Only the fields the UI presents are typed. */
+export interface PassRecord {
+  pass_index: number;
+  input_sha256: string;
+  output_sha256: string;
+  units_total?: number;
+  enhanced?: number;
+  reverted?: number;
+  chosen_strengths?: number[];
+  separation_db: number;
+  integrated_lufs?: number | null;
+  discarded?: boolean;
+  discard_reason?: string | null;
+}
+
+// ---- restoration section (schema v2, docs/ui-contract.md Addendum 2) -------
+// Field names mirror `hawavoclean.restoration.report.RestorationReport`; the
+// engine serialises the dataclass verbatim, so these are wire names.
+
+export interface RestorationBandwidthEvidence {
+  spectral_rolloff?: number;
+  above_cutoff_snr_db?: number;
+  stationarity?: number;
+  high_band_energy_ratio_db?: number;
+}
+
+export interface RestorationBandwidth {
+  effective_cutoff_hz: number;
+  confidence: number;
+  /** "codec_lowpass" | "steep_brickwall" | "gentle_rolloff" | "fullband" | "manual_override" | … */
+  shape: string;
+  restore_recommended?: boolean;
+  /** "auto" (measured) or "manual" (asserted by the operator). */
+  cutoff_mode?: string;
+  evidence?: RestorationBandwidthEvidence;
+}
+
+export interface RestorationRestorer {
+  name?: string;
+  commit?: string;
+  weights_sha256?: string;
+  checkpoint_path?: string;
+  device?: string;
+  seed_policy?: string;
+  solver?: string;
+  steps?: number;
+  guidance_scale?: number;
+}
+
+export interface RestorationSegments {
+  restored: number;
+  reduced: number;
+  reverted: number;
+  bypassed: number;
+  errors: number;
+}
+
+export interface RestorationGuardR {
+  /** "PASS" | "WARN" | "FAIL" | "ERROR" | "NO_RESTORE" */
+  verdict?: string;
+  accepted_strength?: number;
+  reason?: string;
+  protected_band?: Record<string, unknown>;
+  ctc?: Record<string, unknown>;
+  highband_events?: Record<string, unknown>;
+  harmonic?: Record<string, unknown>;
+  speaker?: Record<string, unknown>;
+}
+
+export interface RestorationSection {
+  mode: string;
+  speaker_id: string | null;
+  profile_hash?: string | null;
+  natural_output_hash?: string | null;
+  bandwidth?: RestorationBandwidth;
+  restorer?: RestorationRestorer;
+  segments?: RestorationSegments;
+  guard_r?: RestorationGuardR;
+  review_timecodes?: unknown[];
+}
+
 export interface HawaVoCleanReport {
   schema_version?: number;
+  /** Schema v2 only; a schema-v1 report never carries either. */
+  release?: ReleaseMetadata | null;
+  build?: Record<string, unknown> | null;
   job_id: string;
   config_hash: string;
   input: MediaStats;
@@ -183,6 +312,10 @@ export interface HawaVoCleanReport {
   summary: UnitSummary;
   review_timecodes?: ReviewTimecode[];
   units?: UnitDecisionRecord[];
+  /** Multi-pass audit trail; empty for the ordinary single-pass run. */
+  passes?: PassRecord[];
+  /** Present only on a restore-mode run (Addendum 2). */
+  restoration?: RestorationSection | null;
 }
 
 // Verdict classes used by the verdict strip. The engine's `final_decision`
@@ -196,6 +329,21 @@ export function classifyDecision(decision: string): VerdictClass {
   if (d.includes('error')) return 'error';
   if (d.includes('revert') || d.includes('continuity') || d.includes('unverified')) return 'reverted';
   return 'passthrough';
+}
+
+/**
+ * Guard R verdicts reuse the verdict-strip classes so the restoration card
+ * speaks the same colour language as the per-unit verdicts. FAIL maps to
+ * `reverted`, not `error`: a failed restoration *shipped the Natural master*,
+ * which is the guard doing its job, not the run breaking. Only ERROR — the
+ * restorer itself falling over — earns the error class.
+ */
+export function classifyRestorationVerdict(verdict: string | null | undefined): VerdictClass {
+  const v = (verdict ?? '').toUpperCase();
+  if (v === 'PASS' || v === 'WARN') return 'enhanced';
+  if (v === 'ERROR') return 'error';
+  if (v === 'FAIL') return 'reverted';
+  return 'passthrough'; // NO_RESTORE and anything unrecognised: Natural shipped untouched
 }
 
 export function decisionLabel(decision: string): string {

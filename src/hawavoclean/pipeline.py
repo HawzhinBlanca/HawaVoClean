@@ -5,10 +5,12 @@ report always describes the run that produced it. The scratch workspace is
 removed on success and survives only a genuine crash, for forensics.
 """
 
+import hashlib
 import os
 import platform
 import time
 import tomllib
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,7 @@ from hawavoclean.errors import (
     CalibrationError,
     ConfigError,
     HawaVoCleanError,
+    InvalidUserInputError,
     PreflightError,
     PublicationError,
     WorkerCrashError,
@@ -63,7 +66,11 @@ from hawavoclean.job import JobWorkspace
 from hawavoclean.journal import JournalEvent
 from hawavoclean.logging import get_logger
 from hawavoclean.paths import models_dir, profile_config_path, resolve_calibration_file
-from hawavoclean.policy.continuity import enforce_source_continuity
+from hawavoclean.policy.continuity import (
+    CONTINUITY_TAPER_ACTION,
+    apply_continuity_taper,
+    resolve_source_continuity,
+)
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from hawavoclean.progress import (
     PROGRESS_DECODE,
@@ -77,6 +84,9 @@ from hawavoclean.progress import (
     emit_progress,
     unit_progress,
 )
+from hawavoclean.provenance import deterministic_settings, runtime_versions
+from hawavoclean.publication import public_output_path, publication_exists, publication_paths
+from hawavoclean.release import REPORT_SCHEMA_VERSION
 from hawavoclean.report.schema import (
     CoreMetadata,
     EnvironmentMetadata,
@@ -86,9 +96,22 @@ from hawavoclean.report.schema import (
     ReviewTimecode,
     UnitDecisionRecord,
     UnitSummary,
+    current_build_metadata,
+    current_release_metadata,
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import serialize_json_report
+from hawavoclean.restoration import (
+    BandwidthDetector,
+    ProfileValidationError,
+    RestorationConfig,
+    RestorationGuard,
+    RestorationPolicyManager,
+    RestorationReport,
+    RestorationSegmentCounts,
+    SegmentRestorationDecision,
+    load_speaker_profile,
+)
 from hawavoclean.segmentation.types import SpeechUnit
 from hawavoclean.segmentation.utterances import build_speech_units
 
@@ -111,18 +134,33 @@ def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> No
       minutes of processing.
     - an unwritable destination directory is refused here, cleanly.
     """
-    sidecars = (
-        out_path,
-        out_path.parent / f"{out_path.stem}.hawavoclean.json",
-        out_path.parent / f"{out_path.stem}.hawavoclean.txt",
-    )
+    # The published master is a RIFF/WAVE stream, so the name has to say so.
+    # ``-o take.mp3`` used to succeed: the file was WAVE, ``file`` reported
+    # "WAVE audio, Microsoft PCM, 24 bit", and every consumer that trusts the
+    # extension -- players, DAWs, an ffmpeg step keyed on suffix -- would have
+    # been handed a mislabelled file. The server already refuses this with
+    # "output_path must end in .wav"; the two surfaces now agree.
+    if out_path.suffix.lower() != ".wav":
+        raise PublicationError(
+            f"Output must be a .wav file, got {out_path.name!r}. "
+            "The published master is RIFF/WAVE audio and the name has to match."
+        )
+    # An existing directory here otherwise surfaced as "Incomplete legacy
+    # output triplet cannot be migrated safely", which describes the
+    # publisher's internal state rather than what the caller did.
+    if out_path.is_dir():
+        raise PublicationError(
+            f"Output path is a directory: {out_path}. Give the path of the .wav to write."
+        )
+
+    sidecars = publication_paths(out_path).public
     for candidate in sidecars:
         if candidate == in_path:
             raise PublicationError(
                 f"Refusing to write output over the input: {in_path}. "
                 "Choose a different output path."
             )
-    if not overwrite and any(c.exists() for c in sidecars):
+    if not overwrite and publication_exists(out_path):
         raise PublicationError(
             f"Destination output file already exists and overwrite=False: {out_path} "
             "(pass --overwrite to replace it)"
@@ -138,7 +176,7 @@ def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> No
         ) from e
 
 
-def _load_core_lock(core_id: str) -> dict[str, Any]:
+def _load_core_lock(core_id: str) -> tuple[dict[str, Any], str]:
     """Load and verify the configured core's lockfile. Missing or mismatched
     provenance is a hard failure, never a silent degradation."""
     registration = resolve_core(core_id)
@@ -157,8 +195,8 @@ def _load_core_lock(core_id: str) -> dict[str, Any]:
             f"Core lockfile missing: {lock_path}. Refusing to run without "
             "verifiable core provenance."
         )
-    with open(lock_path, "rb") as f:
-        lock = tomllib.load(f)
+    raw_lock = lock_path.read_bytes()
+    lock = tomllib.loads(raw_lock.decode("utf-8"))
 
     if lock.get("core_id") != core_id:
         raise PreflightError(
@@ -189,7 +227,7 @@ def _load_core_lock(core_id: str) -> dict[str, Any]:
             raise PreflightError(f"Locked weights file missing: {weight_path}")
         if hash_file(weight_path) != digest:
             raise PreflightError(f"Weights digest mismatch for {rel}")
-    return lock
+    return lock, hash_bytes(raw_lock)
 
 
 def run_pipeline(
@@ -201,6 +239,11 @@ def run_pipeline(
     overwrite: bool = False,
     probe_override: SpectralProbe | None = None,
     on_progress: ProgressCallback | None = None,
+    mode: str = "natural",
+    speaker_id: str | None = None,
+    cutoff: str = "auto",
+    cutoff_hz: float | None = None,
+    profiles_dir: str | Path = "profiles",
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
@@ -208,9 +251,34 @@ def run_pipeline(
     stage boundary; exceptions it raises are logged and ignored.
     """
     in_path = Path(input_path).resolve()
-    out_path = Path(output_path).resolve()
+    out_path = public_output_path(output_path)
 
-    logger.info(f"Starting HawaVoClean pipeline on {in_path} -> {out_path} [profile={profile}]")
+    if mode not in ("natural", "restore"):
+        raise InvalidUserInputError(f"Unknown processing mode: '{mode}' (expected natural|restore)")
+    if mode == "restore" and not speaker_id:
+        raise InvalidUserInputError("Restore mode requires an explicit --speaker-id <ID>")
+    if mode == "restore" and speaker_id:
+        # Fail on a bad speaker id NOW, not at step 10.5. The profile used to
+        # be looked up only when restoration ran, which is after decode,
+        # segmentation and the enhancement of every unit -- so a typo in
+        # --speaker-id cost the user the entire enhancement pass before
+        # admitting the id was never going to resolve.
+        try:
+            load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        except ProfileValidationError as exc:
+            raise InvalidUserInputError(str(exc)) from exc
+    if cutoff not in ("auto", "manual"):
+        raise InvalidUserInputError(f"Unknown cutoff mode: '{cutoff}' (expected auto|manual)")
+    if cutoff == "manual" and cutoff_hz is None:
+        raise InvalidUserInputError("--cutoff manual requires an explicit --cutoff-hz <Hz>")
+    # An explicit frequency *is* manual selection. Deriving the mode here keeps
+    # the report's cutoff_mode truthful whichever way the caller spelled it,
+    # instead of recording "auto" over an operator-asserted boundary.
+    cutoff = "manual" if cutoff_hz is not None else "auto"
+
+    logger.info(
+        f"Starting HawaVoClean pipeline on {in_path} -> {out_path} [profile={profile}, mode={mode}]"
+    )
     _preflight_destination(in_path, out_path, overwrite)
 
     # 1. Configuration, calibration, and core provenance preflight
@@ -228,7 +296,7 @@ def run_pipeline(
         )
     active_guard_cfg = apply_calibrated_thresholds(config.guard, calib_data)
 
-    core_lock = _load_core_lock(config.enhancement.core_id)
+    core_lock, core_lock_sha256 = _load_core_lock(config.enhancement.core_id)
     if bool(core_lock.get("phase_coherent", True)) != config.enhancement.phase_coherent:
         raise ConfigError(
             f"enhancement.phase_coherent = {config.enhancement.phase_coherent} but core "
@@ -258,6 +326,12 @@ def run_pipeline(
         core_id=config.enhancement.core_id,
         guard_id=active_guard_cfg.guard_id,
         tool_version=__version__,
+        # Restore-only inputs belong in the job identity: without them a
+        # natural master and a reconstruction of the same file shared an id,
+        # as did two reconstructions from two different speaker profiles.
+        restore_context=(
+            f"{mode}:{speaker_id}:{cutoff}:{cutoff_hz}" if mode == "restore" else None
+        ),
     )
     workspace.journal.append(
         JournalEvent.JOB_STARTED, {"input": str(in_path), "job_id": workspace.job_id}
@@ -274,7 +348,9 @@ def run_pipeline(
             config,
             active_guard_cfg,
             calib_data,
+            hash_file(calib_path),
             core_lock,
+            core_lock_sha256,
             media,
             workspace,
             in_path,
@@ -282,6 +358,11 @@ def run_pipeline(
             overwrite,
             probe_override,
             on_progress,
+            mode=mode,
+            speaker_id=speaker_id,
+            cutoff=cutoff,
+            cutoff_hz=cutoff_hz,
+            profiles_dir=profiles_dir,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
@@ -290,11 +371,85 @@ def run_pipeline(
         raise
 
 
+#: Restoration segment length. Long enough that Guard R's F0, harmonic and
+#: linguistic layers see real speech context; short enough that one bad moment
+#: costs only its own segment and that per-layer analysis stays bounded however
+#: long the recording is.
+_RESTORE_SEGMENT_S = 10.0
+#: Overlap cross-faded between neighbouring segments, so two segments that
+#: reach different verdicts meet without a click.
+_RESTORE_SEGMENT_OVERLAP_S = 0.25
+_RESTORE_SEGMENT_HOP_S = _RESTORE_SEGMENT_S - _RESTORE_SEGMENT_OVERLAP_S
+
+
+def _restore_in_segments(
+    *,
+    natural_audio: "np.ndarray[Any, np.dtype[np.float32]]",
+    sample_rate: int,
+    bandwidth_est: Any,
+    speaker_profile: Any,
+    policy: RestorationPolicyManager,
+    base_seed: int,
+) -> tuple["np.ndarray[Any, np.dtype[np.float32]]", list[SegmentRestorationDecision]]:
+    """Run the restoration policy over overlapping segments and stitch them.
+
+    The bandwidth estimate is deliberately shared: a band limit is a property of
+    the recording, not of a moment inside it, so re-detecting per segment would
+    let a quiet passage invent a different cutoff and hand the model licence to
+    overwrite content the rest of the file proves is real.
+
+    Each segment is seeded from ``(base_seed, index)``, so the result depends on
+    the job and the position in the file and not on how the work was divided.
+    """
+    n_samples = natural_audio.shape[-1]
+    seg_len = max(int(sample_rate * _RESTORE_SEGMENT_S), 1)
+    overlap = min(int(sample_rate * _RESTORE_SEGMENT_OVERLAP_S), seg_len // 2)
+    hop = max(seg_len - overlap, 1)
+
+    starts: list[int] = []
+    pos = 0
+    while True:
+        starts.append(pos)
+        if pos + seg_len >= n_samples:
+            break
+        pos += hop
+
+    out = np.zeros_like(natural_audio)
+    records: list[SegmentRestorationDecision] = []
+    covered = 0
+    for index, start in enumerate(starts):
+        stop = min(start + seg_len, n_samples)
+        segment = natural_audio[..., start:stop]
+        restored, decision = policy.process_segment(
+            natural_audio=segment,
+            sample_rate=sample_rate,
+            bandwidth_est=bandwidth_est,
+            speaker_profile=speaker_profile,
+            segment_seed=(base_seed + 7919 * index) % (2**63 - 1),
+        )
+        records.append(decision)
+        restored = np.asarray(restored, dtype=np.float32)
+
+        fade = max(0, min(covered - start, stop - start)) if index > 0 else 0
+        if fade > 0:
+            ramp = np.linspace(0.0, 1.0, fade, endpoint=False, dtype=np.float32)
+            out[..., start : start + fade] *= 1.0 - ramp
+            out[..., start : start + fade] += restored[..., :fade] * ramp
+            out[..., start + fade : stop] = restored[..., fade:]
+        else:
+            out[..., start:stop] = restored
+        covered = stop
+
+    return out, records
+
+
 def _run_after_preflight(
     config: HawaVoCleanConfig,
     active_guard_cfg: Any,
     calib_data: dict[str, Any],
+    calibration_sha256: str,
     core_lock: dict[str, Any],
+    core_lock_sha256: str,
     media: AudioProbeResult,
     workspace: JobWorkspace,
     in_path: Path,
@@ -302,6 +457,11 @@ def _run_after_preflight(
     overwrite: bool,
     probe_override: SpectralProbe | None,
     on_progress: ProgressCallback | None = None,
+    mode: str = "natural",
+    speaker_id: str | None = None,
+    cutoff: str = "auto",
+    cutoff_hz: float | None = None,
+    profiles_dir: str | Path = "profiles",
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
     # 4. Decode and classify channels
@@ -319,6 +479,14 @@ def _run_after_preflight(
             bit_depth=media.bit_depth,
             sha256=media.sha256,
         )
+    # The report's ``input`` block describes the file the user handed us, so
+    # its loudness has to be measured here, on the decoded source. It used to
+    # be taken from the pre-master buffer, which is the audio AFTER three
+    # enhancement cores and reassembly -- so a reader comparing input against
+    # output LUFS to see what mastering did was reading enhancement into the
+    # baseline, and every other field beside it (path, sha256, sample_rate)
+    # genuinely described the source.
+    source_loudness = measure_loudness_and_peaks(audio_buf.data, audio_buf.sample_rate)
     channel_mode = classify_channels(audio_buf, declared_mode=config.input.channel_mode)
     audio_buf.channel_mode = channel_mode
     logger.info(f"Channel classification: {channel_mode}")
@@ -543,13 +711,21 @@ def _run_after_preflight(
 
         # 8. Source continuity — BEFORE records are built and units finished,
         # so a continuity revert is what gets finished, recorded, and stitched.
+        # The fades it plans are applied AFTER finishing instead: the seam a
+        # listener hears is between the *finished* enhanced audio and the
+        # original, so fading any earlier would leave the finishing EQ's own
+        # step sitting at the joint.
         continuity_reverted_ids: set[int] = set()
+        taper_in = [0] * len(all_units)
+        taper_out = [0] * len(all_units)
         if config.policy.enforce_continuity:
-            adjusted = enforce_source_continuity(all_units, decisions, orig_core_waveforms)
-            for u, before, after in zip(all_units, decisions, adjusted, strict=True):
-                if before.is_enhanced and not after.is_enhanced:
-                    continuity_reverted_ids.add(u.unit_id)
-            decisions = adjusted
+            resolution = resolve_source_continuity(
+                all_units, decisions, orig_core_waveforms, audio_buf.sample_rate
+            )
+            decisions = resolution.decisions
+            continuity_reverted_ids = resolution.reverted_ids
+            taper_in = resolution.fade_in_samples
+            taper_out = resolution.fade_out_samples
 
         # 9. Finishing (Guard B) on surviving enhanced units, then records
         emit_progress(
@@ -600,6 +776,15 @@ def _run_after_preflight(
                 finish_actions = finish_res.actions_taken
                 guard_b_verdict = finish_res.guard_b_verdict
                 guard_b_scores = finish_res.guard_b_scores
+
+            if taper_in[idx] > 0 or taper_out[idx] > 0:
+                final_wave = apply_continuity_taper(
+                    final_wave, orig_core_waveforms[idx], taper_in[idx], taper_out[idx]
+                )
+                finish_actions = [
+                    *finish_actions,
+                    f"{CONTINUITY_TAPER_ACTION}(in={taper_in[idx]},out={taper_out[idx]})",
+                ]
 
             final_waveforms.append(final_wave)
             workspace.journal.append(
@@ -684,8 +869,121 @@ def _run_after_preflight(
     )
     workspace.journal.append(JournalEvent.ASSEMBLY_COMPLETE)
 
+    # 10.5. Spectral Restoration Subsystem (HawaRestore-KD)
+    restoration_report: dict[str, Any] | None = None
+    if mode == "restore":
+        # Imported here, not at module scope: HawaRestoreKD is a torch model,
+        # torch is an optional extra, and a natural-mode-only install is
+        # supported. At module scope this made every `import hawavoclean.cli`
+        # require torch, so the published wheel could not print its own
+        # version without the restore extra.
+        from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
+
+        assert speaker_id is not None
+        speaker_profile = load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+
+        # Target sample rate for restored output is 48000 Hz
+        target_sr = 48000
+        current_data = assembled_buffer.data
+        if assembled_buffer.sample_rate != target_sr:
+            gcd = np.gcd(assembled_buffer.sample_rate, target_sr)
+            down = assembled_buffer.sample_rate // gcd
+            up = target_sr // gcd
+            current_data = scipy.signal.resample_poly(current_data, up, down, axis=-1).astype(
+                np.float32
+            )
+
+        # Detect bandwidth and effective cutoff
+        bw_detector = BandwidthDetector(sample_rate=target_sr)
+        bw_est = bw_detector.detect(current_data, override_cutoff_hz=cutoff_hz)
+
+        # Run HawaRestore-KD and Guard R
+        restorer = HawaRestoreKD(sample_rate=target_sr)
+        guard_r = RestorationGuard(sample_rate=target_sr)
+        rest_cfg = RestorationConfig(mode="explicit", enabled=True)
+        policy_mgr = RestorationPolicyManager(config=rest_cfg, restorer=restorer, guard=guard_r)
+
+        seed_val = int(hashlib.sha256(workspace.job_id.encode("utf-8")).hexdigest()[:8], 16)
+
+        # Restore in segments, not as one file-length block. Handing the whole
+        # recording to Guard R made every decision all-or-nothing: measured, a
+        # single defective 50 ms window — 0.25% of a 20 s file — failed the
+        # guard and discarded restoration for 100% of it. It also made
+        # ``segments`` and ``review_timecodes`` dead fields that could only ever
+        # read 1-and-zeros and empty, and it let each guard layer's analysis
+        # grow with file length instead of staying bounded.
+        #
+        # Segments overlap and are cross-faded, so neighbours that reach
+        # different verdicts meet without a click at the seam.
+        restored_data, segment_records = _restore_in_segments(
+            natural_audio=current_data,
+            sample_rate=target_sr,
+            bandwidth_est=bw_est,
+            speaker_profile=speaker_profile,
+            policy=policy_mgr,
+            base_seed=seed_val,
+        )
+        counts = Counter(record.action for record in segment_records)
+        # The audit should carry the evidence of a refusal when one happened, so
+        # prefer a segment the guard turned away over one it waved through.
+        rest_dec = next(
+            (r for r in segment_records if r.action in ("reverted", "error")),
+            segment_records[0],
+        )
+        review_segments = [
+            {
+                "segment_index": index,
+                "start_time_s": round(index * _RESTORE_SEGMENT_HOP_S, 3),
+                "action": record.action,
+                "verdict": record.guard_result.verdict if record.guard_result else "n/a",
+                "reason": record.guard_result.reason if record.guard_result else "",
+            }
+            for index, record in enumerate(segment_records)
+            if record.action in ("reverted", "error")
+        ]
+
+        assembled_buffer = AudioBuffer(
+            data=restored_data,
+            sample_rate=target_sr,
+            channel_mode=channel_mode,
+        )
+
+        rest_rep = RestorationReport(
+            mode="restore",
+            speaker_id=speaker_id,
+            profile_hash=speaker_profile.compute_hash(),
+            natural_output_hash=hash_bytes(assembled_data.tobytes()),
+            # ``cutoff_mode`` records whether the protected-band boundary was
+            # measured or asserted by the operator — the reader cannot tell them
+            # apart from the frequency alone.
+            bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
+            restorer={
+                "name": "hawarestore-kd",
+                "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
+                # Reported by the restorer itself, so the hash can only describe
+                # weights that were actually loaded into the network.
+                "weights_sha256": restorer.weights_sha256,
+                "checkpoint_path": str(restorer.checkpoint_path),
+                "device": restorer.device,
+                "seed_policy": "deterministic_job_id",
+                "solver": "midpoint",
+                "steps": 4,
+                "guidance_scale": 0.0,
+            },
+            segments=RestorationSegmentCounts(
+                restored=counts.get("restored", 0),
+                reduced=counts.get("reduced", 0),
+                reverted=counts.get("reverted", 0),
+                bypassed=counts.get("bypassed", 0),
+                errors=counts.get("error", 0),
+            ),
+            guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
+            review_timecodes=review_segments,
+        )
+        restoration_report = rest_rep.to_dict()
+
     # 11. Loudness normalization and true-peak limiting
-    initial_loudness = measure_loudness_and_peaks(
+    premaster_loudness = measure_loudness_and_peaks(
         assembled_buffer.data, assembled_buffer.sample_rate
     )
     target_lufs = (
@@ -695,9 +993,9 @@ def _run_after_preflight(
     )
 
     static_gain_db = compute_static_master_gain(
-        measured_lufs=initial_loudness.integrated_lufs,
+        measured_lufs=premaster_loudness.integrated_lufs,
         target_lufs=target_lufs,
-        current_true_peak_dbtp=initial_loudness.true_peak_dbtp,
+        current_true_peak_dbtp=premaster_loudness.true_peak_dbtp,
         true_peak_ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
         max_limiter_reduction_db=config.loudness.max_limiter_reduction_db,
     )
@@ -753,6 +1051,11 @@ def _run_after_preflight(
     continuity_cnt = sum(
         1 for r in unit_decision_records if r.final_decision == "original_continuity"
     )
+    crossfaded_cnt = sum(
+        1
+        for r in unit_decision_records
+        if any(a.startswith(CONTINUITY_TAPER_ACTION) for a in r.finish_actions)
+    )
     reverted_cnt = sum(1 for r in unit_decision_records if r.final_decision == "original_reverted")
     unverified_cnt = sum(
         1 for r in unit_decision_records if r.final_decision == "original_unverified"
@@ -785,7 +1088,9 @@ def _run_after_preflight(
     out_sha256 = hash_file(tmp_out)
 
     report = HawaVoCleanReport(
-        schema_version=1,
+        schema_version=REPORT_SCHEMA_VERSION,
+        release=current_release_metadata(),
+        build=current_build_metadata(),
         job_id=workspace.job_id,
         config_hash=workspace.config_hash,
         input=MediaStats(
@@ -795,8 +1100,8 @@ def _run_after_preflight(
             channels=media.channels,
             samples=media.samples,
             duration_s=media.duration_s,
-            integrated_lufs=initial_loudness.integrated_lufs,
-            true_peak_dbtp=initial_loudness.true_peak_dbtp,
+            integrated_lufs=source_loudness.integrated_lufs,
+            true_peak_dbtp=source_loudness.true_peak_dbtp,
         ),
         output=MediaStats(
             path=str(out_path),
@@ -813,11 +1118,17 @@ def _run_after_preflight(
             algorithm=str(core_lock["algorithm"]),
             params_hash=str(core_lock["params_hash"]),
             phase_coherent=config.enhancement.phase_coherent,
+            lock_sha256=core_lock_sha256,
+            weight_sha256={
+                str(key): str(value)
+                for key, value in dict(core_lock.get("weight_sha256", {})).items()
+            },
         ),
         guard=GuardMetadata(
             id=active_guard_cfg.guard_id,
             probe_hash=probe.probe_hash,
             calibration_id=str(calib_data["calibration_id"]),
+            calibration_sha256=calibration_sha256,
         ),
         environment=EnvironmentMetadata(
             platform=platform.platform(),
@@ -827,6 +1138,8 @@ def _run_after_preflight(
             scipy_version=scipy.__version__,
             soundfile_version=soundfile.__version__,
             cpu_model=platform.processor(),
+            runtime_versions=runtime_versions(),
+            deterministic_settings=deterministic_settings(config),
         ),
         summary=UnitSummary(
             units_total=len(all_units),
@@ -835,12 +1148,14 @@ def _run_after_preflight(
             unverified=unverified_cnt,
             error_passthrough=error_cnt,
             continuity_reverted=continuity_cnt,
+            continuity_crossfaded=crossfaded_cnt,
             no_speech=no_speech_cnt,
             finish_applied=finish_app_cnt,
             finish_bypassed=finish_byp_cnt,
         ),
         review_timecodes=review_timecodes,
         units=unit_decision_records,
+        restoration=restoration_report,
     )
 
     json_str = serialize_json_report(report)

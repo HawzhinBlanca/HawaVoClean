@@ -4,7 +4,7 @@ from enum import IntEnum
 
 
 class ExitCode(IntEnum):
-    """Standardized process exit codes defined in BLUEPRINT.md."""
+    """Stable process exit codes published by the CLI contract."""
 
     SUCCESS = 0
     PREFLIGHT_FAILURE = 2
@@ -64,7 +64,7 @@ class AmbiguousStereoError(HawaVoCleanError):
 
 
 class PublicationError(HawaVoCleanError):
-    """Raised when final validation or atomic file publication fails."""
+    """Raised when validation or committed-generation publication fails."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message, exit_code=ExitCode.PUBLICATION_FAILURE)

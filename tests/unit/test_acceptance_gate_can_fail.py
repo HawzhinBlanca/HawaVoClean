@@ -5,17 +5,18 @@ from typing import Any
 
 import hawavoclean.eval.acceptance as acceptance_mod
 from hawavoclean.report.schema import (
-    CoreMetadata,
-    EnvironmentMetadata,
-    GuardMetadata,
     HawaVoCleanReport,
     MediaStats,
     UnitSummary,
+    current_release_metadata,
 )
+from tests.support.report_provenance import build, core, environment, guard
 
 
 def _report_violating_sample_count() -> HawaVoCleanReport:
     return HawaVoCleanReport(
+        release=current_release_metadata(),
+        build=build(),
         job_id="testjob",
         config_hash="c" * 64,
         input=MediaStats(
@@ -35,16 +36,9 @@ def _report_violating_sample_count() -> HawaVoCleanReport:
             channels=1,
             duration_s=1.0,
         ),
-        core=CoreMetadata(id="test-core", algorithm="test", params_hash="f" * 64),
-        guard=GuardMetadata(id="test-guard", probe_hash="d" * 64, calibration_id="e" * 64),
-        environment=EnvironmentMetadata(
-            platform="test",
-            os_version="test",
-            python_version="3",
-            numpy_version="0",
-            scipy_version="0",
-            soundfile_version="0",
-        ),
+        core=core("test-core", "test", "f" * 64),
+        guard=guard("test-guard", "d" * 64, "e" * 64),
+        environment=environment(),
         summary=UnitSummary(units_total=1, enhanced=1),
         units=[],
     )
@@ -83,6 +77,8 @@ def _base_report(**overrides: Any) -> HawaVoCleanReport:
     from hawavoclean.report.schema import UnitDecisionRecord
 
     defaults: dict[str, Any] = {
+        "release": current_release_metadata(),
+        "build": build(),
         "job_id": "j",
         "config_hash": "c" * 64,
         "input": MediaStats(
@@ -102,16 +98,9 @@ def _base_report(**overrides: Any) -> HawaVoCleanReport:
             channels=1,
             duration_s=1.0,
         ),
-        "core": CoreMetadata(id="t", algorithm="t", params_hash="f" * 64),
-        "guard": GuardMetadata(id="g", probe_hash="d" * 64, calibration_id="e" * 64),
-        "environment": EnvironmentMetadata(
-            platform="t",
-            os_version="t",
-            python_version="3",
-            numpy_version="0",
-            scipy_version="0",
-            soundfile_version="0",
-        ),
+        "core": core("t", "t", "f" * 64),
+        "guard": guard("g", "d" * 64, "e" * 64),
+        "environment": environment(platform="t", os_version="t"),
         "summary": UnitSummary(units_total=1, enhanced=1),
         "units": [
             UnitDecisionRecord(

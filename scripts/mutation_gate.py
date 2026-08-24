@@ -232,34 +232,19 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "M9",
-        "report and summary never staged (audio published alone)",
-        "src/hawavoclean/job.py",
-        """            shutil.copyfile(temp_audio_path, staged_audio)
-            for staged, content in ((staged_json, json_report_str), (staged_txt, txt_summary_str)):
-                with open(staged, "w", encoding="utf-8") as f:
-                    f.write(content)
-                    f.flush()
-                    os.fsync(f.fileno())
-
-            renamed: list[tuple[Path, Path]] = []
-            try:
-                for staged, dest in (
-                    (staged_audio, dest_audio),
-                    (staged_json, dest_json),
-                    (staged_txt, dest_txt),
-                ):""",
-        """            shutil.copyfile(temp_audio_path, staged_audio)
-
-            renamed: list[tuple[Path, Path]] = []
-            try:
-                for staged, dest in (
-                    (staged_audio, dest_audio),
-                ):""",
-        # Owners: `verify` reads the published report back, so it is the test
-        # that notices when audio is published without its report and summary.
+        "overwrite commit pointer keeps the previous generation",
+        "src/hawavoclean/publication.py",
+        """            _checkpoint("before_pointer_commit")
+            _replace_current(paths, generation_id)
+            _replace_json(""",
+        """            _checkpoint("before_pointer_commit")
+            _replace_current(paths, prior or generation_id)
+            _replace_json(""",
+        # Owner: an overwrite is complete only when the single authoritative
+        # pointer names the new immutable generation. This catches a publisher
+        # that prepares perfect artifacts yet silently keeps serving the old set.
         owners=(
-            "tests/unit/test_cli_surface.py::test_verify_happy_path",
-            "tests/unit/test_cli.py::test_cli_verify_success",
+            "tests/unit/test_publication_transaction.py::test_overwrite_retains_prior_immutable_generation",
         ),
     ),
     Mutation(
@@ -320,6 +305,424 @@ MUTATIONS: list[Mutation] = [
         # block makes auto always run to the cap and ship the last pass.
         owners=(
             "tests/unit/test_multipass.py::test_auto_discards_regressing_pass_and_ships_previous",
+        ),
+    ),
+    Mutation(
+        "M14",
+        "continuity fade lands on the wrong edge",
+        "src/hawavoclean/policy/continuity.py",
+        """    fade_in = max(0, min(fade_in_samples, n))""",
+        """    fade_in_samples, fade_out_samples = fade_out_samples, fade_in_samples
+    fade_in = max(0, min(fade_in_samples, n))""",
+        # Owner: a fade on the wrong edge satisfies every "something faded"
+        # assertion while leaving the seam exactly where it was. Only a test
+        # that checks WHICH edge went back to the original catches it.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_the_fade_removes_the_step_a_hard_cut_leaves",
+        ),
+    ),
+    Mutation(
+        "M15",
+        "continuity ignores a seam on a unit's left edge",
+        "src/hawavoclean/policy/continuity.py",
+        """        left = i > 0 and forced_cut_between(i - 1, i) and not adjusted[i - 1].is_enhanced""",
+        """        left = False""",
+        # Owner: half the seams are on the left. A unit between two originals
+        # would fade only its right edge and ship a hard step on its left.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_a_unit_between_two_originals_fades_on_both_sides",
+            "tests/unit/test_policy_verdict.py::test_enforce_continuity_fades_cut_speech",
+        ),
+    ),
+    Mutation(
+        "M16",
+        "a unit too short to fade is faded anyway instead of reverting",
+        "src/hawavoclean/policy/continuity.py",
+        """    def can_afford_fade(i: int) -> bool:
+        return taper <= len(orig_core_waveforms[i]) * MAX_TAPER_FRACTION""",
+        """    def can_afford_fade(i: int) -> bool:
+        return True""",
+        # Owner: this is the fail-closed path. Without it a 20 ms unit gets a
+        # 30 ms fade — the whole unit, and then some.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_a_unit_too_short_to_fade_still_reverts",
+            "tests/unit/test_continuity_taper.py::test_a_cascade_of_short_units_terminates",
+        ),
+    ),
+    Mutation(
+        "M17",
+        "the pipeline plans the continuity fade and never applies it",
+        "src/hawavoclean/pipeline.py",
+        """            if taper_in[idx] > 0 or taper_out[idx] > 0:
+                final_wave = apply_continuity_taper(
+                    final_wave, orig_core_waveforms[idx], taper_in[idx], taper_out[idx]
+                )
+                finish_actions = [
+                    *finish_actions,
+                    f"{CONTINUITY_TAPER_ACTION}(in={taper_in[idx]},out={taper_out[idx]})",
+                ]
+""",
+        "",
+        # Owner: every unit test covers what the policy DECIDES. Only an
+        # end-to-end run notices when the decision never reaches the audio.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_a_planned_fade_reaches_the_master_and_the_report",
+        ),
+    ),
+    Mutation(
+        "M18",
+        "the continuity fade's ramp becomes a hard step",
+        "src/hawavoclean/policy/continuity.py",
+        "    w = (0.5 - 0.5 * np.cos(np.pi * t)).astype(np.float32)",
+        "    w = (t >= 0.5).astype(np.float32)",
+        # Owner: a step is monotone, bounded in [0,1], and still lands the
+        # original at the joint — so every obvious assertion passes. It is
+        # WORSE than the seam it replaces: it moves the whole discontinuity
+        # 15 ms upstream, off the low-energy zero crossing the segmenter chose.
+        # Only a bound on the ramp's slope tells them apart.
+        owners=(
+            "tests/unit/test_continuity_taper.py::test_the_fade_weight_is_monotone_across_the_window",
+        ),
+    ),
+    Mutation(
+        "M19",
+        "the continuity fade resolves to the candidate, not the original",
+        "src/hawavoclean/pipeline.py",
+        "final_wave, orig_core_waveforms[idx], taper_in[idx], taper_out[idx]",
+        "final_wave, dec.selected_waveform, taper_in[idx], taper_out[idx]",
+        # Owner: the whole promise is that the joint sample IS the original
+        # recording. Fading toward the guard-approved candidate still fades,
+        # still changes the hash, still concentrates the change in the window —
+        # and leaves a step at the joint bigger than applying no fade at all.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_the_joint_of_a_real_forced_cut_is_the_original_recording",
+        ),
+    ),
+    Mutation(
+        "M20",
+        "the continuity fade is planned at the wrong sample rate",
+        "src/hawavoclean/pipeline.py",
+        "all_units, decisions, orig_core_waveforms, audio_buf.sample_rate",
+        "all_units, decisions, orig_core_waveforms, 16000",
+        # Owner: ships a 10 ms fade instead of 30 ms. Every self-consistent
+        # assertion still holds — a fade happened, in the right place, on the
+        # right unit — so only the ABSOLUTE length in the audit trail catches it.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_the_joint_of_a_real_forced_cut_is_the_original_recording",
+        ),
+    ),
+    Mutation(
+        "M21",
+        "a continuity revert is filed under the guard's own REVERT",
+        "src/hawavoclean/pipeline.py",
+        "continuity_reverted_ids = resolution.reverted_ids",
+        "continuity_reverted_ids = set()",
+        # Owner: the guard rejecting audio and this rule spending good audio to
+        # protect a seam are different events, and only the second is a cost
+        # the rule is accountable for. Conflating them hides the rule's price
+        # in a number that means something else — which is how the cascade
+        # stayed invisible for as long as it did.
+        owners=(
+            "tests/integration/test_continuity_taper_pipeline.py::test_a_continuity_revert_is_recorded_as_one",
+        ),
+    ),
+    Mutation(
+        "M22",
+        "band-split crossover moved to 2500 Hz",
+        "src/hawavoclean/enhancement/studio_lowband.py",
+        '"crossover_hz": 1000.0,',
+        '"crossover_hz": 2500.0,',
+        # Owners: the crossover is this core's one locked decision — at 2500 Hz
+        # the measured spectral-hole score is 0.187 against a 0.100 threshold,
+        # i.e. every unit reverted. Moving it must be a relock, so the lockfile
+        # invariant and the params-hash test are the detectors.
+        owners=(
+            "tests/unit/test_studio_core.py::test_every_registered_core_has_a_consistent_lockfile",
+            "tests/unit/test_studio_lowband_core.py::test_crossover_frequency_and_order_are_inside_the_params_hash",
+            "tests/unit/test_studio_lowband_core.py::test_lock_declares_the_shipped_crossover",
+        ),
+    ),
+    Mutation(
+        "M23",
+        "crossover high band taken with a second filter, not the complement",
+        "src/hawavoclean/enhancement/studio_lowband.py",
+        """    low = lowpass_zero_phase(enhanced, sample_rate, crossover_hz, order)
+    orig_low = lowpass_zero_phase(original, sample_rate, crossover_hz, order)
+    return (low + (original - orig_low)).astype(np.float32)""",
+        """    import scipy.signal
+
+    low = lowpass_zero_phase(enhanced, sample_rate, crossover_hz, order)
+    sos = scipy.signal.butter(order, crossover_hz, btype="high", fs=sample_rate, output="sos")
+    orig32 = np.asarray(original, dtype=np.float32)
+    padlen = min(3 * (2 * len(sos) + 1), max(0, len(orig32) - 1))
+    high = np.asarray(
+        scipy.signal.sosfiltfilt(sos, orig32.astype(np.float64), padlen=padlen), dtype=np.float32
+    )
+    return (low + high).astype(np.float32)""",
+        # Owner: the exact reason the split is one filter and a subtraction. Two
+        # independently designed Butterworths sum to a ripple and a phase step
+        # at the crossover — precisely where the first formant is — and only
+        # the reconstruction property notices.
+        owners=(
+            "tests/unit/test_studio_lowband_core.py::test_crossover_reconstructs_the_input_when_the_model_changes_nothing",
+        ),
+    ),
+    Mutation(
+        "M24",
+        "guard protected-band rejection disabled",
+        "src/hawavoclean/restoration/guard.py",
+        "        if not prot_verif.passes_invariance:",
+        "        if False and not prot_verif.passes_invariance:",
+        # Owner: the revert test's broken candidate is rejected by exactly this
+        # layer (its FAIL verdict carries the protected-band metrics). With the
+        # layer disabled the candidate sails through every other check and the
+        # guard ships altered protected-band audio as a PASS.
+        owners=(
+            "tests/unit/test_restoration_guard.py::test_guard_r_revert_is_reported_as_fail_not_pass",
+        ),
+    ),
+    Mutation(
+        "M25",
+        "guard admits the zero-strength Natural candidate to evaluation",
+        "src/hawavoclean/restoration/guard.py",
+        "            (c for c in candidates if c.strength > 0.0), key=lambda c: c.strength, reverse=True",
+        "            (c for c in candidates), key=lambda c: c.strength, reverse=True",
+        # Owner: the original shipped bug. The 0.0 candidate IS the Natural
+        # audio, so scored against itself it passes trivially and a total
+        # revert is published as a passing verdict.
+        owners=(
+            "tests/unit/test_restoration_guard.py::test_guard_r_revert_is_reported_as_fail_not_pass",
+        ),
+    ),
+    Mutation(
+        "M26",
+        "guard clipping rejection threshold effectively removed",
+        "src/hawavoclean/restoration/guard.py",
+        "        if peak_amp > 1.05:",
+        "        if peak_amp > 1e9:",
+        owners=(
+            "tests/unit/test_restoration_dsp_branches.py::test_guard_rejects_clipping_above_headroom",
+        ),
+    ),
+    Mutation(
+        "M27",
+        "protected-band transition mask generates everywhere",
+        "src/hawavoclean/restoration/protected_band.py",
+        "    mask[freqs >= f_high] = 1.0",
+        "    mask[:] = 1.0",
+        # Owners: the mask IS the protected band. All-ones means the trusted
+        # observed spectrum below the cutoff is replaced by generated content.
+        owners=(
+            "tests/unit/test_restoration_protected_band.py::test_transition_mask_shape_and_values",
+            "tests/unit/test_restoration_protected_band.py::test_merge_protected_spectrum_invariance",
+        ),
+    ),
+    Mutation(
+        "M28",
+        "policy healthy-bandwidth bypass deleted",
+        "src/hawavoclean/restoration/policy.py",
+        """        if (
+            not bandwidth_est.restore_recommended
+            or bandwidth_est.confidence < self.config.cutoff_confidence_min
+        ):""",
+        "        if False:",
+        # Owners: healthy or uncertain audio must never enter the generative
+        # path at all — bypassing is the No-False-Restoration promise.
+        owners=(
+            "tests/unit/test_restoration_validation_branches.py::test_bypass_when_bandwidth_healthy",
+            "tests/unit/test_restoration_validation_branches.py::test_bypass_on_low_confidence",
+        ),
+    ),
+    Mutation(
+        "M29",
+        "restorer attests a fabricated weights hash",
+        "src/hawavoclean/restoration/hawarestore_kd.py",
+        "        self.weights_sha256 = hash_file(ckpt_path)",
+        '        self.weights_sha256 = "0" * 64',
+        # Owner: the report's weights_sha256 must be computed from the file the
+        # network actually loaded — a fabricated digest is provenance fraud.
+        owners=(
+            "tests/unit/test_restoration_hawarestore.py::test_hawarestore_kd_reports_hash_of_loaded_weights",
+        ),
+    ),
+    Mutation(
+        "M30",
+        "bandwidth detector recommends restoring full-band audio",
+        "src/hawavoclean/restoration/bandwidth.py",
+        """                confidence=0.95,
+                shape="fullband",
+                restore_recommended=False,""",
+        """                confidence=0.95,
+                shape="fullband",
+                restore_recommended=True,""",
+        # Owner: this early return is where full-band audio is decided now
+        # that the detector requires a cliff rather than a slope. The gate
+        # caught the drift: this mutation used to sit on the 16 kHz rule
+        # below, which no signal reaches, so it went green while the
+        # behaviour it names was in another branch entirely.
+        owners=("tests/unit/test_restoration_bandwidth.py::test_bandwidth_detector_fullband",),
+    ),
+    Mutation(
+        "M31",
+        "strengths ladder no longer requires the 0.0 fallback",
+        "src/hawavoclean/restoration/config.py",
+        """        if 0.0 not in v:
+            raise ValueError("Strengths ladder must include 0.0 as safe fallback candidate.")""",
+        """        if False:
+            raise ValueError("Strengths ladder must include 0.0 as safe fallback candidate.")""",
+        owners=(
+            "tests/unit/test_restoration_validation_branches.py::test_strengths_without_zero_fallback_rejected",
+        ),
+    ),
+    Mutation(
+        "M32",
+        "restore child command loses its absolute profiles dir",
+        "src/hawavoclean/server/jobs.py",
+        """        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]
+        cmd += ["--profiles-dir", str(profiles_root())]""",
+        """        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]""",
+        # Owner: without the explicit absolute dir the child resolves profiles
+        # against its own working directory — the CWD trap this repo has
+        # already been bitten by twice.
+        owners=("tests/unit/test_server_jobs.py::test_default_command_restore_mode_flags",),
+    ),
+    Mutation(
+        "M33",
+        "server stops validating speaker_id before it reaches a child argv",
+        "src/hawavoclean/server/app.py",
+        "        if req.speaker_id is not None and not SPEAKER_ID_PATTERN.fullmatch(req.speaker_id):",
+        "        if False:",
+        owners=("tests/unit/test_server_api.py::test_restore_job_request_validation",),
+    ),
+    Mutation(
+        "M35",
+        "job identity ignores which speaker rebuilt the audio",
+        "src/hawavoclean/hashing.py",
+        '''    if restore_context:
+        composite = f"{composite}:{restore_context}"''',
+        '''    if False:
+        composite = f"{composite}:{restore_context}"''',
+        # Owner: the report, the provenance record and the dither seed are
+        # all keyed on job_id. Drop the restore inputs and a natural master,
+        # a reconstruction of it, and a second speaker's reconstruction all
+        # claim one identity -- in a system whose stated top risk is exactly
+        # that confusion.
+        owners=(
+            "tests/unit/test_hashing_journal.py::test_job_id_separates_a_restoration_from_the_master_it_replaces",
+        ),
+    ),
+    Mutation(
+        "M36",
+        "a profile may be loaded under another speaker's name",
+        "src/hawavoclean/restoration/profiles.py",
+        "    if profile.speaker_id != speaker_id:",
+        "    if False:",
+        # Owner: consent is validated against the id the profile DECLARES,
+        # while the report attributes the run to the name it was looked up
+        # by. Let those differ and a reconstruction is credited to someone
+        # who never agreed to it.
+        owners=(
+            "tests/unit/test_restoration_profiles.py::test_a_profile_may_not_be_looked_up_under_another_speakers_name",
+        ),
+    ),
+    Mutation(
+        "M38",
+        "impulse check scores the recording instead of the change",
+        "src/hawavoclean/restoration/highband_events.py",
+        "        steps = np.abs(np.diff((rest_mono - nat_mono).astype(np.float64)))",
+        "        steps = np.abs(np.diff(rest_mono.astype(np.float64)))",
+        # Owner: score the restored signal instead of the difference and
+        # the metric becomes a property of the RECORDING -- a faithful
+        # restoration of a plosive scores the same 21x the input already
+        # had, and gets rejected for it.
+        owners=(
+            "tests/unit/test_restoration_dsp_branches.py::test_highband_does_not_reject_a_recording_for_its_own_transients",
+        ),
+    ),
+    Mutation(
+        "M39",
+        "restoration package re-exports its torch models eagerly again",
+        "src/hawavoclean/restoration/__init__.py",
+        """_TORCH_BACKED: dict[str, str] = {
+    "HawaRestoreKD": "hawavoclean.restoration.hawarestore_kd",""",
+        """from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD  # noqa: E402, F401
+
+_TORCH_BACKED: dict[str, str] = {
+    "HawaRestoreKD": "hawavoclean.restoration.hawarestore_kd",""",
+        # Owner: torch is an optional extra and a natural-mode-only install
+        # is supported, so the entry point must import without it. Eager
+        # re-export made `hawavoclean --version` impossible on the base
+        # wheel, and only the post-suite smoke step noticed.
+        owners=(
+            "tests/unit/test_optional_torch_dependency.py::test_the_cli_imports_without_torch",
+        ),
+    ),
+    Mutation(
+        "M40",
+        "verify stops saying whether anything anchors its answer",
+        "src/hawavoclean/cli.py",
+        '    if committed is None:\n        print("  Anchored by:         nothing — no committed publication bundle was found")',
+        '    if False:\n        print("  Anchored by:         nothing — no committed publication bundle was found")',
+        # Owner: a loose audio/report pair rewritten to agree passes with
+        # exit 0. That is honest only while the output says the report was
+        # taken on trust rather than anchored by a generation digest.
+        owners=(
+            "tests/unit/test_cli_surface.py::test_verify_says_whether_anything_anchors_its_answer",
+        ),
+    ),
+    Mutation(
+        "M41",
+        "a master may be published under any extension",
+        "src/hawavoclean/pipeline.py",
+        '    if out_path.suffix.lower() != ".wav":',
+        "    if False:",
+        # Owner: the bytes are RIFF/WAVE. Published as .mp3 they are a
+        # mislabelled file for every consumer that trusts the suffix, and
+        # the server refuses the same thing at its own boundary.
+        owners=("tests/unit/test_cli_error_paths.py::test_a_non_wav_output_name_is_refused",),
+    ),
+    Mutation(
+        "M42",
+        "tonal gain caps stop being checked for sign",
+        "src/hawavoclean/finishing/eq.py",
+        "    negative = sorted(name for name, value in caps.items() if value < 0.0)",
+        "    negative = []",
+        # Owner: the cut cap is negated to build the lower bound, so a
+        # negative one collapses the clip range onto a single value and
+        # np.clip returns it silently -- pinning the low shelf to full LIFT
+        # on audio measured as needing a cut.
+        owners=(
+            "tests/unit/test_finishing_tonal_restoration.py::test_tonal_gain_caps_are_magnitudes_and_say_so",
+        ),
+    ),
+    Mutation(
+        "M43",
+        "impulse check judges the segment edges again",
+        "src/hawavoclean/restoration/highband_events.py",
+        "            if outlier.size > 2 * window:",
+        "            if False:",
+        # Owner: a block model has no context past a boundary and its high
+        # band decays there. Counting those samples put legitimate output
+        # at 4.20-11.42 against an 8.0 bound and reverted good work.
+        owners=(
+            "tests/unit/test_restoration_dsp_branches.py::test_highband_does_not_judge_the_first_and_last_window",
+        ),
+    ),
+    Mutation(
+        "M34",
+        "terminal cleanup callbacks run inside the job lock again",
+        "src/hawavoclean/server/jobs.py",
+        """        # Queue the callbacks; ``_locked`` runs them once the lock is released.
+        self._pending_terminal.append(record)""",
+        """        for callback in self._terminal_callbacks:
+            callback(record)""",
+        # Owner: the callbacks the manager invites callers to register have to
+        # be able to ask it a question -- retention checks active_input_paths()
+        # before deleting an upload. Under the lock that is a self-deadlock on
+        # a non-reentrant Lock, which is why the owning test asserts from a
+        # watcher thread: once wedged, every in-line assertion blocks too.
+        owners=(
+            "tests/unit/test_server_retention.py::test_a_terminal_callback_may_ask_the_manager_a_question",
         ),
     ),
 ]

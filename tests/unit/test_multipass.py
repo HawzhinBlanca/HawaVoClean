@@ -30,18 +30,18 @@ from hawavoclean.multipass import (
 )
 from hawavoclean.paths import work_root
 from hawavoclean.progress import ProgressEvent
+from hawavoclean.publication import public_output_path
 from hawavoclean.report.schema import (
-    CoreMetadata,
-    EnvironmentMetadata,
-    GuardMetadata,
     HawaVoCleanReport,
     MediaStats,
     PassRecord,
     UnitDecisionRecord,
     UnitSummary,
+    current_release_metadata,
 )
 from hawavoclean.report.summary import generate_human_summary
 from hawavoclean.report.writer import load_json_report, write_json_report
+from tests.support.report_provenance import build, core, environment, guard
 from tests.support.wavbytes import masked_wav_bytes
 
 REPO = Path(__file__).resolve().parents[2]
@@ -158,20 +158,15 @@ def _report(
     out_sha: str = "b" * 64,
 ) -> HawaVoCleanReport:
     return HawaVoCleanReport(
+        release=current_release_metadata(),
+        build=build(),
         job_id="job",
         config_hash="c" * 64,
         input=_media("in.wav", "a" * 64),
         output=_media("out.wav", out_sha),
-        core=CoreMetadata(id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="e" * 64),
-        guard=GuardMetadata(id="g", probe_hash="f" * 64, calibration_id="cal"),
-        environment=EnvironmentMetadata(
-            platform="p",
-            os_version="v",
-            python_version="3",
-            numpy_version="2",
-            scipy_version="1",
-            soundfile_version="0",
-        ),
+        core=core("wiener-dd-48k-v1", "wiener-dd", "e" * 64),
+        guard=guard("g", "f" * 64, "cal"),
+        environment=environment(platform="p", os_version="v"),
         summary=UnitSummary(units_total=len(units or []), enhanced=1),
         units=units or [],
         passes=passes or [],
@@ -195,15 +190,21 @@ def _pass_record(index: int, sep: float, enhanced: int = 1, **kw: Any) -> PassRe
 
 
 @pytest.mark.unit
-def test_report_passes_default_is_empty_and_schema_version_1() -> None:
+def test_report_passes_default_is_empty_and_legacy_schema_v1_still_loads() -> None:
     rep = _report(passes=None)
     assert rep.passes == []
-    assert rep.schema_version == 1
-    # A pre-multipass report (no "passes" key at all) must still validate.
+    assert rep.schema_version == 2
+    assert rep.release == current_release_metadata()
+    # A pre-v2 report has neither release identity nor the multipass key and
+    # must remain readable without inventing a modern release for it.
     raw = json.loads(rep.model_dump_json())
+    raw["schema_version"] = 1
+    del raw["release"]
+    del raw["build"]
     del raw["passes"]
     old = HawaVoCleanReport.model_validate(raw)
     assert old.passes == []
+    assert old.release is None
 
 
 @pytest.mark.unit
@@ -349,20 +350,15 @@ class _StubPipeline:
             on_progress(ProgressEvent("publish", 0.98, "Publishing master"))
         units = [_unit(0, 1.0 if k > 1 else 0.5, "enhanced"), _unit(1, 0.0, "original_no_speech")]
         return HawaVoCleanReport(
+            release=current_release_metadata(),
+            build=build(),
             job_id=f"job{k}",
             config_hash="c" * 64,
             input=_media(str(in_path), hash_file(in_path) if in_path.exists() else "a" * 64),
             output=_media(str(out_path), hash_file(out_path)),
-            core=CoreMetadata(id="wiener-dd-48k-v1", algorithm="wiener-dd", params_hash="e" * 64),
-            guard=GuardMetadata(id="g", probe_hash="f" * 64, calibration_id="cal"),
-            environment=EnvironmentMetadata(
-                platform="p",
-                os_version="v",
-                python_version="3",
-                numpy_version="2",
-                scipy_version="1",
-                soundfile_version="0",
-            ),
+            core=core("wiener-dd-48k-v1", "wiener-dd", "e" * 64),
+            guard=guard("g", "f" * 64, "cal"),
+            environment=environment(platform="p", os_version="v"),
             summary=UnitSummary(
                 units_total=2, enhanced=self.enhanced[k - 1], no_speech=1, reverted=0
             ),
@@ -410,7 +406,7 @@ def test_explicit_two_passes_chains_input_and_records_both(
     assert stub.calls[1][0] == stub.calls[0][1], "pass 2 must consume pass 1's output"
     assert out.exists()
     assert hash_file(out) == report.output.sha256
-    assert report.output.path == str(out.resolve())
+    assert report.output.path == str(public_output_path(out))
     # Report input is the ORIGINAL source, passes[] chains the journey.
     assert report.input.sha256 == hash_file(src)
     assert [p.pass_index for p in report.passes] == [1, 2]

@@ -95,3 +95,43 @@ def contents(directory: Path) -> list[str]:
     """Sorted names in ``directory`` — every entry, dotfiles included: a
     publish staging directory left behind is litter at the destination too."""
     return sorted(p.name for p in directory.iterdir())
+
+
+def describe(pid: int) -> str:
+    """Best-effort command line for ``pid``, for diagnostics in assertions.
+
+    A bare pid says a process survived but not *what* did, and an orphaned
+    enhancement worker and a lingering multiprocessing resource tracker are
+    different bugs with different fixes.
+    """
+    # /proc first: it is authoritative and, unlike ps, never truncated. Linux
+    # ps trims to the assumed terminal width -- 80 columns on a CI runner --
+    # which cut the survivor line at "python -c from multiprocessi", one word
+    # short of the spawn_main/resource_tracker token this exists to report,
+    # even after the interpreter path was shortened to make room. ``-ww``
+    # covers any platform without /proc.
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    out = ""
+    try:
+        raw = proc_cmdline.read_bytes()
+    except OSError:
+        raw = b""
+    if raw:
+        out = " ".join(part for part in raw.decode("utf-8", "replace").split("\0") if part)
+    if not out:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+    if not out:
+        return "gone"
+    # The interpreter's absolute path is the longest part and the least
+    # informative one. A CI failure reported two survivors as
+    # "…/.venv/bin/python -c from multiprocessi" -- truncated one word before
+    # the only thing that distinguishes an orphaned enhancement worker
+    # (``spawn_main``) from a lingering resource tracker
+    # (``resource_tracker``), which this docstring says are different bugs.
+    head, _, rest = out.partition(" ")
+    out = f"{Path(head).name} {rest}".strip()
+    if len(out) <= 160:
+        return out
+    return f"{out[:80]} … {out[-70:]}"

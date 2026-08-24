@@ -101,3 +101,31 @@ def resolve_client_path(raw: str, *, must_exist: bool = False) -> Path:
         if not exists:
             raise PathPolicyError(404, "not_found", f"file not found: {raw}")
     return resolved
+
+
+def resolve_client_output_path(raw: str) -> Path:
+    """Validate a writable public path without following its final alias.
+
+    A committed HawaVoClean output is a symlink into its adjacent generation
+    bundle. Following that final symlink during an overwrite would silently
+    retarget the job at the immutable old generation. The parent is still
+    fully resolved and checked against policy; only the final public name is
+    preserved lexically for the publisher.
+    """
+    if not raw or not raw.strip():
+        raise PathPolicyError(400, "bad_request", "path is required")
+    refuse_unusable_filename_text(raw)
+    path = Path(raw)
+    if not path.is_absolute():
+        raise PathPolicyError(400, "bad_request", f"path must be absolute: {raw}")
+    try:
+        parent = path.parent.resolve()
+    except (OSError, ValueError) as exc:  # pragma: no cover - defence in depth
+        raise PathPolicyError(400, "bad_request", f"path cannot be resolved: {exc}") from exc
+    if not any(parent == root or parent.is_relative_to(root) for root in allowed_roots()):
+        raise PathPolicyError(
+            403,
+            "forbidden",
+            f"path is outside the allowed locations (home, /Volumes, work dir): {raw}",
+        )
+    return parent / path.name
