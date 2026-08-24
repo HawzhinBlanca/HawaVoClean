@@ -4,6 +4,7 @@ import argparse
 import atexit
 import contextlib
 import json
+import math
 import os
 import queue
 import shutil
@@ -430,7 +431,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 speaker_id=getattr(args, "speaker_id", None),
                 cutoff=getattr(args, "cutoff", "auto"),
                 cutoff_hz=getattr(args, "cutoff_hz", None),
-                profiles_dir=getattr(args, "profiles_dir", "profiles"),
+                profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
             )
         else:
             run_multipass(
@@ -475,6 +476,45 @@ def cmd_process(args: argparse.Namespace) -> int:
     finally:
         if sink is not None:
             sink.close()
+
+
+def _resolve_profiles_dir(explicit: str | Path | None) -> Path:
+    """Where to look for speaker profiles when the caller did not say.
+
+    ``--profiles-dir`` defaulted to the literal relative string ``"profiles"``,
+    which is exactly the working-directory trap :func:`paths.profiles_root`
+    exists to avoid, and it ignored ``HAWAVOCLEAN_PROFILES_DIR`` outright.
+    Running ``process --mode restore`` from the folder holding the audio
+    therefore failed to find profiles that the server and the doctor both
+    located without trouble. An explicit flag still wins; absent one, the CLI
+    resolves the same way as everything else in the system.
+    """
+    if explicit is None:
+        return paths_profiles_root()
+    return Path(explicit)
+
+
+def _cutoff_hz_arg(value: str) -> float:
+    """``--cutoff-hz``: a finite, positive frequency.
+
+    ``type=float`` accepted ``nan`` and ``inf`` because Python's float() does.
+    ``nan`` then survived the detector's clamp -- every comparison against it
+    is False -- and reached the report as a value ``json.dumps`` refuses to
+    emit, so a single typo produced an unwritable report at the very end of a
+    full run. ``inf``, ``0`` and negatives were silently clamped to a bound the
+    user never asked for.
+    """
+    try:
+        hz = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--cutoff-hz must be a frequency in Hz, got {value!r}"
+        ) from None
+    if not math.isfinite(hz) or hz <= 0.0:
+        raise argparse.ArgumentTypeError(
+            f"--cutoff-hz must be a finite positive frequency in Hz, got {value!r}"
+        )
+    return hz
 
 
 def _passes_arg(value: str) -> int | str:
@@ -551,7 +591,7 @@ def cmd_batch_worker(_args: argparse.Namespace) -> int:
                     speaker_id=req.get("speaker_id"),
                     cutoff=str(req.get("cutoff", "auto")),
                     cutoff_hz=req.get("cutoff_hz"),
-                    profiles_dir=req.get("profiles_dir", "profiles"),
+                    profiles_dir=_resolve_profiles_dir(req.get("profiles_dir")),
                 )
                 reply = {"ok": True}
             except HawaVoCleanError as e:
@@ -680,7 +720,7 @@ class _BatchChild:
         speaker_id: str | None = None,
         cutoff: str = "auto",
         cutoff_hz: float | None = None,
-        profiles_dir: str = "profiles",
+        profiles_dir: str | Path | None = None,
     ) -> str:
         deadline = time.monotonic() + timeout_s
         try:
@@ -698,7 +738,7 @@ class _BatchChild:
                 "speaker_id": speaker_id,
                 "cutoff": cutoff,
                 "cutoff_hz": cutoff_hz,
-                "profiles_dir": str(profiles_dir),
+                "profiles_dir": str(_resolve_profiles_dir(profiles_dir)),
             }
             self._proc.stdin.write(json.dumps(payload) + "\n")
             self._proc.stdin.flush()
@@ -767,7 +807,7 @@ def _run_one_isolated(
     speaker_id: str | None = None,
     cutoff: str = "auto",
     cutoff_hz: float | None = None,
-    profiles_dir: str = "profiles",
+    profiles_dir: str | Path | None = None,
 ) -> str:
     """Process one file in a child process under a hard deadline."""
     return _batch_child.run(
@@ -780,7 +820,7 @@ def _run_one_isolated(
         speaker_id=speaker_id,
         cutoff=cutoff,
         cutoff_hz=cutoff_hz,
-        profiles_dir=profiles_dir,
+        profiles_dir=_resolve_profiles_dir(profiles_dir),
     )
 
 
@@ -851,7 +891,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
                     speaker_id=speaker_id,
                     cutoff=getattr(args, "cutoff", "auto"),
                     cutoff_hz=getattr(args, "cutoff_hz", None),
-                    profiles_dir=getattr(args, "profiles_dir", "profiles"),
+                    profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
                 )
             else:
                 status = _run_one_isolated(
@@ -1272,13 +1312,16 @@ def _main() -> None:
     )
     p_proc.add_argument(
         "--cutoff-hz",
-        type=float,
-        help="Explicit cutoff frequency in Hz (e.g. 7800.0)",
+        type=_cutoff_hz_arg,
+        help="Explicit cutoff frequency in Hz (e.g. 7800.0); clamped to the detector range",
     )
     p_proc.add_argument(
         "--profiles-dir",
-        default="profiles",
-        help="Path to speaker profiles directory (default: profiles)",
+        default=None,
+        help=(
+            "Path to speaker profiles directory "
+            "(default: $HAWAVOCLEAN_PROFILES_DIR, else the installed profiles tree)"
+        ),
     )
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"
@@ -1341,13 +1384,16 @@ def _main() -> None:
     )
     p_batch.add_argument(
         "--cutoff-hz",
-        type=float,
-        help="Explicit cutoff frequency in Hz (e.g. 7800.0)",
+        type=_cutoff_hz_arg,
+        help="Explicit cutoff frequency in Hz (e.g. 7800.0); clamped to the detector range",
     )
     p_batch.add_argument(
         "--profiles-dir",
-        default="profiles",
-        help="Path to speaker profiles directory (default: profiles)",
+        default=None,
+        help=(
+            "Path to speaker profiles directory "
+            "(default: $HAWAVOCLEAN_PROFILES_DIR, else the installed profiles tree)"
+        ),
     )
     p_batch.set_defaults(func=cmd_batch)
 

@@ -466,6 +466,10 @@ def test_unknown_request_fields_are_422_not_silently_ignored(
 
 def test_restore_job_submits_and_snapshots_its_mode(client: TestClient, work: Path) -> None:
     src = _tiny_wav(work / "take.wav")
+    # Stage the speaker the job names. /api/health is the contract for which
+    # speakers exist, and a job may not name one it does not list.
+    (work / "profiles" / "character_01").mkdir(parents=True)
+    (work / "profiles" / "character_01" / "profile.json").write_text("{}")
     r = client.post(
         "/api/jobs",
         headers=H,
@@ -833,3 +837,33 @@ def test_sse_keepalive_ping_and_submit_after_shutdown(
             assert r.status_code == 503 and r.json()["error"] == "unavailable"
     finally:
         manager.shutdown()
+
+
+def test_a_job_may_not_name_a_speaker_health_does_not_list(client: TestClient, work: Path) -> None:
+    """An unknown speaker_id is answerable at submit, so it is answered there.
+
+    The id used to pass the grammar check, get queued, and spawn a child that
+    enhanced the entire file before restoration looked the profile up and
+    failed. /api/health already publishes the installed speakers and the UI
+    builds its picker from that list -- the same list answers this now.
+    """
+    src = _tiny_wav(work / "take.wav")
+    (work / "profiles" / "character_01").mkdir(parents=True)
+    (work / "profiles" / "character_01" / "profile.json").write_text("{}")
+
+    listed = client.get("/api/health", headers=H).json()["speakers"]
+    assert listed == ["character_01"]
+
+    r = client.post(
+        "/api/jobs",
+        headers=H,
+        json={
+            "input_path": str(src),
+            "profile": "studio",
+            "mode": "restore",
+            "speaker_id": "character_99",
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert r.json()["error"] == "bad_request"
+    assert "character_99" in r.json()["message"]

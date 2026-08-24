@@ -633,6 +633,18 @@ def create_app(
             # The id becomes a child argv and a path segment: reject anything
             # outside the profile-tree grammar before it can travel.
             raise ApiError(422, "bad_request", "speaker_id must match ^[a-z0-9_]{1,64}$")
+        if req.speaker_id is not None and req.speaker_id not in available_speakers():
+            # /api/health publishes the installed speakers and the UI builds
+            # its picker from that list, so a job naming one that is not there
+            # is answerable now. It used to be accepted, queued, and spawned,
+            # and the id was only checked once the child reached restoration --
+            # after it had enhanced the whole file. Same list, same answer,
+            # before any of that.
+            raise ApiError(
+                422,
+                "bad_request",
+                f"unknown speaker_id {req.speaker_id!r} (see /api/health for installed speakers)",
+            )
         upload_store.scavenge(manager.active_input_paths())
         input_path = resolve_client_path(req.input_path, must_exist=True)
         if req.output_path:

@@ -160,3 +160,34 @@ def test_benchmark_command(monkeypatch: Any, tmp_path: Path) -> None:
 
     data = json.loads((tmp_path / "bench.json").read_text())
     assert data["measured"]["units_total"] > 0
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-500"])
+def test_cutoff_hz_refuses_values_that_are_not_frequencies(monkeypatch: Any, bad: str) -> None:
+    """A manual cutoff must be a real frequency, refused before any work starts.
+
+    ``type=float`` took ``nan`` because Python's float() does. It then survived
+    the detector's clamp -- every comparison against NaN is False -- and landed
+    in the report as a value ``json.dumps`` will not emit, so a single typo
+    bought a full enhancement run and then an unwritable report at the end of
+    it. ``inf``, ``0`` and negatives were silently clamped to a bound the user
+    never asked for and never told about.
+    """
+    code = _run_cli(
+        monkeypatch,
+        "process",
+        str(FIXTURE),
+        "-o",
+        "/tmp/hawavoclean-cutoff-check.wav",
+        "--cutoff",
+        "manual",
+        "--cutoff-hz",
+        bad,
+    )
+    assert code != 0, f"--cutoff-hz {bad!r} was accepted"
+
+
+def test_cutoff_hz_accepts_a_real_frequency() -> None:
+    """The guard must not reject the values it exists to let through."""
+    assert cli._cutoff_hz_arg("7800.0") == 7800.0
+    assert cli._cutoff_hz_arg("2000") == 2000.0

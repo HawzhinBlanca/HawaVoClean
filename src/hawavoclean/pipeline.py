@@ -104,6 +104,7 @@ from hawavoclean.report.writer import serialize_json_report
 from hawavoclean.restoration import (
     BandwidthDetector,
     HawaRestoreKD,
+    ProfileValidationError,
     RestorationConfig,
     RestorationGuard,
     RestorationPolicyManager,
@@ -238,6 +239,16 @@ def run_pipeline(
         raise InvalidUserInputError(f"Unknown processing mode: '{mode}' (expected natural|restore)")
     if mode == "restore" and not speaker_id:
         raise InvalidUserInputError("Restore mode requires an explicit --speaker-id <ID>")
+    if mode == "restore" and speaker_id:
+        # Fail on a bad speaker id NOW, not at step 10.5. The profile used to
+        # be looked up only when restoration ran, which is after decode,
+        # segmentation and the enhancement of every unit -- so a typo in
+        # --speaker-id cost the user the entire enhancement pass before
+        # admitting the id was never going to resolve.
+        try:
+            load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        except ProfileValidationError as exc:
+            raise InvalidUserInputError(str(exc)) from exc
     if cutoff not in ("auto", "manual"):
         raise InvalidUserInputError(f"Unknown cutoff mode: '{cutoff}' (expected auto|manual)")
     if cutoff == "manual" and cutoff_hz is None:
@@ -444,6 +455,14 @@ def _run_after_preflight(
             bit_depth=media.bit_depth,
             sha256=media.sha256,
         )
+    # The report's ``input`` block describes the file the user handed us, so
+    # its loudness has to be measured here, on the decoded source. It used to
+    # be taken from the pre-master buffer, which is the audio AFTER three
+    # enhancement cores and reassembly -- so a reader comparing input against
+    # output LUFS to see what mastering did was reading enhancement into the
+    # baseline, and every other field beside it (path, sha256, sample_rate)
+    # genuinely described the source.
+    source_loudness = measure_loudness_and_peaks(audio_buf.data, audio_buf.sample_rate)
     channel_mode = classify_channels(audio_buf, declared_mode=config.input.channel_mode)
     audio_buf.channel_mode = channel_mode
     logger.info(f"Channel classification: {channel_mode}")
@@ -933,7 +952,7 @@ def _run_after_preflight(
         restoration_report = rest_rep.to_dict()
 
     # 11. Loudness normalization and true-peak limiting
-    initial_loudness = measure_loudness_and_peaks(
+    premaster_loudness = measure_loudness_and_peaks(
         assembled_buffer.data, assembled_buffer.sample_rate
     )
     target_lufs = (
@@ -943,9 +962,9 @@ def _run_after_preflight(
     )
 
     static_gain_db = compute_static_master_gain(
-        measured_lufs=initial_loudness.integrated_lufs,
+        measured_lufs=premaster_loudness.integrated_lufs,
         target_lufs=target_lufs,
-        current_true_peak_dbtp=initial_loudness.true_peak_dbtp,
+        current_true_peak_dbtp=premaster_loudness.true_peak_dbtp,
         true_peak_ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
         max_limiter_reduction_db=config.loudness.max_limiter_reduction_db,
     )
@@ -1050,8 +1069,8 @@ def _run_after_preflight(
             channels=media.channels,
             samples=media.samples,
             duration_s=media.duration_s,
-            integrated_lufs=initial_loudness.integrated_lufs,
-            true_peak_dbtp=initial_loudness.true_peak_dbtp,
+            integrated_lufs=source_loudness.integrated_lufs,
+            true_peak_dbtp=source_loudness.true_peak_dbtp,
         ),
         output=MediaStats(
             path=str(out_path),

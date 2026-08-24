@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from hawavoclean.cli import main
-from hawavoclean.errors import ExitCode
+from hawavoclean.errors import ExitCode, InvalidUserInputError
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _REPO_PROFILES = _REPO_ROOT / "profiles"
@@ -380,3 +380,36 @@ def test_batch_restore_without_speaker_id_exits_4(
     assert code == int(ExitCode.INVALID_USER_INPUT)
     assert "Restore mode requires an explicit --speaker-id" in capsys.readouterr().err
     assert not list(out_dir.glob("*.wav"))
+
+
+def test_an_unknown_speaker_id_is_refused_before_the_audio_is_decoded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad --speaker-id must cost nothing.
+
+    The profile was looked up at restoration time -- step 10.5, after decode,
+    segmentation and the enhancement of every unit -- so a typo bought the
+    whole enhancement pass before the id turned out never to resolve. On the
+    8 s fixture that was half the runtime; on an hour of audio it is the
+    entire job.
+
+    Decode is sabotaged rather than timed: if the speaker check still ran
+    late, the failure that surfaced would be this one, and the wrong error
+    message is the proof.
+    """
+    import hawavoclean.pipeline as pipeline
+
+    def _explode(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("decode must not be reached: the speaker id is already invalid")
+
+    monkeypatch.setattr(pipeline, "decode_audio", _explode)
+
+    with pytest.raises(InvalidUserInputError, match="no_such_speaker"):
+        pipeline.run_pipeline(
+            input_path=_REPO_ROOT / "tests" / "fixtures" / "sample_sorani_podcast.wav",
+            output_path=tmp_path / "out.wav",
+            profile="development",
+            overwrite=True,
+            mode="restore",
+            speaker_id="no_such_speaker",
+        )
