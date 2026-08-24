@@ -642,8 +642,8 @@ MUTATIONS: list[Mutation] = [
         "M38",
         "high-band layer vetoes every candidate that changed anything",
         "src/hawavoclean/restoration/highband_events.py",
-        "            impulse_ratio = float(np.max(steps / (local + 1e-12)))",
-        "            impulse_ratio = float(np.max(steps) / 1e-12)",
+        "            outlier = steps / (local + 1e-12)",
+        "            outlier = steps / 1e-12",
         # Owner: strip the local normalisation and the metric measures
         # raw activity again, so every restoration that adds a high band
         # trips it -- which is how the old endpoint-offset metric came to
