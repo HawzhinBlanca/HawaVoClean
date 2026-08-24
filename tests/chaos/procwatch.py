@@ -107,4 +107,16 @@ def describe(pid: int) -> str:
     out = subprocess.run(
         ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
     ).stdout.strip()
-    return out[:120] if out else "gone"
+    if not out:
+        return "gone"
+    # The interpreter's absolute path is the longest part and the least
+    # informative one. A CI failure reported two survivors as
+    # "…/.venv/bin/python -c from multiprocessi" -- truncated one word before
+    # the only thing that distinguishes an orphaned enhancement worker
+    # (``spawn_main``) from a lingering resource tracker
+    # (``resource_tracker``), which this docstring says are different bugs.
+    head, _, rest = out.partition(" ")
+    out = f"{Path(head).name} {rest}".strip()
+    if len(out) <= 160:
+        return out
+    return f"{out[:80]} … {out[-70:]}"
