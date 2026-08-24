@@ -104,9 +104,24 @@ def describe(pid: int) -> str:
     enhancement worker and a lingering multiprocessing resource tracker are
     different bugs with different fixes.
     """
-    out = subprocess.run(
-        ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
-    ).stdout.strip()
+    # /proc first: it is authoritative and, unlike ps, never truncated. Linux
+    # ps trims to the assumed terminal width -- 80 columns on a CI runner --
+    # which cut the survivor line at "python -c from multiprocessi", one word
+    # short of the spawn_main/resource_tracker token this exists to report,
+    # even after the interpreter path was shortened to make room. ``-ww``
+    # covers any platform without /proc.
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    out = ""
+    try:
+        raw = proc_cmdline.read_bytes()
+    except OSError:
+        raw = b""
+    if raw:
+        out = " ".join(part for part in raw.decode("utf-8", "replace").split("\0") if part)
+    if not out:
+        out = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
     if not out:
         return "gone"
     # The interpreter's absolute path is the longest part and the least
