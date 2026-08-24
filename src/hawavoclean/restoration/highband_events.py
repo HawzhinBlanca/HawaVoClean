@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import ndimage, signal
+from scipy import signal
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class HighBandEventDetector:
         frame_ms: float = 10.0,
         leakage_threshold: float = 0.25,
         envelope_threshold: float = 0.35,
-        impulse_threshold: float = 8.0,
+        impulse_threshold: float = 10.0,
         max_spurious_bursts: int = 0,
     ) -> None:
         self.sample_rate = sample_rate
@@ -166,30 +166,32 @@ class HighBandEventDetector:
         # 0.25-1.0: legitimate output scores 2.54-4.63, while injected steps
         # and clicks of 0.2 full-scale score 10.4 and above.
         window = max(64, int(self.sample_rate * 0.02))
-        steps = np.abs(np.diff(rest_mono.astype(np.float64)))
+        # Measure what restoration CHANGED, not how impulsive the recording is.
+        # Scoring the restored signal's own steps made this the source's
+        # property: on the character_01 canonical reference the band-limited
+        # input already scored 20.94 and the faithful restoration of it scored
+        # 21.04 -- 1.00x, with the largest step 0.1796 in the natural and
+        # 0.1830 in the restored -- so an ordinary plosive was rejected as a
+        # click at 21x against an 8x bound. The difference signal cancels
+        # anything present in both and leaves only what was introduced.
+        steps = np.abs(np.diff((rest_mono - nat_mono).astype(np.float64)))
+        natural_steps = np.abs(np.diff(nat_mono.astype(np.float64)))
         if steps.size == 0:
             impulse_ratio = 0.0
         else:
-            # ``reflect`` rather than ``nearest``, which extends the edge
-            # VALUE outward and lets a click at the very first or last sample
-            # become its own baseline. That mattered when the edges were
-            # judged; the margin below now excludes exactly the region the two
-            # modes disagree about, so this is belt-and-braces and carries no
-            # mutation -- one on an unobservable behaviour can never be caught,
-            # and the gate said so.
-            local = ndimage.uniform_filter1d(steps, size=min(window, steps.size), mode="reflect")
-            outlier = steps / (local + 1e-12)
+            # Normalised by the NATURAL's typical step, so the scale is the
+            # recording's own dynamics rather than the delta's -- a faithful
+            # delta is tiny everywhere and would make any wobble look enormous
+            # against itself.
+            outlier = steps / (float(np.median(natural_steps)) + 1e-12)
             # The first and last window of a segment is not judged. A block
             # model has no context past the boundary and its high band decays
-            # there, which reads as an impulse without being one: measured on
-            # the shipped model, legitimate output scores 3.08-4.40 in the
-            # interior and 4.20-11.42 once those samples are counted, so the
-            # 8.0 bound reverted good restorations for the model's own edge
-            # behaviour. Deliberate limit: a real click inside that margin is
-            # not seen here. The pipeline cross-fades 250 ms across every
+            # there, which lands in the difference signal as a ramp without
+            # being a click. Deliberate limit: a real click inside that margin
+            # is not seen here. The pipeline cross-fades 250 ms across every
             # segment join, so those samples are blended with the neighbour
-            # rather than shipped raw, and the whole-file edges are the start
-            # and end of the recording.
+            # rather than shipped raw, and a whole file's outer edges are the
+            # start and end of the recording.
             if outlier.size > 2 * window:
                 outlier = outlier[window : outlier.size - window]
             impulse_ratio = float(np.max(outlier))

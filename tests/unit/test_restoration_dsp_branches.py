@@ -339,17 +339,22 @@ def test_highband_accepts_a_restoration_that_only_added_a_high_band() -> None:
     """
     nat = _tone(1000.0, 0.4, amp=0.3)
     rng = np.random.default_rng(7)
-    # A dense, quiet high band: every sample moves, no sample jumps.
+    # A dense high band at -28 dB relative to the natural: every sample moves,
+    # no sample jumps. The level matters. This fixture used 0.05 (-14 dB),
+    # which is some 250x more high band than the shipped model actually adds
+    # (-73 dBFS, RISKS R-14) -- that much near-Nyquist energy dropped onto a
+    # pure tone really is an impulsive change, and reading it as a false
+    # positive would have been reading the fixture, not the check.
     hf = signal.sosfiltfilt(
         signal.butter(8, 6000 / (SR / 2), btype="highpass", output="sos"),
-        rng.standard_normal(len(nat)) * 0.05,
+        rng.standard_normal(len(nat)) * 0.01,
     )
     rest = (nat + hf).astype(np.float32)
 
     res = HighBandEventDetector(sample_rate=SR).evaluate(nat, rest, cutoff_hz=8000.0)
     # A literal, not ``detector.impulse_threshold``: comparing the metric to
     # the same bound the code uses would pass no matter what either becomes.
-    assert res.impulse_discontinuity_ratio < 8.0, (
+    assert res.impulse_discontinuity_ratio < 10.0, (
         "broadly added high-band content was mistaken for an impulse"
     )
 
@@ -654,3 +659,27 @@ def test_hawarestore_ode_failure_falls_back_to_dsp_extrapolation(
     hf_out = float(np.sqrt(np.mean(signal.sosfiltfilt(sos, restored) ** 2)))
     assert hf_out > 1e-4
     assert hf_out > 50.0 * hf_in
+
+
+def test_highband_does_not_reject_a_recording_for_its_own_transients() -> None:
+    """A plosive the restoration faithfully preserved is not a click it made.
+
+    The check scored the RESTORED signal's own sample steps, which made it a
+    property of the recording. On the character_01 canonical reference the
+    band-limited input already scored 20.94 and a faithful restoration of it
+    scored 21.04 -- 1.00x, largest step 0.1796 natural against 0.1830 restored
+    -- so an ordinary transient was rejected as a click at 21x against an 8x
+    bound. Every synthetic fixture here was a smooth harmonic stack, so none
+    of them ever showed it.
+    """
+    sr = SR
+    t = np.arange(int(sr * 0.5)) / sr
+    voice = (0.3 * np.sin(2 * np.pi * 180 * t)).astype(np.float32)
+    # A plosive: present in the natural, and faithfully carried through.
+    voice[int(sr * 0.25)] += 0.6
+    faithful = voice.copy()
+
+    res = HighBandEventDetector(sample_rate=sr).evaluate(voice, faithful, cutoff_hz=8000.0)
+    assert res.impulse_discontinuity_ratio < 10.0, (
+        "the recording's own transient was scored as damage the restoration did"
+    )

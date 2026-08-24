@@ -627,16 +627,16 @@ MUTATIONS: list[Mutation] = [
     ),
     Mutation(
         "M38",
-        "high-band layer vetoes every candidate that changed anything",
+        "impulse check scores the recording instead of the change",
         "src/hawavoclean/restoration/highband_events.py",
-        "            outlier = steps / (local + 1e-12)",
-        "            outlier = steps / 1e-12",
-        # Owner: strip the local normalisation and the metric measures
-        # raw activity again, so every restoration that adds a high band
-        # trips it -- which is how the old endpoint-offset metric came to
-        # admit only the candidate that changes nothing.
+        "        steps = np.abs(np.diff((rest_mono - nat_mono).astype(np.float64)))",
+        "        steps = np.abs(np.diff(rest_mono.astype(np.float64)))",
+        # Owner: score the restored signal instead of the difference and
+        # the metric becomes a property of the RECORDING -- a faithful
+        # restoration of a plosive scores the same 21x the input already
+        # had, and gets rejected for it.
         owners=(
-            "tests/unit/test_restoration_dsp_branches.py::test_highband_accepts_a_restoration_that_only_added_a_high_band",
+            "tests/unit/test_restoration_dsp_branches.py::test_highband_does_not_reject_a_recording_for_its_own_transients",
         ),
     ),
     Mutation(
