@@ -2,6 +2,7 @@
 
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -78,16 +79,24 @@ def test_process_hawavoclean_error_exit_code(monkeypatch: Any, tmp_path: Path) -
 
 
 @pytest.fixture(scope="module")
-def published(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
-    """One processed output shared by the verify-mismatch tests."""
-    import os
+def published(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, Path]]:
+    """One processed output shared by the verify-mismatch tests.
 
+    The work-dir override is undone afterwards. It used to be a bare
+    ``os.environ[...] = ...`` in a module-scoped fixture, so every test that
+    ran after this module in the same process inherited a work root pointing
+    into this module's temp directory -- the sort of leak that makes a test
+    pass alone and fail in a suite, which is how it was noticed.
+    ``pytest.MonkeyPatch`` as a context manager is the supported way to do
+    this outside function scope.
+    """
     tmp = tmp_path_factory.mktemp("pub")
-    os.environ["HAWAVOCLEAN_WORK_DIR"] = str(tmp / "w")
-    from hawavoclean.pipeline import run_pipeline
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp / "w"))
+        from hawavoclean.pipeline import run_pipeline
 
-    run_pipeline(input_path=FIXTURE, output_path=tmp / "v.wav", overwrite=True)
-    return tmp / "v.wav", tmp / "v.hawavoclean.json"
+        run_pipeline(input_path=FIXTURE, output_path=tmp / "v.wav", overwrite=True)
+        yield tmp / "v.wav", tmp / "v.hawavoclean.json"
 
 
 def _tampered_report(report: Path, tmp_path: Path, field: str, value: object) -> Path:
