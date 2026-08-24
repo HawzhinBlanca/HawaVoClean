@@ -10,6 +10,7 @@ import os
 import platform
 import time
 import tomllib
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,7 @@ from hawavoclean.restoration import (
     RestorationPolicyManager,
     RestorationReport,
     RestorationSegmentCounts,
+    SegmentRestorationDecision,
     load_speaker_profile,
 )
 from hawavoclean.segmentation.types import SpeechUnit
@@ -332,6 +334,78 @@ def run_pipeline(
         # not leak a scratch workspace; a genuine crash keeps it for forensics.
         workspace.cleanup()
         raise
+
+
+#: Restoration segment length. Long enough that Guard R's F0, harmonic and
+#: linguistic layers see real speech context; short enough that one bad moment
+#: costs only its own segment and that per-layer analysis stays bounded however
+#: long the recording is.
+_RESTORE_SEGMENT_S = 10.0
+#: Overlap cross-faded between neighbouring segments, so two segments that
+#: reach different verdicts meet without a click.
+_RESTORE_SEGMENT_OVERLAP_S = 0.25
+_RESTORE_SEGMENT_HOP_S = _RESTORE_SEGMENT_S - _RESTORE_SEGMENT_OVERLAP_S
+
+
+def _restore_in_segments(
+    *,
+    natural_audio: "np.ndarray[Any, np.dtype[np.float32]]",
+    sample_rate: int,
+    bandwidth_est: Any,
+    speaker_profile: Any,
+    policy: RestorationPolicyManager,
+    base_seed: int,
+) -> tuple["np.ndarray[Any, np.dtype[np.float32]]", list[SegmentRestorationDecision]]:
+    """Run the restoration policy over overlapping segments and stitch them.
+
+    The bandwidth estimate is deliberately shared: a band limit is a property of
+    the recording, not of a moment inside it, so re-detecting per segment would
+    let a quiet passage invent a different cutoff and hand the model licence to
+    overwrite content the rest of the file proves is real.
+
+    Each segment is seeded from ``(base_seed, index)``, so the result depends on
+    the job and the position in the file and not on how the work was divided.
+    """
+    n_samples = natural_audio.shape[-1]
+    seg_len = max(int(sample_rate * _RESTORE_SEGMENT_S), 1)
+    overlap = min(int(sample_rate * _RESTORE_SEGMENT_OVERLAP_S), seg_len // 2)
+    hop = max(seg_len - overlap, 1)
+
+    starts: list[int] = []
+    pos = 0
+    while True:
+        starts.append(pos)
+        if pos + seg_len >= n_samples:
+            break
+        pos += hop
+
+    out = np.zeros_like(natural_audio)
+    records: list[SegmentRestorationDecision] = []
+    covered = 0
+    for index, start in enumerate(starts):
+        stop = min(start + seg_len, n_samples)
+        segment = natural_audio[..., start:stop]
+        restored, decision = policy.process_segment(
+            natural_audio=segment,
+            sample_rate=sample_rate,
+            bandwidth_est=bandwidth_est,
+            speaker_profile=speaker_profile,
+            segment_seed=(base_seed + 7919 * index) % (2**63 - 1),
+        )
+        records.append(decision)
+        restored = np.asarray(restored, dtype=np.float32)
+
+        fade = max(0, min(covered - start, stop - start)) if index > 0 else 0
+        if fade > 0:
+            ramp = np.linspace(0.0, 1.0, fade, endpoint=False, dtype=np.float32)
+            out[..., start : start + fade] *= 1.0 - ramp
+            out[..., start : start + fade] += restored[..., :fade] * ramp
+            out[..., start + fade : stop] = restored[..., fade:]
+        else:
+            out[..., start:stop] = restored
+        covered = stop
+
+    return out, records
 
 
 def _run_after_preflight(
@@ -780,13 +854,43 @@ def _run_after_preflight(
         policy_mgr = RestorationPolicyManager(config=rest_cfg, restorer=restorer, guard=guard_r)
 
         seed_val = int(hashlib.sha256(workspace.job_id.encode("utf-8")).hexdigest()[:8], 16)
-        restored_data, rest_dec = policy_mgr.process_segment(
+
+        # Restore in segments, not as one file-length block. Handing the whole
+        # recording to Guard R made every decision all-or-nothing: measured, a
+        # single defective 50 ms window — 0.25% of a 20 s file — failed the
+        # guard and discarded restoration for 100% of it. It also made
+        # ``segments`` and ``review_timecodes`` dead fields that could only ever
+        # read 1-and-zeros and empty, and it let each guard layer's analysis
+        # grow with file length instead of staying bounded.
+        #
+        # Segments overlap and are cross-faded, so neighbours that reach
+        # different verdicts meet without a click at the seam.
+        restored_data, segment_records = _restore_in_segments(
             natural_audio=current_data,
             sample_rate=target_sr,
             bandwidth_est=bw_est,
             speaker_profile=speaker_profile,
-            segment_seed=seed_val,
+            policy=policy_mgr,
+            base_seed=seed_val,
         )
+        counts = Counter(record.action for record in segment_records)
+        # The audit should carry the evidence of a refusal when one happened, so
+        # prefer a segment the guard turned away over one it waved through.
+        rest_dec = next(
+            (r for r in segment_records if r.action in ("reverted", "error")),
+            segment_records[0],
+        )
+        review_segments = [
+            {
+                "segment_index": index,
+                "start_time_s": round(index * _RESTORE_SEGMENT_HOP_S, 3),
+                "action": record.action,
+                "verdict": record.guard_result.verdict if record.guard_result else "n/a",
+                "reason": record.guard_result.reason if record.guard_result else "",
+            }
+            for index, record in enumerate(segment_records)
+            if record.action in ("reverted", "error")
+        ]
 
         assembled_buffer = AudioBuffer(
             data=restored_data,
@@ -817,14 +921,14 @@ def _run_after_preflight(
                 "guidance_scale": 0.0,
             },
             segments=RestorationSegmentCounts(
-                restored=1 if rest_dec.action == "restored" else 0,
-                reduced=1 if rest_dec.action == "reduced" else 0,
-                reverted=1 if rest_dec.action == "reverted" else 0,
-                bypassed=1 if rest_dec.action == "bypassed" else 0,
-                errors=1 if rest_dec.action == "error" else 0,
+                restored=counts.get("restored", 0),
+                reduced=counts.get("reduced", 0),
+                reverted=counts.get("reverted", 0),
+                bypassed=counts.get("bypassed", 0),
+                errors=counts.get("error", 0),
             ),
             guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
-            review_timecodes=[],
+            review_timecodes=review_segments,
         )
         restoration_report = rest_rep.to_dict()
 
