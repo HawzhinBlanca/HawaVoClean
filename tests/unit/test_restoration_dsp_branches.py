@@ -322,6 +322,8 @@ def test_highband_accepts_a_restoration_that_only_added_a_high_band() -> None:
     rest = (nat + hf).astype(np.float32)
 
     res = HighBandEventDetector(sample_rate=SR).evaluate(nat, rest, cutoff_hz=8000.0)
+    # A literal, not ``detector.impulse_threshold``: comparing the metric to
+    # the same bound the code uses would pass no matter what either becomes.
     assert res.impulse_discontinuity_ratio < 8.0, (
         "broadly added high-band content was mistaken for an impulse"
     )

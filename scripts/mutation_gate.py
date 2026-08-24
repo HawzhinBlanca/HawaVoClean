@@ -643,10 +643,11 @@ MUTATIONS: list[Mutation] = [
         "high-band layer vetoes every candidate that changed anything",
         "src/hawavoclean/restoration/highband_events.py",
         "            impulse_ratio = float(np.max(steps / (local + 1e-12)))",
-        "            impulse_ratio = float(np.max(np.abs(rest_mono - nat_mono)))",
-        # Owner: the old endpoint-offset metric scored 0 only for the
-        # untouched candidate, so the layer admitted the one that changes
-        # nothing and rejected every real restoration.
+        "            impulse_ratio = float(np.max(steps) / 1e-12)",
+        # Owner: strip the local normalisation and the metric measures
+        # raw activity again, so every restoration that adds a high band
+        # trips it -- which is how the old endpoint-offset metric came to
+        # admit only the candidate that changes nothing.
         owners=(
             "tests/unit/test_restoration_dsp_branches.py::test_highband_accepts_a_restoration_that_only_added_a_high_band",
         ),
