@@ -7,7 +7,7 @@ import sys
 import textwrap
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,25 @@ from hawavoclean.server.retention import (
 pytestmark = pytest.mark.unit
 TOKEN = "retention-token"
 HEADERS = {"X-Hawa-Token": TOKEN}
+
+
+def _absent(path: Path) -> Callable[[], bool]:
+    """A predicate for :func:`_wait_until`, bound now rather than at call time."""
+
+    def gone() -> bool:
+        return not path.exists()
+
+    return gone
+
+
+def _wait_until(predicate: Callable[[], bool], message: str, timeout: float = 10.0) -> None:
+    """Wait for something a terminal callback does after the job lock is released."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"{message} within {timeout:.0f}s")
 
 
 def _success(record: JobRecord) -> list[str]:
@@ -246,10 +265,20 @@ def test_terminal_job_cleans_upload_input_but_keeps_published_output(
             assert submitted.status_code == 202
             body = _wait_api_terminal(client, submitted.json()["job_id"])
             assert body["state"] == "done"
-            assert not input_path.exists()
+            # Cleanup is deliberately NOT synchronous with the job reaching
+            # terminal: 2143062 moved terminal callbacks outside the job lock,
+            # because asking the manager whether another job still needs an
+            # upload deadlocked inside it. So a client can see "done" a moment
+            # before the upload is gone, and this waits for it instead of
+            # assuming the old ordering. It raced once in a full-suite run and
+            # passed three times alone.
+            _wait_until(_absent(input_path), "the upload was never cleaned up")
             assert Path(str(body["output_path"])).read_bytes() == b"RIFF"
             assert Path(str(body["report_path"])).is_file()
-            assert not (input_path.parent / UPLOAD_MARKER).exists()
+            _wait_until(
+                _absent(input_path.parent / UPLOAD_MARKER),
+                "the upload marker was never removed",
+            )
     finally:
         manager.shutdown()
 

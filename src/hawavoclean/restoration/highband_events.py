@@ -175,7 +175,21 @@ class HighBandEventDetector:
             # local baseline and hides -- measured 1.89, where the same click
             # one sample further in scored 20.77.
             local = ndimage.uniform_filter1d(steps, size=min(window, steps.size), mode="reflect")
-            impulse_ratio = float(np.max(steps / (local + 1e-12)))
+            outlier = steps / (local + 1e-12)
+            # The first and last window of a segment is not judged. A block
+            # model has no context past the boundary and its high band decays
+            # there, which reads as an impulse without being one: measured on
+            # the shipped model, legitimate output scores 3.08-4.40 in the
+            # interior and 4.20-11.42 once those samples are counted, so the
+            # 8.0 bound reverted good restorations for the model's own edge
+            # behaviour. Deliberate limit: a real click inside that margin is
+            # not seen here. The pipeline cross-fades 250 ms across every
+            # segment join, so those samples are blended with the neighbour
+            # rather than shipped raw, and the whole-file edges are the start
+            # and end of the recording.
+            if outlier.size > 2 * window:
+                outlier = outlier[window : outlier.size - window]
+            impulse_ratio = float(np.max(outlier))
 
         passes = (
             (leakage <= self.leakage_threshold)

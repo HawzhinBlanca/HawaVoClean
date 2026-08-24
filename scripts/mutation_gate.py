@@ -635,7 +635,7 @@ MUTATIONS: list[Mutation] = [
         # the first or last sample becomes its own baseline and hides --
         # exactly the seam a segmented restoration stitches on.
         owners=(
-            "tests/unit/test_restoration_dsp_branches.py::test_highband_click_is_rejected_wherever_it_lands",
+            "tests/unit/test_restoration_dsp_branches.py::test_highband_click_is_rejected_anywhere_it_is_judged",
         ),
     ),
     Mutation(
@@ -706,6 +706,19 @@ _TORCH_BACKED: dict[str, str] = {
         # on audio measured as needing a cut.
         owners=(
             "tests/unit/test_finishing_tonal_restoration.py::test_tonal_gain_caps_are_magnitudes_and_say_so",
+        ),
+    ),
+    Mutation(
+        "M43",
+        "impulse check judges the segment edges again",
+        "src/hawavoclean/restoration/highband_events.py",
+        "            if outlier.size > 2 * window:",
+        "            if False:",
+        # Owner: a block model has no context past a boundary and its high
+        # band decays there. Counting those samples put legitimate output
+        # at 4.20-11.42 against an 8.0 bound and reverted good work.
+        owners=(
+            "tests/unit/test_restoration_dsp_branches.py::test_highband_does_not_judge_the_first_and_last_window",
         ),
     ),
     Mutation(

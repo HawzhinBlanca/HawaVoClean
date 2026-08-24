@@ -287,8 +287,8 @@ def test_highband_inaudible_residue_is_suppressed_by_absolute_floor() -> None:
     assert res.passes_event_check
 
 
-def test_highband_click_is_rejected_wherever_it_lands() -> None:
-    """A click is a local outlier, and it counts anywhere -- not only at an edge.
+def test_highband_click_is_rejected_anywhere_it_is_judged() -> None:
+    """A click is a local outlier, and it counts anywhere in the judged region.
 
     The check read exactly two samples of the segment, |rest[0] - nat[0]| and
     |rest[-1] - nat[-1]|, so a click one sample further in was invisible while
@@ -296,13 +296,38 @@ def test_highband_click_is_rejected_wherever_it_lands() -> None:
     """
     nat = _tone(1000.0, 0.4, amp=0.3)
     detector = HighBandEventDetector(sample_rate=SR)
+    margin = max(64, int(SR * 0.02))
 
-    for where in (0, len(nat) // 2, len(nat) - 1):
+    for where in (margin + 1, len(nat) // 3, len(nat) // 2, len(nat) - margin - 2):
         rest = nat.copy()
         rest[where] += 0.5
         res = detector.evaluate(nat, rest, cutoff_hz=8000.0)
         assert not res.passes_event_check, f"a 0.5 click at sample {where} was accepted"
         assert res.impulse_discontinuity_ratio > detector.impulse_threshold
+
+
+def test_highband_does_not_judge_the_first_and_last_window() -> None:
+    """Pin the limit of the impulse check rather than letting it be discovered.
+
+    A block model has no context past a segment boundary and its high band
+    decays there, which reads as an impulse without being one: measured on the
+    shipped model, legitimate output scores 3.08-4.40 in the interior and
+    4.20-11.42 once the edge samples count, so judging them reverted good
+    restorations for the model's own edge behaviour. The cost is that a real
+    click inside that margin is not seen here -- and the pipeline cross-fades
+    250 ms across every segment join, so those samples are blended with the
+    neighbouring segment rather than shipped raw.
+    """
+    nat = _tone(1000.0, 0.4, amp=0.3)
+    detector = HighBandEventDetector(sample_rate=SR)
+
+    for where in (0, len(nat) - 1):
+        rest = nat.copy()
+        rest[where] += 0.5
+        res = detector.evaluate(nat, rest, cutoff_hz=8000.0)
+        assert res.impulse_discontinuity_ratio <= detector.impulse_threshold, (
+            f"sample {where} is inside the unjudged margin and must not be scored"
+        )
 
 
 def test_highband_accepts_a_restoration_that_only_added_a_high_band() -> None:
