@@ -170,10 +170,13 @@ class HighBandEventDetector:
         if steps.size == 0:
             impulse_ratio = 0.0
         else:
-            # ``reflect``, not ``nearest``: nearest extends the edge VALUE
-            # outward, so a click on the first or last sample becomes its own
-            # local baseline and hides -- measured 1.89, where the same click
-            # one sample further in scored 20.77.
+            # ``reflect`` rather than ``nearest``, which extends the edge
+            # VALUE outward and lets a click at the very first or last sample
+            # become its own baseline. That mattered when the edges were
+            # judged; the margin below now excludes exactly the region the two
+            # modes disagree about, so this is belt-and-braces and carries no
+            # mutation -- one on an unobservable behaviour can never be caught,
+            # and the gate said so.
             local = ndimage.uniform_filter1d(steps, size=min(window, steps.size), mode="reflect")
             outlier = steps / (local + 1e-12)
             # The first and last window of a segment is not judged. A block
