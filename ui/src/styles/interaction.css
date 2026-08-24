@@ -899,13 +899,27 @@ input:focus-visible,
 /* ============================================== A7 · VERDICT STRIP CLARITY
  * Resting opacity used to be 0.85 on the track and 0.9 on the legend, so a
  * legend chip was never quite the colour of the bar it explained. Both are
- * now opaque and the hover/selection response moved onto `filter`, which
- * means chip and segment are the same pixels by construction. */
+ * now opaque, and the hover/selection response rides on the fill's alpha and
+ * its bloom — chip and segment are the same pixels by construction.
+ *
+ * The transition list has to name those two. It used to name `filter` and
+ * `transform`, and nothing anywhere sets either on a segment: every
+ * declaration was dead, and every state that really changes — the hover fill
+ * and bloom below, the `.sel` ring in app.css — was a hard cut. The densest
+ * control on the screen was also the only one with no easing, so sweeping a
+ * few hundred units strobed and `[`/`]` teleported the selection ring.
+ *
+ * `background` is safe to interpolate here: resting, hover and `.sel` fills
+ * are all three-stop `linear-gradient(180deg, ...)` differing only in alpha,
+ * so they tween; anything that ever failed to would fall back to the hard swap
+ * that shipped before, which is not a regression. `box-shadow` is the case
+ * rule 1 at the top of this file explicitly sanctions — a small object whose
+ * shadow *is* its state. */
 .verdict-seg {
   opacity: 1;
   transition:
-    filter var(--ix-mid) var(--ease-out),
-    transform var(--ix-mid) var(--ease-out);
+    background var(--ix-mid) var(--ease-out),
+    box-shadow var(--ix-mid) var(--ease-out);
 }
 
 /* A 10x6 chip has no room for a tint to read as a hue, so the key is drawn at

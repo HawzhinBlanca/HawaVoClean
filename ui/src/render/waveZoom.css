@@ -36,7 +36,7 @@
 
 .wave-zoom .mag {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   color: var(--fg-3);
@@ -55,7 +55,7 @@
 
 .wave-fit {
   font-family: var(--font-ui);
-  font-size: 9px;
+  font-size: var(--fs-xs);
   font-weight: 700;
   letter-spacing: var(--ls-caps);
   color: var(--fg-3);
@@ -284,12 +284,19 @@
   z-index: 3;
   display: flex;
   align-items: center;
-  padding: 0 4px 0 3px;
+  /* Tightened from `0 4px 0 3px` to absorb the two glyphs growing from the
+     off-scale 8.5px below to the scale's --fs-xs (11px). */
+  padding: 0 3px 0 2px;
   pointer-events: none;
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  /* On the scale. This was 8.5px/0.06em — a fifth type size and a fourth
+     tracking value invented for one two-character tag, in a file whose own
+     rule is four sizes and two weights. `--fs-xs` exists in tokens.css for
+     exactly this file; `line-height: 1` keeps 11px inside both the 18px lane
+     and the 15px one. */
+  font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
-  letter-spacing: 0.06em;
+  letter-spacing: var(--ls-caps);
   line-height: 1;
   color: rgba(232, 238, 246, 0.82);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
@@ -356,7 +363,7 @@
   pointer-events: none;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   letter-spacing: var(--ls-caps);
   text-transform: uppercase;
