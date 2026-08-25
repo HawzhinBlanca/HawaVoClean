@@ -96,7 +96,7 @@ succeeds with the engine's CORS headers.
 From a clean exact release revision, first build the wheel and then its self-contained engine:
 
 ```bash
-SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" uv build
+uv build
 uv run python scripts/build_resolve_engine.py \
   --wheel "$PWD/dist/hawavoclean-3.3.0-py3-none-any.whl" \
   --output "$PWD/build/resolve-engine"

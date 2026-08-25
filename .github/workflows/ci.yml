@@ -176,7 +176,7 @@ jobs:
   web-resolve:
     name: web and Resolve shell
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Check out the exact source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -217,6 +217,44 @@ jobs:
             > build/ci-evidence/web-resolve/plugin-audit.json
           npm --prefix resolve-plugin/toolchain audit --audit-level=low --json \
             > build/ci-evidence/web-resolve/toolchain-audit.json
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@1e862dfacbd1d6d858c55d9b792c756523627244 # v7.1.4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+
+      # The Resolve engine is a shipped surface that, until this step existed,
+      # only the self-hosted release gate ever assembled. A bundle that could
+      # not start — or could start and not run — was therefore invisible to
+      # every hosted job, and so to `required`, and so to branch protection.
+      # It is built here on the platform it ships for, and it has to do the
+      # job: `--version` proves the launcher, `doctor` proves the bundled
+      # numeric stack and every packaged profile and core lock, and
+      # process/verify proves the runtime end to end against its own digests.
+      - name: Build and smoke the shipped Resolve engine
+        run: |
+          EVIDENCE_DIR=build/ci-evidence/web-resolve
+          SMOKE_DIR="$RUNNER_TEMP/hawavoclean-engine-smoke"
+          mkdir -p "$EVIDENCE_DIR" "$SMOKE_DIR"
+          uv python install 3.11
+          uv build --wheel --out-dir dist
+          WHEEL="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$WHEEL"
+          uv run --frozen python scripts/build_resolve_engine.py \
+            --wheel "$PWD/$WHEEL" \
+            --output "$PWD/build/resolve-engine"
+          ENGINE="$PWD/build/resolve-engine/hawavoclean-engine"
+          "$ENGINE" --version | tee "$EVIDENCE_DIR/resolve-engine-version.txt"
+          "$ENGINE" doctor | tee "$EVIDENCE_DIR/resolve-engine-doctor.log"
+          "$ENGINE" process tests/fixtures/sample_sorani_podcast.wav \
+            --output "$SMOKE_DIR/output.wav" --profile production
+          "$ENGINE" verify "$SMOKE_DIR/output.wav" \
+            --report "$SMOKE_DIR/output.hawavoclean.json"
+          cp "$SMOKE_DIR/output.hawavoclean.json" \
+            "$EVIDENCE_DIR/resolve-engine-smoke.hawavoclean.json"
+          cp build/resolve-engine/ENGINE-MANIFEST.json \
+            "$EVIDENCE_DIR/resolve-engine-manifest.json"
 
       - name: Upload immutable web and Resolve-shell evidence
         if: always()

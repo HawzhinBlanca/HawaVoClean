@@ -306,9 +306,11 @@ as well. From the moment it is applied, the owner cannot merge anything alone.
 That is the contract behaving as designed — T7 assumes an independent
 challenger and U4 assumes a protected merge — but it makes ordering load
 bearing in a way the numbering above does not show: **everything that still
-needs to land must land before step 3.** At the time of writing that is the
-`web-resolve` engine-build step (STATUS blocker 7), which edits
-`.github/workflows/ci.yml` and therefore re-pins `ci.workflow_sha256`.
+needs to land must land before step 3.** That was the `web-resolve` engine-build
+step (STATUS blocker 7), which edits `.github/workflows/ci.yml` and therefore
+re-pins both `ci.workflow_sha256` and the contract's own digest; it is folded
+into the same pull request as this runbook change, so one gate execution covers
+both U1 items rather than two.
 
 Step 6 is unaffected: the T3.3 proof needs a pull request that *cannot* merge,
 which is the state protection creates rather than one it obstructs.

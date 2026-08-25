@@ -112,16 +112,25 @@ version-seeded PCM24 dither identity.
    now historical rather than active — `scripts/audio_regression_gate.py` passes with **0 changed
    samples and 0.0 max LSB** across all six cases, two runs each, where it previously had to tolerate
    up to 2.0 LSB.
-7. **The Resolve engine is built by no hosted job (U1):** `scripts/build_resolve_engine.py` assembles
-   a shipped surface, and only the self-hosted release gate runs it. It installs the wheel without
-   the optional extras, so while `import hawavoclean.cli` briefly required torch the engine could not
-   have started either, and no hosted job would have said so — the wheel smoke in `core` caught the
-   same defect for the CLI. Verified by hand on this branch: the engine builds, and
-   `hawavoclean-engine --version` and `doctor` both succeed with torch absent. The fix is a step in
-   the existing macos-15 `web-resolve` job, which `required` already depends on, so it needs no new
-   check name and no branch-protection change — but `.github/workflows/ci.yml` is pinned by
-   `ci.workflow_sha256` in the governance contract and attested in ledger entry 38, so editing it
-   amends an approved design and belongs with U1 rather than to a passing change.
+7. ~~**The Resolve engine is built by no hosted job (U1):**~~ **Resolved 2026-08-26.**
+   `scripts/build_resolve_engine.py` assembles a shipped surface, and only the self-hosted release
+   gate ran it, so a bundle that could not start — or could start and not run — was invisible to
+   every hosted job, and therefore to `required`, and therefore to branch protection. The macos-15
+   `web-resolve` job now builds it on the platform it ships for and makes it do the job:
+   `--version` proves the launcher, `doctor` proves the bundled numeric stack and all four packaged
+   profiles and three core locks, and process/verify proves the runtime end to end against the
+   generation's own digests. `required` already depends on that job, so this needed no new check
+   name and no branch-protection change. Measured locally first: a 711 MB bundle in 21 s, doctor
+   clean, and an 8-second fixture processed and verified in under 3 s. Editing
+   `.github/workflows/ci.yml` amends an approved design — it is pinned by `ci.workflow_sha256` and
+   attested in ledger entry 38 — so both digests are re-pinned and the amendment is recorded in the
+   ledger, which is why this belonged with U1 rather than to a passing change.
+
+   The same work found that the engine build command in `docs/operations.md` and
+   `resolve-plugin/README.md` had never worked: both prefixed it with
+   `SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"`, and in a Git checkout the backend derives
+   both anchors itself and refuses an explicit one supplied without
+   `HAWAVOCLEAN_SOURCE_REVISION`. The pair belongs to sdist builds, which have no `.git` to read.
 
 ## Historical correction
 
