@@ -38,6 +38,10 @@ function useJobAnnouncer(): string {
   const state = useStore((s) => s.job?.status?.state ?? (s.job ? 'queued' : null));
   const report = useStore((s) => s.report);
   const errCode = useStore((s) => s.job?.status?.error?.code ?? null);
+  // The boolean, not the object: `original` is a fresh analysis record on
+  // every load, so selecting it would re-run this effect for no state change.
+  const hasOriginal = useStore((s) => s.original !== null);
+  const loadError = useStore((s) => s.error);
   const deckFault = useStore((s) => s.deckFault);
   const [msg, setMsg] = useState('');
   const saidFault = useRef<string | null>(null);
@@ -68,8 +72,21 @@ function useJobAnnouncer(): string {
       setMsg('Processing cancelled');
       return;
     }
-    if (sourceName) setMsg(`${sourceName} ready`);
-  }, [analyzing, sourceName, state, report, errCode]);
+    if (!sourceName) return;
+    // "ready" was said whether or not the analysis produced anything. A file
+    // the engine refused, or one whose analysis was cancelled, still cleared
+    // `analyzing` with a source name set — so the one region a screen-reader
+    // user has announced the opposite of what happened, and the run they went
+    // on to start could not work. `original` is what "ready" actually means:
+    // the clip was decoded and measured.
+    if (hasOriginal) {
+      setMsg(`${sourceName} ready`);
+      return;
+    }
+    // Short, and not a duplicate of the role="alert" bar in the footer, which
+    // carries the full sentence. This says which clip and that it did not load.
+    setMsg(loadError ? `${sourceName} not analyzed: ${loadError}` : `${sourceName} not analyzed`);
+  }, [analyzing, sourceName, state, report, errCode, hasOriginal, loadError]);
 
   // A deck falling out of service changes what the transport can do, so it is
   // told — once, on the transition into the fault, never again while it stands.
@@ -227,6 +244,13 @@ export default function App() {
             <MetricsTiles />
           </section>
           <section className="panel controls" aria-label="Processing controls">
+            {/* The only panel with no visible title, so it is the only one
+                with no heading to land on. It gets a hidden one rather than a
+                visible one, because the controls below name themselves and a
+                title here would be chrome for its own sake. `aria-label` on
+                the section stays: it names the landmark, which is a different
+                job from being a stop in the heading list. */}
+            <h2 className="sr-only">Processing controls</h2>
             <ProfileControl />
             {/* Renders nothing until the engine's health answer offers
                 speaker profiles (contract addendum 2). */}

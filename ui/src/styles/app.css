@@ -260,7 +260,15 @@ kbd {
   box-shadow: 0 1px 0 var(--hair-hi);
 }
 
+/* These are <h2>. The document had exactly one heading in its steady state —
+   the wordmark — so a screen-reader user pressing H to move between the
+   regions of the app landed nowhere, on a screen that is entirely panels. The
+   h1-h6 reset above normalises font only, so the browser's default margin has
+   to go here; nothing about how a panel title is drawn changes. (The shortcuts
+   dialog already used an h2 with this class, which is why the geometry was
+   known to work on a heading before the change.) */
 .panel-title {
+  margin: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1289,8 +1297,14 @@ kbd {
   color: var(--fg);
 }
 
-.seg button:disabled {
+/* Both spellings. The segments moved from the native `disabled` attribute to
+   `aria-disabled` so the reason for being disabled stays reachable (see
+   Segmented.tsx); the dim must follow, or a switch that cannot be used looks
+   exactly like one that can. */
+.seg button:disabled,
+.seg button[aria-disabled='true'] {
   opacity: 0.62;
+  cursor: not-allowed;
 }
 
 .seg .thumb {

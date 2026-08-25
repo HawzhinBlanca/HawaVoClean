@@ -5,6 +5,8 @@ export interface SegOption<T extends string> {
   label: string;
   className?: string;
   disabled?: boolean;
+  /** Why this one option cannot be chosen. Shown and announced when disabled. */
+  disabledReason?: string;
 }
 
 interface Props<T extends string> {
@@ -14,6 +16,13 @@ interface Props<T extends string> {
   className?: string;
   thumbClassName?: string;
   disabled?: boolean;
+  /**
+   * Why the whole switch cannot be used. Both consumers of this component
+   * (`ProfileControl`, `RestoreControl`) disable at the *group* level, so a
+   * per-option reason alone would leave the two states that actually occur
+   * silent.
+   */
+  disabledReason?: string;
   ariaLabel: string;
 }
 
@@ -24,6 +33,7 @@ export function Segmented<T extends string>({
   className,
   thumbClassName,
   disabled,
+  disabledReason,
   ariaLabel,
 }: Props<T>) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -122,7 +132,18 @@ export function Segmented<T extends string>({
           aria-checked={o.value === value}
           data-value={o.value}
           className={`${o.value === value ? 'on' : ''}${o.className ? ` ${o.className}` : ''}`}
-          disabled={disabled || o.disabled}
+          // B6 · `aria-disabled`, not the native `disabled` attribute. A
+          // natively-disabled button is removed from the accessibility tree
+          // and cannot be focused, so the explanation of *why* it is disabled
+          // is unreachable by exactly the users who most need it — and a
+          // `title` on a control the pointer cannot rest on is never shown
+          // either. The click is guarded instead. This keeps the roving
+          // tabindex intact, which is the point: the reason has to be
+          // reachable.
+          aria-disabled={disabled || o.disabled ? true : undefined}
+          title={
+            (disabled && disabledReason) || (o.disabled && o.disabledReason) || undefined
+          }
           // D1 · a radiogroup is one tab stop, not one per option: Tab lands on
           // the checked segment and the arrows move between them (WAI-ARIA
           // radio group pattern). Two stops per switch would also have meant
@@ -130,7 +151,10 @@ export function Segmented<T extends string>({
           // screen's seventeen.
           tabIndex={o.value === tabValue ? 0 : -1}
           onKeyDown={(e) => onKey(e, i)}
-          onClick={() => onChange(o.value)}
+          onClick={() => {
+            if (disabled || o.disabled) return;
+            onChange(o.value);
+          }}
         >
           {o.label}
         </button>

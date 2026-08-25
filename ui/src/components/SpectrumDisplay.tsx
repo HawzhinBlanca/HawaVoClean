@@ -110,12 +110,12 @@ export function SpectrumDisplay() {
   return (
     <>
       <div className="panel-head">
-        <div className="panel-title">
+        <h2 className="panel-title">
           <span>Spectrum</span>
           {/* the same `title · qualifier` head the waveform panel uses: what
               the panel is showing, said once, where the panel is named */}
           <span className="sub">· LTAS</span>
-        </div>
+        </h2>
       </div>
       <div className="spectrum-body">
         <div className="display spectrum-display">

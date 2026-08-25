@@ -173,11 +173,11 @@ input:focus-visible,
     filter var(--ix-mid) var(--ease-out);
 }
 
-.seg button:not(.on):not(:disabled):hover {
+.seg button:not(.on):not(:disabled):not([aria-disabled='true']):hover {
   color: var(--fg-2);
 }
 
-.seg button:not(:disabled):active {
+.seg button:not(:disabled):not([aria-disabled='true']):active {
   filter: brightness(0.92);
   transition-duration: var(--ix-fast);
 }

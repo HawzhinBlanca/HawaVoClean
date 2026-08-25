@@ -82,8 +82,15 @@ function HeaderNow() {
   if (upload) {
     tone = 'busy';
     label = 'Uploading';
+    // The name goes in the *value* slot, like every other branch here. It was
+    // in the key slot, which does not shrink, so a long filename clipped hard
+    // and pushed the percentage off the end of the header.
+    facts.push({ k: 'Clip', v: upload.name });
+    // "Sent", not "Done": `upload.phase` reaches 'finishing' at
+    // loaded === total while the engine is still writing the file, so 100%
+    // here does not mean the upload is over.
     facts.push({
-      k: upload.name,
+      k: 'Sent',
       v: `${Math.round((upload.total ? upload.loaded / upload.total : 0) * 100)}%`,
     });
   } else if (analyzing) {

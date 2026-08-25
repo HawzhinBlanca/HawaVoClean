@@ -109,7 +109,13 @@ function UploadProgress() {
  */
 function AnalyzeProgress({ name }: { name: string }) {
   return (
-    <div className="analyzing-row" role="status" aria-live="polite">
+    // `role="group"`, not a second `role="status" aria-live="polite"`. App.tsx
+    // already announces "Analyzing <clip>" through the app's single polite
+    // region; a second one narrating the same transition is the double
+    // announcement D1 exists to prevent, and it is the same treatment
+    // `UploadProgress` above already had. The row stays fully readable
+    // whenever the user browses to it.
+    <div className="analyzing-row" role="group" aria-label={`Analyzing ${name}`}>
       <span className="an-spin" aria-hidden="true" />
       <span className="an-copy">
         <span className="an-head">

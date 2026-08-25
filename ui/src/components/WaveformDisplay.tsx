@@ -863,10 +863,10 @@ export function WaveformDisplay() {
         end. Left and right arrows seek the transport.
       </p>
       <div className="panel-head">
-        <div className="panel-title">
+        <h2 className="panel-title">
           <span>Waveform</span>
           {source ? <span className="sub">· {source.name}</span> : null}
-        </div>
+        </h2>
         <div className="wave-legend-head">
           <span className="wave-zoom">
             <span className="range" ref={rangeRef} data-testid="zoom-range">

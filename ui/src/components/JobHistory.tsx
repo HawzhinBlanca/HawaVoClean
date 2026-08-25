@@ -171,14 +171,14 @@ export function JobHistory() {
       data-empty={history.length === 0 ? 'true' : 'false'}
     >
       <div className="panel-head">
-        <div className="panel-title">
+        <h2 className="panel-title">
           <span>Session runs</span>
           {history.length > 0 ? (
             <span className="sub">
               · {history.length} of {HISTORY_LIMIT} kept
             </span>
           ) : null}
-        </div>
+        </h2>
       </div>
       <div className="hist-body">
         {history.length === 0 ? (

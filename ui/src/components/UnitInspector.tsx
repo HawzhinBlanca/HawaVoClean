@@ -362,7 +362,7 @@ export function UnitInspector() {
       data-selected={selected ? 'true' : 'false'}
     >
       <div className="panel-head">
-        <div className="panel-title">
+        <h2 className="panel-title">
           <span>Unit inspector</span>
           {selected ? (
             <span className="sub">
@@ -370,7 +370,7 @@ export function UnitInspector() {
               {selName ? ` · ${selName.short}` : ''}
             </span>
           ) : null}
-        </div>
+        </h2>
         <div className="insp-tools">
           <button
             type="button"
