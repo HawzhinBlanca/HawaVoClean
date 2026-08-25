@@ -324,3 +324,26 @@ squash or rebase. Disabling merge commits in repository settings is optional and
 makes that constraint visible in the UI before someone attempts a merge; it is
 left set as it is, because it changes how pull requests are landed today and
 that is a workflow decision rather than a governance one.
+
+### `required_linear_history` conflicts with evidence pinning
+
+Found while preparing this pull request's own merge, and it is not a workflow
+preference — it is a way to lose evidence.
+
+`evidence/release/audio-regressions.json` pins `d37ef29a…` as the
+`reference_source_commit` of all six regenerated cases. That commit is
+*introduced by this pull request*: it is not yet an ancestor of `main`. Squash
+and rebase merges both rewrite branch SHAs, so merging this branch either of
+those ways orphans the very commit it pins — the same failure as deleting the
+branch that held `3f2ec25b…`, arrived at from the opposite direction, and the
+one `evidence/baseline-lowband-branch` exists to remember.
+
+Today a merge commit avoids it, because the original SHAs survive. Once
+`required_linear_history` is active a merge commit is no longer available, so
+**any later change that both regenerates evidence and pins it to its own commit
+must tag that commit before merging.** `tests/unit/test_release_evidence.py`
+accepts a tag as a durable anchor precisely for this, alongside trunk ancestry.
+
+Done here rather than left as advice: `evidence/audio-regression-references-v3.3`
+now points at `d37ef29a…` and is pushed, so the pin holds under every merge
+strategy including the ones the ruleset will force.
