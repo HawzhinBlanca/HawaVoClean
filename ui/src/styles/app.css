@@ -818,16 +818,43 @@ kbd {
  * neighbours by roughly 3x in luminance instead of 1.2x. */
 .verdict-seg {
   position: absolute;
-  top: 4px;
-  bottom: 4px;
+  top: var(--seg-inset);
+  bottom: var(--seg-inset);
   border-radius: var(--r-xxs);
   --seg: 91, 100, 115;
   --seg-bloom: 0.22;
+  /* Two channels that survive a 2px-wide bar, added because hue alone did not.
+   * The four decisions differed ONLY by the --seg triple: no shape, no
+   * pattern, no glyph. Composited, enhanced and reverted landed at 0.111 and
+   * 0.112 luminance — indistinguishable without colour — and error at 0.064,
+   * *darker* than reverted, which is backwards for the one verdict that means
+   * something broke. Under deuteranopia or protanopia the strip was close to
+   * unreadable, and the legend that decodes it is aria-hidden and used to be
+   * deleted outright below 1120px.
+   *
+   * --seg-a scales the fill alphas into a lightness ladder and --seg-inset
+   * varies the bar's height, so every adjacent pair differs on at least one
+   * channel that has nothing to do with hue. Both are readable at 2px wide,
+   * and neither adds a concept to the recipe: this is still coloured light in
+   * a well, just lit and sized to a degree that matches consequence.
+   *
+   * The two channels do different work at different ends of the ladder, and
+   * that is deliberate. Measured on the shipped pixels, luminance separates
+   * the bottom of the ladder well (passthrough -> enhanced 1.55, enhanced ->
+   * reverted 1.39) and the top of it barely (reverted -> error 1.10) — because
+   * error is red, whose luminance coefficient is 0.2126 against amber's
+   * green-heavy 0.7152, so no alpha short of blowing it out makes red outrank
+   * amber. Height is what carries that pair: a 4px step per class on the 22px
+   * track, plus a bloom that doubles (0.28 -> 0.55). Claiming a 3:1 luminance
+   * ratio between all four would be claiming something the colour space does
+   * not allow in a dark strip. */
+  --seg-a: 1;
+  --seg-inset: 4px;
   background: linear-gradient(
     180deg,
-    rgba(var(--seg), 0.62),
-    rgba(var(--seg), 0.42) 52%,
-    rgba(var(--seg), 0.3)
+    rgba(var(--seg), calc(0.62 * var(--seg-a))),
+    rgba(var(--seg), calc(0.42 * var(--seg-a))) 52%,
+    rgba(var(--seg), calc(0.3 * var(--seg-a)))
   );
   box-shadow:
     inset 0 1px 0 rgba(var(--seg), 0.95),
@@ -835,21 +862,34 @@ kbd {
     0 0 9px -2px rgba(var(--seg), var(--seg-bloom));
 }
 
+/* The ladder, dimmest and shortest to brightest and tallest, in order of how
+   much the reader needs to notice it. */
+.verdict-seg.passthrough {
+  --seg: 122, 133, 150;
+  --seg-a: 0.5;
+  --seg-bloom: 0;
+  --seg-inset: 7px;
+}
+
 .verdict-seg.enhanced {
   --seg: 57, 208, 255;
+  --seg-a: 0.74;
+  --seg-bloom: 0.14;
+  --seg-inset: 5px;
 }
 
 .verdict-seg.reverted {
   --seg: 255, 179, 71;
-}
-
-.verdict-seg.passthrough {
-  --seg: 122, 133, 150;
-  --seg-bloom: 0;
+  --seg-a: 1;
+  --seg-bloom: 0.28;
+  --seg-inset: 3px;
 }
 
 .verdict-seg.error {
   --seg: 255, 90, 95;
+  --seg-a: 1.45;
+  --seg-bloom: 0.55;
+  --seg-inset: 1px;
 }
 
 .verdict-empty {
@@ -879,18 +919,38 @@ kbd {
   color: var(--fg-3);
 }
 
+/* The key has to show the same object it decodes, so it carries the track's
+   height ladder too — scaled to the chip, and driven by the same --seg-inset
+   each class already sets, so the two can never disagree. 14px chip box,
+   inset top and bottom by half the track's inset. */
 .verdict-legend i.verdict-seg {
   position: static;
   display: inline-block;
   width: 10px;
-  height: 6px;
+  height: calc(14px - var(--seg-inset));
+  vertical-align: middle;
   border-radius: var(--r-xxs);
   opacity: 0.9;
 }
 
+/* The legend is NOT deleted at narrow widths any more. `display: none` below
+   1120px removed the only thing on screen that maps a colour to a word, from
+   exactly the layout with the least room to guess — and the strip's four
+   decisions are otherwise distinguished by fill alone. It takes its own grid
+   row instead of sharing the header row with the label. */
 @media (max-width: 1120px) {
-  .verdict-legend {
-    display: none;
+  .wave-body .verdict {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'head'
+      'legend'
+      'track';
+  }
+
+  .wave-body .verdict-legend {
+    justify-self: start;
+    align-self: start;
+    gap: 8px;
   }
 }
 
@@ -2014,6 +2074,12 @@ kbd {
 
 .insp-stats .stat.reverted b {
   color: var(--amber);
+}
+
+/* The one tile that only appears when something went wrong, in the same red
+   the strip's ERROR bars and the verdict legend use. */
+.insp-stats .stat.error b {
+  color: var(--err);
 }
 
 .insp-stats .stat.bypass b {

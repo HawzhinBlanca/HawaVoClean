@@ -168,7 +168,13 @@ function Summary() {
   const total = s?.units_total ?? 0;
   const enhanced = s?.enhanced ?? 0;
   const reverted = (s?.reverted ?? 0) + (s?.continuity_reverted ?? 0) + (s?.unverified ?? 0);
-  const bypassed = (s?.no_speech ?? 0) + (s?.error_passthrough ?? 0);
+  // Split out, not folded into Bypassed. "A unit had no speech in it" and "a
+  // unit errored and the original was passed through" are different facts, and
+  // only one of them means something went wrong. Folded together, "did
+  // anything error?" was answerable only by hovering the strip and reading a
+  // colour — which is the one question no colour ladder can answer in words.
+  const errored = s?.error_passthrough ?? 0;
+  const bypassed = s?.no_speech ?? 0;
 
   // Prefer the analyses the metrics tiles show, so the two never disagree on
   // screen; the report's own measurements are the fallback.
@@ -220,6 +226,15 @@ function Summary() {
           <b className="mono">{report ? bypassed : '—'}</b>
           <span className="caps">Bypassed</span>
         </div>
+        {/* Only when there is one. A permanent "0 Errors" tile spends a column
+            of a five-tile row saying nothing on every healthy run, and trains
+            the reader to stop looking at it. */}
+        {report && errored > 0 ? (
+          <div className="stat error">
+            <b className="mono">{errored}</b>
+            <span className="caps">Errored</span>
+          </div>
+        ) : null}
         <div className="stat units">
           <b className="mono">{report ? total : '—'}</b>
           <span className="caps">Units</span>

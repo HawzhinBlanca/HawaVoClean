@@ -2358,6 +2358,7 @@ input:focus-visible,
 }
 
 .rc-field {
+  position: relative; /* the select's caret, drawn as ::after below */
   display: flex;
   flex: 1 1 0;
   align-items: center;
@@ -2365,20 +2366,76 @@ input:focus-visible,
   min-width: 0;
 }
 
-/* The two inputs are sunk wells, same recipe as the display surfaces. */
+/* The two inputs are sunk wells, same recipe as the display surfaces.
+ *
+ * `appearance: none` because these were the only two controls on the screen
+ * still wearing the OS's own chrome — a system-blue focus ring, a native
+ * dropdown arrow, and Chromium's spinner buttons — inside a housing whose
+ * whole point is that nothing invents its own lighting. Removing the
+ * appearance also removes the arrow gutter the select reserved, hence the
+ * asymmetric padding-right below. */
 .rc-field select,
 .rc-field input {
   flex: 1;
   min-width: 0;
   height: 24px;
   padding: 0 6px;
+  appearance: none;
   font-size: var(--fs-sm);
+  font-family: inherit;
   font-variant-numeric: tabular-nums;
   color: var(--fg);
   background: var(--display);
   border: none;
   border-radius: var(--r-sm);
   box-shadow: var(--shadow-display);
+  transition:
+    box-shadow var(--ix-mid) var(--ease-out),
+    color var(--ix-mid) var(--ease-out);
+}
+
+/* `appearance: none` alone does not remove these in Chromium. */
+.rc-field input::-webkit-outer-spin-button,
+.rc-field input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+/* The caret the removed native arrow used to draw, in the text ramp's own
+   colour rather than a baked hex — a background-image data URI would fork the
+   ramp and drift the moment tokens.css is re-cut. 18px of gutter because
+   `appearance: none` gave the arrow's reserved space back. */
+.rc-field select {
+  padding-right: 18px;
+}
+
+.rc-field:has(select)::after {
+  content: '';
+  position: absolute;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  background: var(--fg-3);
+  pointer-events: none;
+}
+
+/* Rule 2 of this file: hover, active, focus-visible. These answered on focus
+   alone — the only two controls in the app that did. */
+.rc-field select:not(:disabled):hover,
+.rc-field input:not(:disabled):hover {
+  box-shadow:
+    var(--shadow-display),
+    inset 0 0 0 1px var(--hair);
+}
+
+.rc-field select:not(:disabled) {
+  cursor: pointer;
+}
+
+/* Only the select presses: a text field's "active" is the caret landing. */
+.rc-field select:not(:disabled):active {
+  box-shadow: var(--shadow-pressed);
 }
 
 .rc-field select:disabled,
@@ -2386,14 +2443,18 @@ input:focus-visible,
   color: var(--fg-4);
 }
 
-.rc-field select:focus-visible {
+.rc-field select:focus-visible,
+.rc-field input:focus-visible {
   outline: 2px solid var(--ix-focus, rgba(120, 222, 255, 0.95));
   outline-offset: 2px;
 }
 
 /* Typed text that will not be sent (unparseable, zero) is flagged where it
  * was typed; the run itself would simply auto-detect. */
-.rc-field input[aria-invalid='true'] {
+/* Outranks the hover hairline above: a flagged value stays flagged under the
+   pointer, which is exactly when the user is about to correct it. */
+.rc-field input[aria-invalid='true'],
+.rc-field input[aria-invalid='true']:hover {
   box-shadow:
     var(--shadow-display),
     inset 0 0 0 1px rgba(255, 210, 138, 0.55);

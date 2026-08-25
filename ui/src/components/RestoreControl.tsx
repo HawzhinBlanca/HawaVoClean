@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { JobMode } from '../api/types';
-import { useStore } from '../state/store';
+import { useStore, jobInFlight } from '../state/store';
 import { Segmented } from './Segmented';
 
 /**
@@ -24,9 +24,9 @@ export function RestoreControl() {
   const setMode = useStore((s) => s.setMode);
   const setSpeakerId = useStore((s) => s.setSpeakerId);
   const setCutoffHz = useStore((s) => s.setCutoffHz);
-  const running = useStore(
-    (s) => !!s.job?.status && (s.job.status.state === 'running' || s.job.status.state === 'queued'),
-  );
+  // `jobInFlight`: the window between the engine accepting a job and its first
+  // status reads as idle under a hand-written state check.
+  const running = useStore((s) => jobInFlight(s.job));
   // The field shows what was typed, the store holds what will be sent: only a
   // positive finite number becomes a manual cutoff, anything else (empty, a
   // half-typed value, zero) means auto-detect. A store-driven value would snap
@@ -52,9 +52,23 @@ export function RestoreControl() {
           disabled={running}
           disabledReason="The mode is part of the run — cancel it to change this."
           onChange={setMode}
+          // Static per option, not the live `sub` below: the difference
+          // between "clean only" and "invent spectral content above a cutoff"
+          // is the most consequential choice on this panel, and a listener
+          // arrowing onto Restore should hear what it does *before* choosing
+          // it. The visible sub-line stays the sighted equivalent.
           options={[
-            { value: 'natural', label: 'Natural' },
-            { value: 'restore', label: 'Restore' },
+            {
+              value: 'natural',
+              label: 'Natural',
+              description: 'Clean only — no spectral content is invented',
+            },
+            {
+              value: 'restore',
+              label: 'Restore',
+              description:
+                'HawaRestore-KD rebuilds content above the cutoff, so the output contains audio the source never captured',
+            },
           ]}
         />
       </div>

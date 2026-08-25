@@ -1,4 +1,10 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 
 export interface SegOption<T extends string> {
   value: T;
@@ -7,6 +13,16 @@ export interface SegOption<T extends string> {
   disabled?: boolean;
   /** Why this one option cannot be chosen. Shown and announced when disabled. */
   disabledReason?: string;
+  /**
+   * What choosing this option actually means, for a listener.
+   *
+   * Deliberately per-option and static rather than one group-level node fed by
+   * the current value: `onKey` below calls `onChange` and then `btn.focus()` in
+   * the same handler, so a node driven by state would still be holding the
+   * *previous* option's text at the moment focus lands on the new one. A
+   * screen reader would then read the wrong description on every arrow press.
+   */
+  description?: string;
 }
 
 interface Props<T extends string> {
@@ -37,6 +53,9 @@ export function Segmented<T extends string>({
   ariaLabel,
 }: Props<T>) {
   const ref = useRef<HTMLDivElement | null>(null);
+  // Two of these can be on screen at once (Profile and Mode), so the
+  // description ids have to be unique per instance, not per option value.
+  const groupId = useId();
   const [thumb, setThumb] = useState<{ x: number; w: number } | null>(null);
 
   /**
@@ -129,6 +148,7 @@ export function Segmented<T extends string>({
           key={o.value}
           type="button"
           role="radio"
+          {...(o.description ? { 'aria-describedby': `${groupId}-d${i}` } : {})}
           aria-checked={o.value === value}
           data-value={o.value}
           className={`${o.value === value ? 'on' : ''}${o.className ? ` ${o.className}` : ''}`}
@@ -157,6 +177,14 @@ export function Segmented<T extends string>({
           }}
         >
           {o.label}
+          {o.description ? (
+            // Inside the button, so it is removed with it and cannot outlive
+            // its owner. `.sr-only` keeps it out of the visual layout — the
+            // visible sub-line below the control is the sighted equivalent.
+            <span className="sr-only" id={`${groupId}-d${i}`}>
+              {o.description}
+            </span>
+          ) : null}
         </button>
       ))}
     </div>

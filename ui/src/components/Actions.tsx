@@ -152,16 +152,39 @@ export function Actions() {
 
   return (
     <div className="actions">
+      {/* `aria-disabled` + a guarded handler, not the native attribute — the
+          same reason the artefact links above already give: a natively
+          disabled control takes no pointer events, so the `title` that says
+          *why* the file is not there can never be shown, and it leaves the
+          accessibility tree entirely. Half this file followed that rule and
+          half did not, and the half that did not is the half whose reasons
+          matter most ("the master this run wrote is no longer on disk"). The
+          inline `masterServed` guard stays: importToResolve and revealOutput
+          check `cleanedPath` but not availability, so without it the key goes
+          live in exactly the file-is-gone state B6 exists for. */}
       {hasResolve ? (
         <>
-          <button className="btn small" disabled={!masterServed} onClick={() => void importToResolve()} title={masterServed ? 'Import the cleaned master into the media pool' : cleanedPath ? goneNote : missingNote}>
+          <button
+            className="btn small"
+            type="button"
+            aria-disabled={!masterServed || undefined}
+            onClick={() => {
+              if (!masterServed) return;
+              void importToResolve();
+            }}
+            title={masterServed ? 'Import the cleaned master into the media pool' : cleanedPath ? goneNote : missingNote}
+          >
             <IconImport size={14} />
             <span>Import to Resolve</span>
           </button>
           <button
             className="btn small"
-            disabled={!canReplace}
-            onClick={() => void replaceInResolve()}
+            type="button"
+            aria-disabled={!canReplace || undefined}
+            onClick={() => {
+              if (!canReplace) return;
+              void replaceInResolve();
+            }}
             title={canReplace ? 'Replace the selected clip with the cleaned master' : 'Available when the source came from Resolve'}
           >
             <IconReplace size={14} />
@@ -169,7 +192,16 @@ export function Actions() {
           </button>
         </>
       ) : null}
-      <button className="btn small" disabled={!masterServed} onClick={() => void revealOutput()} title={masterServed ? 'Reveal the cleaned master in Finder' : cleanedPath ? goneNote : missingNote}>
+      <button
+        className="btn small"
+        type="button"
+        aria-disabled={!masterServed || undefined}
+        onClick={() => {
+          if (!masterServed) return;
+          void revealOutput();
+        }}
+        title={masterServed ? 'Reveal the cleaned master in Finder' : cleanedPath ? goneNote : missingNote}
+      >
         <IconReveal size={14} />
         <span>Reveal in Finder</span>
       </button>
