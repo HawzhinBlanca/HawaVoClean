@@ -39,6 +39,42 @@ import {
  */
 const HEALTH_OK_MS = 10000;
 const HEALTH_BACKOFF_MS = [400, 800, 1600, 3000, 5000] as const;
+/**
+ * A health probe that never answers must still end.
+ *
+ * `probeInFlight` is cleared in a `finally`, so an engine that accepts the
+ * socket and then never writes — hung, paused, wedged behind a stuck
+ * filesystem call, or a proxy holding the connection — left the await pending
+ * forever and the flag set forever. Every later beat returned at the
+ * `if (probeInFlight) return` guard, so the heartbeat stopped, `Retry now`
+ * became inert, and no offline banner ever appeared because
+ * `engineOfflineSince` is only set on a *failed* probe. The app sat looking
+ * connected to an engine that was gone. Longer than the 5s ceiling of the
+ * backoff so a slow-but-alive engine is not cut off mid-answer.
+ */
+const HEALTH_TIMEOUT_MS = 4000;
+
+/**
+ * A signal that aborts itself after `ms`.
+ *
+ * Not `AbortSignal.timeout(ms)`, which is the obvious spelling: its timer is
+ * the platform's, outside `window.setTimeout`, so nothing in the test suite can
+ * advance it — a timeout no test can reach is a timeout no test can prove.
+ * This uses the same clock as the rest of the module.
+ *
+ * The abort reason is a `TimeoutError`, deliberately not the `AbortError` a
+ * bare `ac.abort()` produces: `AbortError` is how this app says *the user*
+ * cancelled, and reporting a hung engine as "Cancelled" would blame the reader
+ * for the engine's silence. `state/errors.ts` maps `TimeoutError` alongside a
+ * dead socket, which is what it is.
+ */
+function timeoutSignal(ms: number): { signal: AbortSignal; done: () => void } {
+  const ac = new AbortController();
+  const t = window.setTimeout(() => {
+    ac.abort(new DOMException(`No answer in ${ms} ms`, 'TimeoutError'));
+  }, ms);
+  return { signal: ac.signal, done: () => window.clearTimeout(t) };
+}
 
 let healthTimer: number | null = null;
 let probeStep = 0;
@@ -230,7 +266,13 @@ async function probeEngine(): Promise<void> {
     getState().setEngineProbe(getState().engineNextProbeAt, true);
     let client = getState().client;
     if (!client) client = new EngineClient(await getBridge().engine.getEndpoint());
-    const health = await client.health();
+    const probeTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
+    let health;
+    try {
+      health = await client.health(probeTimeout.signal);
+    } finally {
+      probeTimeout.done();
+    }
     if (!health.ok) throw new Error('Engine reported not ok');
 
     const wasDown = getState().engineStatus !== 'ready';
@@ -353,7 +395,15 @@ async function resumeAfterReconnect(client: EngineClient): Promise<void> {
   if (!job) return;
   if (job.status && isTerminal(job.status.state)) return;
   try {
-    const status = await client.getJob(job.id);
+    // The second door into the same deadlock: this runs on reconnect, so it is
+    // by definition talking to an engine that has just misbehaved.
+    const resumeTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
+    let status;
+    try {
+      status = await client.getJob(job.id, resumeTimeout.signal);
+    } finally {
+      resumeTimeout.done();
+    }
     onJobStatus(status);
     if (!isTerminal(status.state)) followFrom(client, job.id);
   } catch (e) {
@@ -1327,6 +1377,15 @@ export async function selectRun(jobId: string): Promise<void> {
   }
   stopFollow?.();
   stopFollow = null;
+  // An analysis in flight belongs to the clip the user was *leaving*. Without
+  // this it keeps running, and when it lands it writes that clip's peaks,
+  // spectrum, duration and loudness over the run just restored — clip B's
+  // audio and timecode sitting under run A's name, with nothing on screen
+  // saying they disagree. `stopFollow` was already torn down here for exactly
+  // the same reason; the analyze half was missed.
+  analyzeAbort?.abort();
+  analyzeAbort = null;
+  st.setAnalyzing(false);
   const player = getPlayer();
   player.pause();
   st.setError(null);

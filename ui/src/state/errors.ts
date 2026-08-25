@@ -130,8 +130,16 @@ export function classifyFailure(e: unknown, name?: string): UiFailure {
     };
   }
 
-  // A dead socket surfaces as a TypeError from `fetch`, with no status.
-  if (e instanceof TypeError || (e instanceof EngineError && e.status === 0)) {
+  // A dead socket surfaces as a TypeError from `fetch`, with no status. A
+  // socket that opened and then went silent surfaces as a DOMException named
+  // 'TimeoutError' — that is what `AbortSignal.timeout` rejects with, and it
+  // is deliberately NOT 'AbortError', which above means the *user* cancelled.
+  // Both mean the same thing to the reader: the engine is not answering.
+  if (
+    e instanceof TypeError ||
+    (e instanceof DOMException && e.name === 'TimeoutError') ||
+    (e instanceof EngineError && e.status === 0)
+  ) {
     const raw = e instanceof Error ? e.message : String(e);
     return {
       kind: 'offline',

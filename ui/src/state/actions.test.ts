@@ -465,7 +465,10 @@ describe('B6 · a run whose engine went away (ENGINE_RESTARTED)', () => {
 
     const st = store.useStore.getState();
     expect(st.engineStatus).toBe('ready');
-    expect(client.getJob).toHaveBeenCalledWith('j1');
+    // With a timeout signal: this call runs on reconnect, i.e. against an
+    // engine that has just misbehaved, and an un-timed-out request here is the
+    // second door into the health-probe deadlock.
+    expect(client.getJob).toHaveBeenCalledWith('j1', expect.any(AbortSignal));
     expect(st.job?.status?.state).toBe('failed');
     expect(st.job?.status?.error?.code).toBe('ENGINE_RESTARTED');
     expect(st.history[0]?.outcome).toBe('failed');
@@ -1805,5 +1808,118 @@ describe('restore mode (contract addendum 2)', () => {
     expect('mode' in req).toBe(false);
     expect('speaker_id' in req).toBe(false);
     expect('cutoff_hz' in req).toBe(false);
+  });
+});
+
+describe('an engine that accepts the socket and never answers', () => {
+  it('times the health probe out instead of deadlocking the heartbeat', async () => {
+    const { actions, store, client } = await boot();
+
+    // `probeInFlight` is cleared in a `finally`. With no timeout on the
+    // request, an engine that opens the connection and then goes silent — hung,
+    // paused, wedged behind a stuck filesystem call, or a proxy holding the
+    // socket — leaves that await pending forever and the flag set forever.
+    // Every later beat then returns at the `if (probeInFlight) return` guard,
+    // so the heartbeat stops, `Retry now` becomes inert, and no offline banner
+    // appears at all, because engineOfflineSince is only set on a *failed*
+    // probe. The app sits looking connected to an engine that is gone.
+    client.health.mockImplementation(
+      (signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason));
+        }),
+    );
+
+    // retryEngineNow is a no-op while the app believes it is connected.
+    store.useStore.getState().setEngine('offline', client as never, '3.3.0');
+    actions.retryEngineNow();
+    await settle(10);
+    expect(client.health).toHaveBeenCalledTimes(1);
+
+    // While that request is outstanding `probeInFlight` is held, so nothing
+    // else can probe. This is the state the bug made permanent.
+    actions.retryEngineNow();
+    await settle(10);
+    expect(client.health).toHaveBeenCalledTimes(1);
+
+    // Past the 4s ceiling the request aborts itself and the `finally` runs.
+    // The engine is now recorded as unreachable, which is what raises the
+    // offline banner — the bug's worst symptom was that this never happened,
+    // so the app sat looking connected to an engine that was gone.
+    await settle(5000);
+    expect(store.useStore.getState().engineOfflineSince).not.toBeNull();
+
+    // And the heartbeat is alive again: a later probe really is issued, and
+    // the app can recover. Without the timeout this call is swallowed forever.
+    client.health.mockImplementation(async () => ({
+      ok: true,
+      version: '3.3.0',
+      profiles: ['studio'],
+      engine_pid: 4242,
+    }));
+    actions.retryEngineNow();
+    await settle(2000);
+    // The claim that matters, and the one the bug broke: the heartbeat is not
+    // wedged. A further probe really is issued. (Whether *this* probe flips the
+    // lamp back to ready depends on the backoff schedule, which the B6 tests
+    // above already cover; asserting it here would be asserting the scheduler,
+    // not the deadlock.)
+    expect(client.health.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('passes a real timeout signal, not an already-settled one', async () => {
+    const { actions, store, client } = await boot();
+    store.useStore.getState().setEngine('offline', client as never, '3.3.0');
+    actions.retryEngineNow();
+    await settle(10);
+    const signal = client.health.mock.calls[0]?.[0] as AbortSignal | undefined;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+  });
+});
+
+describe('selectRun with an analysis still in flight', () => {
+  it('cancels it, so the old clip cannot land on top of the restored run', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+
+    // A finished run to go back to.
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('done')));
+    await settle(10);
+    const jobId = st().job?.id;
+    expect(jobId).toBe('j1');
+    expect(st().history.length).toBeGreaterThan(0);
+
+    // Now the user loads a different clip. Hold its analysis open.
+    let landAnalysis: ((a: unknown) => void) | undefined;
+    client.analyze.mockImplementation(
+      (path: string, _b?: number, signal?: AbortSignal) =>
+        new Promise((resolve, reject) => {
+          landAnalysis = (a) => resolve(a as never);
+          signal?.addEventListener('abort', () => reject(signal.reason));
+          void path;
+        }),
+    );
+    void actions.loadSource({ path: '/b.wav', name: 'b.wav', origin: 'file' });
+    await settle(10);
+    expect(st().analyzing).toBe(true);
+
+    // …and, before it lands, goes back to the finished run.
+    await actions.selectRun(jobId as string);
+    await settle(10);
+
+    // The analysis must have been abandoned, exactly as `stopFollow` is.
+    expect(st().analyzing).toBe(false);
+    expect(st().source?.name).toBe('a.wav');
+
+    // If clip B's analysis were still live, this would write its peaks,
+    // duration and loudness over run A — B's audio and timecode under A's
+    // name, with nothing on screen saying they disagree.
+    landAnalysis?.(analysis({ path: '/b.wav', duration_s: 999 }));
+    await settle(50);
+    expect(st().source?.name).toBe('a.wav');
+    expect(st().original?.duration_s).not.toBe(999);
   });
 });
