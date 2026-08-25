@@ -100,7 +100,8 @@ export function WaveformDisplay() {
   const lastDetail = useRef<Record<WaveKind, DetailKey | null>>({ original: null, cleaned: null });
   const requestCount = useRef(0);
 
-  const [width, setWidth] = useState(0);
+  /** Last width we actually reacted to, in whole CSS pixels. */
+  const lastWidthRef = useRef(0);
   const [glOk, setGlOk] = useState(true);
 
   const original = useStore((s) => s.original);
@@ -427,11 +428,14 @@ export function WaveformDisplay() {
       const e = entries[0];
       if (!e) return;
       widthRef.current = e.contentRect.width;
-      setWidth(Math.round(e.contentRect.width));
+      applyWidthRef.current(e.contentRect.width);
     });
     ro.observe(wrap);
-    widthRef.current = wrap.getBoundingClientRect().width;
-    setWidth(Math.round(wrap.getBoundingClientRect().width));
+    const first = wrap.getBoundingClientRect().width;
+    widthRef.current = first;
+    // Sets bucketsRef before the data effect below reads it, so the first
+    // setSource no longer runs against the stale 1200 default.
+    applyWidthRef.current(first);
     const unsub = getPlayer().subscribe((snap) => {
       const hasAudio = getPlayer().hasDeck('original') || getPlayer().hasDeck('cleaned');
       host.setPlayhead(snap.time, hasAudio);
@@ -560,16 +564,39 @@ export function WaveformDisplay() {
   }, [report]);
 
   // Width changes move the deepest useful zoom (one bucket per device column).
-  useEffect(() => {
-    if (width <= 0) return;
-    bucketsRef.current = bucketsFor(width);
-    const sr = getState().original?.sample_rate ?? 48000;
-    waveView.setMaxBuckets(sr, bucketsRef.current);
-    drawRuler();
-    drawOverview();
-    updateChrome();
-    scheduleDetailFetch();
-  }, [width, drawRuler, drawOverview, updateChrome, scheduleDetailFetch]);
+  //
+  // This used to be a `useEffect` on a `width` useState that the JSX never
+  // read: its only purpose was to re-run this body, so every pixel of a window
+  // drag re-rendered the whole panel — a 975-line component with a canvas
+  // host, a ruler, an overview and a verdict strip under it — to recompute a
+  // bucket count. `widthRef` already carried the number. The observer calls
+  // this directly now, and nothing re-renders on a resize at all.
+  //
+  // The dedupe guards on WIDTH, not on the bucket count. `bucketsFor` clamps
+  // to [256, 8000], so a guard on its output would stop calling drawRuler and
+  // drawOverview once the window got wide enough to saturate it — and those
+  // two are what set the canvases' backing-store size, so the display would be
+  // left stretching a stale bitmap.
+  const applyWidth = useCallback(
+    (w: number) => {
+      const px = Math.round(w);
+      if (px <= 0 || px === lastWidthRef.current) return;
+      lastWidthRef.current = px;
+      bucketsRef.current = bucketsFor(px);
+      const sr = getState().original?.sample_rate ?? 48000;
+      waveView.setMaxBuckets(sr, bucketsRef.current);
+      drawRuler();
+      drawOverview();
+      updateChrome();
+      scheduleDetailFetch();
+    },
+    [drawRuler, drawOverview, updateChrome, scheduleDetailFetch],
+  );
+
+  // The ResizeObserver is installed once, at mount, so it must not close over
+  // a stale `applyWidth`.
+  const applyWidthRef = useRef(applyWidth);
+  applyWidthRef.current = applyWidth;
 
   // ------------------------------------------------------------ interaction
 

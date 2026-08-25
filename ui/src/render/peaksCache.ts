@@ -22,7 +22,23 @@ const LRU_LIMIT = 24;
 const TIME_DECIMALS = 6;
 
 const cache = new Map<string, PeaksData>();
-const inflight = new Map<string, Promise<PeaksData>>();
+/**
+ * Requests in flight, so two views asking for the same window share one fetch.
+ *
+ * The signal is stored with the task because the sharing was unsound without
+ * it: the entry held only the promise, created with the *first* caller's
+ * AbortSignal. A second caller joining that entry was therefore joining a
+ * request that the first caller could cancel out from under it — zoom in,
+ * zoom straight back out, and the live request dies because the abandoned one
+ * was aborted. A joiner now checks the owner's signal and starts its own fetch
+ * rather than inheriting someone else's cancellation.
+ */
+interface Inflight {
+  task: Promise<PeaksData>;
+  signal: AbortSignal | undefined;
+}
+
+const inflight = new Map<string, Inflight>();
 
 let supported = true;
 
@@ -110,7 +126,9 @@ export async function loadPeaks(
     return hit;
   }
   const running = inflight.get(key);
-  if (running) return running;
+  // Only join a request that can still finish. An aborted owner's promise is
+  // already rejecting.
+  if (running && !running.signal?.aborted) return settle(running.task);
 
   const task = (async (): Promise<PeaksData> => {
     const res = await client.peaks(path, s, e, buckets, signal);
@@ -127,7 +145,28 @@ export async function loadPeaks(
     touch(key, data);
     return data;
   })();
-  inflight.set(key, task);
+  const entry: Inflight = { task, signal };
+  inflight.set(key, entry);
+  try {
+    return await settle(task);
+  } finally {
+    // Identity-checked. A bare `delete(key)` lets a dying request evict the
+    // entry a *newer* request has already installed under the same key, so the
+    // next caller re-fetches a window that is on its way.
+    if (inflight.get(key) === entry) inflight.delete(key);
+  }
+}
+
+/**
+ * Await a peaks request and apply the capability latch.
+ *
+ * Owner and joiner both go through here. They used to differ: a joiner
+ * returned the raw promise, so a 404/405 — the engine saying it has no
+ * windowed-peaks route at all — reached it as a thrown EngineError instead of
+ * the `null` the owner gets, and did not set the latch that stops the app
+ * asking again.
+ */
+async function settle(task: Promise<PeaksData>): Promise<PeaksData | null> {
   try {
     return await task;
   } catch (err) {
@@ -138,7 +177,5 @@ export async function loadPeaks(
       return null;
     }
     throw err;
-  } finally {
-    inflight.delete(key);
   }
 }

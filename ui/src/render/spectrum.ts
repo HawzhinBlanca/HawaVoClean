@@ -129,6 +129,16 @@ function bandCentres(): Float32Array {
 
 const BANDS = bandCentres();
 
+/**
+ * What the canvas paints with when a custom property cannot be resolved.
+ *
+ * These duplicate `styles/tokens.css`, because a canvas has no cascade to read
+ * from. Duplicated values drift, and these had: --fg-3 and --fg-4 sat at
+ * #6f7886 / #454c58 here — a generation older even than the #7c8593 / #545c69
+ * that the D2 contrast pass rejected as illegible — long after tokens.css was
+ * re-cut to #949daa / #86909f. `palette.test.ts` now pins every hex-valued
+ * entry against tokens.css so the two cannot separate again.
+ */
 const FALLBACK: Record<string, string> = {
   '--amber': '#ffb347',
   '--amber-2': '#ffd28a',
@@ -137,8 +147,8 @@ const FALLBACK: Record<string, string> = {
   '--display': '#07080a',
   '--display-2': '#0a0c0f',
   '--fg-2': '#aab2bf',
-  '--fg-3': '#6f7886',
-  '--fg-4': '#454c58',
+  '--fg-3': '#949daa',
+  '--fg-4': '#86909f',
   '--font-mono': "'SF Mono', ui-monospace, Menlo, Monaco, Consolas, monospace",
   '--font-ui':
     "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif",
@@ -322,13 +332,17 @@ export class SpectrumRenderer {
     this.ro.observe(canvas);
     this.onDprChange = this.onDprChange.bind(this);
     this.watchDpr();
+    // Bound before syncSize(), because syncSize() -> invalidate() -> kick()
+    // needs `this.loop` to already be the bound copy. Starting the loop with a
+    // bare requestAnimationFrame here instead of kick() would leave `this.raf`
+    // set by two different owners and leak a second, uncancellable loop.
+    this.loop = this.loop.bind(this);
     this.syncSize();
     this.onPointerMove = this.onPointerMove.bind(this);
     this.onPointerLeave = this.onPointerLeave.bind(this);
     canvas.addEventListener('pointermove', this.onPointerMove);
     canvas.addEventListener('pointerleave', this.onPointerLeave);
-    this.loop = this.loop.bind(this);
-    this.raf = requestAnimationFrame(this.loop);
+    this.kick();
   }
 
   // ---- theme --------------------------------------------------------------
@@ -345,8 +359,8 @@ export class SpectrumRenderer {
     const cyan = col('--cyan', [57, 208, 255]);
     const cyan2 = col('--cyan-2', [154, 232, 255]);
     const fg2 = col('--fg-2', [170, 178, 191]);
-    const fg3 = col('--fg-3', [111, 120, 134]);
-    const fg4 = col('--fg-4', [69, 76, 88]);
+    const fg3 = col('--fg-3', [148, 157, 170]);
+    const fg4 = col('--fg-4', [134, 144, 159]);
     const mono = raw('--font-mono') || FALLBACK['--font-mono'];
     const ui = raw('--font-ui') || FALLBACK['--font-ui'];
     // Grid tints are white by default but honour explicit overrides so the
@@ -402,6 +416,7 @@ export class SpectrumRenderer {
   private invalidate(): void {
     this.staticDirty = true;
     this.dirty = true;
+    this.kick();
   }
 
   private rebuildPaints(): void {
@@ -632,10 +647,12 @@ export class SpectrumRenderer {
       }
     }
     this.dirty = true;
+    this.kick();
   }
 
   dispose(): void {
     cancelAnimationFrame(this.raf);
+    this.raf = 0;
     this.ro.disconnect();
     this.mql?.removeEventListener('change', this.onDprChange);
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
@@ -791,6 +808,7 @@ export class SpectrumRenderer {
     if (next !== this.cursorX) {
       this.cursorX = next;
       this.dirty = true;
+      this.kick();
     }
   }
 
@@ -798,6 +816,7 @@ export class SpectrumRenderer {
     if (this.cursorX !== null) {
       this.cursorX = null;
       this.dirty = true;
+      this.kick();
     }
   }
 
@@ -882,13 +901,36 @@ export class SpectrumRenderer {
     }
   }
 
-  private loop(ts: number): void {
+  /**
+   * Start the frame loop if it is not already running.
+   *
+   * Every path that makes the display need a frame calls this. The loop parks
+   * itself when there is nothing left to do (see `loop`), so an idle app with
+   * a clip loaded is not holding a 60 Hz callback open to re-check five
+   * booleans — which is what it did before, for as long as the window was
+   * open.
+   */
+  private kick(): void {
+    if (this.raf) return;
+    // A parked loop has no notion of when it stopped. Without clearing this,
+    // the first frame after minutes of idle would see a huge `ts - lastT`,
+    // clamp it to 100 ms, and advance the live fade and ballistics by that
+    // whole step — a visible jump on the exact transition that woke it.
+    this.lastT = 0;
     this.raf = requestAnimationFrame(this.loop);
+  }
+
+  private loop(ts: number): void {
     const dt = this.lastT ? Math.min(0.1, (ts - this.lastT) / 1000) : 1 / 60;
     this.lastT = ts;
     const animating = this.liveActive || this.liveVisible > 0;
     if (animating) this.step(dt);
-    if (!animating && !this.dirty && !this.staticDirty) return;
+    if (!animating && !this.dirty && !this.staticDirty) {
+      // Nothing to draw and nothing decaying: park. `kick()` restarts us.
+      this.raf = 0;
+      return;
+    }
+    this.raf = requestAnimationFrame(this.loop);
     this.dirty = false;
     this.draw();
   }
