@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { isTerminal } from './api/sse';
 import { Actions } from './components/Actions';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
@@ -18,7 +17,7 @@ import { WaveformDisplay } from './components/WaveformDisplay';
 import { connectEngine, ingestDataTransfer } from './state/actions';
 import { useKeyboardMap } from './state/keymap';
 import { unitsEnhancedSpoken } from './state/plural';
-import { getState, useStore } from './state/store';
+import { getState, jobInFlight, useStore } from './state/store';
 
 /**
  * D1 · one polite live region for the whole job lifecycle.
@@ -197,7 +196,11 @@ export default function App() {
       const busy =
         st.engineStatus !== 'ready' ||
         Boolean(st.upload) ||
-        Boolean(st.job?.status && !isTerminal(st.job.status.state));
+        // Not `st.job?.status && !isTerminal(...)`: a job whose first status
+        // has not arrived yet has `status: null`, which that spelling reads as
+        // idle — so a file dropped in that window sailed past this guard and
+        // orphaned the run the engine had just accepted.
+        jobInFlight(st.job);
       if (busy) return;
       void ingestDataTransfer(e.dataTransfer);
     };

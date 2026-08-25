@@ -1923,3 +1923,116 @@ describe('selectRun with an analysis still in flight', () => {
     expect(st().original?.duration_s).not.toBe(999);
   });
 });
+
+describe('a run that is refused must not destroy the one on screen', () => {
+  it('keeps the finished run when createJob fails', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('done')));
+    await settle(10);
+    expect(st().report).not.toBeNull();
+    expect(st().cleanedPath).toBe('/out/a.wav');
+    const keptReport = st().report;
+
+    // The engine refuses the next one — a path it will not take, a 4xx, a dead
+    // socket. The prelude used to clear report, cleaned deck, artefacts and
+    // the A/B *before* this call, so a refusal left an empty screen with the
+    // plate still claiming the run it had just erased was complete.
+    client.createJob.mockRejectedValueOnce(new EngineError(422, 'bad_input', 'refused'));
+    await actions.startJob();
+    await settle(10);
+
+    expect(st().report).toBe(keptReport);
+    expect(st().cleanedPath).toBe('/out/a.wav');
+    expect(st().error).not.toBeNull();
+  });
+
+  it('refuses to start at all while the engine is gone, and says so', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('done')));
+    await settle(10);
+    const keptReport = st().report;
+
+    store.useStore.getState().setEngine('offline', client as never, '3.3.0');
+    client.createJob.mockClear();
+    await actions.startJob();
+    await settle(10);
+
+    expect(client.createJob).not.toHaveBeenCalled();
+    expect(st().report).toBe(keptReport);
+    expect(st().statusLine).toContain('engine is offline');
+  });
+});
+
+describe('a job the engine has accepted but not yet reported on', () => {
+  it('counts as in flight, so a second start cannot orphan it', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    // The window between createJob returning an id and the first status
+    // arriving. Written by hand as `job && job.status && !isTerminal(...)`,
+    // this reads as *idle*.
+    expect(st().job?.id).toBe('j1');
+    expect(st().job?.status).toBeNull();
+
+    client.createJob.mockClear();
+    await actions.startJob();
+    await settle(10);
+    expect(client.createJob).not.toHaveBeenCalled();
+  });
+
+  it('counts as in flight for loadSource, so a drop cannot orphan it', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    expect(st().job?.status).toBeNull();
+
+    client.analyze.mockClear();
+    await actions.loadSource({ path: '/b.wav', name: 'b.wav', origin: 'file' });
+    await settle(10);
+
+    // The running job keeps the screen; the new clip is refused with a reason.
+    expect(client.analyze).not.toHaveBeenCalled();
+    expect(st().source?.name).toBe('a.wav');
+    expect(st().job?.id).toBe('j1');
+  });
+});
+
+describe('loading a clip whose analysis never lands', () => {
+  it('does not leave the previous clip playing under the new name', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    // Clip A is loaded and its deck is live.
+    armed(store);
+    player.load.mockClear();
+    player.claimOnly.mockClear();
+    player.seek.mockClear();
+
+    // Clip B is refused — a rate the engine will not take, a codec it cannot
+    // read. `analyzing` clears, the source name becomes B, and the original
+    // deck used to still hold A's blob, so the transport played A under B's
+    // name. `player.time` reads currentTime ungated, so A's timecode came too.
+    client.analyze.mockRejectedValueOnce(new EngineError(415, 'bad_rate', 'refused'));
+    await actions.loadSource({ path: '/b.wav', name: 'b.wav', origin: 'file' });
+    await settle(20);
+
+    expect(st().source?.name).toBe('b.wav');
+    expect(st().original).toBeNull();
+    // Both decks let go, and the playhead reset before they did.
+    expect(player.seek).toHaveBeenCalledWith(0);
+    expect(player.claimOnly).toHaveBeenCalledWith('original', null);
+    expect(player.load).toHaveBeenCalledWith('cleaned', null);
+  });
+});

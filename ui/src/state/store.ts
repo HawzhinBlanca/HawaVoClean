@@ -73,6 +73,25 @@ export interface JobInfo {
   streamConnected: boolean;
 }
 
+/**
+ * Is this job still the engine's problem?
+ *
+ * The subtlety is `status: null`, which is the window between `createJob`
+ * returning an id and the first status arriving over the stream. Written out
+ * by hand as `job && job.status && !isTerminal(job.status.state)` — which is
+ * how four call sites had it — that window reads as *idle*, so during it a
+ * dropped file, a new load or another PROCESS press sailed past the guard and
+ * silently orphaned a run the engine was already working on.
+ *
+ * A job with no status yet is in flight. That is what having an id means.
+ */
+export function jobInFlight(job: JobInfo | null | undefined): boolean {
+  if (!job) return false;
+  if (!job.status) return true;
+  const s = job.status.state;
+  return s !== 'done' && s !== 'failed' && s !== 'cancelled';
+}
+
 export interface HoverUnit {
   unit: UnitDecisionRecord;
   x: number;

@@ -18,6 +18,7 @@ import {
 } from './errors';
 import {
   getState,
+  jobInFlight,
   useStore,
   type ArtifactState,
   type DeckFaultInfo,
@@ -740,7 +741,7 @@ async function reverifyCurrentRun(): Promise<void> {
 
 export async function loadSource(source: SourceInfo): Promise<void> {
   const st = getState();
-  if (st.job && st.job.status && !isTerminal(st.job.status.state)) {
+  if (jobInFlight(st.job)) {
     st.setError('A job is still running — cancel it before loading another clip.', 'Busy');
     return;
   }
@@ -749,6 +750,15 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   analyzeAbort?.abort();
   const player = getPlayer();
   player.pause();
+  // Both decks, not just the cleaned one. The original kept the *previous*
+  // clip's blob until the new analysis came back — and if the analysis failed
+  // or was refused it kept it indefinitely, so the transport played clip A
+  // under clip B's name with nothing on screen saying so. `seek(0)` comes
+  // first because retiring a deck leaves `currentTime` where it was and
+  // `player.time` reads it ungated, so the old clip's timecode would survive
+  // the deck that produced it.
+  player.seek(0);
+  player.claimOnly('original', null);
   player.load('cleaned', null);
   st.resetForNewSource();
   // A refusal is answered by the load that follows it. The multi-file note is
@@ -1268,16 +1278,18 @@ function uniqueOutputPath(inputPath: string, profile: Profile): string | null {
 export async function startJob(): Promise<void> {
   const st = getState();
   if (!st.source) return;
-  if (st.job && st.job.status && !isTerminal(st.job.status.state)) return;
-  st.setError(null);
-  st.setCleaned(null, null);
-  st.setReport(null);
-  st.setCurrentRun(null);
-  st.setDeckFault(null);
-  st.setArtifacts(null);
-  getPlayer().load('cleaned', null);
-  getPlayer().setActive('original');
-  st.setAbMode('original');
+  if (jobInFlight(st.job)) return;
+  // The engine has to be there before anything on screen is thrown away.
+  // Without this, pressing PROCESS with the engine gone wiped the finished run
+  // — report, cleaned deck, artefacts, the A/B — and *then* discovered there
+  // was nobody to send the request to, leaving an empty screen and a plate
+  // still claiming the run it had just erased was complete. `cancelJob` below
+  // already refuses with a sentence for the same reason; this is the same
+  // courtesy on the way in.
+  if (st.engineStatus !== 'ready') {
+    st.setStatus('Cannot start a run while the engine is offline — waiting for it to come back');
+    return;
+  }
   const profile: Profile = st.profile;
   try {
     const client = requireClient();
@@ -1307,6 +1319,20 @@ export async function startJob(): Promise<void> {
       ...(output ? { output_path: output } : {}),
       ...restore,
     });
+    // Only now, with a job id in hand, is the previous run's result really
+    // superseded. Doing this before `createJob` meant any refusal — a 4xx, a
+    // dead socket, a path the engine will not take — destroyed a finished run
+    // to start one that never began.
+    const cur = useStore.getState();
+    cur.setError(null);
+    cur.setCleaned(null, null);
+    cur.setReport(null);
+    cur.setCurrentRun(null);
+    cur.setDeckFault(null);
+    cur.setArtifacts(null);
+    getPlayer().load('cleaned', null);
+    getPlayer().setActive('original');
+    cur.setAbMode('original');
     const job = {
       id: res.job_id,
       outputPath: res.output_path,
@@ -1371,7 +1397,7 @@ export async function selectRun(jobId: string): Promise<void> {
   }
   const entry = st.history.find((h) => h.jobId === jobId);
   if (!entry) return;
-  if (st.job && st.job.status && !isTerminal(st.job.status.state)) {
+  if (jobInFlight(st.job)) {
     st.setError('A job is still running — cancel it before opening another run.', 'Busy');
     return;
   }

@@ -13,7 +13,7 @@ import {
   sourceFailureLabel,
   useResolveClip,
 } from '../state/actions';
-import { useStore } from '../state/store';
+import { useStore, jobInFlight } from '../state/store';
 import { IconCancel, IconClip, IconDrop, IconFolder, IconWarn } from './Icons';
 
 function fmtDuration(s: number): string {
@@ -187,9 +187,11 @@ export function SourceStrip() {
   const analyzing = useStore((s) => s.analyzing);
   const upload = useStore((s) => s.upload);
   const engineReady = useStore((s) => s.engineStatus === 'ready');
-  const running = useStore(
-    (s) => !!s.job?.status && (s.job.status.state === 'running' || s.job.status.state === 'queued'),
-  );
+  // `jobInFlight`, not a hand-written state check: this also has to cover the
+  // window between the engine accepting a job and its first status arriving,
+  // where `status` is still null. Loading a clip in that window orphans the
+  // run.
+  const running = useStore((s) => jobInFlight(s.job));
   const engineOffline = useStore((s) => s.engineStatus === 'offline');
   // C5 · subscribing to `error` is what makes the clip-row failure chip
   // reactive: the classification behind `sourceFailureLabel()` is set on the
