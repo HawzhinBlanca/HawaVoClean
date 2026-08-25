@@ -19,7 +19,7 @@ import { homedir } from 'node:os';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { HawaVoCleanReport, HealthResponse, JobStatus, PeaksWindow } from '../src/api/types';
+import type { HawaVoCleanReport, HealthResponse, JobStatus, PeaksWindow } from '../src/api/types.ts';
 
 const SCRIPT = fileURLToPath(new URL('./mock-engine.mjs', import.meta.url));
 const TOKEN = 'dev';

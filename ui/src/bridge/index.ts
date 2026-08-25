@@ -36,6 +36,11 @@ function webBaseUrl(): string {
       /* malformed ?engine= — ignore */
     }
   }
+  // Under the dev server there is never an engine on this origin, whatever
+  // port Vite ended up on. Deciding by build mode rather than by matching a
+  // port literal means a moved dev port cannot make the UI aim its API client
+  // (and its token) at the Vite server and then report the engine unreachable.
+  if (import.meta.env.DEV) return 'http://127.0.0.1:8765';
   const { protocol, port } = window.location;
   if (protocol === 'http:' || protocol === 'https:') {
     if (port === '5173' || port === '4173' || port === '8080' || port === '3000') {

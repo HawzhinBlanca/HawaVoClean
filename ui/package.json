@@ -14,7 +14,6 @@
     "mock": "node dev/mock-engine.mjs"
   },
   "dependencies": {
-    "motion": "^12.23.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "zustand": "^5.0.8"

@@ -18,6 +18,7 @@ import {
 } from './errors';
 import {
   getState,
+  jobInFlight,
   useStore,
   type ArtifactState,
   type DeckFaultInfo,
@@ -39,6 +40,42 @@ import {
  */
 const HEALTH_OK_MS = 10000;
 const HEALTH_BACKOFF_MS = [400, 800, 1600, 3000, 5000] as const;
+/**
+ * A health probe that never answers must still end.
+ *
+ * `probeInFlight` is cleared in a `finally`, so an engine that accepts the
+ * socket and then never writes — hung, paused, wedged behind a stuck
+ * filesystem call, or a proxy holding the connection — left the await pending
+ * forever and the flag set forever. Every later beat returned at the
+ * `if (probeInFlight) return` guard, so the heartbeat stopped, `Retry now`
+ * became inert, and no offline banner ever appeared because
+ * `engineOfflineSince` is only set on a *failed* probe. The app sat looking
+ * connected to an engine that was gone. Longer than the 5s ceiling of the
+ * backoff so a slow-but-alive engine is not cut off mid-answer.
+ */
+const HEALTH_TIMEOUT_MS = 4000;
+
+/**
+ * A signal that aborts itself after `ms`.
+ *
+ * Not `AbortSignal.timeout(ms)`, which is the obvious spelling: its timer is
+ * the platform's, outside `window.setTimeout`, so nothing in the test suite can
+ * advance it — a timeout no test can reach is a timeout no test can prove.
+ * This uses the same clock as the rest of the module.
+ *
+ * The abort reason is a `TimeoutError`, deliberately not the `AbortError` a
+ * bare `ac.abort()` produces: `AbortError` is how this app says *the user*
+ * cancelled, and reporting a hung engine as "Cancelled" would blame the reader
+ * for the engine's silence. `state/errors.ts` maps `TimeoutError` alongside a
+ * dead socket, which is what it is.
+ */
+function timeoutSignal(ms: number): { signal: AbortSignal; done: () => void } {
+  const ac = new AbortController();
+  const t = window.setTimeout(() => {
+    ac.abort(new DOMException(`No answer in ${ms} ms`, 'TimeoutError'));
+  }, ms);
+  return { signal: ac.signal, done: () => window.clearTimeout(t) };
+}
 
 let healthTimer: number | null = null;
 let probeStep = 0;
@@ -230,7 +267,13 @@ async function probeEngine(): Promise<void> {
     getState().setEngineProbe(getState().engineNextProbeAt, true);
     let client = getState().client;
     if (!client) client = new EngineClient(await getBridge().engine.getEndpoint());
-    const health = await client.health();
+    const probeTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
+    let health;
+    try {
+      health = await client.health(probeTimeout.signal);
+    } finally {
+      probeTimeout.done();
+    }
     if (!health.ok) throw new Error('Engine reported not ok');
 
     const wasDown = getState().engineStatus !== 'ready';
@@ -353,7 +396,15 @@ async function resumeAfterReconnect(client: EngineClient): Promise<void> {
   if (!job) return;
   if (job.status && isTerminal(job.status.state)) return;
   try {
-    const status = await client.getJob(job.id);
+    // The second door into the same deadlock: this runs on reconnect, so it is
+    // by definition talking to an engine that has just misbehaved.
+    const resumeTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
+    let status;
+    try {
+      status = await client.getJob(job.id, resumeTimeout.signal);
+    } finally {
+      resumeTimeout.done();
+    }
     onJobStatus(status);
     if (!isTerminal(status.state)) followFrom(client, job.id);
   } catch (e) {
@@ -690,7 +741,7 @@ async function reverifyCurrentRun(): Promise<void> {
 
 export async function loadSource(source: SourceInfo): Promise<void> {
   const st = getState();
-  if (st.job && st.job.status && !isTerminal(st.job.status.state)) {
+  if (jobInFlight(st.job)) {
     st.setError('A job is still running — cancel it before loading another clip.', 'Busy');
     return;
   }
@@ -699,6 +750,15 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   analyzeAbort?.abort();
   const player = getPlayer();
   player.pause();
+  // Both decks, not just the cleaned one. The original kept the *previous*
+  // clip's blob until the new analysis came back — and if the analysis failed
+  // or was refused it kept it indefinitely, so the transport played clip A
+  // under clip B's name with nothing on screen saying so. `seek(0)` comes
+  // first because retiring a deck leaves `currentTime` where it was and
+  // `player.time` reads it ungated, so the old clip's timecode would survive
+  // the deck that produced it.
+  player.seek(0);
+  player.claimOnly('original', null);
   player.load('cleaned', null);
   st.resetForNewSource();
   // A refusal is answered by the load that follows it. The multi-file note is
@@ -1218,16 +1278,18 @@ function uniqueOutputPath(inputPath: string, profile: Profile): string | null {
 export async function startJob(): Promise<void> {
   const st = getState();
   if (!st.source) return;
-  if (st.job && st.job.status && !isTerminal(st.job.status.state)) return;
-  st.setError(null);
-  st.setCleaned(null, null);
-  st.setReport(null);
-  st.setCurrentRun(null);
-  st.setDeckFault(null);
-  st.setArtifacts(null);
-  getPlayer().load('cleaned', null);
-  getPlayer().setActive('original');
-  st.setAbMode('original');
+  if (jobInFlight(st.job)) return;
+  // The engine has to be there before anything on screen is thrown away.
+  // Without this, pressing PROCESS with the engine gone wiped the finished run
+  // — report, cleaned deck, artefacts, the A/B — and *then* discovered there
+  // was nobody to send the request to, leaving an empty screen and a plate
+  // still claiming the run it had just erased was complete. `cancelJob` below
+  // already refuses with a sentence for the same reason; this is the same
+  // courtesy on the way in.
+  if (st.engineStatus !== 'ready') {
+    st.setStatus('Cannot start a run while the engine is offline — waiting for it to come back');
+    return;
+  }
   const profile: Profile = st.profile;
   try {
     const client = requireClient();
@@ -1257,6 +1319,20 @@ export async function startJob(): Promise<void> {
       ...(output ? { output_path: output } : {}),
       ...restore,
     });
+    // Only now, with a job id in hand, is the previous run's result really
+    // superseded. Doing this before `createJob` meant any refusal — a 4xx, a
+    // dead socket, a path the engine will not take — destroyed a finished run
+    // to start one that never began.
+    const cur = useStore.getState();
+    cur.setError(null);
+    cur.setCleaned(null, null);
+    cur.setReport(null);
+    cur.setCurrentRun(null);
+    cur.setDeckFault(null);
+    cur.setArtifacts(null);
+    getPlayer().load('cleaned', null);
+    getPlayer().setActive('original');
+    cur.setAbMode('original');
     const job = {
       id: res.job_id,
       outputPath: res.output_path,
@@ -1321,12 +1397,21 @@ export async function selectRun(jobId: string): Promise<void> {
   }
   const entry = st.history.find((h) => h.jobId === jobId);
   if (!entry) return;
-  if (st.job && st.job.status && !isTerminal(st.job.status.state)) {
+  if (jobInFlight(st.job)) {
     st.setError('A job is still running — cancel it before opening another run.', 'Busy');
     return;
   }
   stopFollow?.();
   stopFollow = null;
+  // An analysis in flight belongs to the clip the user was *leaving*. Without
+  // this it keeps running, and when it lands it writes that clip's peaks,
+  // spectrum, duration and loudness over the run just restored — clip B's
+  // audio and timecode sitting under run A's name, with nothing on screen
+  // saying they disagree. `stopFollow` was already torn down here for exactly
+  // the same reason; the analyze half was missed.
+  analyzeAbort?.abort();
+  analyzeAbort = null;
+  st.setAnalyzing(false);
   const player = getPlayer();
   player.pause();
   st.setError(null);

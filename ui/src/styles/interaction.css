@@ -48,6 +48,11 @@ input:focus-visible,
 .wave-fit:focus-visible,
 .sc-close:focus-visible,
 .insp-keys:focus-visible,
+.insp-step:focus-visible,
+.insp-clear:focus-visible,
+.up-cancel:focus-visible,
+.an-cancel:focus-visible,
+.dr-dismiss:focus-visible,
 .errbar .dismiss:focus-visible {
   filter: drop-shadow(0 0 7px var(--ix-focus-soft));
 }
@@ -68,8 +73,17 @@ input:focus-visible,
   opacity: 0.62;
 }
 
-/* Controls that live *inside* a well: the ring goes in with them. */
+/* Controls that live *inside* a well: the ring goes in with them.
+   `.wave-canvas-wrap` is the same case for a different reason — it is a
+   focusable display, not a control, and it sits flush against three sides of
+   `.display`, which is `overflow: hidden` (app.css). An outward ring is
+   clipped away on those three sides and painted under the glass overlay on
+   the fourth, so keyboard focus on the waveform showed almost nothing. Only
+   the offset is restated here; the colour and width come from the global rule
+   above, and no z-index is raised — lifting the canvas out from under
+   `.display::after` would change the display's finish on every focus. */
 .seg button:focus-visible,
+.wave-canvas-wrap:focus-visible,
 .dropzone input[type='file']:focus-visible {
   outline-offset: -2px;
 }
@@ -159,11 +173,11 @@ input:focus-visible,
     filter var(--ix-mid) var(--ease-out);
 }
 
-.seg button:not(.on):not(:disabled):hover {
+.seg button:not(.on):not(:disabled):not([aria-disabled='true']):hover {
   color: var(--fg-2);
 }
 
-.seg button:not(:disabled):active {
+.seg button:not(:disabled):not([aria-disabled='true']):active {
   filter: brightness(0.92);
   transition-duration: var(--ix-fast);
 }
@@ -280,7 +294,7 @@ input:focus-visible,
 
 .process .ring .bar {
   transition:
-    stroke-dashoffset 260ms var(--ease-out),
+    stroke-dashoffset var(--ix-slow) var(--ease-out),
     stroke var(--ix-slow) var(--ease-out),
     filter var(--ix-slow) var(--ease-out);
 }
@@ -303,6 +317,10 @@ input:focus-visible,
   opacity: 0;
   transform: scale(0.7);
   pointer-events: none;
+  /* Deliberately faster than the --ix-slow phase change washing behind it:
+     the glyph is a discrete symbol being swapped, not a state being crossed,
+     and it has to have landed before the wash finishes or it reads as lagging
+     the thing it labels. Not drift from the token — a different class. */
   transition:
     opacity 220ms var(--ease-out),
     transform 220ms var(--ease-out);
@@ -895,13 +913,27 @@ input:focus-visible,
 /* ============================================== A7 · VERDICT STRIP CLARITY
  * Resting opacity used to be 0.85 on the track and 0.9 on the legend, so a
  * legend chip was never quite the colour of the bar it explained. Both are
- * now opaque and the hover/selection response moved onto `filter`, which
- * means chip and segment are the same pixels by construction. */
+ * now opaque, and the hover/selection response rides on the fill's alpha and
+ * its bloom — chip and segment are the same pixels by construction.
+ *
+ * The transition list has to name those two. It used to name `filter` and
+ * `transform`, and nothing anywhere sets either on a segment: every
+ * declaration was dead, and every state that really changes — the hover fill
+ * and bloom below, the `.sel` ring in app.css — was a hard cut. The densest
+ * control on the screen was also the only one with no easing, so sweeping a
+ * few hundred units strobed and `[`/`]` teleported the selection ring.
+ *
+ * `background` is safe to interpolate here: resting, hover and `.sel` fills
+ * are all three-stop `linear-gradient(180deg, ...)` differing only in alpha,
+ * so they tween; anything that ever failed to would fall back to the hard swap
+ * that shipped before, which is not a regression. `box-shadow` is the case
+ * rule 1 at the top of this file explicitly sanctions — a small object whose
+ * shadow *is* its state. */
 .verdict-seg {
   opacity: 1;
   transition:
-    filter var(--ix-mid) var(--ease-out),
-    transform var(--ix-mid) var(--ease-out);
+    background var(--ix-mid) var(--ease-out),
+    box-shadow var(--ix-mid) var(--ease-out);
 }
 
 /* A 10x6 chip has no room for a tint to read as a hue, so the key is drawn at
@@ -1125,9 +1157,13 @@ input:focus-visible,
  * it takes every animation and transition off `document.getAnimations()`
  * entirely, so the guarantee is checkable rather than merely fast. It is safe
  * here because nothing in the app listens for `transitionend`/`animationend` —
- * no state machine depends on an animation completing. JS-driven motion
- * (`motion/react` in the error bar, and the progress-ring interpolator) reads
- * the same preference in code. */
+ * no state machine depends on an animation completing. JS-driven motion — the
+ * header's readout cross-fade and the progress-ring interpolator — reads the
+ * same preference in code, through `state/reducedMotion.ts`, which queries the
+ * media string on this very line. (This used to credit `motion/react` "in the
+ * error bar", which was never true: the error bar is pure CSS, and the library
+ * was only ever asked for a hook that read the preference once at mount and
+ * then never again.) */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1222,8 +1258,24 @@ input:focus-visible,
   background-clip: padding-box;
 }
 
-.insp-body::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+/* Brighter on hover, not dimmer. This was 0.20 against a 0.22 rest, so
+   pointing at the bar made it recede — the one control in the app that
+   answered a hover by getting quieter. `background-clip` is restated because
+   the `background` shorthand resets it to border-box, which visually doubles
+   the thumb's width. */
+.insp-body::-webkit-scrollbar-thumb:hover,
+.hist-body::-webkit-scrollbar-thumb:hover,
+.sc-body::-webkit-scrollbar-thumb:hover,
+.right::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
+  background-clip: padding-box;
+}
+
+.insp-body::-webkit-scrollbar-thumb:active,
+.hist-body::-webkit-scrollbar-thumb:active,
+.sc-body::-webkit-scrollbar-thumb:active,
+.right::-webkit-scrollbar-thumb:active {
+  background: rgba(255, 255, 255, 0.44);
   background-clip: padding-box;
 }
 
@@ -1491,6 +1543,22 @@ input:focus-visible,
     filter var(--ix-mid) var(--ease-out);
 }
 
+/* 16px is the right visual size for this key in a fixed-height row, and well
+   below any sane pointer target. The box therefore stays 16px — growing it
+   would move the row — and the target grows to 24px through a transparent
+   ::after. This is the *only* pointer route to abort an upload in flight, so
+   missing it costs the user the transfer. (The keyboard route is Esc, which
+   the shortcut panel now lists.) */
+.up-cancel {
+  position: relative;
+}
+
+.up-cancel::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+}
+
 .up-cancel:hover {
   color: var(--err);
   filter: brightness(1.25);
@@ -1661,6 +1729,18 @@ input:focus-visible,
     filter var(--ix-mid) var(--ease-out);
 }
 
+/* Same case again, from 18px: the box stays put and the target grows to 24px
+   through a transparent ::after. */
+.dr-dismiss {
+  position: relative;
+}
+
+.dr-dismiss::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+}
+
 .dr-dismiss:hover {
   color: var(--fg);
   filter: brightness(1.2);
@@ -1699,8 +1779,12 @@ input:focus-visible,
   min-height: 0;
 }
 
+/* Sides at --pad-5 (12px) to line up with this panel's own `.panel-head` and
+   with every sibling panel body. They were --pad-4, so each run row sat 2px
+   left of the heading above it — the one panel in the app whose contents did
+   not share an edge with its title. */
 .hist-body {
-  padding: var(--pad-3) var(--pad-4) var(--pad-4);
+  padding: var(--pad-3) var(--pad-5) var(--pad-4);
   min-height: 0;
   max-height: min(300px, 40vh);
   overflow-y: auto;
@@ -1760,12 +1844,18 @@ input:focus-visible,
     box-shadow var(--ix-mid) var(--ease-out);
 }
 
-.hist-row:hover {
+/* Guarded: a row for a run that can no longer be shown is `aria-disabled` and
+   does nothing when clicked. Without the guard it still lifted, brightened and
+   pressed under the pointer — the full three-channel "you can press this"
+   answer, from a control that cannot be pressed. The `:active` half matters
+   more than the hover: --shadow-pressed on a dead control reads as a click
+   that was accepted and then ignored. */
+.hist-row:not(:disabled):not([aria-disabled='true']):hover {
   transform: translateY(-1px);
   filter: brightness(1.12);
 }
 
-.hist-row:active {
+.hist-row:not(:disabled):not([aria-disabled='true']):active {
   transform: translateY(0);
   box-shadow: var(--shadow-pressed);
 }
@@ -1935,11 +2025,15 @@ input:focus-visible,
   white-space: nowrap;
 }
 
+/* No side padding: `.hist-body` now supplies the 12px, and the extra 2px here
+   existed only to nudge the empty state back towards the panel edge that the
+   body was missing. Left in place it would make the empty state the newly
+   misaligned thing. */
 .hist-empty {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding: 2px 2px 4px;
+  padding: 2px 0 4px;
 }
 
 .hist-empty .msg {
@@ -2812,6 +2906,19 @@ input:focus-visible,
     filter var(--ix-mid) var(--ease-out);
 }
 
+/* Same case as `.up-cancel`: 16px box so the row does not move, 24px pointer
+   target through a transparent ::after, and the only pointer route to abort a
+   running analysis. */
+.an-cancel {
+  position: relative;
+}
+
+.an-cancel::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+}
+
 .an-cancel:hover {
   color: var(--err);
   filter: brightness(1.25);
@@ -2821,14 +2928,17 @@ input:focus-visible,
   box-shadow: var(--shadow-pressed);
 }
 
-/* The global `button:focus-visible` rule above already draws the ring; this
-   only adds the halo the other small inset controls wear. (An earlier draft
-   restated `outline` here with a token that does not exist — an invalid
-   value makes the whole declaration compute to `none`, which would have
-   *removed* the ring from this button rather than restyling it.) */
-.an-cancel:focus-visible {
-  filter: drop-shadow(0 0 7px var(--ix-focus-soft));
-}
+/* `.an-cancel`'s halo used to be declared here on its own, one of five small
+   inset controls that had drifted out of the halo list at the top of this
+   file. It is in that list now, with `.insp-step`, `.insp-clear`,
+   `.up-cancel` and `.dr-dismiss`, so the rule is stated once for the whole
+   family instead of per control.
+
+   The warning that came with it is worth keeping: an earlier draft restated
+   `outline` here with a token that does not exist, and an invalid value makes
+   the whole declaration compute to `none` — which *removes* the ring rather
+   than restyling it. The global `button:focus-visible` rule draws the ring;
+   nothing down here should redeclare it. */
 
 /* Reduced motion: the ring stops turning, so the state has to be legible
    standing still. It becomes a solid lit dot — the same "something is

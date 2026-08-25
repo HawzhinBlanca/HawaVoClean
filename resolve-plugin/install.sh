@@ -132,6 +132,14 @@ else
 fi
 [ -f "$UI_DIR/dist/index.html" ] || die "a complete ui/dist build is required"
 [ -d "$UI_DIR/dist/assets" ] || die "ui/dist/assets is missing"
+# Everything the app ships goes through the bundler into dist/assets, so
+# index.html is the only file that may sit at the top of dist/. Anything else
+# arrived unprocessed — a stray public/ file, a leftover from a debug session —
+# and this script would otherwise package it into the plugin verbatim. A 580 kB
+# debug script reached dist/ exactly that way; `publicDir: false` in
+# ui/vite.config.ts closes the usual door, and this closes the rest.
+STRAY="$(find "$UI_DIR/dist" -type f -not -path '*/assets/*' -not -name 'index.html')"
+[ -z "$STRAY" ] || die "unexpected files at the top of ui/dist (rebuild it): $(echo "$STRAY" | tr '\n' ' ')"
 
 say "Installing the exact standalone Electron test runtime from pnpm-lock.yaml"
 (cd "$SRC_DIR" && node "$PNPM_CLI" install --frozen-lockfile)

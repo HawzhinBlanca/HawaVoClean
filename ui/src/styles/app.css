@@ -260,7 +260,15 @@ kbd {
   box-shadow: 0 1px 0 var(--hair-hi);
 }
 
+/* These are <h2>. The document had exactly one heading in its steady state —
+   the wordmark — so a screen-reader user pressing H to move between the
+   regions of the app landed nowhere, on a screen that is entirely panels. The
+   h1-h6 reset above normalises font only, so the browser's default margin has
+   to go here; nothing about how a panel title is drawn changes. (The shortcuts
+   dialog already used an h2 with this class, which is why the geometry was
+   known to work on a heading before the change.) */
 .panel-title {
+  margin: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -470,7 +478,6 @@ kbd {
   transition:
     transform var(--dur) var(--ease-out),
     opacity var(--dur) var(--ease-out);
-  will-change: transform;
 }
 
 .btn svg {
@@ -565,6 +572,16 @@ kbd {
   inset: 0;
   opacity: 0;
   cursor: pointer;
+}
+
+/* The overlay input is what the pointer actually sees, and it kept `pointer`
+   across the whole well while disabled — the well said "drop here" to the
+   cursor during a run, an upload, or with no engine. `default` rather than
+   `not-allowed`: in this product `not-allowed` is the aria-disabled tier's
+   word (see .btn[aria-disabled]), and a natively-disabled input is not that
+   tier. */
+.dropzone input[type='file']:disabled {
+  cursor: default;
 }
 
 .clipinfo {
@@ -816,7 +833,6 @@ kbd {
     inset 0 1px 0 rgba(var(--seg), 0.95),
     inset 0 -1px 0 rgba(0, 0, 0, 0.45),
     0 0 9px -2px rgba(var(--seg), var(--seg-bloom));
-  transition: opacity var(--dur) var(--ease-out);
 }
 
 .verdict-seg.enhanced {
@@ -992,41 +1008,54 @@ kbd {
   /* the column is its own scroll world: a wheel over it must not scroll the
      page behind it once it reaches an end */
   overscroll-behavior: contain;
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
-  /* An overflow nobody can see is the dead zone B8 forbids, and this Chrome
-     gives a scrolled grid an *overlay* scrollbar (measured: offsetWidth −
-     clientWidth = 0 with every scrollbar declaration tried), so the bar itself
-     cannot be the affordance. These four layers are the standard local/scroll
-     pair: the two `local` covers ride the content and the two `scroll` shadows
-     stay pinned to the frame, so an edge with more behind it is shaded and an
-     edge at the end of the content is not. They cost nothing and appear only
-     when there is something to scroll to. */
-  background-image:
-    linear-gradient(var(--page), rgba(0, 0, 0, 0)),
-    linear-gradient(rgba(0, 0, 0, 0), var(--page)),
-    radial-gradient(farthest-side at 50% 0, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0)),
-    radial-gradient(farthest-side at 50% 100%, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
-  background-position:
-    50% 0,
-    50% 100%,
-    50% 0,
-    50% 100%;
-  background-repeat: no-repeat;
-  background-size:
-    100% 18px,
-    100% 18px,
-    100% 9px,
-    100% 9px;
-  background-attachment: local, local, scroll, scroll;
+  /* An overflow nobody can see is the dead zone B8 forbids, and this column
+     had exactly that: no scrollbar and no shading.
+     
+     Two mistakes compounded. The earlier measurement — "this Chrome gives a
+     scrolled grid an *overlay* scrollbar, offsetWidth − clientWidth = 0 with
+     every scrollbar declaration tried" — was confounded by the
+     `scrollbar-color` on this very rule, which is the declaration this
+     codebase already documents twice (interaction.css, for .insp-body and
+     .hist-body) as making Chromium ignore ::-webkit-scrollbar entirely. So the
+     8px graphite bar declared below never rendered, and the conclusion drawn
+     from its absence was wrong.
+     
+     The fallback that conclusion motivated then could not work either: the
+     affordance was four background layers on `.right`, but `.right` has no
+     padding and its two children are opaque `.panel` sections that fill the
+     whole grid. The background box was covered edge to edge; the only exposed
+     sliver was the 12px inter-panel gap in the middle of the column, where a
+     top/bottom edge shadow never lands. Provably-invisible paint, so it is
+     gone rather than left in place.
+     
+     `scrollbar-width: auto; scrollbar-color: auto` hands back the real
+     space-taking bar (measured gutter 0 -> 8px), which is visible at rest and
+     reserves its own layout — the same treatment the two precedents use.
+     
+     Pseudo-elements are NOT an option here: `.right` is a grid container, so
+     ::before/::after become grid items and would steal the
+     `minmax(var(--display-floor), 1fr)` track this rule exists to guarantee. */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
 }
 
 .right::-webkit-scrollbar {
   width: 8px;
 }
 
+.right::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.8);
+}
+
+/* 0.22, not --hair-strong (0.11): the two scrollable bodies that already had a
+   working bar rest at 0.22, and half that reads as an empty channel. All four
+   scrollers in the app now rest alike. */
 .right::-webkit-scrollbar-thumb {
-  background: var(--hair-strong);
+  background: rgba(255, 255, 255, 0.22);
   border-radius: var(--r-sm);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
 .spectrum-panel {
@@ -1268,8 +1297,14 @@ kbd {
   color: var(--fg);
 }
 
-.seg button:disabled {
+/* Both spellings. The segments moved from the native `disabled` attribute to
+   `aria-disabled` so the reason for being disabled stays reachable (see
+   Segmented.tsx); the dim must follow, or a switch that cannot be used looks
+   exactly like one that can. */
+.seg button:disabled,
+.seg button[aria-disabled='true'] {
   opacity: 0.62;
+  cursor: not-allowed;
 }
 
 .seg .thumb {
@@ -1317,7 +1352,6 @@ kbd {
   transition:
     transform var(--dur) var(--ease-out),
     opacity var(--dur) var(--ease-out);
-  will-change: transform;
 }
 
 .process:hover:not(:disabled):not([aria-disabled='true']) {
@@ -1370,7 +1404,6 @@ kbd {
 .process .ring .bar {
   stroke: var(--cyan);
   filter: drop-shadow(0 0 5px rgba(57, 208, 255, 0.55));
-  transition: stroke-dashoffset 220ms var(--ease-out);
 }
 
 .process .ring .bar.idle {
@@ -1653,11 +1686,15 @@ kbd {
   white-space: nowrap;
 }
 
+/* Restated in tokens: these were the literals 12/12/48, which is exactly
+   `--gap` on the sides and `--gap + the 28px footer + --pad-3` at the bottom
+   — right at the default size, and 2px wide of every panel below 720px tall,
+   where the compact block shrinks the app's own gutters. */
 .errbar {
   position: fixed;
-  left: 12px;
-  right: 12px;
-  bottom: 48px;
+  left: var(--gap);
+  right: var(--gap);
+  bottom: calc(var(--gap) + 28px + var(--pad-3));
   z-index: 40;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1710,6 +1747,18 @@ kbd {
     padding: 10px;
   }
 
+  /* The bar is `position: fixed`, so it does not inherit the app's compact
+     gutters — it has to restate them. This block shrinks the page inset to
+     10px and the footer to 24px; without this the bar kept the 12px/48px of
+     the default size and overhung every panel below it by 2px.
+     (Deliberately not `--gap: var(--pad-4)` on `.app`: --gap also feeds
+     `.main` and `.left`, which this block leaves at 12px on purpose.) */
+  .errbar {
+    left: var(--pad-4);
+    right: var(--pad-4);
+    bottom: calc(var(--pad-4) + 24px + var(--pad-3));
+  }
+
   .app[data-offline='true'] {
     grid-template-rows: 40px auto 48px minmax(0, 1fr) 24px;
   }
@@ -1726,23 +1775,13 @@ kbd {
     padding: 10px;
   }
 
-  .process {
-    height: 78px;
-    grid-template-columns: 62px minmax(0, 1fr);
-    gap: 12px;
-    padding: 0 12px 0 8px;
-  }
-
-  .process .ring {
-    width: 62px;
-    height: 62px;
-  }
-
-  .process .ring svg {
-    width: 62px;
-    height: 62px;
-  }
-
+  /* The plate's compact geometry is NOT here. `.process` in this block is
+     0,1,0 and the plate is `.process.plate`, so every value this rule used to
+     set — 78px tall, a 62px ring column, 12px gap, 8/12 padding — was
+     outranked and never shipped. Measured on the running app at 640px tall:
+     76px / 66px / 11px / 0 6px 0 11px, from interaction.css and process.css.
+     Only the icon size below is this rule's own; it is live because nothing
+     else sets it. */
   .process .ring .center svg.icon {
     width: 20px;
     height: 20px;
@@ -1804,8 +1843,10 @@ kbd {
   overflow-y: auto;
   overflow-x: hidden;
   max-height: min(300px, 40vh);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  /* No `scrollbar-width: thin` / `scrollbar-color` pair here: it suppresses
+     every ::-webkit-scrollbar rule in Chromium. interaction.css already
+     overrides it back to auto/auto for this element, so the pair was dead —
+     but a dead trap is what the next scroller gets copied from. */
 }
 
 .inspector[data-selected='false'] .insp-body {
@@ -2417,8 +2458,14 @@ kbd {
   padding: 12px 14px 14px;
   overflow-y: auto;
   min-height: 0;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  /* `scrollbar-width: thin` + a `scrollbar-color` makes Chromium ignore every
+     ::-webkit-scrollbar rule — including the track and thumb this file
+     declares for .sc-body further down, which therefore never rendered. The
+     panel is two columns of shortcut rows and does overflow on a short window,
+     with no sign that there is more below. Same trap, and the same fix, as
+     .insp-body and .hist-body (interaction.css). */
+  scrollbar-width: auto;
+  scrollbar-color: auto;
 }
 
 .sc-group {
@@ -2694,8 +2741,12 @@ kbd {
   width: 8px;
 }
 
+/* 0.22 to match .insp-body, .hist-body and .right. --hair-strong is 0.11 —
+   invisible against the track once the bar actually renders. */
 .sc-body::-webkit-scrollbar-thumb {
-  background: var(--hair-strong);
+  background: rgba(255, 255, 255, 0.22);
+  border: 2px solid transparent;
+  background-clip: padding-box;
   border-radius: var(--r-sm);
 }
 

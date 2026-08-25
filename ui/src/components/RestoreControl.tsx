@@ -50,6 +50,7 @@ export function RestoreControl() {
           ariaLabel="Mode"
           value={mode}
           disabled={running}
+          disabledReason="The mode is part of the run — cancel it to change this."
           onChange={setMode}
           options={[
             { value: 'natural', label: 'Natural' },

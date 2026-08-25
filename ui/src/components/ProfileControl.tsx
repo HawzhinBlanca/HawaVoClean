@@ -31,6 +31,7 @@ export function ProfileControl() {
           ariaLabel="Profile"
           value={profile}
           disabled={running}
+          disabledReason="The profile is part of the run — cancel it to change this."
           onChange={setProfile}
           options={[
             { value: 'studio', label: 'Studio' },

@@ -41,6 +41,8 @@ const GROUPS: Group[] = [
     title: 'Job',
     rows: [
       { keys: [['P']], what: 'Process the loaded clip', when: 'when idle' },
+      { keys: [['Esc']], what: 'Cancel the upload', when: 'while uploading' },
+      { keys: [['Esc']], what: 'Cancel the analysis', when: 'while analyzing' },
       { keys: [['Esc']], what: 'Cancel the running job', when: 'while running' },
     ],
   },

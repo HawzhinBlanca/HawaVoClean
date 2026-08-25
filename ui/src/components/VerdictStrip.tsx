@@ -63,8 +63,19 @@ function segmentLabel(u: UnitDecisionRecord, channels: number[]): string {
   return parts.join(', ');
 }
 
-interface Hover {
-  unit: UnitDecisionRecord;
+/**
+ * Where the pointer is. Deliberately a ref, not state.
+ *
+ * This used to be `{ unit, x, y }` in `useState`, updated from `onMouseMove`.
+ * That made every pixel of pointer travel across the strip a React render of
+ * the whole component — hundreds of `<button>`s, each rebuilding its
+ * `aria-label` through `segmentLabel()` — to move one card. The card is the
+ * only thing that depends on the coordinates, and it is positioned by writing
+ * `style.transform` directly, so the coordinates never need to reach the
+ * reconciler at all. Only *which unit* is hovered is state, because that is
+ * what changes the rendered tree.
+ */
+interface Cursor {
   x: number;
   y: number;
 }
@@ -80,7 +91,8 @@ export function VerdictStrip() {
   const duration = useStore((s) => s.duration);
   const setHighlight = useStore((s) => s.setHighlight);
   const selected = useStore((s) => s.selectedUnit);
-  const [hover, setHover] = useState<Hover | null>(null);
+  const [hover, setHover] = useState<UnitDecisionRecord | null>(null);
+  const cursor = useRef<Cursor>({ x: 0, y: 0 });
   const tipRef = useRef<HTMLDivElement | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
 
@@ -117,16 +129,51 @@ export function VerdictStrip() {
     return waveView.subscribe(syncWindow);
   }, [syncWindow]);
 
+  // Keep the tooltip on-screen, and tell it where its arrow goes.
+  //
+  // The card is centred over the cursor and sits above the strip; when there
+  // is no room above it flips below, and when it would run off either edge it
+  // slides back in. The arrow is then placed at the cursor's offset *inside*
+  // the card, clamped away from the rounded corners, so it points at the
+  // segment however far the card had to slide.
+  const placeTip = useCallback(() => {
+    const tip = tipRef.current;
+    if (!tip) return;
+    const { x: cx, y: cy } = cursor.current;
+    const r = tip.getBoundingClientRect();
+    const M = 8; // viewport margin
+    const GAP = 13; // clearance for the arrow
+    let x = cx - r.width / 2;
+    x = Math.max(M, Math.min(x, window.innerWidth - r.width - M));
+    let y = cy - r.height - GAP;
+    let place: 'top' | 'bottom' = 'top';
+    if (y < M) {
+      y = cy + GAP;
+      place = 'bottom';
+    }
+    tip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    tip.dataset.place = place;
+    const arrow = Math.max(14, Math.min(cx - x, r.width - 14));
+    tip.style.setProperty('--tip-arrow', `${Math.round(arrow)}px`);
+  }, []);
+
   const onEnter = useCallback(
     (u: UnitDecisionRecord, e: MouseEvent) => {
-      setHover({ unit: u, x: e.clientX, y: e.clientY });
+      cursor.current = { x: e.clientX, y: e.clientY };
+      setHover(u);
       setHighlight(highlightFor(u, channels));
     },
     [setHighlight, channels],
   );
-  const onMove = useCallback((e: MouseEvent) => {
-    setHover((h) => (h ? { ...h, x: e.clientX, y: e.clientY } : h));
-  }, []);
+  const onMove = useCallback(
+    (e: MouseEvent) => {
+      cursor.current = { x: e.clientX, y: e.clientY };
+      // One style write, no render. The card is pinned to the pointer rather
+      // than trailing it by a frame.
+      placeTip();
+    },
+    [placeTip],
+  );
   const onLeave = useCallback(() => {
     setHover(null);
     // Hover only borrows the highlight; the selection keeps it.
@@ -140,32 +187,13 @@ export function VerdictStrip() {
     }
   }, [report, setHighlight]);
 
-  // Keep the tooltip on-screen, and tell it where its arrow goes.
-  //
-  // The card is centred over the cursor and sits above the strip; when there
-  // is no room above it flips below, and when it would run off either edge it
-  // slides back in. The arrow is then placed at the cursor's offset *inside*
-  // the card, clamped away from the rounded corners, so it points at the
-  // segment however far the card had to slide.
-  useEffect(() => {
-    const tip = tipRef.current;
-    if (!tip || !hover) return;
-    const r = tip.getBoundingClientRect();
-    const M = 8; // viewport margin
-    const GAP = 13; // clearance for the arrow
-    let x = hover.x - r.width / 2;
-    x = Math.max(M, Math.min(x, window.innerWidth - r.width - M));
-    let y = hover.y - r.height - GAP;
-    let place: 'top' | 'bottom' = 'top';
-    if (y < M) {
-      y = hover.y + GAP;
-      place = 'bottom';
-    }
-    tip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-    tip.dataset.place = place;
-    const arrow = Math.max(14, Math.min(hover.x - x, r.width - 14));
-    tip.style.setProperty('--tip-arrow', `${Math.round(arrow)}px`);
-  }, [hover]);
+  // Before paint, not after. `.tooltip` rests at `position: fixed; top: 0;
+  // left: 0` with no transform, so positioning it in a passive effect
+  // committed one frame of a 292 px card with an --elev-3 shadow sitting in
+  // the top-left corner of the window, arrow unplaced, on every single hover.
+  useLayoutEffect(() => {
+    if (hover) placeTip();
+  }, [hover, placeTip]);
 
   const enhanced = units.filter((u) => u.final_decision === 'enhanced').length;
 
@@ -191,7 +219,7 @@ export function VerdictStrip() {
         // seeks and pans the view in one press.
         tabIndex={-1}
         key={unitKey(u)}
-        className={`verdict-seg ${cls}${hover?.unit === u ? ' hot' : ''}${isSel ? ' sel' : ''}`}
+        className={`verdict-seg ${cls}${hover === u ? ' hot' : ''}${isSel ? ' sel' : ''}`}
         style={style}
         // D1 · the hover tooltip must not be the only way to read a
         // unit's decision. Two routes replace it: the inspector, which
@@ -200,7 +228,12 @@ export function VerdictStrip() {
         // both guard verdicts, strength — so a screen reader gets the
         // card's content without a pointer ever entering the strip.
         aria-label={segmentLabel(u, channels)}
-        aria-pressed={isSel}
+        // `aria-current`, not `aria-pressed`. A segment selects a unit; it can
+        // never be un-pressed, and a screen reader announcing "not pressed" on
+        // every one of a few hundred segments describes a toggle that does not
+        // exist. JobHistory.tsx uses aria-current for the identical "this is
+        // the one you are looking at" semantic.
+        aria-current={isSel ? 'true' : undefined}
         onMouseEnter={(e) => onEnter(u, e)}
         onMouseMove={onMove}
         onClick={(e) => {
@@ -226,9 +259,11 @@ export function VerdictStrip() {
       <div
         className="verdict-track"
         ref={trackRef}
-        // D1 · the strip is a group of toggles over one time axis; naming the
-        // group is what lets a screen-reader user understand the run of
-        // segments inside it as one thing.
+        // D1 · the strip is one selectable run of units over one time axis;
+        // naming the group is what lets a screen-reader user understand the
+        // segments inside it as one thing. (It said "a group of toggles" while
+        // the segments carried `aria-pressed`; they carry `aria-current` now,
+        // because selecting a unit is not a press that can be undone.)
         role="group"
         aria-label={
           multi
@@ -296,48 +331,48 @@ export function VerdictStrip() {
         <div ref={tipRef} className="tooltip" role="tooltip">
           <div className="head">
             <span className="mono" style={{ color: 'var(--fg)' }}>
-              Unit {hover.unit.unit_id}
+              Unit {hover.unit_id}
               <span style={{ color: 'var(--fg-3)' }}>
                 {' · '}
-                {multi ? channelName(hover.unit.channel, channels).short : `ch ${hover.unit.channel}`}
+                {multi ? channelName(hover.channel, channels).short : `ch ${hover.channel}`}
               </span>
             </span>
             {/* same badge recipe as the inspector and the strip itself */}
-            <span className={`pill ${classifyDecision(hover.unit.final_decision)}`}>
-              {decisionLabel(hover.unit.final_decision)}
+            <span className={`pill ${classifyDecision(hover.final_decision)}`}>
+              {decisionLabel(hover.final_decision)}
             </span>
           </div>
           <div className="row">
             <span className="k">Range</span>
             <span className="v">
-              {formatTime(hover.unit.start_time_s, true)} → {formatTime(hover.unit.end_time_s, true)}
+              {formatTime(hover.start_time_s, true)} → {formatTime(hover.end_time_s, true)}
             </span>
           </div>
           <div className="row">
             <span className="k">Guards</span>
             <span className="verdicts">
-              <span className={`gv ${guardTone(hover.unit.guard_a_verdict)}`}>
-                A <b>{hover.unit.guard_a_verdict ?? '—'}</b>
+              <span className={`gv ${guardTone(hover.guard_a_verdict)}`}>
+                A <b>{hover.guard_a_verdict ?? '—'}</b>
               </span>
-              <span className={`gv ${guardTone(hover.unit.guard_b_verdict)}`}>
-                B <b>{hover.unit.guard_b_verdict ?? '—'}</b>
+              <span className={`gv ${guardTone(hover.guard_b_verdict)}`}>
+                B <b>{hover.guard_b_verdict ?? '—'}</b>
               </span>
             </span>
           </div>
-          {typeof hover.unit.chosen_strength === 'number' && hover.unit.chosen_strength > 0 ? (
+          {typeof hover.chosen_strength === 'number' && hover.chosen_strength > 0 ? (
             <div className="row">
               <span className="k">Strength</span>
-              <span className="v">{hover.unit.chosen_strength.toFixed(2)}</span>
+              <span className="v">{hover.chosen_strength.toFixed(2)}</span>
             </div>
           ) : null}
-          {hover.unit.decision_reason ? <div className="reason">{hover.unit.decision_reason}</div> : null}
-          {hover.unit.guard_a_scores && Object.keys(hover.unit.guard_a_scores).length ? (
+          {hover.decision_reason ? <div className="reason">{hover.decision_reason}</div> : null}
+          {hover.guard_a_scores && Object.keys(hover.guard_a_scores).length ? (
             <div className="scores">
-              {SCORE_KEYS.filter(([k]) => hover.unit.guard_a_scores && k in hover.unit.guard_a_scores).map(
+              {SCORE_KEYS.filter(([k]) => hover.guard_a_scores && k in hover.guard_a_scores).map(
                 ([k, label]) => (
                   <div className="row" key={k}>
                     <span className="k">{label}</span>
-                    <span className="v">{fmtScore(hover.unit.guard_a_scores?.[k] ?? '')}</span>
+                    <span className="v">{fmtScore(hover.guard_a_scores?.[k] ?? '')}</span>
                   </div>
                 ),
               )}

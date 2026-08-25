@@ -1,5 +1,5 @@
-import { useReducedMotion } from 'motion/react';
 import { useEffect, useRef, useState } from 'react';
+import { useReducedMotion } from '../state/reducedMotion';
 import { useStore } from '../state/store';
 import { Led, type LedState } from './Led';
 
@@ -20,6 +20,14 @@ const SWAP_MS = 240;
 function useSwap(text: string, enabled: boolean): string | null {
   const [prev, setPrev] = useState<string | null>(null);
   const last = useRef(text);
+  // Turning the preference on *during* a cross-fade cancels the timeout that
+  // would have cleared the outgoing word, so it would overprint the incoming
+  // one permanently — worse than the 240 ms overprint being avoided. Dropping
+  // the held word whenever motion is switched off is the whole fix. (Dormant
+  // until this file's hook became live; `motion/react`'s latched at mount.)
+  useEffect(() => {
+    if (!enabled) setPrev(null);
+  }, [enabled]);
   useEffect(() => {
     if (last.current === text) return;
     const before = last.current;
@@ -74,8 +82,15 @@ function HeaderNow() {
   if (upload) {
     tone = 'busy';
     label = 'Uploading';
+    // The name goes in the *value* slot, like every other branch here. It was
+    // in the key slot, which does not shrink, so a long filename clipped hard
+    // and pushed the percentage off the end of the header.
+    facts.push({ k: 'Clip', v: upload.name });
+    // "Sent", not "Done": `upload.phase` reaches 'finishing' at
+    // loaded === total while the engine is still writing the file, so 100%
+    // here does not mean the upload is over.
     facts.push({
-      k: upload.name,
+      k: 'Sent',
       v: `${Math.round((upload.total ? upload.loaded / upload.total : 0) * 100)}%`,
     });
   } else if (analyzing) {
@@ -175,9 +190,16 @@ export function Header() {
     <header className="panel header">
       {/* D1 · the page had no h1 at all. The wordmark is the document's one
           top-level heading; nothing about how it is drawn changes. */}
+      {/* The UI's own version, injected from ui/package.json at build time
+          (vite.config.ts). It was the literal string "v3.2" from the commit
+          that created this file — one titled "v3.3.0-dev" — so the wordmark
+          named the wrong product version on every screenshot in the perfection
+          log and through three adversarial audits. The lamp's `v{engineVersion}`
+          to the right is a different fact (what the engine answering us is),
+          and the two are worth being able to see disagree. */}
       <h1 className="wordmark">
         <span className="name">HAWAVOCLEAN</span>
-        <span className="ver">v3.2</span>
+        <span className="ver">v{__UI_VERSION__}</span>
       </h1>
       <div className="header-mid">
         <span className={`badge${host === 'resolve' ? ' accent' : ''}`}>
