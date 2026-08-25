@@ -156,6 +156,8 @@ function jobStatus(state: JobState, over: Partial<JobStatus> = {}): JobStatus {
 interface FakeClient {
   health: ReturnType<typeof vi.fn>;
   analyze: ReturnType<typeof vi.fn>;
+  /** Assigned per-test by the upload cases; unused by the rest. */
+  uploadWithProgress: ReturnType<typeof vi.fn>;
   createJob: ReturnType<typeof vi.fn>;
   getJob: ReturnType<typeof vi.fn>;
   cancelJob: ReturnType<typeof vi.fn>;
@@ -181,6 +183,7 @@ function makeClient(): FakeClient {
     })),
     getJob: vi.fn(),
     cancelJob: vi.fn(async () => ({ ok: true })),
+    uploadWithProgress: vi.fn(),
     peaks: vi.fn(),
     // One ranged byte of `/api/audio` — the artefact verification a restore
     // makes. Everything is there, readable, 1000 B long unless a test says
@@ -2159,5 +2162,126 @@ describe('retryFaultedDecks and the store’s single deckFault', () => {
     // so clearing it here loses it for the rest of the session.
     expect(st().deckFault?.deck).toBe('cleaned');
     expect(st().deckFault?.detail).toContain('no longer on disk');
+  });
+});
+
+describe('the web-mode upload state machine', () => {
+  /** A file the bridge cannot give a local path for, so it must be uploaded. */
+  const wav = (name = 'take-01.wav', size = 1024): File => {
+    const f = new File([new Uint8Array(size)], name, { type: 'audio/wav' });
+    Object.defineProperty(f, 'size', { value: size });
+    return f;
+  };
+
+  it('publishes progress so the bar can move, and flips to "finishing" at 100%', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    let report: ((l: number, t: number) => void) | undefined;
+    client.uploadWithProgress = vi.fn(
+      (_f: File, o: { onProgress: (l: number, t: number) => void; onCancelHandle: (c: () => void) => void }) =>
+        new Promise(() => {
+          report = o.onProgress;
+          o.onCancelHandle(() => undefined);
+        }),
+    );
+
+    void actions.ingestFile(wav());
+    await settle(10);
+    expect(st().upload?.name).toBe('take-01.wav');
+    expect(st().upload?.phase).toBe('sending');
+
+    report?.(512, 1024);
+    await settle(10);
+    expect(st().upload?.loaded).toBe(512);
+    expect(st().upload?.phase).toBe('sending');
+
+    // The engine is still writing the file to the work dir at this point, so
+    // 100% is "sent", not "done" — the phase is what the strip renders as
+    // "writing to the work dir".
+    report?.(1024, 1024);
+    await settle(10);
+    expect(st().upload?.phase).toBe('finishing');
+  });
+
+  it('a cancelled upload is not an error', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    let abort: (() => void) | undefined;
+    client.uploadWithProgress = vi.fn(
+      (_f: File, o: { onCancelHandle: (c: () => void) => void }) =>
+        new Promise((_res, rej) => {
+          o.onCancelHandle(() => {
+            abort = () => undefined;
+            rej(new DOMException('aborted', 'AbortError'));
+          });
+        }),
+    );
+
+    void actions.ingestFile(wav());
+    await settle(10);
+    expect(actions.isUploading()).toBe(true);
+
+    actions.cancelUpload();
+    await settle(20);
+
+    // The branch this test exists for: the user stopping a transfer is not a
+    // failure, so no red bar — just a status line saying what happened.
+    expect(st().error).toBeNull();
+    expect(st().statusLine).toContain('Upload cancelled');
+    expect(st().statusLine).toContain('take-01.wav');
+    // …and the machine is fully unwound, or the next drop is refused as busy.
+    expect(st().upload).toBeNull();
+    expect(actions.isUploading()).toBe(false);
+    void abort;
+  });
+
+  it('a failed upload IS an error, and names the file', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn(() =>
+      Promise.reject(new EngineError(413, 'too_large', 'file exceeds the limit')),
+    );
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(st().error).not.toBeNull();
+    expect(st().upload).toBeNull();
+    expect(actions.isUploading()).toBe(false);
+  });
+
+  it('hands the uploaded path straight to loadSource', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn(() => Promise.resolve({ path: '/work/up/take-01.wav' }));
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(client.analyze).toHaveBeenCalledWith('/work/up/take-01.wav', expect.any(Number), expect.anything());
+    expect(st().source?.path).toBe('/work/up/take-01.wav');
+    // The *user's* name for the file, not the work-dir spelling.
+    expect(st().source?.name).toBe('take-01.wav');
+    expect(st().upload).toBeNull();
+  });
+
+  it('refuses a file it cannot open before uploading a byte of it', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn();
+    await actions.ingestFile(new File(['x'], 'notes.txt', { type: 'text/plain' }));
+    await settle(10);
+    expect(client.uploadWithProgress).not.toHaveBeenCalled();
+    expect(st().rejection?.kind).toBe('type');
+  });
+
+  it('refuses an empty file, which would upload fine and then fail to decode', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn();
+    await actions.ingestFile(wav('empty.wav', 0));
+    await settle(10);
+    expect(client.uploadWithProgress).not.toHaveBeenCalled();
+    expect(st().rejection?.kind).toBe('empty');
   });
 });

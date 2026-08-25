@@ -231,9 +231,34 @@ export class DualPlayer {
     }
   }
 
-  /** Must be called from a user gesture the first time (AudioContext policy). */
+  /**
+   * Must be called from a user gesture the first time (AudioContext policy).
+   *
+   * Fails soft. Every caller already null-guards `ctx`/`gains` — `setActive`
+   * branches to `applyMuteFallback()` and `play` skips the resume — so a
+   * missing graph costs the cross-fade and the analyser, not playback. It used
+   * to throw instead: `window.AudioContext` absent, or
+   * `createMediaElementSource` refusing (a media element can only ever back one
+   * source node, and tainted media throws), took `play()` down with it, and
+   * since `toggle()` calls `void this.play()` the rejection landed in the app's
+   * failure net as an unexplained error while the transport simply did nothing.
+   * Element-level mute is the pre-graph A/B mechanism and still works; a
+   * webview without WebAudio should lose the fade, not the sound.
+   */
   private ensureGraph(): void {
     if (this.ctx) return;
+    try {
+      this.buildGraph();
+    } catch {
+      // Left null on purpose: `applyMuteFallback()` owns A/B from here.
+      this.ctx = null;
+      this.gains = null;
+      this.analyser = null;
+      this.applyMuteFallback();
+    }
+  }
+
+  private buildGraph(): void {
     const Ctor = window.AudioContext;
     const ctx = new Ctor({ latencyHint: 'interactive' });
     const analyser = ctx.createAnalyser();
