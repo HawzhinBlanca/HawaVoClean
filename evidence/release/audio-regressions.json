@@ -2,7 +2,7 @@
   "schema_version": 1,
   "deterministic_device": "cpu",
   "audio_drift_contract": {
-    "reason": "v3.3 changes the deterministic TPDF dither seed because release version is a job-identity input",
+    "reason": "Historical. v3.3 changed the deterministic TPDF dither seed because the release version is a job-identity input, so v3.2-generated references differed from v3.3 output by design. The references were regenerated under v3.3 on 2026-08-25 and now match byte for byte; every case's regenerated audio reproduced the candidate_audio_sha256 this contract had predicted.",
     "max_absolute_lsb": 2.0
   },
   "allowed_report_drift": [
@@ -19,12 +19,12 @@
       "profile": "production",
       "input": "test_output/ui-smoke/Flute 09.m4a.mp4",
       "input_sha256": "73fdacaf824651107864dcdafeabee4770de065ab34a94eba66eed8ef1508c0f",
-      "reference_source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
       "reference_audio": "test_output/deep-audit/Flute09_production.wav",
-      "audio_sha256": "75f6a600a56e22bf509898ffbd63836e7846e3ec8d14e4494f65938a8dfd17cc",
+      "audio_sha256": "94d45922da5b2d2753d1f682c3f5619d8da8edc7a1ea5adf0e0d159f3dffeb6a",
       "candidate_audio_sha256": "94d45922da5b2d2753d1f682c3f5619d8da8edc7a1ea5adf0e0d159f3dffeb6a",
       "reference_report": "test_output/deep-audit/Flute09_production.hawavoclean.json",
-      "report_sha256": "1d5d36d043971ca6d2dce718401b8b19651858a3099121698cb315cf1d8dbe21",
+      "report_sha256": "655a667fd84d8bcf81a6abee8b29e0d93666d631c4272fc216ef9248948b5e8f",
       "core_id": "wiener-dd-48k-v1"
     },
     {
@@ -32,12 +32,12 @@
       "profile": "studio",
       "input": "test_output/ui-smoke/Flute 09.m4a.mp4",
       "input_sha256": "73fdacaf824651107864dcdafeabee4770de065ab34a94eba66eed8ef1508c0f",
-      "reference_source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
       "reference_audio": "test_output/deep-audit/Flute09_studio.wav",
-      "audio_sha256": "a5d418f21592620b71df95c0e208aa5507f1ba45909f86832d0d3ce7c64d0b97",
+      "audio_sha256": "dfcbff36e3bbc6e6fdfbd612fa0ba68570274f0fefa443c1e7416996430eb5dd",
       "candidate_audio_sha256": "dfcbff36e3bbc6e6fdfbd612fa0ba68570274f0fefa443c1e7416996430eb5dd",
       "reference_report": "test_output/deep-audit/Flute09_studio.hawavoclean.json",
-      "report_sha256": "4b569a50a8e174433f33887a39a4917c957658614eea1809ad164300b8beefe6",
+      "report_sha256": "e015ea7ba3ee5c2266bef0ed693bb58de1d698a9ba37088880c145af92b09518",
       "core_id": "studio-dfn3-48k-v1"
     },
     {
@@ -45,12 +45,12 @@
       "profile": "lowband",
       "input": "test_output/ui-smoke/Flute 09.m4a.mp4",
       "input_sha256": "73fdacaf824651107864dcdafeabee4770de065ab34a94eba66eed8ef1508c0f",
-      "reference_source_commit": "3f2ec25b0859ec6b58160bdf37bcd5f1b09308d9",
+      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
       "reference_audio": "test_output/lowband-proof/Flute09_lowband.wav",
-      "audio_sha256": "fd4be17addd65ce999b26eb41c0f31d074f5a92d516a50a314065f8dd34bf292",
+      "audio_sha256": "100c1de6485eb9a05c39dcb2676f7fca810c681af238e4ecd6bb0c2a9aea97a2",
       "candidate_audio_sha256": "100c1de6485eb9a05c39dcb2676f7fca810c681af238e4ecd6bb0c2a9aea97a2",
       "reference_report": "test_output/lowband-proof/Flute09_lowband.hawavoclean.json",
-      "report_sha256": "7d22cc2e3949677f98959d6f639a50396f487e047d4d401acc4dceaff3609f0d",
+      "report_sha256": "e50386087bd9d22981f941d8c5a110d43c7e079e0d34e069e8565a8df38016a2",
       "core_id": "studio-dfn3-lowband-48k-v1"
     },
     {
@@ -58,12 +58,12 @@
       "profile": "production",
       "input": "test_output/teat1vo-lab/src.mp3",
       "input_sha256": "a414a1d343517202b649f98b450eb330c6a74145f4d7164c9b0b2818fbe04923",
-      "reference_source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
       "reference_audio": "test_output/perf-ref/src_production.wav",
-      "audio_sha256": "7fc036a85a356f573882b711ab2e65a9342544c00c9988e4452f5df0f5a6b5bf",
+      "audio_sha256": "210dfd78e3f09831db6c56028acb746d2cc039c8b008989acdea7bff09300ae1",
       "candidate_audio_sha256": "210dfd78e3f09831db6c56028acb746d2cc039c8b008989acdea7bff09300ae1",
       "reference_report": "test_output/perf-ref/src_production.hawavoclean.json",
-      "report_sha256": "6dfb9bac858d681007c0073dc5bfae63914e1550999768de6426f157f2a795e8",
+      "report_sha256": "e195ca89a790ff00f1b0cee173062703d26c0be0c0768bc0d6b8080bd238e5a5",
       "core_id": "wiener-dd-48k-v1"
     },
     {
@@ -71,12 +71,12 @@
       "profile": "studio",
       "input": "test_output/teat1vo-lab/src.mp3",
       "input_sha256": "a414a1d343517202b649f98b450eb330c6a74145f4d7164c9b0b2818fbe04923",
-      "reference_source_commit": "bf6d932af14c689ef145cf13a110d490b9920bd4",
+      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
       "reference_audio": "test_output/perf-ref/src_studio.wav",
-      "audio_sha256": "94c5665bb4a5a39644485a877b34f7f25fd42c0ea58f4a58b5d8285790e5751a",
+      "audio_sha256": "7c453a54611ebc10c7e5606f8262f973bfb62095bcf046419dfe26b967fe787e",
       "candidate_audio_sha256": "7c453a54611ebc10c7e5606f8262f973bfb62095bcf046419dfe26b967fe787e",
       "reference_report": "test_output/perf-ref/src_studio.hawavoclean.json",
-      "report_sha256": "be7107624235a2d3803d9f5beb9c3d25e5424be3a12840353437f278212ac65d",
+      "report_sha256": "ddbe983bf7a9683b6c78befcfd865e9a33f385a74dd37701b5c767071dfb66c2",
       "core_id": "studio-dfn3-48k-v1"
     },
     {
@@ -84,12 +84,12 @@
       "profile": "lowband",
       "input": "test_output/teat1vo-lab/src.mp3",
       "input_sha256": "a414a1d343517202b649f98b450eb330c6a74145f4d7164c9b0b2818fbe04923",
-      "reference_source_commit": "3f2ec25b0859ec6b58160bdf37bcd5f1b09308d9",
+      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
       "reference_audio": "test_output/lowband-proof/teat1vo_lowband.wav",
-      "audio_sha256": "a4e69150094f95edddd48f8ae0c4c3279329b74153f7ecc251423d6d0e75cc3f",
+      "audio_sha256": "f1a172e9fe321866614e5487e074e2b8e0cd11258dbbfab81cd4c6be6f73180a",
       "candidate_audio_sha256": "f1a172e9fe321866614e5487e074e2b8e0cd11258dbbfab81cd4c6be6f73180a",
       "reference_report": "test_output/lowband-proof/teat1vo_lowband.hawavoclean.json",
-      "report_sha256": "ea7cc0db3fb394e9468c1ea17eb65f807884a8a3dcb427a1b93f28f1eaa808ad",
+      "report_sha256": "56b7eaf2bc9238e2685dd6c25c631c99522217007f94e7e026b0894cbb73e3f3",
       "core_id": "studio-dfn3-lowband-48k-v1"
     }
   ]
