@@ -31,9 +31,26 @@ before.
 | Any GitHub Actions job starting | **Running** | — |
 | `release-candidate` environment with a required reviewer | **Active** | — |
 | Secret scanning and push protection | **Enabled** | — |
-| Protected `main` requiring `release / required` | Deliberately deferred | Needs one green run first |
+| Protected `main` requiring `release / required` | Not applied | The runner — see below |
 | Self-hosted `hawavoclean-release` runner | Not registered | Owner's machine |
 | `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` | Not set | Mirror location decision |
+| Fork pull requests require approval from all outside contributors | **Active** | — |
+
+Re-measured against the live repository on 2026-08-25, after PRs #1, #2 and #3
+merged: 0 runners registered; one ruleset (`immutable-release-tags`, tag target);
+`main` returns HTTP 404 for branch protection; `release-candidate` carries
+`required_reviewers` and `branch_policy`; no repository variables exist.
+
+**The remaining order is strictly serial, and the runner is its head.** The
+earlier note that protected `main` needed "one green run first" understates the
+dependency. `required` is an aggregate job that asserts
+`test "$EXACT_RELEASE_GATE" = success`, and `exact-release-gate` runs on
+`[self-hosted, macOS, ARM64, hawavoclean-release]`. With no such runner the gate
+never starts, so `required` never starts either — it does not appear in a pull
+request's checks at all. Applying a ruleset with a strict `release / required`
+context in that state would not merely defer merges; it would make `main`
+**permanently unmergeable** until a runner exists. Hosted jobs going green,
+which they now do, does not change this.
 
 ## The two blockers as they stood before the visibility change
 
@@ -70,9 +87,21 @@ machine. Two independent controls stand in the way here, and both were verified:
   required reviewer must approve the deployment before it runs.
 
 Repository settings also report `default_workflow_permissions: read` and
-`can_approve_pull_request_reviews: false`. Before the runner is registered, set
-*Settings → Actions → Fork pull request workflows from outside collaborators* to
-require approval for all outside collaborators.
+`can_approve_pull_request_reviews: false` (re-verified 2026-08-25).
+
+The third control is now in place. The fork pull-request approval policy was
+`first_time_contributors`, which would have let a returning outside contributor
+reach the self-hosted runner without a fresh approval; it is now
+`all_external_contributors`. This had to precede runner registration rather than
+follow it, so it is done ahead of the owner's step:
+
+```
+gh api --method PUT \
+  repos/HawzhinBlanca/HawaVoClean/actions/permissions/fork-pr-contributor-approval \
+  -f approval_policy=all_external_contributors
+```
+
+The repository currently has 0 forks, so nothing was exposed in the interval.
 
 ## What only the account owner can do
 
@@ -84,6 +113,45 @@ require approval for all outside collaborators.
    and it will be set as the repository variable
    `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT`.
 
+## The two owner-only steps, as commands
+
+Both need the owner's own credentials on the owner's own machine, which is why
+they cannot be scripted from here.
+
+**1. Register the runner.** The registration token is short-lived and must be
+fetched by the owner; do not paste it anywhere but the installer prompt.
+
+```
+# on the Apple-silicon host
+mkdir -p ~/actions-runner && cd ~/actions-runner
+curl -o actions-runner-osx-arm64.tar.gz -L \
+  https://github.com/actions/runner/releases/latest/download/actions-runner-osx-arm64-<version>.tar.gz
+tar xzf actions-runner-osx-arm64.tar.gz
+
+# token from: Settings -> Actions -> Runners -> New self-hosted runner
+./config.sh --url https://github.com/HawzhinBlanca/HawaVoClean \
+  --labels hawavoclean-release \
+  --ephemeral
+
+./run.sh          # or ./svc.sh install && ./svc.sh start
+```
+
+`self-hosted`, `macOS` and `ARM64` are applied automatically by the installer;
+only `hawavoclean-release` needs declaring. `--ephemeral` satisfies the
+contract's "ephemeral or single-purpose" requirement.
+
+Verify with `gh api repos/HawzhinBlanca/HawaVoClean/actions/runners --jq
+'.total_count'` — it currently returns `0`.
+
+**2. Choose the evidence mirror path**, outside any runner workspace, then:
+
+```
+gh variable set HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT \
+  --repo HawzhinBlanca/HawaVoClean --body '/absolute/path/you/choose'
+```
+
+Only the path is the owner's decision; setting the variable afterwards is not.
+
 ## Remaining activation order
 
 Order matters here:
@@ -94,22 +162,27 @@ Order matters here:
 2. Let the hosted jobs run green. `exact-release-gate` stays pending until the
    self-hosted runner exists — that is expected, and `required` cannot report
    success before it does.
-3. **Only then** apply the branch ruleset to `main`. Applying it earlier would
-   require a status context that has never reported, which would block the very
-   pull request that lands the workflow. The rules to apply are already proven
+3. **Only after the runner exists** apply the branch ruleset to `main`. Not
+   merely after a green hosted run: `required` cannot report success while
+   `exact-release-gate` has no runner to execute on, so applying the ruleset
+   first locks `main` outright. The rules to apply are already proven
    to be accepted on this plan: pull request with one approval, dismiss stale
    reviews, require last push approval, required conversation resolution,
    required linear history, no deletion, no force push, and a strict
    `release / required` status check.
-4. Create `release-candidate` with the owner as required reviewer and a
-   protected-branches-only deployment policy.
+4. ~~Create `release-candidate` with the owner as required reviewer and a
+   protected-branches-only deployment policy.~~ Done: the environment exists and
+   carries `required_reviewers` and `branch_policy`.
 5. Set `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT`.
 6. **T3.3 proof:** open a disposable pull request that deliberately fails a gate
    and record that it cannot be merged. T3.3 stays open until that exists.
 
 ## Note on merge settings
 
-The repository currently allows merge commits. The branch rule for
-`required_linear_history` will reject them on `main` once active. Disabling
-merge commits in repository settings is optional but makes the constraint
-visible in the UI before a merge is attempted.
+The repository currently allows merge commits, and `main` now contains three of
+them (PRs #1, #2 and #3). Existing history is unaffected — `required_linear_history`
+governs new pushes — but once the rule is active every later pull request must
+squash or rebase. Disabling merge commits in repository settings is optional and
+makes that constraint visible in the UI before someone attempts a merge; it is
+left set as it is, because it changes how pull requests are landed today and
+that is a workflow decision rather than a governance one.

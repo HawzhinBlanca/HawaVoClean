@@ -69,8 +69,15 @@ version-seeded PCM24 dither identity.
 
 ## Open release blockers
 
-1. **GitHub governance (U1/T3.2–T3.3):** billing currently prevents required private-repository jobs;
-   the full matrix and protected `main` are not proved remotely.
+1. **GitHub governance (U1/T3.2–T3.3):** the billing blocker is gone — the repository was made public
+   on 2026-08-24, hosted Actions now run, and three pull requests have taken the full hosted matrix
+   green (8 core jobs, source contract, web and Resolve shell). What remains is one dependency and
+   everything queued behind it: **no self-hosted `hawavoclean-release` runner is registered**
+   (measured: 0 runners), so `exact-release-gate` has never executed on any pull request, and the
+   `required` aggregate — which asserts `EXACT_RELEASE_GATE = success` — therefore never starts.
+   `main` is consequently still unprotected: applying the ruleset before the runner exists would
+   demand a status context that cannot report success and would make `main` permanently unmergeable.
+   T3.3's deliberately-failing-pull-request proof is queued behind that ruleset in turn.
 2. **Vendor Electron (T4.6):** Resolve 21.0.3 embeds Electron 36.3.2 with 33 captured advisories,
    including seven high. HawaVoClean hardens reachable boundaries, but the residual vendor risk needs
    explicit acceptance or a qualifying Resolve update.
