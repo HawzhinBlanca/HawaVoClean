@@ -32,8 +32,9 @@ before.
 | `release-candidate` environment with a required reviewer | **Active** | — |
 | Secret scanning and push protection | **Enabled** | — |
 | Protected `main` requiring `release / required` | Not applied | The runner — see below |
-| Self-hosted `hawavoclean-release` runner | Not registered | Owner's machine |
+| Self-hosted `hawavoclean-release` runner | **Registered and proven** | — |
 | `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` | Not set | Mirror location decision |
+| `exact-release-gate` has executed at least once | **Yes — 2026-08-25** | — |
 | Fork pull requests require approval from all outside contributors | **Active** | — |
 
 Re-measured against the live repository on 2026-08-25, after PRs #1, #2 and #3
@@ -103,6 +104,29 @@ gh api --method PUT \
 
 The repository currently has 0 forks, so nothing was exposed in the interval.
 
+## Proven on 2026-08-25: the gate's first execution
+
+`exact-release-gate` had never run once in this repository's history — it was
+pending on every pull request, including the four that merged. With the runner
+registered and the `release-candidate` deployment approved by its required
+reviewer, it executed, and it failed at its first step:
+
+```
+Run test -n "$HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT"
+  HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT:
+##[error]Process completed with exit code 1
+```
+
+That is the gate behaving correctly: it fail-closes on absent private evidence
+rather than hydrating nothing and reporting success. `required` then failed on
+`test "$EXACT_RELEASE_GATE" = success`, which is also correct.
+
+Two things this bought that reading the workflow could not. It established the
+gate is genuinely reachable — the runner labels match, the environment approval
+path works, the checkout and toolchain steps all pass. And it exposed the
+ordering error corrected below: the evidence root is a *prerequisite* of the
+branch ruleset, not a step after it.
+
 ## What only the account owner can do
 
 1. **Register the release runner** on the Apple-silicon host, labelled exactly
@@ -118,30 +142,34 @@ The repository currently has 0 forks, so nothing was exposed in the interval.
 Both need the owner's own credentials on the owner's own machine, which is why
 they cannot be scripted from here.
 
-**1. Register the runner.** The registration token is short-lived and must be
-fetched by the owner; do not paste it anywhere but the installer prompt.
+**1. Register the runner.** *Done on 2026-08-25.* Recorded here because it is
+reproducible and because the published checksum step is not optional:
 
 ```
-# on the Apple-silicon host
+V=2.336.0
+EXPECT=8e8839c49b7060b6b2154f4931f815df330c27f167d53ef2239ee3dfce28b079
 mkdir -p ~/actions-runner && cd ~/actions-runner
-curl -o actions-runner-osx-arm64.tar.gz -L \
-  https://github.com/actions/runner/releases/latest/download/actions-runner-osx-arm64-<version>.tar.gz
-tar xzf actions-runner-osx-arm64.tar.gz
+curl -sSL -o "actions-runner-osx-arm64-$V.tar.gz" \
+  "https://github.com/actions/runner/releases/download/v$V/actions-runner-osx-arm64-$V.tar.gz"
+shasum -a 256 "actions-runner-osx-arm64-$V.tar.gz"   # must equal $EXPECT before extracting
+tar xzf "actions-runner-osx-arm64-$V.tar.gz"
 
-# token from: Settings -> Actions -> Runners -> New self-hosted runner
-./config.sh --url https://github.com/HawzhinBlanca/HawaVoClean \
-  --labels hawavoclean-release \
-  --ephemeral
-
-./run.sh          # or ./svc.sh install && ./svc.sh start
+./config.sh --unattended \
+  --url https://github.com/HawzhinBlanca/HawaVoClean \
+  --token "$(gh api --method POST \
+      repos/HawzhinBlanca/HawaVoClean/actions/runners/registration-token --jq .token)" \
+  --name hawavoclean-release-mac --labels hawavoclean-release --ephemeral
+nohup ./run.sh > run.log 2>&1 &
 ```
 
-`self-hosted`, `macOS` and `ARM64` are applied automatically by the installer;
-only `hawavoclean-release` needs declaring. `--ephemeral` satisfies the
-contract's "ephemeral or single-purpose" requirement.
+`self-hosted`, `macOS` and `ARM64` are applied by the installer; only
+`hawavoclean-release` needs declaring. The registration token is short-lived —
+mint it into the command as above rather than writing it down.
 
-Verify with `gh api repos/HawzhinBlanca/HawaVoClean/actions/runners --jq
-'.total_count'` — it currently returns `0`.
+`--ephemeral` satisfies the contract and has an operational consequence worth
+stating: the runner deregisters and the listener exits after **one** job, so
+`run.sh` must be started again for each subsequent job. No launchd service was
+installed.
 
 **2. Choose the evidence mirror path**, outside any runner workspace, then:
 
@@ -162,10 +190,20 @@ Order matters here:
 2. Let the hosted jobs run green. `exact-release-gate` stays pending until the
    self-hosted runner exists — that is expected, and `required` cannot report
    success before it does.
-3. **Only after the runner exists** apply the branch ruleset to `main`. Not
-   merely after a green hosted run: `required` cannot report success while
-   `exact-release-gate` has no runner to execute on, so applying the ruleset
-   first locks `main` outright. The rules to apply are already proven
+3. **Only after the runner exists AND the evidence root is set** apply the
+   branch ruleset to `main`. Two dependencies, not one, and both were learned
+   the hard way rather than read:
+
+   - `required` cannot report success while `exact-release-gate` has no runner
+     to execute on, so applying the ruleset before the runner locks `main`
+     outright.
+   - The gate's first step is `test -n "$HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT"`.
+     With the variable unset the gate fails immediately at hydration, so
+     `required` fails too. Step 5 below is therefore a *prerequisite of this
+     step*, not a successor to it — the numbering said otherwise until the gate
+     ran for the first time on 2026-08-25 and proved it.
+
+   The rules to apply are already proven
    to be accepted on this plan: pull request with one approval, dismiss stale
    reviews, require last push approval, required conversation resolution,
    required linear history, no deletion, no force push, and a strict
@@ -173,7 +211,9 @@ Order matters here:
 4. ~~Create `release-candidate` with the owner as required reviewer and a
    protected-branches-only deployment policy.~~ Done: the environment exists and
    carries `required_reviewers` and `branch_policy`.
-5. Set `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT`.
+5. Set `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT`. **Do this before step 3**, for the
+   reason recorded there: the gate refuses to hydrate without it, so the
+   `release / required` context cannot report success until it is set.
 6. **T3.3 proof:** open a disposable pull request that deliberately fails a gate
    and record that it cannot be merged. T3.3 stays open until that exists.
 
