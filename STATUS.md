@@ -70,14 +70,27 @@ version-seeded PCM24 dither identity.
 ## Open release blockers
 
 1. **GitHub governance (U1/T3.2–T3.3):** the billing blocker is gone — the repository was made public
-   on 2026-08-24, hosted Actions now run, and three pull requests have taken the full hosted matrix
-   green (8 core jobs, source contract, web and Resolve shell). What remains is one dependency and
-   everything queued behind it: **no self-hosted `hawavoclean-release` runner is registered**
-   (measured: 0 runners), so `exact-release-gate` has never executed on any pull request, and the
-   `required` aggregate — which asserts `EXACT_RELEASE_GATE = success` — therefore never starts.
-   `main` is consequently still unprotected: applying the ruleset before the runner exists would
-   demand a status context that cannot report success and would make `main` permanently unmergeable.
-   T3.3's deliberately-failing-pull-request proof is queued behind that ruleset in turn.
+   on 2026-08-24, hosted Actions now run, and four pull requests have taken the full hosted matrix
+   green. The two owner-only decisions are also closed: the ephemeral `hawavoclean-release` runner is
+   registered, and `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` was set on 2026-08-26 to
+   `/Users/hawzhin/HawaVoCleanEvidence`, whose fourteen manifest-named files hydrated into a hosted
+   job for the first time in the repository's history. What remains is one green
+   `release / required`, and the two things queued behind it: the `main` ruleset, and T3.3's
+   deliberately-failing-pull-request proof.
+
+   The gate's second execution failed, and on nothing in the product: the listener had been started
+   with `nohup ./run.sh &`, which leaves SIGINT, SIGQUIT and SIGHUP at `SIG_IGN` for every
+   descendant, so ten interrupt-dependent tests could not deliver the signal they exist to test. One
+   of those failures is itself the proof the product was right — the watchdog detected the ignored
+   disposition and escalated to SIGTERM, exactly as
+   `test_watchdog_escalates_to_sigterm_when_sigint_is_inherited_ignored` asserts it must. The
+   listener is now started through `start-ephemeral-runner.sh`, which restores the three dispositions
+   before exec; the ten tests fail and pass on the same machine according to that one difference, and
+   no test was changed. See `docs/u1-governance-runbook.md`.
+
+   Applying the ruleset is one-way for a single-maintainer repository: it requires one approving
+   review with `enforce_admins: true`, and nobody may approve their own pull request. Everything that
+   still needs to land — blocker 7 below — must land before it.
 2. **Vendor Electron (T4.6):** Resolve 21.0.3 embeds Electron 36.3.2 with 33 captured advisories,
    including seven high. HawaVoClean hardens reachable boundaries, but the residual vendor risk needs
    explicit acceptance or a qualifying Resolve update.
