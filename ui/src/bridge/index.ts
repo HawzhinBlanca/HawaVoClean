@@ -17,7 +17,28 @@ function readWebToken(): string {
   }
 }
 
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+/**
+ * Hosts a `?engine=` override may name.
+ *
+ * Pinned to the one literal spelling, because this set and index.html's
+ * `connect-src`/`media-src` are two lists that have to agree and did not. CSP
+ * host matching is literal: `http://127.0.0.1:*` does not match the host
+ * `localhost`, and CSP's host grammar has no IPv6-literal form at all — there
+ * is no source expression that can cover `[::1]`, so adding one would be
+ * silently dropped by the browser. Accepting those three here meant the
+ * override produced a base URL the page's own policy forbade it from
+ * contacting, and every `fetch`, `EventSource` and `<audio src>` against it
+ * failed and was reported to the user as "Engine unreachable" — a true
+ * sentence about a cause the user could not possibly guess.
+ *
+ * `https:` is deliberately still accepted by the protocol test below: CSP3
+ * matches `http://127.0.0.1:*` against an https origin on the same host, so it
+ * was never part of this problem.
+ *
+ * `bridge.test.ts` asserts every member of this set appears in both CSP
+ * directives, so widening either side alone fails loudly.
+ */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1']);
 
 function webBaseUrl(): string {
   // Served by `hawavoclean serve --ui-dir` → same origin. Under the Vite dev

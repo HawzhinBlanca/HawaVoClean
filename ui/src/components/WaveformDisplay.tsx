@@ -277,14 +277,31 @@ export function WaveformDisplay() {
       );
     }
     const ov = ovRef.current;
-    if (ov && dur > 0) {
-      ov.setAttribute('aria-valuemin', '0');
-      ov.setAttribute('aria-valuemax', dur.toFixed(3));
-      ov.setAttribute('aria-valuenow', v.start.toFixed(3));
-      ov.setAttribute(
-        'aria-valuetext',
-        `${formatSeconds(v.start, span)} to ${formatSeconds(v.end, span)}`,
-      );
+    if (ov) {
+      if (dur > 0) {
+        ov.setAttribute('aria-valuemin', '0');
+        ov.setAttribute('aria-valuemax', dur.toFixed(3));
+        ov.setAttribute('aria-valuenow', v.start.toFixed(3));
+        ov.setAttribute(
+          'aria-valuetext',
+          `${formatSeconds(v.start, span)} to ${formatSeconds(v.end, span)}`,
+        );
+        ov.removeAttribute('aria-disabled');
+      } else {
+        // The `else` is the half that matters: this is the only thing that
+        // clears the *previous* clip's seconds-based range after
+        // `resetForNewSource()`. Without it the element kept announcing a
+        // position in a clip that is no longer loaded — and on first paint it
+        // declared itself a scrollbar at value 0 against ARIA's implied 0-100
+        // range, a position in a scale that does not exist. Its key handler
+        // bails while there is no clip, so it was also a tab stop that did
+        // nothing and said nothing about why.
+        ov.setAttribute('aria-valuemin', '0');
+        ov.setAttribute('aria-valuemax', '0');
+        ov.setAttribute('aria-valuenow', '0');
+        ov.setAttribute('aria-valuetext', 'No clip loaded');
+        ov.setAttribute('aria-disabled', 'true');
+      }
     }
     syncSelTag();
   }, [syncSelTag]);
@@ -983,7 +1000,14 @@ export function WaveformDisplay() {
           aria-label="Visible waveform window"
           aria-controls="wave-canvas-wrap"
           aria-orientation="horizontal"
+          // Coherent on the first paint, before updateChrome has run. With
+          // valuenow alone the implied range is 0-100, so the very first frame
+          // announced a position on a scale the element does not have.
+          aria-valuemin={0}
+          aria-valuemax={0}
           aria-valuenow={0}
+          aria-disabled
+          aria-valuetext="No clip loaded"
           title="Drag to scroll the visible window · arrows and page keys when focused"
           onKeyDown={onOverviewKey}
           onPointerDown={onOvDown}

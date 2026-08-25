@@ -1,5 +1,5 @@
 import type { Profile } from '../api/types';
-import { useStore } from '../state/store';
+import { jobInFlight, useStore } from '../state/store';
 import { Segmented } from './Segmented';
 
 /**
@@ -20,9 +20,9 @@ const CORE_LINE: Record<Profile, string> = {
 export function ProfileControl() {
   const profile = useStore((s) => s.profile);
   const setProfile = useStore((s) => s.setProfile);
-  const running = useStore(
-    (s) => !!s.job?.status && (s.job.status.state === 'running' || s.job.status.state === 'queued'),
-  );
+  // `jobInFlight`: a job the engine has accepted but not yet reported on has
+  // `status: null`, and the hand-written check read that window as idle.
+  const running = useStore((s) => jobInFlight(s.job));
   return (
     <div className="profilectl">
       <div className="pc-row">
@@ -33,10 +33,15 @@ export function ProfileControl() {
           disabled={running}
           disabledReason="The profile is part of the run — cancel it to change this."
           onChange={setProfile}
+          // Each option carries its own core line. The visible `.pc-sub` below
+          // shows only the *selected* one, so arrowing through the group told a
+          // listener nothing about what they were about to choose — the one
+          // line that says what a profile actually is was on screen but
+          // unassociated with the control that sets it.
           options={[
-            { value: 'studio', label: 'Studio' },
-            { value: 'lowband', label: 'Low-band' },
-            { value: 'production', label: 'Production' },
+            { value: 'studio', label: 'Studio', description: CORE_LINE.studio },
+            { value: 'lowband', label: 'Low-band', description: CORE_LINE.lowband },
+            { value: 'production', label: 'Production', description: CORE_LINE.production },
           ]}
         />
       </div>

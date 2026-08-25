@@ -85,9 +85,6 @@ describe('the token travels as a query parameter where a header cannot go', () =
     expect(url.searchParams.get('token')).toBe(TOKEN);
   });
 
-  it('audioUrl is the deprecated alias of fileUrl', () => {
-    expect(client().audioUrl('/a.wav')).toBe(client().fileUrl('/a.wav'));
-  });
 });
 
 describe('error shape parsing', () => {
@@ -129,13 +126,49 @@ describe('error shape parsing', () => {
     expect(err.message).toContain('17 bytes');
   });
 
-  it('lets a transport failure through as itself (that is what "offline" looks like)', async () => {
+  it('turns a transport failure into an EngineError with status 0', async () => {
+    // It used to re-raise the raw TypeError. That put the burden of
+    // recognising "the socket is dead" on the consumer, whose only handle is
+    // `e instanceof TypeError` — which also matches every null-dereference in
+    // a React handler that reaches the app's failure net, so a genuine app bug
+    // was published as "The engine is not answering… this comes back on its
+    // own when it reconnects" while the header lamp said READY.
+    //
+    // status 0 is the shape errors.ts and probeSoon already understand, and it
+    // is what the XHR upload path in this file has always produced.
     const boom = new TypeError('Failed to fetch');
     vi.stubGlobal(
       'fetch',
       vi.fn(() => Promise.reject(boom)),
     );
-    await expect(client().health()).rejects.toBe(boom);
+    const err = (await client().health().catch((e: unknown) => e)) as EngineError;
+    expect(err).toBeInstanceOf(EngineError);
+    expect(err.status).toBe(0);
+    expect(err.code).toBe('engine_offline');
+    // The original wording survives, because "Failed to fetch" vs "network
+    // error" vs "Load failed" is the only clue to which layer gave up.
+    expect(err.message).toBe('Failed to fetch');
+  });
+
+  it('leaves an abort alone — that is the user, not the network', async () => {
+    const abort = new DOMException('aborted', 'AbortError');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(abort)),
+    );
+    await expect(client().health()).rejects.toBe(abort);
+  });
+
+  it('leaves a timeout alone, and it is not an abort', async () => {
+    // `AbortSignal.timeout` and the app's own timeoutSignal reject with
+    // TimeoutError. Wrapping it as engine_offline would be defensible, but it
+    // must not become AbortError, which this app reads as "the user cancelled".
+    const t = new DOMException('No answer in 4000 ms', 'TimeoutError');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(t)),
+    );
+    await expect(client().health()).rejects.toBe(t);
   });
 });
 
@@ -442,6 +475,12 @@ describe('verify', () => {
   it('an engine that never answers re-raises — offline is not deleted', async () => {
     const fn = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
     vi.stubGlobal('fetch', fn);
-    await expect(client().verify('/out/a.wav')).rejects.toBeInstanceOf(TypeError);
+    // Still re-raised rather than answered as "the file is gone" — "the engine
+    // is offline" and "your master was deleted" are two different things and
+    // the UI says two different things about them. It now arrives typed, as an
+    // EngineError with status 0, instead of a raw TypeError.
+    const err = (await client().verify('/out/a.wav').catch((e: unknown) => e)) as EngineError;
+    expect(err).toBeInstanceOf(EngineError);
+    expect(err.status).toBe(0);
   });
 });

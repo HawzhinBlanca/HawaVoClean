@@ -85,12 +85,43 @@ export class EngineClient {
     this.token = endpoint.token;
   }
 
+  /**
+   * `fetch`, with a transport failure turned into an `EngineError(0, …)`.
+   *
+   * A dead socket makes `fetch` reject with a bare `TypeError`, and those were
+   * escaping this class raw. That mattered because `state/errors.ts` had to
+   * catch them somewhere, and the only handle it has on a raw TypeError is
+   * `e instanceof TypeError` — which also matches every null-dereference in a
+   * React event handler that reaches the app's failure net. The result was a
+   * genuine app bug being published to the user as "The engine is not
+   * answering… this comes back on its own when it reconnects", while the
+   * header lamp said READY: a screen contradicting itself, telling the reader
+   * to wait for a recovery that was never coming.
+   *
+   * Normalising here means every network-shaped failure arrives with
+   * `status === 0`, which errors.ts already classifies as offline and
+   * `probeSoon` already re-measures on. The XHR upload path in this file
+   * already did exactly this (`new EngineError(0, 'network', …)`); this brings
+   * the fetch paths in line. An abort is left alone — it is the user's, not
+   * the network's.
+   */
+  private async fetchOrOffline(input: string, init: RequestInit): Promise<Response> {
+    try {
+      return await fetch(input, init);
+    } catch (e) {
+      if (e instanceof DOMException && (e.name === 'AbortError' || e.name === 'TimeoutError')) {
+        throw e;
+      }
+      throw new EngineError(0, 'engine_offline', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   private headers(extra?: Record<string, string>): HeadersInit {
     return { 'X-Hawa-Token': this.token, ...(extra ?? {}) };
   }
 
   private async json<T>(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const res = await this.fetchOrOffline(`${this.baseUrl}${path}`, {
       ...init,
       headers: this.headers(
         init.body !== undefined && !(init.body instanceof FormData)
@@ -242,7 +273,7 @@ export class EngineClient {
    * about them.
    */
   async verify(path: string, signal?: AbortSignal): Promise<ArtifactProbe> {
-    const res = await fetch(this.fileUrl(path), {
+    const res = await this.fetchOrOffline(this.fileUrl(path), {
       headers: { Range: 'bytes=0-0' },
       cache: 'no-store',
       signal: signal ?? null,
@@ -269,7 +300,7 @@ export class EngineClient {
 
   /** Plain text of a served file (the human-readable report sidecar). */
   async fetchText(path: string, signal?: AbortSignal): Promise<string> {
-    const res = await fetch(this.fileUrl(path), { signal: signal ?? null });
+    const res = await this.fetchOrOffline(this.fileUrl(path), { signal: signal ?? null });
     if (!res.ok) throw await parseError(res);
     return await res.text();
   }
@@ -288,11 +319,6 @@ export class EngineClient {
   fileUrl(path: string): string {
     const q = new URLSearchParams({ path, token: this.token });
     return `${this.baseUrl}/api/audio?${q.toString()}`;
-  }
-
-  /** @deprecated name — `fileUrl` says what it actually does. */
-  audioUrl(path: string): string {
-    return this.fileUrl(path);
   }
 
   /** URL for the job's `EventSource` stream. */

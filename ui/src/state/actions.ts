@@ -406,6 +406,7 @@ async function resumeAfterReconnect(client: EngineClient): Promise<void> {
       resumeTimeout.done();
     }
     onJobStatus(status);
+    reconcileTries.delete(job.id);
     if (!isTerminal(status.state)) followFrom(client, job.id);
   } catch (e) {
     if (e instanceof EngineError && e.status === 404) {
@@ -442,6 +443,47 @@ function interruptedStatus(job: JobInfo): JobStatus {
     report: null,
   };
 }
+
+/**
+ * The terminal status a run gets when its stream ended, the engine is still up,
+ * and repeated attempts to ask what happened all failed.
+ *
+ * Distinct from `interruptedStatus`: that one *knows* the engine went away and
+ * can promise nothing was written. This one knows only that we lost track, so
+ * it must not make that promise about the output file.
+ */
+function lostTrackStatus(job: JobInfo): JobStatus {
+  const prev = job.status;
+  const st = getState();
+  return {
+    job_id: job.id,
+    state: 'failed',
+    stage: 'error',
+    progress: prev?.progress ?? 0,
+    message: 'Lost track of this run',
+    unit: prev?.unit ?? null,
+    input_path: prev?.input_path ?? st.source?.path ?? '',
+    output_path: prev?.output_path ?? job.outputPath,
+    report_path: prev?.report_path ?? job.reportPath,
+    profile: prev?.profile ?? st.profile,
+    started_at: prev?.started_at ?? null,
+    finished_at: new Date().toISOString(),
+    error: {
+      code: 'LOST_TRACK',
+      message:
+        'The run’s status stream ended and the engine would not say how it finished, so its outcome is unknown. Check the output folder before running it again.',
+    },
+    report: null,
+  };
+}
+
+/**
+ * How many times a job's stream has ended without a terminal status and left us
+ * unable to reconcile. Bounded so an engine that keeps emitting `end` for a
+ * live job cannot spin EventSource opens forever.
+ */
+const RECONCILE_LIMIT = 3;
+const reconcileTries = new Map<string, number>();
 
 let autoloaded = false;
 /** Dev convenience: `?file=/abs/path` loads a clip straight away (web mode). */
@@ -665,10 +707,10 @@ function retryFaultedDecks(): void {
   const client = st.client;
   if (!client) return;
   const player = getPlayer();
-  let retried = false;
+  const retried: Array<'original' | 'cleaned'> = [];
   if (player.deckFault('original')?.kind === 'network' && st.source) {
     player.load('original', client.fileUrl(st.source.path), st.original?.duration_s ?? null);
-    retried = true;
+    retried.push('original');
   }
   // The cleaned deck is retried on the *path*, not on the analysis. Requiring
   // `st.cleaned` meant that a run whose cleaned analysis had also died in the
@@ -680,9 +722,26 @@ function retryFaultedDecks(): void {
       client.fileUrl(st.cleanedPath),
       st.cleaned?.duration_s ?? st.original?.duration_s ?? null,
     );
-    retried = true;
+    retried.push('cleaned');
   }
-  if (retried) st.setDeckFault(null);
+  // The store holds ONE deckFault, so clearing it unconditionally erased
+  // whatever explanation happened to be standing — including one about the
+  // other deck. Concretely: a run whose cleaned master has been deleted
+  // carries "CLEANED DECK UNAVAILABLE — the cleaned master is no longer on
+  // disk". The engine then restarts; the *original* deck faulted with
+  // `network` during the outage, is retried here, and the cleaned deck's
+  // sentence is wiped. The CLEANED segment stays greyed out, because
+  // `artifacts.master` is still false — so the user is left looking at a
+  // disabled control with no reason attached anywhere, and nothing puts it
+  // back for the rest of the session: `reverifyCurrentRun` returns early when
+  // the master was already known bad.
+  //
+  // Only the deck that was asked for again has stopped being the current
+  // answer. (Not re-derived from `player.deckFault(...)`: a condemnation from
+  // `reverifyCurrentRun` is an HTTP-probe verdict with no player fault behind
+  // it, and `load(deck, null)` retires the deck and nulls its fault — so
+  // re-deriving would clear the plate unconditionally and make this worse.)
+  if (st.deckFault && retried.includes(st.deckFault.deck)) st.setDeckFault(null);
 }
 
 /**
@@ -1213,7 +1272,50 @@ function followFrom(client: EngineClient, jobId: string): void {
           void client
             .getJob(jobId)
             .then(onJobStatus)
-            .catch(() => undefined);
+            .catch((e: unknown) => {
+              // This `.catch` used to be `() => undefined`. If the stream ended
+              // — an `end` event, a proxy closing it — while the engine was up
+              // but this one request failed (a 500, or the `bad_response` an
+              // unparseable 200 raises), the job sat on RUNNING with its last
+              // progress for the rest of the session: PROCESS stuck as CANCEL,
+              // the drop well shut on "Busy", no history row, and not a word on
+              // screen about why. Every other dead end in this file becomes a
+              // designed state; this was the swallowed catch the C5 comments
+              // forbid.
+              const now = getState();
+              if (!now.job || now.job.id !== jobId) return; // the user moved on
+              if (e instanceof EngineError && e.status === 404) {
+                // The engine is up and does not know this job — the same
+                // question `onGone` and `resumeAfterReconnect` already answer.
+                onJobStatus(interruptedStatus(now.job));
+                reconcileTries.delete(jobId);
+                return;
+              }
+              // Re-measure liveness on this beat. A transport failure or a 5xx
+              // says something about the engine; a `bad_response` carries
+              // status 200 and correctly says nothing.
+              probeSoon(e);
+              // If that already flipped us offline, stop: `markOffline` tore the
+              // stream down and `resumeAfterReconnect` owns the reconciliation.
+              if (getState().engineStatus !== 'ready') return;
+              // Still up, so retry rather than declare — one transient 500 from
+              // a live engine must not condemn a run that is very likely still
+              // going. Re-arming the follow makes the stream's own back-off and
+              // 404 handling the retry path.
+              const tries = (reconcileTries.get(jobId) ?? 0) + 1;
+              reconcileTries.set(jobId, tries);
+              if (tries < RECONCILE_LIMIT) {
+                followFrom(client, jobId);
+                return;
+              }
+              // Exhausted. End in a designed terminal state, which is what
+              // actually releases the busy lock, writes the history row and
+              // produces the bar.
+              reconcileTries.delete(jobId);
+              onJobStatus(lostTrackStatus(now.job));
+            });
+        } else {
+          reconcileTries.delete(jobId);
         }
       }
     },
@@ -1323,6 +1425,7 @@ export async function startJob(): Promise<void> {
     // superseded. Doing this before `createJob` meant any refusal — a 4xx, a
     // dead socket, a path the engine will not take — destroyed a finished run
     // to start one that never began.
+    reconcileTries.delete(res.job_id);
     const cur = useStore.getState();
     cur.setError(null);
     cur.setCleaned(null, null);
@@ -1490,6 +1593,17 @@ export async function selectRun(jobId: string): Promise<void> {
   const needsOriginal = !original;
   const needsCleaned = restored && !cleaned;
   if (client && (needsOriginal || needsCleaned)) {
+    // Registered in `analyzeAbort`, which is what makes the door real. The
+    // strip renders `<AnalyzeProgress>` from the store flag alone, so the
+    // spinner and its X button appeared on this path too — but `cancelAnalysis`
+    // returned immediately because `analyzeAbort` was null, and Esc fell
+    // through the keymap chain to *clear the unit selection* instead. On a long
+    // master that is tens of seconds of a cancel button that does nothing and
+    // an Esc that does the wrong thing. The strip's own comment says this
+    // control exists because "a three-hour file is half a minute of nothing";
+    // here the door was painted on.
+    const ac = new AbortController();
+    analyzeAbort = ac;
     getState().setAnalyzing(true);
     getState().setStatus(`Re-reading ${entry.inputName}`);
     // C5 · a re-read that fails is not a silent nothing. The commonest cause
@@ -1498,15 +1612,33 @@ export async function selectRun(jobId: string): Promise<void> {
     let reReadFailure: UiFailure | null = null;
     const reRead = async (path: string, name: string): Promise<AudioAnalysis | null> => {
       try {
-        return await client.analyze(path, envelopeBuckets());
+        return await client.analyze(path, envelopeBuckets(), ac.signal);
       } catch (e) {
         reReadFailure ??= classifyFailure(e, name);
         return null;
       }
     };
-    if (needsOriginal) original = await reRead(entry.inputPath, entry.inputName);
-    if (needsCleaned) cleaned = await reRead(entry.outputPath, baseName(entry.outputPath));
-    getState().setAnalyzing(false);
+    try {
+      if (needsOriginal) original = await reRead(entry.inputPath, entry.inputName);
+      // A cancel during the first must not start the second.
+      if (needsCleaned && !ac.signal.aborted) {
+        cleaned = await reRead(entry.outputPath, baseName(entry.outputPath));
+      }
+    } finally {
+      // Mirrors loadSource: only the owner clears, so `cancelAnalysis`'s own
+      // teardown is not fought.
+      if (analyzeAbort === ac) {
+        analyzeAbort = null;
+        getState().setAnalyzing(false);
+      }
+    }
+    // An abandoned re-read leaves the run stated but un-analysed, exactly as an
+    // abandoned source analyze leaves a clip loaded but un-analysed. Running on
+    // would clobber `cancelAnalysis`'s "Analysis cancelled" with this run's
+    // summary — `reportFailure` deliberately drops cancellations, so `error` is
+    // null and the guard below does not catch it — and would load a cleaned
+    // deck for an analysis the user just abandoned.
+    if (ac.signal.aborted) return;
     if (reReadFailure) reportFailure(reReadFailure, 'Could not re-read this run');
     getState().patchHistory(entry.jobId, {
       original,

@@ -118,6 +118,19 @@ function rate(message: string, which: 'max' | 'min'): { got: string; limit: stri
  * the path it was uploaded to. Pass it wherever there is one; the sentence
  * reads much better and never leaks the work directory.
  */
+/**
+ * The shapes a browser uses to say "the transport gave up".
+ *
+ * Deliberately broad. Chrome says `Failed to fetch` and, for a body stream
+ * that dies mid-read, `network error`; undici says `fetch failed`; Safari says
+ * `Load failed` and `The Internet connection appears to be offline.`. Matching
+ * only Chrome's wording would classify a real outage on another engine as an
+ * app bug — the exact mirror of the defect this gate exists to fix, and the
+ * worse direction of the two.
+ */
+const NETWORKISH =
+  /failed to fetch|fetch failed|networkerror|network error|network request failed|load failed|connection (?:appears to be offline|was (?:lost|reset|aborted))|err_(?:network|connection|internet)/i;
+
 export function classifyFailure(e: unknown, name?: string): UiFailure {
   if (e instanceof DOMException && e.name === 'AbortError') {
     return {
@@ -130,13 +143,24 @@ export function classifyFailure(e: unknown, name?: string): UiFailure {
     };
   }
 
-  // A dead socket surfaces as a TypeError from `fetch`, with no status. A
-  // socket that opened and then went silent surfaces as a DOMException named
-  // 'TimeoutError' — that is what `AbortSignal.timeout` rejects with, and it
-  // is deliberately NOT 'AbortError', which above means the *user* cancelled.
-  // Both mean the same thing to the reader: the engine is not answering.
+  // A socket that opened and then went silent surfaces as a DOMException named
+  // 'TimeoutError' — what the health probe's timeout rejects with, and
+  // deliberately NOT 'AbortError', which above means the *user* cancelled.
+  // A dead socket from `EngineClient` now arrives as EngineError status 0.
+  //
+  // The bare `e instanceof TypeError` arm is kept, because this classifier is
+  // also the app's failure net (`installFailureNet`) and things outside
+  // EngineClient still throw raw — sse.ts, the player, third-party code. But
+  // it is gated on the message now. Ungated it matched every null-dereference
+  // in a React event handler, so a genuine app bug was published to the reader
+  // as "The engine is not answering. Nothing already on screen is lost — this
+  // comes back on its own when it reconnects", while the header lamp and the
+  // offline banner both said the engine was ready. The screen contradicted
+  // itself and told the reader to wait for a recovery that was never coming.
+  // Anything not network-shaped now falls through to the generic branch, which
+  // already yields 'unexpected' → the honest label "App error".
   if (
-    e instanceof TypeError ||
+    (e instanceof TypeError && NETWORKISH.test(e.message)) ||
     (e instanceof DOMException && e.name === 'TimeoutError') ||
     (e instanceof EngineError && e.status === 0)
   ) {

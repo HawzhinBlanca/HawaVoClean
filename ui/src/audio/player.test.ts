@@ -465,3 +465,181 @@ describe('an engine that dies while a deck is loading', () => {
     expect(faults[0]?.kind).toBe('unreadable');
   });
 });
+
+// --- the A/B contract -------------------------------------------------------
+//
+// Everything above is a fault path. The happy path — setActive, play, seek, and
+// the sample-lock that makes A/B a comparison rather than two unrelated
+// playbacks — had no test at all, which is an odd gap in a file whose headline
+// bug was the A/B control lying about which deck was audible.
+//
+// These pin the state machine only. The gain cross-fade, the drift guard and
+// the analyser need a real audio pipeline and stay in the scripted browser
+// verification.
+
+/** The `<audio>` element behind a deck, so a test can drive what happy-dom will not. */
+function el(deck: 'original' | 'cleaned'): HTMLMediaElement {
+  const all = [...document.querySelectorAll('audio')];
+  const found = all[deck === 'original' ? 0 : 1];
+  if (!found) throw new Error(`no <audio> for ${deck}`);
+  return found as HTMLMediaElement;
+}
+
+/** Both decks loaded and ready, `dur` seconds long. */
+async function bothReady(dur = 60): Promise<void> {
+  engine({ [OK]: 206, [GONE]: 206 });
+  start();
+  player.load('original', OK);
+  player.load('cleaned', GONE);
+  await settle();
+  for (const d of ['original', 'cleaned'] as const) {
+    Object.defineProperty(el(d), 'duration', { configurable: true, value: dur });
+  }
+}
+
+describe('A/B keeps the two decks on the same sample', () => {
+  it('corrects the arriving deck when the two have drifted', async () => {
+    await bothReady();
+    el('original').currentTime = 12.5;
+    el('cleaned').currentTime = 3;
+    player.setActive('cleaned');
+    // Beyond SYNC_TOLERANCE_S (0.035), so the arriving deck is pulled to where
+    // the leaving one was. Without this, A/B compares two different moments —
+    // which is not a comparison at all.
+    expect(el('cleaned').currentTime).toBeCloseTo(12.5, 3);
+    expect(player.activeDeck).toBe('cleaned');
+  });
+
+  it('leaves a deck already within tolerance alone', async () => {
+    await bothReady();
+    el('original').currentTime = 12.5;
+    el('cleaned').currentTime = 12.52; // 20 ms, inside the 35 ms tolerance
+    player.setActive('cleaned');
+    // A needless `currentTime` write costs a reseek on a real element, which is
+    // audible. The tolerance exists so the normal case is free.
+    expect(el('cleaned').currentTime).toBeCloseTo(12.52, 3);
+  });
+
+  it('a seek moves every ready deck, not just the audible one', async () => {
+    await bothReady();
+    player.seek(30);
+    expect(el('original').currentTime).toBeCloseTo(30, 3);
+    expect(el('cleaned').currentTime).toBeCloseTo(30, 3);
+    // …so switching afterwards does not jump.
+    player.setActive('cleaned');
+    expect(el('cleaned').currentTime).toBeCloseTo(30, 3);
+  });
+
+  it('clamps a seek to the clip', async () => {
+    await bothReady(60);
+    player.seek(-5);
+    expect(el('original').currentTime).toBe(0);
+    player.seek(999);
+    expect(el('original').currentTime).toBeCloseTo(60, 3);
+  });
+});
+
+describe('A/B cannot point at a deck that is not there', () => {
+  it('refuses to arrive at an empty deck', async () => {
+    engine({ [OK]: 206 });
+    start();
+    player.load('original', OK);
+    await settle();
+    player.setActive('cleaned'); // never loaded
+    // This is the shape of the audit's headline bug: the control lit CLEANED
+    // while ORIGINAL was making the sound.
+    expect(player.activeDeck).toBe('original');
+    expect(player.snapshot().active).toBe('original');
+  });
+
+  it('waits for a deck that is still loading, then arrives', async () => {
+    engine({ [OK]: 206, [GONE]: 206 });
+    start();
+    player.load('original', OK);
+    await settle();
+    player.load('cleaned', GONE);
+    player.setActive('cleaned'); // asked for while the fetch is in the air
+    expect(player.activeDeck).toBe('original');
+    expect(player.snapshot().pending).toBe('cleaned');
+    await settle();
+    expect(player.activeDeck).toBe('cleaned');
+    expect(player.snapshot().pending).toBeNull();
+  });
+
+  it('is a no-op when asked for the deck already active', async () => {
+    await bothReady();
+    el('original').currentTime = 5;
+    player.setActive('original');
+    expect(player.activeDeck).toBe('original');
+    expect(el('original').currentTime).toBeCloseTo(5, 3);
+  });
+});
+
+describe('transport', () => {
+  it('play starts both ready decks from the active one’s position', async () => {
+    await bothReady();
+    el('original').currentTime = 20;
+    el('cleaned').currentTime = 0;
+    await player.play();
+    // The inactive deck is pulled into line *before* it starts, so an A/B
+    // press mid-playback is instant rather than a seek.
+    expect(el('cleaned').currentTime).toBeCloseTo(20, 3);
+  });
+
+  it('play on a deck that is not ready does nothing', async () => {
+    engine({ [OK]: 404 });
+    start();
+    player.load('original', OK);
+    await settle();
+    await player.play();
+    expect(player.playing).toBe(false);
+  });
+
+  it('toggle flips, and pause is remembered across an A/B switch', async () => {
+    await bothReady();
+    await player.play();
+    player.toggle();
+    expect(player.playing).toBe(false);
+    player.setActive('cleaned');
+    // `wantPlaying` is false, so arriving at a deck must not start it.
+    expect(player.playing).toBe(false);
+  });
+});
+
+describe('duration and time', () => {
+  it('falls back to the other deck when the active one has no duration', async () => {
+    await bothReady(60);
+    Object.defineProperty(el('original'), 'duration', { configurable: true, value: NaN });
+    // A run's length is a property of the run, not of whichever element
+    // happens to have finished parsing its header first.
+    expect(player.duration).toBeCloseTo(60, 3);
+  });
+
+  it('reports 0 rather than NaN for an element with no position yet', async () => {
+    await bothReady();
+    Object.defineProperty(el('original'), 'currentTime', { configurable: true, value: NaN });
+    // NaN here reaches the timecode readout and the waveform playhead.
+    expect(player.time).toBe(0);
+  });
+});
+
+describe('a webview with no WebAudio', () => {
+  it('still plays, losing the cross-fade rather than the sound', async () => {
+    // happy-dom has no AudioContext, which is exactly the case: `ensureGraph`
+    // used to throw out of `play()`, and because `toggle()` calls
+    // `void this.play()` the rejection landed in the app's failure net as an
+    // unexplained error while the transport silently did nothing. Element-level
+    // mute is the pre-graph A/B mechanism and is still there.
+    expect(window.AudioContext).toBeUndefined();
+    await bothReady();
+    await player.play();
+    expect(player.playing).toBe(true);
+    expect(player.getAnalyser()).toBeNull();
+
+    // And A/B still switches which element is audible.
+    player.setActive('cleaned');
+    expect(player.activeDeck).toBe('cleaned');
+    expect(el('cleaned').muted).toBe(false);
+    expect(el('original').muted).toBe(true);
+  });
+});

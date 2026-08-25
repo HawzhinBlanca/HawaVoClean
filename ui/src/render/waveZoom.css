@@ -266,9 +266,13 @@
   z-index: 2;
 }
 
+/* A lane is 18px (15px below 1120), so the track's 1-7px ladder would leave a
+   passthrough bar 1px tall here. Scaled to the lane instead of flattened to a
+   single inset — flattening would delete the height channel on exactly the
+   reports (multi-channel) that are hardest to read. */
 .verdict-lane > .verdict-seg {
-  top: 3px;
-  bottom: 3px;
+  top: calc(var(--seg-inset) * 0.5);
+  bottom: calc(var(--seg-inset) * 0.5);
 }
 
 /* L / R. It sits over the start of the lane because the track cannot give up

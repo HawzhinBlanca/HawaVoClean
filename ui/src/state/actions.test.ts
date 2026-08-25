@@ -156,6 +156,8 @@ function jobStatus(state: JobState, over: Partial<JobStatus> = {}): JobStatus {
 interface FakeClient {
   health: ReturnType<typeof vi.fn>;
   analyze: ReturnType<typeof vi.fn>;
+  /** Assigned per-test by the upload cases; unused by the rest. */
+  uploadWithProgress: ReturnType<typeof vi.fn>;
   createJob: ReturnType<typeof vi.fn>;
   getJob: ReturnType<typeof vi.fn>;
   cancelJob: ReturnType<typeof vi.fn>;
@@ -181,6 +183,7 @@ function makeClient(): FakeClient {
     })),
     getJob: vi.fn(),
     cancelJob: vi.fn(async () => ({ ok: true })),
+    uploadWithProgress: vi.fn(),
     peaks: vi.fn(),
     // One ranged byte of `/api/audio` — the artefact verification a restore
     // makes. Everything is there, readable, 1000 B long unless a test says
@@ -2034,5 +2037,251 @@ describe('loading a clip whose analysis never lands', () => {
     expect(player.seek).toHaveBeenCalledWith(0);
     expect(player.claimOnly).toHaveBeenCalledWith('original', null);
     expect(player.load).toHaveBeenCalledWith('cleaned', null);
+  });
+});
+
+describe('a stream that ends without a terminal status', () => {
+  it('does not leave the run stuck on running when the reconciling getJob fails', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('running')));
+    await settle(10);
+    expect(st().job?.status?.state).toBe('running');
+
+    // The stream ends while the engine is up, and every attempt to ask what
+    // happened fails — a 500, or the bad_response an unparseable 200 raises.
+    // The `.catch` used to swallow this: PROCESS stuck as CANCEL, the drop well
+    // shut on "Busy", no history row, and nothing on screen saying why.
+    client.getJob.mockRejectedValue(new EngineError(500, 'boom', 'engine exploded'));
+    // Each failed reconciliation re-arms the follow, so the retry budget is
+    // spent one *stream* at a time — the new EventSource has to end too. Three
+    // is RECONCILE_LIMIT; the fourth end is the one that gives up.
+    for (let i = 0; i < 4; i++) {
+      FakeEventSource.live.send('end', '{}');
+      await settle(200);
+    }
+
+    const state = st().job?.status?.state;
+    expect(state).not.toBe('running');
+    expect(state).toBe('failed');
+    expect(st().job?.status?.error?.code).toBe('LOST_TRACK');
+    // The busy lock is released — that is what actually unsticks the screen.
+    expect(st().history.length).toBeGreaterThan(0);
+  });
+
+  it('retries a live engine rather than condemning a run on one transient 500', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('running')));
+    await settle(10);
+
+    // One failure, then the engine answers properly.
+    client.getJob.mockRejectedValueOnce(new EngineError(500, 'boom', 'transient'));
+    FakeEventSource.live.send('end', '{}');
+    await settle(200);
+
+    // Not condemned: a single 500 from an engine that is plainly still up says
+    // nothing about whether the run is still going.
+    expect(st().job?.status?.error?.code).not.toBe('LOST_TRACK');
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('done')));
+    await settle(20);
+    expect(st().job?.status?.state).toBe('done');
+  });
+
+  it('treats a 404 as the engine having lost the job, not as an unknown outcome', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('running')));
+    await settle(10);
+
+    client.getJob.mockRejectedValue(new EngineError(404, 'not_found', 'gone'));
+    FakeEventSource.live.send('end', '{}');
+    await settle(200);
+
+    // ENGINE_RESTARTED can promise nothing was written; LOST_TRACK cannot, and
+    // saying the weaker thing here would send the user to check a folder for
+    // a file we know does not exist.
+    expect(st().job?.status?.error?.code).toBe('ENGINE_RESTARTED');
+  });
+});
+
+describe('retryFaultedDecks and the store’s single deckFault', () => {
+  it('does not erase an explanation about the deck it did not retry', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+
+    // A first successful probe, so the app has "ever connected". Without it the
+    // next probe takes the first-connection branch and never reaches the
+    // engine-came-back branch that calls retryFaultedDecks at all.
+    st().setEngine('offline', client as never, '3.3.0');
+    actions.retryEngineNow();
+    await settle(100);
+    expect(st().engineStatus).toBe('ready');
+
+    armed(store);
+    // Run on screen whose cleaned master has been deleted: the plate carries
+    // the sentence, and artifacts.master stays false so CLEANED stays greyed.
+    st().setCleaned(null, '/out/a.wav');
+    st().setDeckFault({
+      deck: 'cleaned',
+      headline: 'CLEANED DECK UNAVAILABLE',
+      detail: 'The cleaned master is no longer on disk.',
+    });
+    // The engine goes and comes back — the real path, through a health probe
+    // that finds it up again after it was down. `retryFaultedDecks` runs only
+    // on that transition, so setting the store to 'ready' by hand would have
+    // exercised nothing.
+    player.deckFault.mockImplementation((d: string) =>
+      d === 'original' ? { kind: 'network', detail: 'unreachable' } : null,
+    );
+    st().setEngine('offline', client as never, '3.3.0');
+    actions.retryEngineNow();
+    await settle(100);
+    expect(st().engineStatus).toBe('ready');
+
+    // Guard against a vacuous pass: the original deck must really have been
+    // retried, or nothing in retryFaultedDecks ran and the assertion below
+    // proves only that the store was left alone.
+    expect(player.load).toHaveBeenCalledWith(
+      'original',
+      expect.stringContaining('%2Fa.wav'),
+      100,
+    );
+
+    // The cleaned deck's sentence must survive: nothing re-states it, because
+    // reverifyCurrentRun returns early when the master was already known bad,
+    // so clearing it here loses it for the rest of the session.
+    expect(st().deckFault?.deck).toBe('cleaned');
+    expect(st().deckFault?.detail).toContain('no longer on disk');
+  });
+});
+
+describe('the web-mode upload state machine', () => {
+  /** A file the bridge cannot give a local path for, so it must be uploaded. */
+  const wav = (name = 'take-01.wav', size = 1024): File => {
+    const f = new File([new Uint8Array(size)], name, { type: 'audio/wav' });
+    Object.defineProperty(f, 'size', { value: size });
+    return f;
+  };
+
+  it('publishes progress so the bar can move, and flips to "finishing" at 100%', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    let report: ((l: number, t: number) => void) | undefined;
+    client.uploadWithProgress = vi.fn(
+      (_f: File, o: { onProgress: (l: number, t: number) => void; onCancelHandle: (c: () => void) => void }) =>
+        new Promise(() => {
+          report = o.onProgress;
+          o.onCancelHandle(() => undefined);
+        }),
+    );
+
+    void actions.ingestFile(wav());
+    await settle(10);
+    expect(st().upload?.name).toBe('take-01.wav');
+    expect(st().upload?.phase).toBe('sending');
+
+    report?.(512, 1024);
+    await settle(10);
+    expect(st().upload?.loaded).toBe(512);
+    expect(st().upload?.phase).toBe('sending');
+
+    // The engine is still writing the file to the work dir at this point, so
+    // 100% is "sent", not "done" — the phase is what the strip renders as
+    // "writing to the work dir".
+    report?.(1024, 1024);
+    await settle(10);
+    expect(st().upload?.phase).toBe('finishing');
+  });
+
+  it('a cancelled upload is not an error', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    let abort: (() => void) | undefined;
+    client.uploadWithProgress = vi.fn(
+      (_f: File, o: { onCancelHandle: (c: () => void) => void }) =>
+        new Promise((_res, rej) => {
+          o.onCancelHandle(() => {
+            abort = () => undefined;
+            rej(new DOMException('aborted', 'AbortError'));
+          });
+        }),
+    );
+
+    void actions.ingestFile(wav());
+    await settle(10);
+    expect(actions.isUploading()).toBe(true);
+
+    actions.cancelUpload();
+    await settle(20);
+
+    // The branch this test exists for: the user stopping a transfer is not a
+    // failure, so no red bar — just a status line saying what happened.
+    expect(st().error).toBeNull();
+    expect(st().statusLine).toContain('Upload cancelled');
+    expect(st().statusLine).toContain('take-01.wav');
+    // …and the machine is fully unwound, or the next drop is refused as busy.
+    expect(st().upload).toBeNull();
+    expect(actions.isUploading()).toBe(false);
+    void abort;
+  });
+
+  it('a failed upload IS an error, and names the file', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn(() =>
+      Promise.reject(new EngineError(413, 'too_large', 'file exceeds the limit')),
+    );
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(st().error).not.toBeNull();
+    expect(st().upload).toBeNull();
+    expect(actions.isUploading()).toBe(false);
+  });
+
+  it('hands the uploaded path straight to loadSource', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn(() => Promise.resolve({ path: '/work/up/take-01.wav' }));
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(client.analyze).toHaveBeenCalledWith('/work/up/take-01.wav', expect.any(Number), expect.anything());
+    expect(st().source?.path).toBe('/work/up/take-01.wav');
+    // The *user's* name for the file, not the work-dir spelling.
+    expect(st().source?.name).toBe('take-01.wav');
+    expect(st().upload).toBeNull();
+  });
+
+  it('refuses a file it cannot open before uploading a byte of it', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn();
+    await actions.ingestFile(new File(['x'], 'notes.txt', { type: 'text/plain' }));
+    await settle(10);
+    expect(client.uploadWithProgress).not.toHaveBeenCalled();
+    expect(st().rejection?.kind).toBe('type');
+  });
+
+  it('refuses an empty file, which would upload fine and then fail to decode', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+    client.uploadWithProgress = vi.fn();
+    await actions.ingestFile(wav('empty.wav', 0));
+    await settle(10);
+    expect(client.uploadWithProgress).not.toHaveBeenCalled();
+    expect(st().rejection?.kind).toBe('empty');
   });
 });
