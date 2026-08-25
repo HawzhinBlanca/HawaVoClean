@@ -2036,3 +2036,128 @@ describe('loading a clip whose analysis never lands', () => {
     expect(player.load).toHaveBeenCalledWith('cleaned', null);
   });
 });
+
+describe('a stream that ends without a terminal status', () => {
+  it('does not leave the run stuck on running when the reconciling getJob fails', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('running')));
+    await settle(10);
+    expect(st().job?.status?.state).toBe('running');
+
+    // The stream ends while the engine is up, and every attempt to ask what
+    // happened fails — a 500, or the bad_response an unparseable 200 raises.
+    // The `.catch` used to swallow this: PROCESS stuck as CANCEL, the drop well
+    // shut on "Busy", no history row, and nothing on screen saying why.
+    client.getJob.mockRejectedValue(new EngineError(500, 'boom', 'engine exploded'));
+    // Each failed reconciliation re-arms the follow, so the retry budget is
+    // spent one *stream* at a time — the new EventSource has to end too. Three
+    // is RECONCILE_LIMIT; the fourth end is the one that gives up.
+    for (let i = 0; i < 4; i++) {
+      FakeEventSource.live.send('end', '{}');
+      await settle(200);
+    }
+
+    const state = st().job?.status?.state;
+    expect(state).not.toBe('running');
+    expect(state).toBe('failed');
+    expect(st().job?.status?.error?.code).toBe('LOST_TRACK');
+    // The busy lock is released — that is what actually unsticks the screen.
+    expect(st().history.length).toBeGreaterThan(0);
+  });
+
+  it('retries a live engine rather than condemning a run on one transient 500', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('running')));
+    await settle(10);
+
+    // One failure, then the engine answers properly.
+    client.getJob.mockRejectedValueOnce(new EngineError(500, 'boom', 'transient'));
+    FakeEventSource.live.send('end', '{}');
+    await settle(200);
+
+    // Not condemned: a single 500 from an engine that is plainly still up says
+    // nothing about whether the run is still going.
+    expect(st().job?.status?.error?.code).not.toBe('LOST_TRACK');
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('done')));
+    await settle(20);
+    expect(st().job?.status?.state).toBe('done');
+  });
+
+  it('treats a 404 as the engine having lost the job, not as an unknown outcome', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    const st = () => store.useStore.getState();
+
+    armed(store);
+    await actions.startJob();
+    FakeEventSource.live.send('status', JSON.stringify(jobStatus('running')));
+    await settle(10);
+
+    client.getJob.mockRejectedValue(new EngineError(404, 'not_found', 'gone'));
+    FakeEventSource.live.send('end', '{}');
+    await settle(200);
+
+    // ENGINE_RESTARTED can promise nothing was written; LOST_TRACK cannot, and
+    // saying the weaker thing here would send the user to check a folder for
+    // a file we know does not exist.
+    expect(st().job?.status?.error?.code).toBe('ENGINE_RESTARTED');
+  });
+});
+
+describe('retryFaultedDecks and the store’s single deckFault', () => {
+  it('does not erase an explanation about the deck it did not retry', async () => {
+    const { actions, store, client } = await boot();
+    const st = () => store.useStore.getState();
+
+    // A first successful probe, so the app has "ever connected". Without it the
+    // next probe takes the first-connection branch and never reaches the
+    // engine-came-back branch that calls retryFaultedDecks at all.
+    st().setEngine('offline', client as never, '3.3.0');
+    actions.retryEngineNow();
+    await settle(100);
+    expect(st().engineStatus).toBe('ready');
+
+    armed(store);
+    // Run on screen whose cleaned master has been deleted: the plate carries
+    // the sentence, and artifacts.master stays false so CLEANED stays greyed.
+    st().setCleaned(null, '/out/a.wav');
+    st().setDeckFault({
+      deck: 'cleaned',
+      headline: 'CLEANED DECK UNAVAILABLE',
+      detail: 'The cleaned master is no longer on disk.',
+    });
+    // The engine goes and comes back — the real path, through a health probe
+    // that finds it up again after it was down. `retryFaultedDecks` runs only
+    // on that transition, so setting the store to 'ready' by hand would have
+    // exercised nothing.
+    player.deckFault.mockImplementation((d: string) =>
+      d === 'original' ? { kind: 'network', detail: 'unreachable' } : null,
+    );
+    st().setEngine('offline', client as never, '3.3.0');
+    actions.retryEngineNow();
+    await settle(100);
+    expect(st().engineStatus).toBe('ready');
+
+    // Guard against a vacuous pass: the original deck must really have been
+    // retried, or nothing in retryFaultedDecks ran and the assertion below
+    // proves only that the store was left alone.
+    expect(player.load).toHaveBeenCalledWith(
+      'original',
+      expect.stringContaining('%2Fa.wav'),
+      100,
+    );
+
+    // The cleaned deck's sentence must survive: nothing re-states it, because
+    // reverifyCurrentRun returns early when the master was already known bad,
+    // so clearing it here loses it for the rest of the session.
+    expect(st().deckFault?.deck).toBe('cleaned');
+    expect(st().deckFault?.detail).toContain('no longer on disk');
+  });
+});

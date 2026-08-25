@@ -16,8 +16,7 @@ import {
   failureHeadline,
   installFailureNet,
   isCancellation,
-  sanitizeEngineMessage,
-} from './errors';
+  sanitizeEngineMessage, failureSource } from './errors';
 
 const WORK = '/Users/someone/Library/Application Support/hawavoclean/work/uploads/9f2c/take.wav';
 
@@ -241,5 +240,48 @@ describe('an API route is not a work-directory path', () => {
     const out = sanitizeEngineMessage('cannot read /Users/x/.cache/hawavoclean/work/ab12/take.wav');
     expect(out).not.toContain('/Users/x/.cache');
     expect(out).toContain('take.wav');
+  });
+});
+
+describe('a TypeError is not automatically an outage', () => {
+  it('classifies a null dereference as an app error, not "engine offline"', () => {
+    // `installFailureNet` routes every unhandled rejection and uncaught error
+    // through this classifier — its own docstring says it exists to catch "an
+    // error thrown out of a React event handler". A null-dereference in a
+    // handler is a TypeError, and so is an AudioContext that cannot be
+    // constructed. Ungated, all of them were published as "The engine is not
+    // answering. Nothing already on screen is lost — this comes back on its
+    // own when it reconnects" — while the header lamp said READY. The screen
+    // contradicted itself and told the reader to wait for a fix that was never
+    // coming.
+    const f = classifyFailure(new TypeError("Cannot read properties of null (reading 'x')"));
+    expect(f.kind).toBe('unknown');
+    expect(f.code).toBe('unexpected');
+    expect(failureSource(f)).toBe('App error');
+  });
+
+  it('still calls every browser’s real transport failure an outage', () => {
+    // Matching only Chrome's wording would call a genuine outage on another
+    // engine an app bug — the same defect pointing the other way, and the
+    // worse of the two directions.
+    const shapes = [
+      'Failed to fetch', // Chrome
+      'network error', // Chrome, body stream dying mid-read
+      'fetch failed', // undici / Node
+      'Load failed', // Safari
+      'The Internet connection appears to be offline.', // Safari
+      'NetworkError when attempting to fetch resource.', // Firefox
+    ];
+    for (const m of shapes) {
+      expect(classifyFailure(new TypeError(m)).kind, m).toBe('offline');
+    }
+  });
+
+  it('treats a health-probe timeout as an outage, not as a cancellation', () => {
+    // The app's timeoutSignal rejects with TimeoutError precisely so it does
+    // not collide with AbortError, which here means the *user* cancelled.
+    const f = classifyFailure(new DOMException('No answer in 4000 ms', 'TimeoutError'));
+    expect(f.kind).toBe('offline');
+    expect(classifyFailure(new DOMException('stop', 'AbortError')).kind).toBe('cancelled');
   });
 });
