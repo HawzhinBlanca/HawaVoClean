@@ -1672,11 +1672,15 @@ kbd {
   white-space: nowrap;
 }
 
+/* Restated in tokens: these were the literals 12/12/48, which is exactly
+   `--gap` on the sides and `--gap + the 28px footer + --pad-3` at the bottom
+   — right at the default size, and 2px wide of every panel below 720px tall,
+   where the compact block shrinks the app's own gutters. */
 .errbar {
   position: fixed;
-  left: 12px;
-  right: 12px;
-  bottom: 48px;
+  left: var(--gap);
+  right: var(--gap);
+  bottom: calc(var(--gap) + 28px + var(--pad-3));
   z-index: 40;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1729,6 +1733,18 @@ kbd {
     padding: 10px;
   }
 
+  /* The bar is `position: fixed`, so it does not inherit the app's compact
+     gutters — it has to restate them. This block shrinks the page inset to
+     10px and the footer to 24px; without this the bar kept the 12px/48px of
+     the default size and overhung every panel below it by 2px.
+     (Deliberately not `--gap: var(--pad-4)` on `.app`: --gap also feeds
+     `.main` and `.left`, which this block leaves at 12px on purpose.) */
+  .errbar {
+    left: var(--pad-4);
+    right: var(--pad-4);
+    bottom: calc(var(--pad-4) + 24px + var(--pad-3));
+  }
+
   .app[data-offline='true'] {
     grid-template-rows: 40px auto 48px minmax(0, 1fr) 24px;
   }
@@ -1745,23 +1761,13 @@ kbd {
     padding: 10px;
   }
 
-  .process {
-    height: 78px;
-    grid-template-columns: 62px minmax(0, 1fr);
-    gap: 12px;
-    padding: 0 12px 0 8px;
-  }
-
-  .process .ring {
-    width: 62px;
-    height: 62px;
-  }
-
-  .process .ring svg {
-    width: 62px;
-    height: 62px;
-  }
-
+  /* The plate's compact geometry is NOT here. `.process` in this block is
+     0,1,0 and the plate is `.process.plate`, so every value this rule used to
+     set — 78px tall, a 62px ring column, 12px gap, 8/12 padding — was
+     outranked and never shipped. Measured on the running app at 640px tall:
+     76px / 66px / 11px / 0 6px 0 11px, from interaction.css and process.css.
+     Only the icon size below is this rule's own; it is live because nothing
+     else sets it. */
   .process .ring .center svg.icon {
     width: 20px;
     height: 20px;

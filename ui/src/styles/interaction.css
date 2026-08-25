@@ -1779,8 +1779,12 @@ input:focus-visible,
   min-height: 0;
 }
 
+/* Sides at --pad-5 (12px) to line up with this panel's own `.panel-head` and
+   with every sibling panel body. They were --pad-4, so each run row sat 2px
+   left of the heading above it — the one panel in the app whose contents did
+   not share an edge with its title. */
 .hist-body {
-  padding: var(--pad-3) var(--pad-4) var(--pad-4);
+  padding: var(--pad-3) var(--pad-5) var(--pad-4);
   min-height: 0;
   max-height: min(300px, 40vh);
   overflow-y: auto;
@@ -2021,11 +2025,15 @@ input:focus-visible,
   white-space: nowrap;
 }
 
+/* No side padding: `.hist-body` now supplies the 12px, and the extra 2px here
+   existed only to nudge the empty state back towards the panel edge that the
+   body was missing. Left in place it would make the empty state the newly
+   misaligned thing. */
 .hist-empty {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  padding: 2px 2px 4px;
+  padding: 2px 0 4px;
 }
 
 .hist-empty .msg {

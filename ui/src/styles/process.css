@@ -380,20 +380,17 @@
 }
 
 /* --------------------------------------------------------- compact height */
-/* 960×640-class windows. The design-system layer shrinks `.process` here; the
-   plate is one class deeper, so it has to restate the compact geometry itself
-   rather than silently outranking it. */
+/* 960×640-class windows.
+   Only the values interaction.css does not set. This block used to also carry
+   `height: 84px`, a 74px ring column and a 74px ring — all outranked by
+   interaction.css's own `.process.plate` compact rule, which is the same
+   specificity and loads after this file. Three files declared a compact plate
+   geometry and two of them shipped nothing; measured on the running app at
+   640px tall, the plate is 76px with a 66px ring, and it still is. */
 @media (max-height: 720px) {
   .process.plate {
-    height: 84px;
-    grid-template-columns: 74px minmax(0, 1fr);
     gap: 11px;
     padding: 0 11px 0 6px;
-  }
-
-  .process.plate .ring {
-    width: 74px;
-    height: 74px;
   }
 
   .process.plate .text {
