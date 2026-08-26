@@ -21,6 +21,7 @@ export function RestoreControl() {
   const mode = useStore((s) => s.mode);
   const speakerId = useStore((s) => s.speakerId);
   const cutoffHz = useStore((s) => s.cutoffHz);
+  const original = useStore((s) => s.original);
   const setMode = useStore((s) => s.setMode);
   const setSpeakerId = useStore((s) => s.setSpeakerId);
   const setCutoffHz = useStore((s) => s.setCutoffHz);
@@ -34,12 +35,28 @@ export function RestoreControl() {
   const [cutoffText, setCutoffText] = useState(cutoffHz === null ? '' : String(cutoffHz));
   if (!available) return null;
 
+  // Nothing exists above Nyquist to restore, and nothing rejected a cutoff that
+  // sat there: the request schema is `gt=0` with no ceiling and the DSP does
+  // `np.clip(cutoff_hz, 0.0, nyquist)`, so a clip asked to restore above 24 kHz
+  // at 48 kHz ran a full pass that restored nothing and said so nowhere. The
+  // highest integer that still leaves a band is one below Nyquist, and that is
+  // also what the input advertises as its `max`, so the browser's idea of valid
+  // and this component's are one set rather than two overlapping ones.
+  const maxCutoffHz = original ? Math.floor(original.sample_rate / 2) - 1 : null;
+  const rateKHz = original ? Math.round(original.sample_rate / 1000) : null;
+  const inRange = (v: number): boolean =>
+    Number.isFinite(v) && v > 0 && (maxCutoffHz === null || v <= maxCutoffHz);
+
+  const typed = Number.parseFloat(cutoffText);
   const cutoffInvalid = cutoffText.trim() !== '' && cutoffHz === null;
+  const outOfRange = cutoffText.trim() !== '' && Number.isFinite(typed) && !inRange(typed);
   const sub =
     mode === 'restore'
-      ? cutoffHz !== null
-        ? `HawaRestore-KD above ${cutoffHz} Hz (manual cutoff)`
-        : 'HawaRestore-KD above the auto-detected cutoff'
+      ? outOfRange && maxCutoffHz !== null
+        ? `${Math.round(typed)} Hz leaves nothing above it at ${rateKHz} kHz — auto-detecting instead (highest usable ${maxCutoffHz} Hz)`
+        : cutoffHz !== null
+          ? `HawaRestore-KD above ${cutoffHz} Hz (manual cutoff)`
+          : 'HawaRestore-KD above the auto-detected cutoff'
       : 'Clean only — no spectral content is invented';
 
   return (
@@ -94,7 +111,14 @@ export function RestoreControl() {
               type="number"
               inputMode="decimal"
               min={1}
-              step={100}
+              // `step` was 100 while `min` was 1, which puts the step *base* at
+              // 1 and makes the valid set 1, 101, 201 … — so 4000, 8000 and
+              // 12000, the only values anyone actually types here, were all
+              // rejected by the browser while this component accepted them, and
+              // the spinner could never reach a round number. Nothing here
+              // quantises a cutoff, so the honest step is "any".
+              step="any"
+              {...(maxCutoffHz !== null ? { max: maxCutoffHz } : {})}
               placeholder="auto"
               value={cutoffText}
               disabled={running}
@@ -104,7 +128,7 @@ export function RestoreControl() {
                 const raw = e.target.value;
                 setCutoffText(raw);
                 const v = Number.parseFloat(raw);
-                setCutoffHz(Number.isFinite(v) && v > 0 ? v : null);
+                setCutoffHz(inRange(v) ? v : null);
               }}
             />
             <span className="rc-unit">Hz</span>
