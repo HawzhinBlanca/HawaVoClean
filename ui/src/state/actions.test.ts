@@ -282,6 +282,29 @@ describe('startJob', () => {
     expect(client.createJob).toHaveBeenCalledTimes(1);
   });
 
+  it('posts one run for a burst of presses, not one per press', async () => {
+    // The guard above reads `st.job`, which `setJob` only fills in after
+    // `createJob` resolves. Every press inside that window saw the previous,
+    // terminal job and went through: six presses posted six runs, the store
+    // kept the last, and the rest ran on the engine unreferenced and
+    // uncancellable. Deliberately NOT awaiting between the calls — awaiting is
+    // what let the sibling test above pass while the race was wide open.
+    const { actions, store, client } = await boot();
+    armed(store);
+    await Promise.all([actions.startJob(), actions.startJob(), actions.startJob()]);
+    expect(client.createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the next press through after a refusal, having created nothing', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    armed(store);
+    client.createJob.mockRejectedValueOnce(new EngineError(503, 'busy', 'Engine busy'));
+    await actions.startJob();
+    expect(store.useStore.getState().job).toBeNull();
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledTimes(2);
+  });
+
   it('does nothing without a source', async () => {
     const { actions, client } = await boot();
     await actions.startJob();

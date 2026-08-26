@@ -115,4 +115,66 @@ describe('RestoreControl', () => {
     expect(getState().cutoffHz).toBeNull();
     expect(input.getAttribute('aria-invalid')).toBe('true');
   });
+
+  it('does not quantise the cutoff to a step base that excludes round numbers', async () => {
+    // `min=1` with `step=100` puts the step *base* at 1, so a browser's valid
+    // set is 1, 101, 201 … and every round cutoff anyone types — 4000, 8000,
+    // 12000 — is a stepMismatch, while this component accepted all of them and
+    // left `aria-invalid` unset. Chrome on the running app: "Please enter a
+    // valid value. The two nearest valid values are 7901 and 8001." The spinner
+    // from empty stepped 1 → 101 → 201 and could never reach a round number.
+    //
+    // Asserted as an attribute, deliberately. happy-dom answers
+    // `validity.stepMismatch === false` and `checkValidity() === true` for
+    // exactly the value Chrome rejects, so a `checkValidity()` assertion here
+    // would pass whatever `step` said and prove nothing. `step="any"` is the
+    // whole fix: nothing about a cutoff is quantised.
+    getState().setCapabilities(['character_01'], true);
+    getState().setMode('restore');
+    await render();
+    const input = host.querySelector('.rc-fields input') as HTMLInputElement;
+    expect(input.getAttribute('step')).toBe('any');
+  });
+
+  it('refuses a cutoff at or above Nyquist instead of restoring nothing', async () => {
+    // The request schema is `gt=0` with no ceiling and the DSP clips to
+    // Nyquist, so a cutoff above it ran a full pass that restored nothing and
+    // reported nothing. The control now declines it and falls back to auto.
+    getState().setCapabilities(['character_01'], true);
+    getState().setMode('restore');
+    getState().setOriginal({
+      path: '/a.wav',
+      duration_s: 60,
+      sample_rate: 48000,
+      channels: 1,
+      peaks: { min: [], max: [] },
+      rms_db: [],
+      spectrum: { freqs_hz: [], db: [] },
+      loudness: { integrated_lufs: null, true_peak_dbtp: null },
+      noise_floor_db: null,
+    });
+    await render();
+    const input = host.querySelector('.rc-fields input') as HTMLInputElement;
+    const setValue = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(input) as object,
+      'value',
+    )?.set;
+    const type = async (text: string): Promise<void> => {
+      await act(async () => {
+        setValue?.call(input, text);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+    // 24000 is Nyquist at 48 kHz: nothing sits above it.
+    expect(input.getAttribute('max')).toBe('23999');
+    await type('999999');
+    expect(getState().cutoffHz).toBeNull();
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    await type('24000');
+    expect(getState().cutoffHz).toBeNull();
+    // One below Nyquist still leaves a band, so it is accepted.
+    await type('23999');
+    expect(getState().cutoffHz).toBe(23999);
+    expect(input.getAttribute('aria-invalid')).toBeNull();
+  });
 });

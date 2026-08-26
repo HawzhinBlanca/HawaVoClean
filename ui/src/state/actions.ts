@@ -1377,10 +1377,28 @@ function uniqueOutputPath(inputPath: string, profile: Profile): string | null {
   return bumpOutputPath(prior.outputPath, new Set(done.map((h) => h.outputPath)));
 }
 
+/**
+ * A run is being created right now, before any job id exists to look at.
+ *
+ * `jobInFlight(st.job)` cannot cover this window: `setJob` only happens after
+ * `createJob` has come back, so every press between the click and the response
+ * read the *previous* job — a terminal one — and passed the guard. Six presses
+ * in a burst posted six runs; the store kept the last and the other five ran to
+ * completion on the engine with nothing on screen referring to them and no id
+ * to cancel them by. On a real engine each is a full DSP pass publishing its
+ * own output generation, because `uniqueOutputPath` gives every one of them a
+ * private destination.
+ *
+ * Module scope rather than store state on purpose: this has to be readable and
+ * writable synchronously, in the same tick as the click, which a React state
+ * update is not.
+ */
+let creatingJob = false;
+
 export async function startJob(): Promise<void> {
   const st = getState();
   if (!st.source) return;
-  if (jobInFlight(st.job)) return;
+  if (creatingJob || jobInFlight(st.job)) return;
   // The engine has to be there before anything on screen is thrown away.
   // Without this, pressing PROCESS with the engine gone wiped the finished run
   // — report, cleaned deck, artefacts, the A/B — and *then* discovered there
@@ -1393,6 +1411,7 @@ export async function startJob(): Promise<void> {
     return;
   }
   const profile: Profile = st.profile;
+  creatingJob = true;
   try {
     const client = requireClient();
     // B5 · a second run of the same profile must not land on the first run's
@@ -1449,6 +1468,10 @@ export async function startJob(): Promise<void> {
   } catch (e) {
     probeSoon(e);
     failed(e, st.source.name, 'Could not start');
+  } finally {
+    // Cleared on both paths. On success `jobInFlight` has taken over by now; on
+    // failure nothing was created, so the next press must be let through.
+    creatingJob = false;
   }
 }
 
