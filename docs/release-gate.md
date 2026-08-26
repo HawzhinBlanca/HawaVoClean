@@ -50,7 +50,7 @@ copying only the required files into an isolated checkout.
 `.github/workflows/ci.yml` invokes this exact command on a protected, dedicated Apple-silicon runner;
 it does not redefine a smaller remote “release gate.” Separate hosted jobs add the complete declared
 Python 3.11–3.14 × Linux/macOS support matrix and a macOS web/Resolve-shell check. The stable
-`release / required` job fails unless every component succeeds on the same source commit.
+`required` job fails unless every component succeeds on the same source commit.
 
 Private regression files are never stored in GitHub or uploaded as evidence. After protected
 environment approval, `scripts/hydrate_release_evidence.py` validates them from an external

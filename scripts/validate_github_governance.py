@@ -180,7 +180,7 @@ def validate_contract(contract: dict[str, Any], *, root: Path = ROOT) -> str:
 
     ci = _object(contract["ci"], "ci")
     _require(ci.get("workflow_name") == "release", "wrong workflow name")
-    _require(ci.get("required_status_context") == "release / required", "wrong required check")
+    _require(ci.get("required_status_context") == "required", "wrong required check")
     _require(
         ci.get("jobs")
         == ["source-contract", "core-support", "web-resolve", "exact-release-gate", "required"],
@@ -223,9 +223,7 @@ def validate_contract(contract: dict[str, Any], *, root: Path = ROOT) -> str:
 
     branch = _object(contract["protected_branch"], "protected branch")
     _require(branch.get("name") == "main", "wrong protected branch")
-    _require(
-        branch.get("required_status_contexts") == ["release / required"], "required checks changed"
-    )
+    _require(branch.get("required_status_contexts") == ["required"], "required checks changed")
     for key in (
         "strict_status_checks",
         "enforce_admins",
