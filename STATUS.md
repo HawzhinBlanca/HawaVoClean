@@ -88,6 +88,22 @@ version-seeded PCM24 dither identity.
    before exec; the ten tests fail and pass on the same machine according to that one difference, and
    no test was changed. See `docs/u1-governance-runbook.md`.
 
+   With that fixed the gate reached step 41 of 41 in its first pass — fuzz, mutations, UI, packaging,
+   audio regressions, Resolve staging and container scanning all executed on this runner for the
+   first time — and failed on the last one, which exposed a second defect, this time real. The SBOM
+   contract requires every apk, npm and PyPI component to carry a cryptographic hash, and 92 of 92
+   Wolfi packages had none. The cause is not the image: Trivy persists its *artifact analysis* keyed
+   by image and layer and reuses it whatever the later scan asks for, and the gate scans the same
+   image twice — `container-vulnerability-scan` first with `--scanners vuln`, which stores a
+   narrower analysis, then `artifact-bound-sbom`, which inherits it. Measured on one image and one
+   empty cache: SBOM first gives 92 components with 0 missing hashes; vuln first gives 92 with 92
+   missing, and `distro=20230201` degrades to `distro=wolfi`. So the committed SBOM's contents
+   depended on Trivy's cache history — hidden, order-dependent state in an artifact whose whole
+   purpose is to be an exact inventory. `_trivy_bom` now scans with `--cache-backend memory`, which
+   neither reads nor writes that cache, and a regression test pins the flag because the failure is
+   invisible from inside a unit test: the SBOM still generates, still validates as CycloneDX 1.6,
+   and is simply wrong about what it contains.
+
    Applying the ruleset is one-way for a single-maintainer repository: it requires one approving
    review with `enforce_admins: true`, and nobody may approve their own pull request. Everything that
    still needs to land — blocker 7 below — must land before it.

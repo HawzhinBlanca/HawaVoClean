@@ -251,6 +251,41 @@ def test_inventory_references_are_deterministic_and_purls_are_preserved() -> Non
     assert generate_sbom._canonical_ref(apk_source) == generate_sbom._canonical_ref(apk_image)
 
 
+def test_trivy_inventory_never_reads_another_scans_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The SBOM must describe the artifact, not a previous scan's leftovers.
+
+    Trivy persists its artifact analysis keyed by image and layer and reuses it
+    whatever the later scan asks for. The release gate scans the same image
+    twice — `container-vulnerability-scan` with `--scanners vuln` first, then
+    this SBOM — so without an isolated backend the inventory inherits the
+    narrower analysis and loses every apk package digest. Measured on one image
+    and one empty cache: SBOM first gives 92 apk components with 0 missing
+    hashes, vuln first gives 92 with 92 missing, and the contract check fails.
+
+    Pinned as a flag assertion because the failure is invisible in unit tests:
+    the SBOM still generates, still validates as CycloneDX 1.6, and is simply
+    wrong about what it contains.
+    """
+    recorded: list[list[str]] = []
+    output = tmp_path / "bom.json"
+
+    def fake_run(command: list[str]) -> str:
+        recorded.append(command)
+        output.write_text(json.dumps({"specVersion": "1.6", "components": []}))
+        return ""
+
+    monkeypatch.setattr(generate_sbom, "_run", fake_run)
+    generate_sbom._trivy_bom(["image", "sha256:abc"], output)
+
+    assert len(recorded) == 1
+    command = recorded[0]
+    assert command[:3] == ["trivy", "image", "sha256:abc"]
+    index = command.index("--cache-backend")
+    assert command[index + 1] == "memory"
+
+
 def test_ephemeral_trivy_scan_subject_is_removed_without_dropping_metadata() -> None:
     bom = {
         "metadata": {
