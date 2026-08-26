@@ -98,9 +98,10 @@
     "name": "release-candidate",
     "minimum_required_reviewers": 1,
     "prevent_self_review": false,
-    "deployment_branch_policy": "protected_branches_only",
+    "deployment_branch_policy": "any_branch_required_reviewer_gated",
     "private_evidence_must_be_outside_runner_workspace": true,
-    "runner_must_be_ephemeral_or_single_purpose": true
+    "runner_must_be_ephemeral_or_single_purpose": true,
+    "deployment_branch_policy_note": "Was protected_branches_only until 2026-08-26. That value is incompatible with the rest of this contract: exact-release-gate triggers on pull_request, deploys to this environment, and required depends on it, but a pull-request merge ref is never a protected branch. The rule was inert while the repository had no protected branch and locked out every pull request the moment main was protected, making main unmergeable. The control that was actually doing the work is the required reviewer, which is unchanged; fork pull requests remain excluded by the job's own condition and by the all-external-contributors approval policy."
   },
   "approval": {
     "checkpoint": "U1",
@@ -116,6 +117,6 @@
     "T3.3 remains open until a deliberately failing disposable pull request is mechanically prevented from merging."
   ],
   "integrity": {
-    "contract_sha256": "4a6d8e31d9c6f09bbd881fb620399a1d51105611638f2f202e68e919f8bba5fa"
+    "contract_sha256": "1d334b0c9f06eb7059d872946229dd964718e80abd6223c423973102059dd6f4"
   }
 }

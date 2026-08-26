@@ -69,60 +69,45 @@ version-seeded PCM24 dither identity.
 
 ## Open release blockers
 
-1. **GitHub governance (U1/T3.2–T3.3):** the billing blocker is gone — the repository was made public
-   on 2026-08-24, hosted Actions now run, and four pull requests have taken the full hosted matrix
-   green. The two owner-only decisions are also closed: the ephemeral `hawavoclean-release` runner is
-   registered, and `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` was set on 2026-08-26 to
-   `/Users/hawzhin/HawaVoCleanEvidence`, whose fourteen manifest-named files hydrated into a hosted
-   job for the first time in the repository's history. What remains is one green
-   `required`, and the two things queued behind it: the `main` ruleset, and T3.3's
-   deliberately-failing-pull-request proof.
+1. ~~**GitHub governance (U1/T3.2–T3.3):**~~ **T3.2 and T3.3 closed 2026-08-26.** `main` is protected
+   with the contracted ruleset, read back from GitHub and compared field-for-field against
+   `evidence/release/github-governance-contract.json`: eleven fields, zero mismatches. The exact
+   release gate passed twice — two isolated passes of forty-one steps each, all ten release and
+   engineering identities reproduced across them — and `required` reported success for the first time
+   in this repository's history. T3.3 is proved in
+   `evidence/release/t3.3-branch-protection-proof.json`: a disposable pull request carrying one
+   deliberately failing test was refused by GitHub twice, first by `required_linear_history` and then
+   with `Required status check "required" is failing`, and `main` never moved.
 
-   The gate's second execution failed, and on nothing in the product: the listener had been started
-   with `nohup ./run.sh &`, which leaves SIGINT, SIGQUIT and SIGHUP at `SIG_IGN` for every
-   descendant, so ten interrupt-dependent tests could not deliver the signal they exist to test. One
-   of those failures is itself the proof the product was right — the watchdog detected the ignored
-   disposition and escalated to SIGTERM, exactly as
-   `test_watchdog_escalates_to_sigterm_when_sigint_is_inherited_ignored` asserts it must. The
-   listener is now started through `start-ephemeral-runner.sh`, which restores the three dispositions
-   before exec; the ten tests fail and pass on the same machine according to that one difference, and
-   no test was changed. See `docs/u1-governance-runbook.md`.
+   Getting there cost five gate executions and each one found something the design had asserted but
+   never run. The listener had been started with `nohup ./run.sh &`, leaving SIGINT, SIGQUIT and
+   SIGHUP at `SIG_IGN` for every descendant, so ten interrupt-dependent tests could not deliver the
+   signal they exist to test — the product was right, and the watchdog escalating to SIGTERM proved
+   it. The release SBOM inherited a narrower analysis from the vulnerability scan's Trivy cache and
+   lost all ninety-two Wolfi package digests, so its contents depended on cache history rather than
+   on the image. The contract pinned the branch-protection context as `release / required`, which
+   GitHub never reports; measured with review and admin enforcement switched off, that string left a
+   green pull request `BLOCKED` while `required` left it `CLEAN`. And the `release-candidate`
+   environment admitted only protected branches, which is incompatible with a gate that triggers on
+   `pull_request` — inert while the repository had no protected branch, and locking out every pull
+   request the moment `main` gained one, `main` included.
 
-   With that fixed the gate reached step 41 of 41 in its first pass — fuzz, mutations, UI, packaging,
-   audio regressions, Resolve staging and container scanning all executed on this runner for the
-   first time — and failed on the last one, which exposed a second defect, this time real. The SBOM
-   contract requires every apk, npm and PyPI component to carry a cryptographic hash, and 92 of 92
-   Wolfi packages had none. The cause is not the image: Trivy persists its *artifact analysis* keyed
-   by image and layer and reuses it whatever the later scan asks for, and the gate scans the same
-   image twice — `container-vulnerability-scan` first with `--scanners vuln`, which stores a
-   narrower analysis, then `artifact-bound-sbom`, which inherits it. Measured on one image and one
-   empty cache: SBOM first gives 92 components with 0 missing hashes; vuln first gives 92 with 92
-   missing, and `distro=20230201` degrades to `distro=wolfi`. So the committed SBOM's contents
-   depended on Trivy's cache history — hidden, order-dependent state in an artifact whose whole
-   purpose is to be an exact inventory. `_trivy_bom` now scans with `--cache-backend memory`, which
-   neither reads nor writes that cache, and a regression test pins the flag because the failure is
-   invisible from inside a unit test: the SBOM still generates, still validates as CycloneDX 1.6,
-   and is simply wrong about what it contains.
+   All four are the same shape: a control that passed because there was nothing for it to check. Only
+   executing them exposed it, which is the argument for this checkpoint existing at all.
 
-   The fifth execution passed: two isolated passes, all forty-one steps each, with all ten release
-   and engineering identities reproduced across them — including the SBOM at `779e22e9…` in both
-   passes, which is the cache fix doing its job. `required` reported success for the first time in
-   this repository's history, and the pull request carrying all of it merged into `main`.
+   Two deviations stand, recorded rather than met. The self-hosted runner is registered under the
+   owner's own account on the owner's workstation, alongside `gh` credentials and a working copy,
+   where `docs/operations.md` asks for a dedicated unprivileged account; it is ephemeral and
+   single-purpose per job, which is the other half of that requirement. And the environment's
+   `deployment_branch_policy` is removed rather than `protected_branches_only`; the required reviewer,
+   which is the control that was doing the work, is unchanged.
 
-   Probing the ruleset before applying it found the last defect, and it was in the approved design
-   itself: the contract pinned the branch-protection context as `release / required`, but GitHub
-   names an Actions check run after the job's `name:` and nothing else. Protection was applied twice
-   to `main` with review, administrator enforcement and the strict rule all switched off, so the only
-   variable was the string — `release / required` left a fully green pull request `BLOCKED`,
-   `required` left it `CLEAN` — and then removed. A required context that never reports does not
-   defer merges; it makes `main` permanently unmergeable, which is precisely the outage the runbook
-   warns about, sitting inside the design that was supposed to prevent it. The contract, the
-   validator, its test and every document now say `required`.
+   What remains under U1 is not governance mechanism but people: with `enforce_admins: true` and one
+   approving review required, and nobody able to approve their own pull request, `main` now needs a
+   second reviewer for every merge. That is the contract behaving as designed — T7 assumes an
+   independent challenger and U4 assumes a protected merge — and it is why the pull request carrying
+   this very paragraph cannot merge itself.
 
-   Applying the ruleset is one-way for a single-maintainer repository: it requires one approving
-   review with `enforce_admins: true`, and nobody may approve their own pull request. Everything that
-   still needs to land must land before it — which is why the context correction is its own pull
-   request rather than a follow-up.
 2. **Vendor Electron (T4.6):** Resolve 21.0.3 embeds Electron 36.3.2 with 33 captured advisories,
    including seven high. HawaVoClean hardens reachable boundaries, but the residual vendor risk needs
    explicit acceptance or a qualifying Resolve update.
