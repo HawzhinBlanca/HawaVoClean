@@ -72,7 +72,7 @@ def test_governance_api_plan_is_non_mutating_and_complete() -> None:
     assert plan["requires_checkpoint"] == "U1"
     operations = plan["operations"]
     assert [item["method"] for item in operations] == ["PUT", "POST"]
-    assert operations[0]["body"]["required_status_checks"]["contexts"] == ["release / required"]
+    assert operations[0]["body"]["required_status_checks"]["contexts"] == ["required"]
     assert operations[1]["body"]["rules"] == [{"type": "update"}, {"type": "deletion"}]
 
 

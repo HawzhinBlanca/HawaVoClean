@@ -18,7 +18,7 @@ Do not convert a declared target into a release claim until its required CI/in-h
 
 ## Protected CI and release-runner setup
 
-The committed GitHub workflow has one stable branch-protection context: `release / required`. It
+The committed GitHub workflow has one stable branch-protection context: `required`. It
 succeeds only when the source contract, all eight Linux/macOS and Python 3.11–3.14 jobs, the macOS
 web/Resolve-shell job, and the exact Apple-silicon release gate all succeed on the same commit. The
 hosted matrix builds a wheel, installs it with hash-locked runtime dependencies in a separate virtual
@@ -39,7 +39,7 @@ hawavoclean-release]` and the protected `release-candidate` environment. Before 
    `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` to that external root. The hydrator copies only manifest-named,
    SHA-256-matching, Git-ignored regular files and refuses symlinks, escapes, conflicting hashes, or
    pre-existing wrong bytes.
-5. Require `release / required` on `main`, one fresh approving review, last-push approval, linear
+5. Require `required` on `main`, one fresh approving review, last-push approval, linear
    history, resolved conversations, administrator enforcement, and no force pushes/deletions. Protect
    `v*` tags against updates and deletion.
 

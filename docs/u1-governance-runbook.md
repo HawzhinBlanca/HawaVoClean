@@ -31,7 +31,7 @@ before.
 | Any GitHub Actions job starting | **Running** | — |
 | `release-candidate` environment with a required reviewer | **Active** | — |
 | Secret scanning and push protection | **Enabled** | — |
-| Protected `main` requiring `release / required` | Not applied | The runner — see below |
+| Protected `main` requiring `required` | Not applied | Contract context correction — see below |
 | Self-hosted `hawavoclean-release` runner | **Registered and proven** | — |
 | `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` | **Set — 2026-08-26** (`/Users/hawzhin/HawaVoCleanEvidence`) | — |
 | Private evidence hydrated by a hosted job | **Yes — 2026-08-26** | — |
@@ -49,7 +49,7 @@ dependency. `required` is an aggregate job that asserts
 `test "$EXACT_RELEASE_GATE" = success`, and `exact-release-gate` runs on
 `[self-hosted, macOS, ARM64, hawavoclean-release]`. With no such runner the gate
 never starts, so `required` never starts either — it does not appear in a pull
-request's checks at all. Applying a ruleset with a strict `release / required`
+request's checks at all. Applying a ruleset with a strict `required`
 context in that state would not merely defer merges; it would make `main`
 **permanently unmergeable** until a runner exists. Hosted jobs going green,
 which they now do, does not change this.
@@ -224,6 +224,39 @@ under `nohup sh -c 'pytest …' &` and all forty-seven pass under
 `trap - INT` cannot substitute for this: POSIX states that signals ignored on
 entry to a non-interactive shell cannot be trapped or reset from within it.
 
+### The contract's required-check context was wrong
+
+*Probed 2026-08-26, immediately before the ruleset was applied for the first
+time.*
+
+The contract pinned `required_status_context: "release / required"`, and the API
+plan would have installed exactly that. GitHub names an Actions check run after
+the job's `name:` and nothing else — every check on this repository proves it:
+`source contract`, `web and Resolve shell`, `exact Apple-silicon release gate`,
+and `required`. The workflow name is never part of the context.
+
+A required context that never reports does not defer a merge; it makes `main`
+permanently unmergeable. That is the failure this runbook already warned about
+in the runner section — and it was sitting inside the approved design, attested
+in ledger entry 38, untested because the ruleset had never been applied.
+
+Measured rather than reasoned. Protection was applied twice to `main` with the
+review requirement, administrator enforcement and the strict rule all switched
+off, so the only thing that could block a green pull request was the context
+under test:
+
+```
+context "release / required"  -> mergeStateStatus=BLOCKED
+context "required"            -> mergeStateStatus=CLEAN
+```
+
+Protection was removed after both probes. The contract, the validator, its test
+and every document now say `required`.
+
+The general lesson is the one this checkpoint keeps teaching: a governance
+contract is a claim about a live system, and a claim nobody has executed is a
+guess with a hash on it.
+
 ### Recorded deviation: the runner account
 
 `docs/operations.md` asks for the runner to be registered "under a dedicated
@@ -283,13 +316,13 @@ Order matters here:
    to be accepted on this plan: pull request with one approval, dismiss stale
    reviews, require last push approval, required conversation resolution,
    required linear history, no deletion, no force push, and a strict
-   `release / required` status check.
+   `required` status check.
 4. ~~Create `release-candidate` with the owner as required reviewer and a
    protected-branches-only deployment policy.~~ Done: the environment exists and
    carries `required_reviewers` and `branch_policy`.
 5. ~~Set `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT`.~~ Done 2026-08-26. **This had to
    happen before step 3**, for the reason recorded there: the gate refuses to
-   hydrate without it, so the `release / required` context cannot report success
+   hydrate without it, so the `required` context cannot report success
    until it is set. The first job to run with it set hydrated all fourteen
    artifacts and went on to fail on the launcher defect recorded above, not on
    the evidence.

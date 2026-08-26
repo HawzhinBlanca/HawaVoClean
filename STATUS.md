@@ -75,7 +75,7 @@ version-seeded PCM24 dither identity.
    registered, and `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` was set on 2026-08-26 to
    `/Users/hawzhin/HawaVoCleanEvidence`, whose fourteen manifest-named files hydrated into a hosted
    job for the first time in the repository's history. What remains is one green
-   `release / required`, and the two things queued behind it: the `main` ruleset, and T3.3's
+   `required`, and the two things queued behind it: the `main` ruleset, and T3.3's
    deliberately-failing-pull-request proof.
 
    The gate's second execution failed, and on nothing in the product: the listener had been started
@@ -104,9 +104,25 @@ version-seeded PCM24 dither identity.
    invisible from inside a unit test: the SBOM still generates, still validates as CycloneDX 1.6,
    and is simply wrong about what it contains.
 
+   The fifth execution passed: two isolated passes, all forty-one steps each, with all ten release
+   and engineering identities reproduced across them — including the SBOM at `779e22e9…` in both
+   passes, which is the cache fix doing its job. `required` reported success for the first time in
+   this repository's history, and the pull request carrying all of it merged into `main`.
+
+   Probing the ruleset before applying it found the last defect, and it was in the approved design
+   itself: the contract pinned the branch-protection context as `release / required`, but GitHub
+   names an Actions check run after the job's `name:` and nothing else. Protection was applied twice
+   to `main` with review, administrator enforcement and the strict rule all switched off, so the only
+   variable was the string — `release / required` left a fully green pull request `BLOCKED`,
+   `required` left it `CLEAN` — and then removed. A required context that never reports does not
+   defer merges; it makes `main` permanently unmergeable, which is precisely the outage the runbook
+   warns about, sitting inside the design that was supposed to prevent it. The contract, the
+   validator, its test and every document now say `required`.
+
    Applying the ruleset is one-way for a single-maintainer repository: it requires one approving
    review with `enforce_admins: true`, and nobody may approve their own pull request. Everything that
-   still needs to land — blocker 7 below — must land before it.
+   still needs to land must land before it — which is why the context correction is its own pull
+   request rather than a follow-up.
 2. **Vendor Electron (T4.6):** Resolve 21.0.3 embeds Electron 36.3.2 with 33 captured advisories,
    including seven high. HawaVoClean hardens reachable boundaries, but the residual vendor risk needs
    explicit acceptance or a qualifying Resolve update.
