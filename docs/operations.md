@@ -245,12 +245,19 @@ local rehearsal and is labeled `unsigned_pending_signing`; verification then req
 Close Resolve, use the exact release revision, and build a self-contained engine from the exact wheel:
 
 ```bash
-SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" uv build
+uv build
 uv run python scripts/build_resolve_engine.py \
   --wheel "$PWD/dist/hawavoclean-3.3.0-py3-none-any.whl" \
   --output "$PWD/build/resolve-engine"
 resolve-plugin/install.sh --engine-bundle "$PWD/build/resolve-engine"
 ```
+
+Do not prefix that build with `SOURCE_DATE_EPOCH=...`. In a Git checkout the
+backend derives both source anchors from Git itself and treats explicit ones as
+a cross-check, so supplying one without `HAWAVOCLEAN_SOURCE_REVISION` is refused
+outright — `detached release builds require both`. The pair is for building from
+an unpacked sdist, where there is no `.git` to read. This page carried the
+one-variable form until 2026-08-26; it never worked.
 
 The installer rejects a source checkout, mutable virtual environment, incomplete engine, wrong
 manifest, or unlocked dependency tree. It assembles a content-addressed stage, verifies every byte,

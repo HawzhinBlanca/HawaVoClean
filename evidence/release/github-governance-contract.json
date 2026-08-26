@@ -15,7 +15,7 @@
   },
   "ci": {
     "workflow": ".github/workflows/ci.yml",
-    "workflow_sha256": "50c7974a6afe529fcd3577206eff49657156e162f6e6d5dde923de854c8ed5b0",
+    "workflow_sha256": "351f9aaa9952b5a838fc66268cb8b24365f94dcd7077b729176fd82ab843df09",
     "workflow_name": "release",
     "required_status_context": "release / required",
     "jobs": [
@@ -116,6 +116,6 @@
     "T3.3 remains open until a deliberately failing disposable pull request is mechanically prevented from merging."
   ],
   "integrity": {
-    "contract_sha256": "f79ab2b295732b14bf74d008b002fb890518aa05e644b3417caeba4a91f244d1"
+    "contract_sha256": "140ae68a4e686792af804034b7ca0b70271dfcbe834b927e53f112b4e6b49132"
   }
 }

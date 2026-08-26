@@ -97,7 +97,34 @@ def _release_version() -> str:
 
 
 def _trivy_bom(arguments: list[str], output: Path) -> dict[str, Any]:
-    _run(["trivy", *arguments, "--quiet", "--format", "cyclonedx", "--output", str(output)])
+    # `--cache-backend memory` is load-bearing, not a performance choice. Trivy
+    # persists its *artifact analysis* keyed by image and layer, and reuses it
+    # whatever the later scan asks for. The release gate scans the same image
+    # twice: `container-vulnerability-scan` runs first with `--scanners vuln`,
+    # which stores a narrower analysis, and this SBOM scan then inherits it —
+    # losing every apk package digest and the resolved distro version.
+    #
+    # Measured on one image and one empty cache, 2026-08-26: SBOM scan first
+    # gives 92 apk components with 0 missing hashes; vuln scan first gives 92
+    # with 92 missing, and `distro=20230201` degrades to `distro=wolfi`. The
+    # contract check then fails on whichever package sorts first. An in-memory
+    # backend neither reads nor writes that cache, so the inventory always comes
+    # from analysing the artifact rather than from what another scan happened to
+    # leave behind. The vulnerability database is a separate cache and is not
+    # affected, so this costs one re-analysis and no extra download.
+    _run(
+        [
+            "trivy",
+            *arguments,
+            "--cache-backend",
+            "memory",
+            "--quiet",
+            "--format",
+            "cyclonedx",
+            "--output",
+            str(output),
+        ]
+    )
     value: Any = json.loads(output.read_text(encoding="utf-8"))
     if not isinstance(value, dict) or value.get("specVersion") != "1.6":
         raise SbomError("Trivy did not emit CycloneDX 1.6 JSON")

@@ -97,8 +97,15 @@ def test_chain_link_is_checked_separately_from_self_hash(tmp_path: Path) -> None
 
 
 def _pinned_commits() -> dict[str, str]:
-    """Every 40-hex commit the baseline names, keyed by its JSON path."""
-    baseline = json.loads((REPO / "evidence" / "release" / "baseline.json").read_text())
+    """
+    Every 40-hex commit the release evidence names, keyed by its JSON path.
+
+    Both files, not just the baseline. `release_evidence.py verify` resolves
+    commits from each of them — the outage that motivated this guard came from
+    a SHA that appears in both — and an earlier version of this function read
+    only `baseline.json`, so a `reference_source_commit` orphaned in
+    `audio-regressions.json` would have gone straight past it.
+    """
     found: dict[str, str] = {}
 
     def walk(node: object, path: str) -> None:
@@ -111,33 +118,40 @@ def _pinned_commits() -> dict[str, str]:
         elif isinstance(node, str) and re.fullmatch(r"[0-9a-f]{40}", node):
             found[path] = node
 
-    walk(baseline, "baseline")
+    for name in ("baseline.json", "audio-regressions.json"):
+        doc = json.loads((REPO / "evidence" / "release" / name).read_text())
+        walk(doc, name.removesuffix(".json"))
     return found
 
 
-def _trunk_ref() -> str:
+def _durable_refs() -> list[str]:
     """
-    A ref naming the trunk's history, in whatever checkout we are standing in.
+    Every ref a fresh clone would carry that could make a commit reachable.
 
-    `main` is not it. A pull-request build checks out a detached merge commit
-    and creates no local `main`, so hard-coding that name made the first version
-    of this guard fail in CI on three anchors that are perfectly reachable —
-    the same class of environment assumption the guard exists to catch, made by
-    the guard itself.
+    ALL of them, not the first that resolves. An earlier version returned only
+    `origin/main`, which fails a commit that a pull request has introduced but
+    `main` does not yet contain — including, on the very change that added this,
+    the `reference_source_commit` of the regenerated audio references. `HEAD` is
+    what covers that case: at pull-request time a fresh clone of the branch sees
+    it, and after the merge `main` does.
 
-    Raises rather than returning a fallback: a reachability test that cannot
-    find the trunk must fail loudly, not pass vacuously.
+    Raises rather than returning empty: a reachability test that can find no ref
+    at all must fail loudly, not pass vacuously.
     """
-    for ref in ("origin/main", "main", "HEAD"):
-        probe = subprocess.run(
+    refs = [
+        ref
+        for ref in ("origin/main", "main", "HEAD")
+        if subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
             cwd=REPO,
             capture_output=True,
             check=False,
-        )
-        if probe.returncode == 0:
-            return ref
-    raise AssertionError("no trunk ref found: tried origin/main, main, HEAD")
+        ).returncode
+        == 0
+    ]
+    if not refs:
+        raise AssertionError("no durable ref found: tried origin/main, main, HEAD")
+    return refs
 
 
 def _reachable_from_a_durable_ref(sha: str) -> bool:
@@ -154,14 +168,15 @@ def _reachable_from_a_durable_ref(sha: str) -> bool:
     A branch tip is not durable either; branches get deleted once merged. The
     two things a clone reliably carries are the trunk's history and tags.
     """
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", sha, _trunk_ref()],
-        cwd=REPO,
-        capture_output=True,
-        check=False,
-    )
-    if ancestor.returncode == 0:
-        return True
+    for ref in _durable_refs():
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, ref],
+            cwd=REPO,
+            capture_output=True,
+            check=False,
+        )
+        if ancestor.returncode == 0:
+            return True
     tagged = subprocess.run(
         ["git", "tag", "--points-at", sha],
         cwd=REPO,
@@ -186,7 +201,7 @@ def test_every_baseline_pinned_commit_survives_a_fresh_clone(where: str, sha: st
     orphaned it. Content equivalence is not the test; reachability is.
     """
     assert _reachable_from_a_durable_ref(sha), (
-        f"{where} = {sha} is not an ancestor of the trunk and carries no tag, so a fresh "
+        f"{where} = {sha} is reachable from no durable ref and carries no tag, so a fresh "
         f"clone cannot see it and `release_evidence.py verify` will fail in CI. "
         f"Tag it rather than relying on a branch nobody has a reason to keep."
     )

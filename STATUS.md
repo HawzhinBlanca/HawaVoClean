@@ -70,14 +70,43 @@ version-seeded PCM24 dither identity.
 ## Open release blockers
 
 1. **GitHub governance (U1/T3.2–T3.3):** the billing blocker is gone — the repository was made public
-   on 2026-08-24, hosted Actions now run, and three pull requests have taken the full hosted matrix
-   green (8 core jobs, source contract, web and Resolve shell). What remains is one dependency and
-   everything queued behind it: **no self-hosted `hawavoclean-release` runner is registered**
-   (measured: 0 runners), so `exact-release-gate` has never executed on any pull request, and the
-   `required` aggregate — which asserts `EXACT_RELEASE_GATE = success` — therefore never starts.
-   `main` is consequently still unprotected: applying the ruleset before the runner exists would
-   demand a status context that cannot report success and would make `main` permanently unmergeable.
-   T3.3's deliberately-failing-pull-request proof is queued behind that ruleset in turn.
+   on 2026-08-24, hosted Actions now run, and four pull requests have taken the full hosted matrix
+   green. The two owner-only decisions are also closed: the ephemeral `hawavoclean-release` runner is
+   registered, and `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT` was set on 2026-08-26 to
+   `/Users/hawzhin/HawaVoCleanEvidence`, whose fourteen manifest-named files hydrated into a hosted
+   job for the first time in the repository's history. What remains is one green
+   `release / required`, and the two things queued behind it: the `main` ruleset, and T3.3's
+   deliberately-failing-pull-request proof.
+
+   The gate's second execution failed, and on nothing in the product: the listener had been started
+   with `nohup ./run.sh &`, which leaves SIGINT, SIGQUIT and SIGHUP at `SIG_IGN` for every
+   descendant, so ten interrupt-dependent tests could not deliver the signal they exist to test. One
+   of those failures is itself the proof the product was right — the watchdog detected the ignored
+   disposition and escalated to SIGTERM, exactly as
+   `test_watchdog_escalates_to_sigterm_when_sigint_is_inherited_ignored` asserts it must. The
+   listener is now started through `start-ephemeral-runner.sh`, which restores the three dispositions
+   before exec; the ten tests fail and pass on the same machine according to that one difference, and
+   no test was changed. See `docs/u1-governance-runbook.md`.
+
+   With that fixed the gate reached step 41 of 41 in its first pass — fuzz, mutations, UI, packaging,
+   audio regressions, Resolve staging and container scanning all executed on this runner for the
+   first time — and failed on the last one, which exposed a second defect, this time real. The SBOM
+   contract requires every apk, npm and PyPI component to carry a cryptographic hash, and 92 of 92
+   Wolfi packages had none. The cause is not the image: Trivy persists its *artifact analysis* keyed
+   by image and layer and reuses it whatever the later scan asks for, and the gate scans the same
+   image twice — `container-vulnerability-scan` first with `--scanners vuln`, which stores a
+   narrower analysis, then `artifact-bound-sbom`, which inherits it. Measured on one image and one
+   empty cache: SBOM first gives 92 components with 0 missing hashes; vuln first gives 92 with 92
+   missing, and `distro=20230201` degrades to `distro=wolfi`. So the committed SBOM's contents
+   depended on Trivy's cache history — hidden, order-dependent state in an artifact whose whole
+   purpose is to be an exact inventory. `_trivy_bom` now scans with `--cache-backend memory`, which
+   neither reads nor writes that cache, and a regression test pins the flag because the failure is
+   invisible from inside a unit test: the SBOM still generates, still validates as CycloneDX 1.6,
+   and is simply wrong about what it contains.
+
+   Applying the ruleset is one-way for a single-maintainer repository: it requires one approving
+   review with `enforce_admins: true`, and nobody may approve their own pull request. Everything that
+   still needs to land — blocker 7 below — must land before it.
 2. **Vendor Electron (T4.6):** Resolve 21.0.3 embeds Electron 36.3.2 with 33 captured advisories,
    including seven high. HawaVoClean hardens reachable boundaries, but the residual vendor risk needs
    explicit acceptance or a qualifying Resolve update.
@@ -87,26 +116,37 @@ version-seeded PCM24 dither identity.
    the plugin has not completed the real in-host workflow, timeline, keyboard or VoiceOver matrix.
 5. **Final release (T7.2–T7.4/U4):** the eventual source commit must be rebuilt twice, challenged,
    signed, merged through protection, tagged and published with matching hashes.
-6. **Audio-regression references are stale (U4):** the committed reference reports record a bug that
-   has since been fixed, so `scripts/audio_regression_gate.py` fails on `flute-production` with
-   "unexplained semantic report drift". `input.integrated_lufs` and `input.true_peak_dbtp` used to be
-   measured on the pre-master buffer — the audio after enhancement — while every other field in that
-   block described the source. The references therefore hold -24.107 LUFS / -2.306 dBTP where the
-   input file actually measures -24.887 / -1.195. The audio itself has not drifted; only the report
-   field that was wrong. Fixing this needs the private reference reports regenerated and their
-   `report_sha256` re-pinned in `evidence/release/audio-regressions.json`, which is a user-held
-   artifact and a ledger change. Latent rather than red today because this gate runs only in the
-   self-hosted Apple-silicon job that U1 has not enabled.
-7. **The Resolve engine is built by no hosted job (U1):** `scripts/build_resolve_engine.py` assembles
-   a shipped surface, and only the self-hosted release gate runs it. It installs the wheel without
-   the optional extras, so while `import hawavoclean.cli` briefly required torch the engine could not
-   have started either, and no hosted job would have said so — the wheel smoke in `core` caught the
-   same defect for the CLI. Verified by hand on this branch: the engine builds, and
-   `hawavoclean-engine --version` and `doctor` both succeed with torch absent. The fix is a step in
-   the existing macos-15 `web-resolve` job, which `required` already depends on, so it needs no new
-   check name and no branch-protection change — but `.github/workflows/ci.yml` is pinned by
-   `ci.workflow_sha256` in the governance contract and attested in ledger entry 38, so editing it
-   amends an approved design and belongs with U1 rather than to a passing change.
+6. ~~**Audio-regression references encode a report bug (U1):**~~ **Resolved 2026-08-25.** The
+   references held `input.integrated_lufs` and `input.true_peak_dbtp` measured on the pre-master
+   buffer — the audio *after* enhancement — while every other field in that block described the
+   source. The proof was that three profiles reported three different input loudnesses for one file
+   (−24.107 / −24.671 / −24.400 LUFS); a source file has one loudness, and the value tracked the
+   profile. Regenerated under v3.3: all six cases now report a single consistent figure per input
+   (−24.887 / −1.195 for Flute, −31.841 / −17.492 for teat1vo), matching what this entry predicted
+   to the digit. Every regenerated master reproduced the `candidate_audio_sha256` the manifest had
+   already predicted, so the v3.2→v3.3 dither-seed transition is complete and the drift contract is
+   now historical rather than active — `scripts/audio_regression_gate.py` passes with **0 changed
+   samples and 0.0 max LSB** across all six cases, two runs each, where it previously had to tolerate
+   up to 2.0 LSB.
+7. ~~**The Resolve engine is built by no hosted job (U1):**~~ **Resolved 2026-08-26.**
+   `scripts/build_resolve_engine.py` assembles a shipped surface, and only the self-hosted release
+   gate ran it, so a bundle that could not start — or could start and not run — was invisible to
+   every hosted job, and therefore to `required`, and therefore to branch protection. The macos-15
+   `web-resolve` job now builds it on the platform it ships for and makes it do the job:
+   `--version` proves the launcher, `doctor` proves the bundled numeric stack and all four packaged
+   profiles and three core locks, and process/verify proves the runtime end to end against the
+   generation's own digests. `required` already depends on that job, so this needed no new check
+   name and no branch-protection change. Measured locally first: a 711 MB bundle in 21 s, doctor
+   clean, and an 8-second fixture processed and verified in under 3 s. Editing
+   `.github/workflows/ci.yml` amends an approved design — it is pinned by `ci.workflow_sha256` and
+   attested in ledger entry 38 — so both digests are re-pinned and the amendment is recorded in the
+   ledger, which is why this belonged with U1 rather than to a passing change.
+
+   The same work found that the engine build command in `docs/operations.md` and
+   `resolve-plugin/README.md` had never worked: both prefixed it with
+   `SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"`, and in a Git checkout the backend derives
+   both anchors itself and refuses an explicit one supplied without
+   `HAWAVOCLEAN_SOURCE_REVISION`. The pair belongs to sdist builds, which have no `.git` to read.
 
 ## Historical correction
 
