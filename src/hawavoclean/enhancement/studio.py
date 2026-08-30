@@ -270,6 +270,9 @@ class StudioVoiceCore(Enhancer):
         enhanced_out = resample_audio(
             enhanced_48k, self._sample_rate, sample_rate, target_samples=orig_len
         )
+        peak = float(np.max(np.abs(enhanced_out))) if len(enhanced_out) > 0 else 0.0
+        if peak > 0.99:
+            enhanced_out = np.ascontiguousarray(enhanced_out * (0.99 / peak), dtype=np.float32)
         t_elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         return EnhancementResult(
             waveform=enhanced_out,
