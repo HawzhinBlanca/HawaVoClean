@@ -68,7 +68,7 @@ def _client(work: Path, manager: JobManager, **kwargs: Any) -> Iterator[TestClie
         min_free_bytes=0,
         **kwargs,
     )
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         yield client
 
 
@@ -96,6 +96,53 @@ def test_cleanup_removes_only_the_marked_input_not_sibling_output(tmp_path: Path
     assert not (input_path.parent / UPLOAD_MARKER).exists()
     assert output.read_bytes() == b"committed output"
     assert store.cleanup_input(input_path) is False
+
+
+def test_source_ids_are_opaque_marker_bound_and_fail_closed(tmp_path: Path) -> None:
+    store = UploadStore(tmp_path / "uploads", min_free_bytes=0)
+    input_path = store.stage("source.wav")
+    input_path.write_bytes(b"input")
+    source_id = store.source_id(input_path)
+
+    assert len(source_id) == 32
+    assert store.resolve_source(source_id) == input_path
+    assert store.resolve_source("../" + source_id) is None
+    assert store.resolve_source("not-an-id") is None
+
+    input_path.unlink()
+    input_path.symlink_to("outside.wav")
+    assert store.resolve_source(source_id) is None
+    with pytest.raises(ValueError, match="not owned"):
+        store.source_id(tmp_path / "unmanaged.wav")
+
+
+def test_source_lease_closes_resolve_then_cleanup_race(tmp_path: Path) -> None:
+    now = [0.0]
+    store = UploadStore(
+        tmp_path / "uploads",
+        ttl_s=1.0,
+        min_free_bytes=0,
+        clock=lambda: now[0],
+    )
+    input_path = store.stage("source.wav")
+    input_path.write_bytes(b"input")
+    source_id = store.source_id(input_path)
+    now[0] = 2.0
+
+    with store.lease_source(source_id) as leased:
+        assert leased == input_path.resolve()
+        assert store.scavenge() == 0
+        assert store.cleanup_input(input_path) is False
+        assert input_path.read_bytes() == b"input"
+
+    assert store.scavenge() == 1
+    assert not input_path.exists()
+
+
+def test_unknown_source_lease_is_a_noop(tmp_path: Path) -> None:
+    store = UploadStore(tmp_path / "uploads", min_free_bytes=0)
+    with store.lease_source("not-an-id") as leased:
+        assert leased is None
 
 
 def test_fake_clock_scavenging_protects_active_and_unknown_files(tmp_path: Path) -> None:

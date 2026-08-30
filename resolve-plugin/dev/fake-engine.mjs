@@ -4,9 +4,10 @@
  * without the Python engine. Node built-ins only.
  *
  * Mimics the subset of docs/ui-contract.md section 1 the shell depends on:
- *   - argv: serve [--host 127.0.0.1] [--port 0] --token TOKEN [--ui-dir DIR]
+ *   - argv: serve [--host 127.0.0.1] [--port 0] --token-stdin [--ui-dir DIR]
  *   - prints exactly one JSON "ready" line to stdout, everything else to stderr
- *   - GET  /api/health     (token via X-Hawa-Token header or ?token=)
+ *   - POST /api/session    (root token via X-Hawa-Token, returns short-lived Bearer capability)
+ *   - GET  /api/health     (root token or Bearer capability; query auth is rejected)
  *   - POST /api/shutdown   (responds {"ok":true}, exits within 1 s)
  *   - CORS: * / X-Hawa-Token, Content-Type
  *   - static files from --ui-dir at / (404 JSON when absent)
@@ -22,12 +23,28 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import crypto from 'node:crypto';
 
 const VERSION = '0.0.0-fake';
 const mode = process.env.FAKE_ENGINE_MODE || 'ok';
+const declaredParentPid = Number(process.env.HAWAVOCLEAN_PARENT_PID);
+
+if (Number.isInteger(declaredParentPid) && declaredParentPid > 1) {
+  setInterval(() => {
+    let alive = process.ppid === declaredParentPid;
+    if (alive) {
+      try {
+        process.kill(declaredParentPid, 0);
+      } catch {
+        alive = false;
+      }
+    }
+    if (!alive) process.exit(130);
+  }, 50);
+}
 
 function parseArgs(argv) {
-  const out = { host: '127.0.0.1', port: 0, token: null, uiDir: null, sub: null };
+  const out = { host: '127.0.0.1', port: 0, token: null, tokenStdin: false, uiDir: null, sub: null };
   const args = argv.slice();
   if (args.length && !args[0].startsWith('--')) out.sub = args.shift();
   for (let i = 0; i < args.length; i += 1) {
@@ -39,6 +56,7 @@ function parseArgs(argv) {
     if (a === '--host') out.host = next();
     else if (a === '--port') out.port = Number(next());
     else if (a === '--token') out.token = next();
+    else if (a === '--token-stdin') out.tokenStdin = true;
     else if (a === '--ui-dir') out.uiDir = next();
     else if (a.startsWith('--port=')) out.port = Number(a.slice(7));
     else if (a.startsWith('--token=')) out.token = a.slice(8);
@@ -49,14 +67,30 @@ function parseArgs(argv) {
 }
 
 const opts = parseArgs(process.argv.slice(2));
+if (opts.tokenStdin) opts.token = await readTokenFromStdin();
 const log = (...a) => console.error('[fake-engine]', ...a);
+
+async function readTokenFromStdin() {
+  const chunks = [];
+  let bytes = 0;
+  // Electron's child-process stdin pipe may initially be non-blocking. A
+  // synchronous read can therefore fail with EAGAIN even though main has
+  // already written and closed the one-shot pipe. The async iterator waits
+  // for readability and EOF, matching the real broker's line reader.
+  for await (const chunk of process.stdin) {
+    bytes += chunk.length;
+    if (bytes > 4096) throw new Error('stdin bootstrap secret exceeded its size limit');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8').replace(/[\r\n]+$/, '');
+}
 
 if (opts.sub !== 'serve') {
   log(`unexpected subcommand ${JSON.stringify(opts.sub)}; expected "serve"`);
   process.exit(2);
 }
 if (!opts.token) {
-  log('--token is required');
+  log('--token or --token-stdin is required');
   process.exit(2);
 }
 
@@ -91,8 +125,8 @@ function sendJson(res, status, body, extraHeaders = {}) {
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'X-Hawa-Token, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, X-Hawa-Token, Content-Type, Range, X-Hawa-Selftest');
   res.setHeader('Access-Control-Max-Age', '600');
 }
 
@@ -125,6 +159,7 @@ function serveStatic(req, res, urlPath) {
 
 function startServer() {
   let stubborn = mode === 'stubborn';
+  const sessions = new Set();
   const server = http.createServer((req, res) => {
     cors(res);
     try {
@@ -144,8 +179,27 @@ function startServer() {
       return res.end();
     }
     if (url.pathname.startsWith('/api/')) {
-      const token = req.headers['x-hawa-token'] || url.searchParams.get('token');
-      if (token !== opts.token) return sendJson(res, 401, { error: 'unauthorized' });
+      if (url.searchParams.has('token')) {
+        return sendJson(res, 400, { error: 'query_auth_forbidden' });
+      }
+      if (url.pathname === '/api/session' && req.method === 'POST') {
+        if (req.headers['x-hawa-token'] !== opts.token || req.headers.authorization) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const sessionToken = crypto.randomBytes(32).toString('base64url');
+        sessions.add(sessionToken);
+        return sendJson(
+          res,
+          200,
+          { sessionToken, expiresInSeconds: 900, tokenType: 'Bearer' },
+          { 'Cache-Control': 'no-store' },
+        );
+      }
+      const bearer = typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')
+        ? req.headers.authorization.slice(7)
+        : null;
+      const authenticated = req.headers['x-hawa-token'] === opts.token || (bearer && sessions.has(bearer));
+      if (!authenticated) return sendJson(res, 401, { error: 'unauthorized' });
       if (url.pathname === '/api/health' && req.method === 'GET') {
         return sendJson(res, 200, { ok: true, version: VERSION, profiles: ['studio', 'lowband', 'production'], engine_pid: process.pid });
       }

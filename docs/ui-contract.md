@@ -1,4 +1,4 @@
-# HawaVoClean UI contract (contract revision 2; product 3.3)
+# HawaVoClean UI contract (contract revision 3; product 3.3)
 
 One web UI bundle, three shells, one engine. This document is the binding contract
 between the three parts. Anything not written here is the implementer's call, but
@@ -21,16 +21,66 @@ it is listening and then nothing else on stdout (all logs go to stderr):
 {"event":"ready","port":54321,"pid":12345,"version":"3.3.0"}
 ```
 
-CLI: `hawavoclean serve [--host 127.0.0.1] [--port 0] --token TOKEN [--ui-dir DIR]`.
+CLI: `hawavoclean serve [--host 127.0.0.1] [--port 0] --token-stdin [--ui-dir DIR]`.
 `--port 0` = OS-assigned. `--ui-dir` = directory containing `index.html` + `assets/` to serve at `/`
-(optional; when absent `/` returns 404 JSON). Token: every `/api/*` request must carry the token as
-header `X-Hawa-Token: TOKEN` **or** query `?token=TOKEN` (query form exists for `EventSource` and
-`<audio src>` which cannot set headers). Missing/wrong token → 401 `{"error":"unauthorized"}`.
-CORS: allow all origins (`*`), all methods, headers `X-Hawa-Token, Content-Type, Range`. The shared UI
-can be served from a browser origin or the private `hawa://app` Resolve origin; token authentication
-and request filtering remain mandatory even when origin varies.
+(optional; when absent `/` returns 404 JSON). Every request must use a numeric loopback or exact
+`localhost` `Host`, with an optional valid port. API clients authenticate in one of three ways:
+
+* Native broker owners send the bootstrap secret in `X-Hawa-Token`. It never appears in a URL.
+* A renderer exchanges that header once at `POST /api/session` and then uses the returned short-lived
+  Bearer capability (`Authorization: Bearer …`) or its HttpOnly `hawa_session` cookie.
+* A server-hosted same-origin UI may use the session cookie automatically. A custom-scheme desktop
+  shell keeps the short-lived capability in its trusted main process and injects the Bearer header
+  for engine requests (including media/SSE), or uses authenticated streaming fetch. URLs contain
+  only resource identifiers and paths.
+
+Missing, expired or wrong authentication → 401 `{"error":"unauthorized",...}`. Any `token` query
+parameter, including a valid one alongside valid header authentication, is rejected with
+`400 query_auth_forbidden`; URL-token compatibility is deliberately fail-closed.
+
+CORS is credentialed and allowlisted, never wildcard: only the private `hawa://app` origin and the
+exact loopback HTTP origin in `Host` are accepted by default. Preflights allow `GET`, `HEAD`, `POST`,
+and the headers `Authorization`, `Content-Type`, `Range`, `X-Hawa-Token`. `null`, `file:`, foreign,
+cross-port and cross-site origins are rejected before authentication or request-body parsing.
 
 All errors: JSON `{"error": "<code>", "message": "<human text>"}` with 4xx/5xx.
+Unhandled 500s never expose exception text. They add an opaque `request_id` field and matching
+`X-Hawa-Request-ID` response header; sanitized local logs contain that ID and exception type only.
+
+### `POST /api/session`
+
+Requires the native `X-Hawa-Token` bootstrap header; an existing session cannot mint another one.
+Returns `Cache-Control: no-store`, sets `hawa_session` as `HttpOnly; SameSite=Strict; Path=/api`, and:
+
+```json
+{"sessionToken":"opaque capability","expiresInSeconds":900,"tokenType":"Bearer"}
+```
+
+Sessions are memory-only, bounded, expire after 15 minutes by default, and are invalid after a broker
+restart. Clients retry by asking the trusted native shell to bootstrap a new session. The bearer value
+may appear only in the `Authorization` header, never in a query string or log.
+
+The broker records the successful credential kind (`root` or `session`) in request state. This is an
+authorization boundary, not merely audit metadata: only root requests may register a native path;
+renderer Bearer/cookie sessions may use only capabilities that root or the managed upload store has
+already established. Root-auth legacy path compatibility remains for one release and is never
+available through the preload bridge.
+
+### `POST /api/v1/native-sources`
+
+Requires root `X-Hawa-Token`; a renderer session receives 403. Request
+`{"path":"/absolute/user-selected.wav"}`. The path must resolve to an existing regular file. Response
+has `Cache-Control: no-store`:
+
+```json
+{"sourceId":"32-lowercase-hex-characters","path":"/canonical/user-selected.wav"}
+```
+
+The process-local registration binds the canonical path to its filesystem device/inode identity and
+revalidates both on every use. Replacing the file or redirecting the path revokes the capability.
+Registrations are bounded and disappear with the broker process. Desktop/Resolve main calls this
+route immediately after a native or Resolve selection, before exposing the compatibility path to the
+renderer. The opaque `sourceId` is accepted by versioned analyze/job APIs.
 
 ### `GET /api/health`
 ```json
@@ -55,8 +105,10 @@ Rules: mono mix (mean of channels) for peaks/rms/spectrum. Spectrum = long-term 
 1/12-octave bands from 40 Hz to min(20 kHz, nyquist), in dB relative to full scale (a full-scale
 sine at a band centre ≈ 0 dB); values below −120 clamp to −120. `noise_floor_db` = 10th-percentile
 of the per-bucket `rms_db` over buckets above −120. Loudness via the existing
-`hawavoclean.finishing.loudness.measure_loudness_and_peaks`. Decoding via the existing
-`hawavoclean.audio` decode path (so any container ffmpeg can read works).
+`hawavoclean.finishing.loudness.measure_loudness_and_peaks`. Decoding uses the existing
+`hawavoclean.audio` path. The production media contract is deliberately closed to WAV/WAVE,
+AIF/AIFF/AIFC, FLAC, MP3, M4A and MP4; decoder support for another container does not advertise or
+authorize it.
 
 ### `POST /api/jobs`
 Request `{"input_path": "/abs/in.m4a.mp4", "profile": "studio", "output_path": "/abs/out.wav" (optional), "overwrite": false}`
@@ -89,25 +141,49 @@ and tails stderr into `message` on failure. One job runs at a time; additional j
 ```
 Unknown id → 404.
 
-### `GET /api/jobs/{job_id}/events?token=` (Server-Sent Events)
+### `GET /api/jobs/{job_id}/events` (Server-Sent Events)
 `Content-Type: text/event-stream`. On connect: one `event: status` with the current `JobStatus`, then one
 `event: status` per change (throttle to ≥50 ms apart, but never drop the final one), then
 `event: end` with `{}` after the job reaches done/failed/cancelled, then close. Keep-alive comment
-`: ping` every 15 s.
+`: ping` every 15 s. A same-origin browser `EventSource` authenticates with the short-lived session
+cookie. A hardened custom-scheme shell injects the session Authorization header at its network
+boundary.
+
+### `GET|HEAD /api/v1/jobs/{job_id}/artifacts/{kind}`
+
+`kind` is one of `master`, `report`, `summary` or `record`. The job must be completed and retain a
+valid output SHA-256. Master/report/summary resolve the immutable publication generation whose
+verified master digest matches that job; they never stream the three recoverable public convenience
+files. `record` additionally verifies the Processing Record archive and its retained archive/master
+digests. Unknown job → 404; incomplete, missing or contradictory evidence → 409
+`artifact_unavailable`. An audio-only match is also refused when multiple generations share the same
+master but have different sidecars; record-bundle sidecar digests disambiguate it. GET/HEAD and HTTP
+Range semantics match `/api/audio`.
 
 ### `POST /api/jobs/{job_id}/cancel`
 Terminates the child (SIGTERM, SIGKILL after 5 s). Status becomes `cancelled`. `200 {"ok":true}`.
 Cancelling a finished job is a no-op 200.
 
-### `GET /api/audio?path=&token=`
+### `GET /api/audio?path=`
 Streams the file with HTTP Range support (206) and a sensible `Content-Type` (`audio/wav`,
-`audio/mp4` for `.m4a/.mp4`, `audio/mpeg`, `audio/flac`, `audio/aac`, `video/quicktime` for `.mov`).
-Path policy (also applies to `/api/analyze` and `POST /api/jobs`): absolute path, must resolve under
-`Path.home()` **or** `/Volumes` **or** the HawaVoClean work dir; otherwise 403. Missing file → 404.
+`audio/mp4` for `.m4a/.mp4`, `audio/mpeg`, `audio/flac` and the platform mapping for AIFF).
+For a renderer session, the path policy (also used by `/api/analyze`, `/api/peaks` and
+`POST /api/jobs`) accepts only an exact still-valid native registration, an exact marker-owned
+managed upload, or the exact public name of a completed durable job artifact. The last case is
+remapped to that job's verified immutable generation; mixed or tampered public aliases are never
+served. A failed create-job does not authorize its input. Root authentication retains the previous
+canonical home/volume/work-root policy for one release. Missing file → 404; absent capability → 403.
+For a renderer job, an explicit output must be the derived profile WAV beside its authorized input
+(or the same derived stem with a `-N`, N ≥ 2, uniqueness suffix); it cannot name an arbitrary sibling
+or directory.
+Same-origin audio/download elements authenticate with the short-lived session cookie. A hardened
+custom-scheme shell injects the session Authorization header at its network boundary.
 
 ### `POST /api/upload` (multipart, field `file`)
-Saves to `<work_dir>/uploads/<uuid>/<original name>` and returns `{"path": "/abs/..."}`. Web-only fallback
-(browsers cannot give local paths).
+Saves to `<work_dir>/uploads/<uuid>/<original name>` and returns
+`{"path":"/abs/...","source_id":"32-hex"}`. This is the browser path and the fail-closed
+desktop/Resolve drop fallback when main cannot register a dropped file. Marker ownership, quotas, TTL
+and leases bound its authority.
 
 ### `POST /api/shutdown`
 Responds `{"ok":true}` then exits the server process within 1 s.
@@ -137,8 +213,9 @@ Callback exceptions must never break the pipeline (catch, log, continue).
 ## 3. Renderer bridge: `window.hawa`
 
 Provided by the Electron preload via `contextBridge.exposeInMainWorld('hawa', …)`. In a plain browser
-`window.hawa` is undefined and the UI builds a `web` fallback (engine = `location.origin`, token from
-`?token=` query or `localStorage['hawa.token']`). TypeScript shape (authoritative copy lives in
+`window.hawa` is undefined and the UI builds a same-origin `web` fallback only when an HttpOnly
+`hawa_session` has already been established (engine = `location.origin`). It never reads a token from
+the URL, local/session storage, or DOM. TypeScript shape (authoritative copy lives in
 `ui/src/bridge/types.ts`):
 
 ```ts
@@ -146,10 +223,11 @@ export type HawaHost = 'resolve' | 'electron' | 'web';
 export interface ResolveClip { mediaId: string; name: string; filePath: string; durationS?: number; }
 export interface HawaBridge {
   host: HawaHost;
-  engine: { getEndpoint(): Promise<{ baseUrl: string; token: string }> };
+  engine: { getEndpoint(): Promise<{ baseUrl: string }> }; // auth is injected by the trusted shell
   files: {
-    pickAudio(): Promise<string | null>;            // native open dialog → absolute path
-    pathForFile(file: File): string | null;         // dropped File → absolute path (Electron webUtils)
+    pickAudio(): Promise<string | null>;            // main registers selection, then returns canonical path
+    registerDroppedFile?(file: File): Promise<string | null>; // null triggers managed upload
+    pathForFile(file: File): string | null;         // compatibility only; hardened shells return null
     revealInFinder(path: string): Promise<void>;
   };
   resolve?: {                                        // present only when host === 'resolve'
@@ -161,7 +239,8 @@ export interface HawaBridge {
   };
 }
 ```
-IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`, `hawa:files:reveal`,
+IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
+`hawa:files:register-dropped`, `hawa:files:reveal`,
 `hawa:resolve:selected`, `hawa:resolve:import`, `hawa:resolve:replace`, `hawa:resolve:append`,
 `hawa:resolve:context`. All `ipcMain.handle` (promise-based). Errors are thrown as `Error(message)`.
 
@@ -171,8 +250,11 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
   `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1"}}`.
   Relative executable and working-directory paths are resolved below the plugin directory and may not
   escape it. Absolute paths remain available only for explicit developer configurations.
-  Spawns `command + ["--port","0","--token",TOKEN,"--ui-dir",__dirname]` with a fresh random 32-hex TOKEN,
-  waits for the `ready` stdout line (timeout 60 s → show an error page with the stderr tail).
+  Spawns `command + ["--port","0","--token-stdin","--ui-dir",__dirname]` and writes a fresh random 32-hex TOKEN to a one-shot stdin pipe,
+  waits for the `ready` stdout line (timeout 60 s → show an error page with the stderr tail), then exchanges
+  the bootstrap secret at `/api/session`. The root secret and short-lived capability remain in main;
+  `webRequest` injects the session Authorization header only for the exact engine origin. Neither value is
+  returned by preload IPC, placed in renderer storage, or appended to a URL.
 * Registers a standard secure `hawa://app` protocol on a private in-memory session. Its handler serves
   only canonical regular files below the plugin root; CORS is enabled while service workers and CSP
   bypass are disabled. `BrowserWindow` loads `hawa://app/index.html` at 1280×820 (min 960×640), dark
@@ -184,6 +266,9 @@ IPC channel names (main ⇄ preload): `hawa:engine:endpoint`, `hawa:files:pick`,
 * The session denies all device permissions and every permission except sanitized clipboard write
   from the exact main renderer. Every privileged IPC handler validates the exact main frame and app
   URL before acting. `HAWA_DEVTOOLS=1` opens devtools for explicit standalone diagnostics.
+* Native picker and Resolve-selected paths are registered using the main-only root token before main
+  returns them. The preload obtains a dropped `File` path only long enough to invoke that trusted IPC;
+  it never returns an unregistered raw path. If registration fails, the renderer uploads the file.
 * `WorkflowIntegration.node` is `require`d in **main** (sandboxed preload cannot load native modules);
   `Initialize('com.hawavoclean.resolve')` failing ⇒ `host='electron'` and no `resolve` bridge (standalone run).
   Registers `ResolveQuit` callback → quit.
@@ -224,7 +309,8 @@ the engine is self-contained and does not refer to the source checkout or a muta
 
 ## 6. Non-negotiables
 
-* Engine binds 127.0.0.1 only, token required, path policy enforced. No arbitrary file reads.
+* Engine binds 127.0.0.1 only; strict loopback Host/Origin, header/session authentication and path
+  policy are enforced before route bodies. No arbitrary file reads and no credentials in URLs.
 * The Resolve-owned Electron version is not inferred from the standalone lock. Capture and assess it
   separately as specified in `docs/resolve-runtime-risk.md`; never describe a vulnerable host as clean.
 * The UI never drives per-frame drawing through React state: waveform in a Worker via `OffscreenCanvas`

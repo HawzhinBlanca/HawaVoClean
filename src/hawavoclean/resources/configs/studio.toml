@@ -102,5 +102,5 @@ max_compression_gr_db = 3.0
 target_lufs_stereo = -16.0
 target_lufs_mono = -19.0
 true_peak_ceiling_dbtp = -1.0
-max_limiter_reduction_db = 2.5
+max_limiter_reduction_db = 0.5
 dither = true

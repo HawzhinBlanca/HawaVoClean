@@ -7,19 +7,30 @@ seconds out of a multi-hour file costs a few megabytes instead of gigabytes;
 what a reduction over a three-hour file needs to stay inside a few hundred MB.
 """
 
+import contextlib
 import math
+import os
+import queue
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal, cast
 
 import numpy as np
 import soundfile as sf
 
 from hawavoclean.audio.types import AudioBuffer, AudioProbeResult
-from hawavoclean.errors import InvalidUserInputError
+from hawavoclean.errors import (
+    InvalidUserInputError,
+    MediaPreflightError,
+    MediaPreflightReason,
+    PreflightError,
+)
+from hawavoclean.process_supervisor import ProcessSupervisor
 
 # One chunk of a streamed whole-file decode: 512 Ki frames is ~11 s at 48 kHz,
 # 2 MB of float32 per channel. Swept against a 3-hour file: 256 Ki costs
@@ -27,6 +38,29 @@ from hawavoclean.errors import InvalidUserInputError
 # 31.5 s — so this is the knee, where the reduction is already as fast as it
 # gets and the footprint is still small.
 DECODE_CHUNK_SAMPLES = 512 * 1024
+DECODE_DISK_SAFETY_MARGIN_BYTES = 500 * 1024 * 1024
+
+# ``probe_audio`` rejects production inputs longer than six hours, but decode
+# output is an independent trust boundary: a damaged or hostile container can
+# lie consistently in every metadata field.  Streaming decode therefore has
+# its own absolute frame ceiling and does not use ``probe.samples`` to decide
+# when it has consumed too much data.
+MAX_STREAM_DECODE_DURATION_S = 6 * 60 * 60
+
+# A healthy local FFmpeg decode produces bytes continuously.  The whole-job
+# deadline bounds total work; this shorter deadline prevents a wedged decoder
+# from owning the shared analysis slot for the rest of that period.
+STREAM_NO_PROGRESS_TIMEOUT_S = 30.0
+
+# The reader may block inside an OS pipe read, so it runs on a daemon thread
+# and reports small blocks through a bounded queue.  Four queued blocks plus
+# one pending output chunk keep the memory bound effectively constant.
+STREAM_READ_BYTES = 64 * 1024
+STREAM_EVENT_QUEUE_SIZE = 4
+STREAM_TERMINATION_GRACE_S = 0.25
+
+_StreamEventKind = Literal["data", "eof", "error"]
+_StreamEvent = tuple[_StreamEventKind, bytes | BaseException | None]
 
 # Seeking a lossy stream drops the MDCT overlap the first frame needs, so the
 # first ~2048 decoded samples after a seek are wrong (measured on AAC: peaks
@@ -274,6 +308,9 @@ def iter_decode_audio(
     probe: AudioProbeResult,
     chunk_samples: int = DECODE_CHUNK_SAMPLES,
     timeout_s: float = 1800.0,
+    *,
+    no_progress_timeout_s: float = STREAM_NO_PROGRESS_TIMEOUT_S,
+    max_decoded_samples: int | None = None,
 ) -> Iterator[AudioBuffer]:
     """Decode a whole file as a sequence of contiguous ``AudioBuffer`` chunks.
 
@@ -285,16 +322,39 @@ def iter_decode_audio(
 
     Error semantics match :func:`decode_audio`: a decoder failure, a timeout or
     a file that yields no samples all raise :class:`InvalidUserInputError`, and
-    every chunk goes through the same NaN/Inf/amplitude sanity check. ffmpeg's
-    stderr goes to a temporary file rather than a pipe, because a pipe nobody
-    drains until the end would deadlock on a file that logs a lot.
+    every chunk goes through the same NaN/Inf/amplitude sanity check. A decoded
+    stream that exceeds ``max_decoded_samples`` is a resource-bomb preflight
+    error. When the caller does not provide that test/embedding override, the
+    ceiling is six hours at the requested output rate and is deliberately
+    independent of untrusted duration/sample-count metadata.
+
+    FFmpeg stdout is drained by one bounded reader thread. The iterator itself
+    waits on a bounded queue, so it can enforce both the total deadline and a
+    shorter no-progress deadline even while the OS pipe read is blocked. FFmpeg
+    is owned by :class:`ProcessSupervisor`; timeout, overflow, generator close
+    and decoder failure terminate its complete process boundary. stderr goes
+    to a temporary file rather than an undrained pipe.
     """
     if chunk_samples < 1:
         raise ValueError(f"chunk_samples must be >= 1, got {chunk_samples}")
+    if not math.isfinite(timeout_s) or timeout_s <= 0.0:
+        raise ValueError(f"timeout_s must be a positive finite number, got {timeout_s}")
+    if not math.isfinite(no_progress_timeout_s) or no_progress_timeout_s <= 0.0:
+        raise ValueError(
+            f"no_progress_timeout_s must be a positive finite number, got {no_progress_timeout_s}"
+        )
+    if max_decoded_samples is None:
+        decoded_sample_ceiling = int(math.ceil(MAX_STREAM_DECODE_DURATION_S * probe.sample_rate))
+    else:
+        if isinstance(max_decoded_samples, bool) or max_decoded_samples < 1:
+            raise ValueError(f"max_decoded_samples must be >= 1, got {max_decoded_samples}")
+        decoded_sample_ceiling = int(max_decoded_samples)
     file_path = probe.path
     ffmpeg_bin = shutil.which("ffmpeg")
     frame_bytes = probe.channels * 4
     total = 0
+    started_at = time.monotonic()
+    deadline = started_at + timeout_s
 
     def _buffer(raw: bytes) -> AudioBuffer:
         flat = np.frombuffer(raw, dtype=np.float32)
@@ -315,6 +375,11 @@ def iter_decode_audio(
             "-map",
             f"0:{probe.audio_stream_index}",
             "-vn",
+            # Bound upstream decode work as well as checking the actual byte
+            # stream below. The extra frame ensures a source beyond the limit
+            # is observed as an overflow rather than looking like clean EOF.
+            "-t",
+            f"{(decoded_sample_ceiling + 1) / probe.sample_rate:.9f}",
             "-f",
             "f32le",
             "-acodec",
@@ -325,41 +390,146 @@ def iter_decode_audio(
             str(probe.channels),
             "pipe:1",
         ]
-        deadline = time.monotonic() + timeout_s
         want = chunk_samples * frame_bytes
         with tempfile.TemporaryFile() as errfile:
-            proc = subprocess.Popen(  # noqa: S603 - argv list, no shell
-                cmd, stdout=subprocess.PIPE, stderr=errfile, stdin=subprocess.DEVNULL
-            )
             try:
-                assert proc.stdout is not None
-                pending = b""
+                supervisor = ProcessSupervisor.spawn(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=errfile,
+                    stdin=subprocess.DEVNULL,
+                )
+                # ProcessSupervisor is also used for text-mode workers and its
+                # public annotation reflects that path. This spawn is binary.
+                proc = cast(subprocess.Popen[bytes], supervisor.process)
+            except OSError as e:
+                raise InvalidUserInputError(
+                    f"FFmpeg failed to start decoding {file_path}: {e}"
+                ) from e
+
+            assert proc.stdout is not None
+            stdout = proc.stdout
+            events: queue.Queue[_StreamEvent] = queue.Queue(maxsize=STREAM_EVENT_QUEUE_SIZE)
+            stop_reader = threading.Event()
+
+            def _emit(event: _StreamEvent) -> bool:
+                while not stop_reader.is_set():
+                    try:
+                        events.put(event, timeout=0.05)
+                        return True
+                    except queue.Full:
+                        continue
+                return False
+
+            def _drain_stdout() -> None:
+                read_once = getattr(stdout, "read1", stdout.read)
+                try:
+                    while not stop_reader.is_set():
+                        block = read_once(STREAM_READ_BYTES)
+                        if not block:
+                            _emit(("eof", None))
+                            return
+                        if not isinstance(block, bytes):
+                            raise TypeError("FFmpeg stdout returned non-bytes data in binary mode")
+                        if not _emit(("data", block)):
+                            return
+                except BaseException as exc:
+                    _emit(("error", exc))
+
+            reader = threading.Thread(
+                target=_drain_stdout,
+                name="hawavoclean-ffmpeg-stream-reader",
+                daemon=True,
+            )
+            reader.start()
+            code: int | None = None
+            pending = bytearray()
+            last_progress_at = started_at
+            clean_exit = False
+            try:
                 while True:
-                    block = proc.stdout.read(want - len(pending))
-                    if time.monotonic() > deadline:
+                    now = time.monotonic()
+                    if now >= deadline:
                         raise InvalidUserInputError(
                             f"FFmpeg decoding timed out after {timeout_s}s: {file_path}"
                         )
-                    if not block:
+                    no_progress_deadline = last_progress_at + no_progress_timeout_s
+                    if now >= no_progress_deadline:
+                        raise InvalidUserInputError(
+                            "FFmpeg decoding made no progress for "
+                            f"{no_progress_timeout_s}s: {file_path}"
+                        )
+                    try:
+                        event_kind, payload = events.get(
+                            timeout=min(deadline - now, no_progress_deadline - now)
+                        )
+                    except queue.Empty:
+                        continue
+
+                    if event_kind == "error":
+                        assert isinstance(payload, BaseException)
+                        raise InvalidUserInputError(
+                            f"FFmpeg stream read failed for {file_path}: {payload}"
+                        ) from payload
+                    if event_kind == "eof":
                         break
-                    pending += block
-                    if len(pending) < want:
-                        continue  # short read from the pipe, not end of stream
-                    total += len(pending) // frame_bytes
-                    yield _buffer(pending)
-                    pending = b""
+                    assert isinstance(payload, bytes)
+                    last_progress_at = time.monotonic()
+                    pending.extend(payload)
+
+                    # Count complete decoded frames before yielding any part
+                    # of this event. No byte beyond the ceiling is accepted.
+                    complete_pending = len(pending) // frame_bytes
+                    if total + complete_pending > decoded_sample_ceiling:
+                        raise MediaPreflightError(
+                            MediaPreflightReason.RESOURCE_BOMB,
+                            "Decoded audio exceeded the independent streaming "
+                            f"ceiling of {decoded_sample_ceiling:,} samples: {file_path}",
+                        )
+
+                    while len(pending) >= want:
+                        raw = bytes(pending[:want])
+                        del pending[:want]
+                        total += chunk_samples
+                        yield _buffer(raw)
+                        # Time spent by the consumer processing a yielded
+                        # chunk is not decoder no-progress time.
+                        last_progress_at = time.monotonic()
+
                 whole = len(pending) - len(pending) % frame_bytes
                 if whole:
                     total += whole // frame_bytes
-                    yield _buffer(pending[:whole])
-                proc.stdout.close()
-                code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+                    yield _buffer(bytes(pending[:whole]))
+                    last_progress_at = time.monotonic()
+
+                now = time.monotonic()
+                if now >= deadline:
+                    raise InvalidUserInputError(
+                        f"FFmpeg decoding timed out after {timeout_s}s: {file_path}"
+                    )
+                try:
+                    code = proc.wait(
+                        timeout=min(
+                            deadline - now,
+                            max(0.001, last_progress_at + no_progress_timeout_s - now),
+                        )
+                    )
+                except subprocess.TimeoutExpired as e:
+                    raise InvalidUserInputError(
+                        "FFmpeg decoder stopped producing output but did not exit within "
+                        f"{no_progress_timeout_s}s: {file_path}"
+                    ) from e
+                clean_exit = True
             finally:
-                if proc.poll() is None:  # pragma: no cover - abandoned generator
-                    proc.kill()
-                    proc.wait()
-                if proc.stdout is not None and not proc.stdout.closed:
-                    proc.stdout.close()
+                stop_reader.set()
+                # On every exceptional path (including GeneratorExit), end
+                # the complete decoder process tree before releasing handles.
+                if not clean_exit:
+                    supervisor.terminate_tree(STREAM_TERMINATION_GRACE_S)
+                supervisor.close()
+                if not stdout.closed:
+                    stdout.close()
+                reader.join(timeout=1.0)
             if code != 0:
                 errfile.seek(0)
                 detail = errfile.read().decode("utf-8", "replace").strip()[-500:]
@@ -375,10 +545,28 @@ def iter_decode_audio(
                         f"{probe.sample_rate}"
                     )
                 while True:
+                    read_started_at = time.monotonic()
+                    if read_started_at >= deadline:
+                        raise InvalidUserInputError(
+                            f"Audio decoding timed out after {timeout_s}s: {file_path}"
+                        )
                     data = f.read(chunk_samples, dtype="float32", always_2d=True)
+                    read_finished_at = time.monotonic()
+                    if read_finished_at - read_started_at > no_progress_timeout_s:
+                        raise InvalidUserInputError(
+                            "Audio decoding made no progress for "
+                            f"{no_progress_timeout_s}s: {file_path}"
+                        )
                     if data.shape[0] == 0:
                         break
-                    total += int(data.shape[0])
+                    decoded = int(data.shape[0])
+                    if total + decoded > decoded_sample_ceiling:
+                        raise MediaPreflightError(
+                            MediaPreflightReason.RESOURCE_BOMB,
+                            "Decoded audio exceeded the independent streaming "
+                            f"ceiling of {decoded_sample_ceiling:,} samples: {file_path}",
+                        )
+                    total += decoded
                     arr = np.ascontiguousarray(data.T, dtype=np.float32)
                     _check_decoded(arr, file_path)
                     yield AudioBuffer(data=arr, sample_rate=probe.sample_rate)
@@ -389,3 +577,118 @@ def iter_decode_audio(
 
     if total == 0:
         raise InvalidUserInputError(f"Decoded zero samples from {file_path}")
+
+
+def decode_audio_to_memmap(
+    probe: AudioProbeResult,
+    output_path: Path | str,
+    timeout_s: float = 1800.0,
+    *,
+    chunk_samples: int = DECODE_CHUNK_SAMPLES,
+) -> AudioBuffer:
+    """Decode ``probe`` into a planar, disk-backed float32 buffer.
+
+    The decoder itself is :func:`iter_decode_audio`, so hostile-stream limits,
+    no-progress deadlines and complete-process-tree cleanup are identical to
+    the ordinary streaming path.  Each channel is appended to a private
+    temporary file while the decoded length is still unknown.  Once EOF is
+    proved, those files are concatenated into one planar backing file and
+    mapped as ``(channels, samples)``.  At no point is a file-length PCM object
+    materialised on the Python heap.
+
+    Planar layout is intentional.  Natural processing repeatedly takes a
+    channel slice; an interleaved mapping would make that slice strided and
+    several existing DSP functions would quietly copy the entire channel.
+    The returned mapping remains owned by the caller and must stay live until
+    processing has finished.
+    """
+
+    destination = Path(output_path).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise InvalidUserInputError(f"Disk-backed decode destination already exists: {destination}")
+
+    channel_paths = [
+        destination.with_name(f".{destination.name}.channel-{channel}.tmp")
+        for channel in range(probe.channels)
+    ]
+    handles: list[Any] = []
+    handle_stack = contextlib.ExitStack()
+    total_samples = 0
+    try:
+        handles = [
+            handle_stack.enter_context(open(path, "xb"))  # noqa: SIM115 - ExitStack owns it
+            for path in channel_paths
+        ]
+        for chunk in iter_decode_audio(
+            probe,
+            chunk_samples=chunk_samples,
+            timeout_s=timeout_s,
+        ):
+            if chunk.channels != probe.channels or chunk.sample_rate != probe.sample_rate:
+                raise InvalidUserInputError(
+                    "Streaming decoder changed the declared channel count or sample rate."
+                )
+            # The temporary channel files and the final planar file coexist
+            # during the layout conversion. Reserve the complete projected
+            # destination before appending this chunk so an underreported
+            # container fails cleanly instead of filling the workspace volume.
+            chunk_bytes = chunk.samples * probe.channels * np.dtype(np.float32).itemsize
+            projected_bytes = (
+                (total_samples + chunk.samples) * probe.channels * np.dtype(np.float32).itemsize
+            )
+            free_bytes = shutil.disk_usage(destination.parent).free
+            required_free = chunk_bytes + projected_bytes + DECODE_DISK_SAFETY_MARGIN_BYTES
+            if free_bytes < required_free:
+                raise PreflightError(
+                    "Insufficient scratch space for disk-backed decode: "
+                    f"available {free_bytes / (1024 * 1024):.1f} MiB, "
+                    f"required {required_free / (1024 * 1024):.1f} MiB."
+                )
+            for channel, handle in enumerate(handles):
+                # ``tobytes`` is bounded by one decode chunk.  The channel is
+                # contiguous inside the chunk returned by iter_decode_audio.
+                handle.write(chunk.data[channel].tobytes(order="C"))
+            total_samples += chunk.samples
+            del chunk
+
+        for handle in handles:
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle_stack.close()
+        handles.clear()
+
+        with open(destination, "xb") as planar:
+            for path in channel_paths:
+                with open(path, "rb") as source:
+                    shutil.copyfileobj(source, planar, length=1024 * 1024)
+            planar.flush()
+            os.fsync(planar.fileno())
+
+        expected_bytes = total_samples * probe.channels * np.dtype(np.float32).itemsize
+        if total_samples <= 0 or destination.stat().st_size != expected_bytes:
+            raise InvalidUserInputError(
+                "Disk-backed decode produced an empty or structurally incomplete PCM stage."
+            )
+        mapped: np.memmap[Any, np.dtype[np.float32]] = np.memmap(
+            destination,
+            dtype=np.float32,
+            mode="r+",
+            shape=(probe.channels, total_samples),
+        )
+        return AudioBuffer(data=mapped, sample_rate=probe.sample_rate)
+    except OSError as exc:
+        handle_stack.close()
+        with contextlib.suppress(OSError):
+            destination.unlink(missing_ok=True)
+        raise PreflightError(f"Disk-backed decode could not write scratch audio: {exc}") from exc
+    except Exception:
+        handle_stack.close()
+        with contextlib.suppress(OSError):
+            destination.unlink(missing_ok=True)
+        raise
+    finally:
+        handle_stack.close()
+        for path in channel_paths:
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)

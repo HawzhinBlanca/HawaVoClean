@@ -22,9 +22,12 @@ data/acceptance/outputs/
 # OS
 .DS_Store
 
-# UI bundle
+# UI & Desktop bundle
 ui/node_modules/
 ui/dist/
+desktop/node_modules/
+desktop/dist/
+desktop/build/
 resolve-plugin/com.hawavoclean.resolve/node_modules/
 resolve-plugin/com.hawavoclean.resolve/engine.json
 resolve-plugin/toolchain/node_modules/
@@ -32,3 +35,4 @@ resolve-plugin/toolchain/node_modules/
 # Third-party upstream checkout (UniverSR). It carries its own .git and is not
 # our work; restoration resolves it at runtime from vendors/universr.
 vendors/
+

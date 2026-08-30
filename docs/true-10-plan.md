@@ -1,9 +1,15 @@
 # HawaVoClean: True 10/10 Release Plan
 
-Status: **implementation in progress — Phases 0–2 complete; Phase 3 active; Phase 4 partially closed**
+Status: **implementation in progress — see the generated release status for the evidence-derived count;
+human, real-host, current-candidate and final-release gates remain open**
 Baseline: `continuity-taper` at `bf6d932`, audited 2026-08-21  
 Target: one evidence-backed `v3.3.0` release candidate containing continuity taper, lowband,
 crash-safe publication, complete release hardening, real Sorani validation, and in-Resolve proof.
+
+Completion authority is the latest result for each task in the hash-chained evidence ledger, plus an
+exact-current-input binding for mutable governance controls. The checkboxes below are a display
+mirror: the status generator rejects disagreement, and a later `failed`, `blocked`, or changed bound
+contract reopens an earlier passing task.
 
 ## What “10/10” means
 
@@ -163,6 +169,12 @@ Goal: eliminate the gap between locally green subsets and the release claim.
   - Protect `main`; require review and all release checks; block force pushes and tag movement.
   - **Proof:** an intentionally failing test prevents merge in a disposable PR.
 
+T3.2 and T3.3 passed on the 2026-08-26 governed commit, but are reopened for this changed workflow.
+The status generator binds these checkboxes to the exact current governance-contract file hash, so
+old proof cannot keep them green. The current candidate must repeat the exact gate twice, prove the
+UI-test failure makes both its leaf job and `required` red on GitHub, and receive independent approval
+after its final push.
+
 **Exit gate:** “green” has one definition locally and remotely, and it covers every shipped surface.
 
 ## Phase 4 — Close runtime, security and operational gaps
@@ -250,7 +262,7 @@ The restore mode landed after this plan was frozen and is in scope for 3.3.0 by 
 decision. Its engineering safety net is built and mutation-covered; every quality claim is
 currently synthetic. These tasks close that gap and are P0 for any release that ships the mode.
 
-- [x] **T5.6 — Revise the locked Sorani protocol to four evaluated conditions** (P0, M; depends on T5.1)
+- [x] **T5.6 — Revise the locked Sorani protocol to four evaluated conditions** (P0, M; extends the locked T5.1 draft; does not close T5.1 or U3)
   - Add `restore` alongside production/studio/lowband: Bonferroni alpha 0.05/4 per profile (the
     450-unit zero-event simultaneous bound stays below 1% at 0.969%), restore-specific stop rules
     (confirmed speaker-identity mismatch, protected-band violation in a shipped unit, undisclosed
@@ -318,7 +330,7 @@ Goal: publish exactly what was proved, with no stale or inflated claim.
 
 | ID | When | User action/decision | Default recommendation |
 |---|---|---|---|
-| U1 | Before T3.2 | Fix GitHub billing or authorize a visibility change | Fix billing; keep the private-repo boundary |
+| U1 | Resolved for the 2026-08-26 T3.2/T3.3 proof | Obtain fresh independent review and rerun the proof for changed workflow digests | Preserve active protections; never transfer old proof to a new digest |
 | U2 | Before T6.1 | Approve and authenticate the sudo plugin install | Install only the hash-recorded hardened candidate |
 | U3 | Before T5.2 | Approve the locked corpus route/terms and identify Sorani reviewers | Common Voice 26.0 + fresh consented collection; two reviewers and an adjudicator |
 | U4 | Before T7.4 | Final go/no-go after listening, Resolve and risk review | Release only with no open P0/P1 |

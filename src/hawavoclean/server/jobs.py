@@ -5,18 +5,21 @@ Each job runs ``python -m hawavoclean.cli process IN -o OUT --profile P
 batch command uses: a wedged decoder or model can never take the server
 down). A reader thread turns the child's JSON progress lines into status
 snapshots; stderr is tailed for the failure message. One job runs at a
-time; the rest wait in a FIFO queue. Cancel is SIGTERM, then SIGKILL after
-a grace period.
+time; the rest wait in a FIFO queue. Every child owns a POSIX process group
+or Windows Job Object; cancel requests graceful shutdown, then force-ends the
+complete tree after a grace period.
 
 Subscribers (the SSE endpoint) register an ``asyncio.Queue`` bound to their
 event loop; every status change is delivered with
 ``loop.call_soon_threadsafe`` so the worker thread never touches the loop.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
-import signal
+import os
 import subprocess
 import sys
 import threading
@@ -30,19 +33,59 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from hawavoclean.errors import ExitCode
+from hawavoclean.hashing import hash_file
 from hawavoclean.logging import get_logger
 from hawavoclean.paths import profiles_root
+from hawavoclean.platform_fs import (
+    ExclusiveFileLease,
+    is_reparse_or_symlink,
+    try_acquire_exclusive_file_lease,
+)
+from hawavoclean.process_supervisor import ProcessSupervisor
+from hawavoclean.publication import (
+    resolve_committed_publication,
+    resolve_immutable_publication_generation,
+)
+from hawavoclean.record_bundle import ProcessingRecord, verify_processing_record
+from hawavoclean.server.job_store import (
+    ConflictPolicy,
+    DurableJobStore,
+    IdempotencyConflictError,
+    JobStoreError,
+    OutputConflictError,
+    Reservation,
+    canonical_request_hash,
+    output_key,
+    processing_record_path,
+    unique_candidate,
+    user_artifact_paths,
+)
 from hawavoclean.watchdog import child_env
 
 logger = get_logger("server.jobs")
 
-JobState = Literal["queued", "running", "done", "failed", "cancelled"]
-TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
+JobState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
+TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled", "interrupted"})
 STDERR_TAIL_LINES = 50
 DEFAULT_KILL_GRACE_S = 5.0
 DEFAULT_MAX_ACTIVE_JOBS = 8
 DEFAULT_MAX_TERMINAL_JOBS = 256
 DEFAULT_TERMINAL_JOB_TTL_S = 24 * 60 * 60.0
+_ARTIFACT_EVIDENCE_SCHEMA = 1
+_SHA256_LENGTH = 64
+_BUNDLE_EVIDENCE_KEYS = frozenset(
+    {
+        "path",
+        "archive_sha256",
+        "content_sha256",
+        "master_sha256",
+        "report_sha256",
+        "summary_sha256",
+        "total_uncompressed_bytes",
+        "internal_hashes_verified",
+        "authenticated_publisher",
+    }
+)
 
 
 class QueueFullError(RuntimeError):
@@ -63,9 +106,15 @@ class JobRecord:
     report_path: Path
     profile: str
     overwrite: bool
+    idempotency_key: str | None = None
+    conflict_policy: ConflictPolicy = "fail"
+    request_hash: str = ""
     mode: str = "natural"
     speaker_id: str | None = None
     cutoff_hz: float | None = None
+    record_bundle: bool = False
+    bundle_path: Path | None = None
+    bundle: dict[str, Any] | None = None
     state: JobState = "queued"
     stage: str = "preflight"
     progress: float = 0.0
@@ -77,9 +126,11 @@ class JobRecord:
     terminal_at: float | None = None
     error: dict[str, str] | None = None
     report: dict[str, Any] | None = None
+    artifact_evidence: dict[str, Any] | None = None
     cancel_requested: bool = False
     seq: int = 0  # bumps on every change; lets subscribers discard stale snapshots
     process: subprocess.Popen[str] | None = None
+    supervisor: ProcessSupervisor | None = None
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=STDERR_TAIL_LINES))
 
     def snapshot(self) -> dict[str, Any]:
@@ -107,11 +158,115 @@ class JobRecord:
             out["cutoff_hz"] = self.cutoff_hz
         if self.unit is not None:
             out["unit"] = dict(self.unit)
-        if self.state == "failed" and self.error is not None:
+        if self.idempotency_key is not None:
+            out["idempotency_key"] = self.idempotency_key
+        out["conflict_policy"] = self.conflict_policy
+        out["record_bundle"] = self.record_bundle
+        if self.bundle_path is not None:
+            out["bundle_path"] = str(self.bundle_path)
+        if self.bundle is not None:
+            out["bundle"] = dict(self.bundle)
+        if self.state in {"failed", "interrupted"} and self.error is not None:
             out["error"] = dict(self.error)
         if self.state == "done" and self.report is not None:
             out["report"] = self.report
+        if self.state == "done" and self.artifact_evidence is not None:
+            # Internal/API artifact resolution needs all three job-bound
+            # digests.  Audio alone is ambiguous when deterministic renders
+            # produce identical masters but different reports or summaries.
+            out["artifact_evidence"] = dict(self.artifact_evidence)
         return out
+
+    def storage_record(self) -> dict[str, Any]:
+        """Complete durable shape (runtime handles and monotonic clocks excluded)."""
+
+        return {
+            "job_id": self.job_id,
+            "input_path": str(self.input_path),
+            "output_path": str(self.output_path),
+            "report_path": str(self.report_path),
+            "profile": self.profile,
+            "overwrite": self.overwrite,
+            "idempotency_key": self.idempotency_key,
+            "conflict_policy": self.conflict_policy,
+            "request_hash": self.request_hash,
+            "mode": self.mode,
+            "speaker_id": self.speaker_id,
+            "cutoff_hz": self.cutoff_hz,
+            "record_bundle": self.record_bundle,
+            "bundle_path": str(self.bundle_path) if self.bundle_path is not None else None,
+            "bundle": self.bundle,
+            "state": self.state,
+            "stage": self.stage,
+            "progress": self.progress,
+            "message": self.message,
+            "unit": self.unit,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "error": self.error,
+            "report": self.report,
+            "artifact_evidence": self.artifact_evidence,
+            "cancel_requested": self.cancel_requested,
+            "seq": self.seq,
+        }
+
+    @classmethod
+    def from_storage(cls, value: dict[str, Any]) -> JobRecord:
+        """Rehydrate a validated record from :mod:`job_store`."""
+
+        state = str(value.get("state", ""))
+        if state not in {"queued", "running", "done", "failed", "cancelled", "interrupted"}:
+            raise JobStoreError(f"durable job has unsupported state {state!r}")
+        conflict_policy = str(value.get("conflict_policy", "fail"))
+        if conflict_policy not in {"unique", "fail", "replace"}:
+            raise JobStoreError(f"durable job has unsupported conflict policy {conflict_policy!r}")
+        unit = value.get("unit")
+        error = value.get("error")
+        report = value.get("report")
+        artifact_evidence = value.get("artifact_evidence")
+        return cls(
+            job_id=str(value["job_id"]),
+            input_path=Path(str(value["input_path"])),
+            output_path=Path(str(value["output_path"])),
+            report_path=Path(str(value["report_path"])),
+            profile=str(value["profile"]),
+            overwrite=bool(value.get("overwrite", False)),
+            idempotency_key=(
+                str(value["idempotency_key"]) if value.get("idempotency_key") is not None else None
+            ),
+            conflict_policy=cast(ConflictPolicy, conflict_policy),
+            request_hash=str(value.get("request_hash", "")),
+            mode=str(value.get("mode", "natural")),
+            speaker_id=(str(value["speaker_id"]) if value.get("speaker_id") is not None else None),
+            cutoff_hz=(float(value["cutoff_hz"]) if value.get("cutoff_hz") is not None else None),
+            record_bundle=bool(value.get("record_bundle", False)),
+            bundle_path=(
+                Path(str(value["bundle_path"])) if value.get("bundle_path") is not None else None
+            ),
+            bundle=(
+                cast(dict[str, Any], value["bundle"])
+                if isinstance(value.get("bundle"), dict)
+                else None
+            ),
+            state=cast(JobState, state),
+            stage=str(value.get("stage", "preflight")),
+            progress=float(value.get("progress", 0.0)),
+            message=str(value.get("message", "")),
+            unit=(cast(dict[str, int], unit) if isinstance(unit, dict) else None),
+            created_at=str(value.get("created_at") or _now_iso()),
+            started_at=(str(value["started_at"]) if value.get("started_at") else None),
+            finished_at=(str(value["finished_at"]) if value.get("finished_at") else None),
+            error=(cast(dict[str, str], error) if isinstance(error, dict) else None),
+            report=(cast(dict[str, Any], report) if isinstance(report, dict) else None),
+            artifact_evidence=(
+                cast(dict[str, Any], artifact_evidence)
+                if isinstance(artifact_evidence, dict)
+                else None
+            ),
+            cancel_requested=bool(value.get("cancel_requested", False)),
+            seq=int(value.get("seq", 0)),
+        )
 
 
 CommandFactory = Callable[[JobRecord], list[str]]
@@ -142,8 +297,28 @@ def default_command(record: JobRecord) -> list[str]:
             cmd += ["--cutoff-hz", str(record.cutoff_hz)]
     if record.overwrite:
         cmd.append("--overwrite")
+    if record.record_bundle:
+        if record.bundle_path is None:  # pragma: no cover - constructor invariant
+            raise ValueError("record-bundle job is missing bundle_path")
+        cmd += ["--record-bundle", str(record.bundle_path)]
     cmd.append("--progress-json")
     return cmd
+
+
+def _bundle_evidence(record: ProcessingRecord) -> dict[str, Any]:
+    """Closed durable evidence shape returned by status endpoints."""
+
+    return {
+        "path": str(record.path),
+        "archive_sha256": record.archive_sha256,
+        "content_sha256": record.content_sha256,
+        "master_sha256": record.master_sha256,
+        "report_sha256": record.report_sha256,
+        "summary_sha256": record.summary_sha256,
+        "total_uncompressed_bytes": record.total_uncompressed_bytes,
+        "internal_hashes_verified": True,
+        "authenticated_publisher": record.authenticated_publisher,
+    }
 
 
 def queue_position(queued: int, a_job_is_running: bool) -> int:
@@ -163,7 +338,7 @@ _Subscriber = tuple[asyncio.AbstractEventLoop, asyncio.Queue[dict[str, Any]]]
 
 
 class JobManager:
-    """In-memory job table + single-worker FIFO queue over child processes."""
+    """Single-worker FIFO scheduler backed by an optional durable job ledger."""
 
     def __init__(
         self,
@@ -175,6 +350,8 @@ class JobManager:
         max_terminal_jobs: int = DEFAULT_MAX_TERMINAL_JOBS,
         terminal_ttl_s: float = DEFAULT_TERMINAL_JOB_TTL_S,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+        store_path: Path | None = None,
     ) -> None:
         if max_active_jobs < 1:
             raise ValueError("max_active_jobs must be at least 1")
@@ -189,16 +366,381 @@ class JobManager:
         self._max_terminal_jobs = max_terminal_jobs
         self._terminal_ttl_s = terminal_ttl_s
         self._clock = clock
+        self._wall_clock = wall_clock
         self._jobs: dict[str, JobRecord] = {}
+        self._idempotency: dict[str, str] = {}
         self._queue: deque[str] = deque()
-        self._lock = threading.Lock()
+        # Reentrant solely so ``prepare_batch`` can hold the scheduling
+        # boundary while ordinary submit calls reuse their existing locking.
+        self._lock = threading.RLock()
         self._wake = threading.Condition(self._lock)
         self._subscribers: dict[str, list[_Subscriber]] = {}
         self._terminal_callbacks: list[TerminalCallback] = []
         self._pending_terminal: deque[JobRecord] = deque()
+        self._persistence_error: str | None = None
         self._closed = False
-        self._worker = threading.Thread(target=self._run_loop, name="hawavoclean-jobs", daemon=True)
-        self._worker.start()
+        self._owner_lease: ExclusiveFileLease | None = None
+        self._store: DurableJobStore | None = None
+        if store_path is not None:
+            try:
+                store_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise JobStoreError(
+                    f"could not create durable job store directory {store_path.parent}: {exc}"
+                ) from exc
+            owner_path = Path(f"{store_path}.owner.lock")
+            try:
+                self._owner_lease = try_acquire_exclusive_file_lease(owner_path)
+            except BlockingIOError as exc:
+                raise JobStoreError(
+                    f"another engine broker already owns durable job store {store_path}"
+                ) from exc
+            except OSError as exc:
+                raise JobStoreError(
+                    f"could not acquire durable job-store owner lease {owner_path}: {exc}"
+                ) from exc
+            try:
+                self._store = DurableJobStore(store_path)
+            except BaseException:
+                self._owner_lease.release()
+                self._owner_lease = None
+                raise
+        try:
+            if self._store is not None:
+                wall_now = self._wall_clock()
+                monotonic_now = self._clock()
+                for value in self._store.load_and_interrupt(
+                    max_terminal_jobs=self._max_terminal_jobs,
+                    terminal_ttl_s=self._terminal_ttl_s,
+                    now_epoch=wall_now,
+                ):
+                    record = JobRecord.from_storage(value)
+                    self._reconcile_completed_after_restart(record)
+                    if record.state in TERMINAL_STATES:
+                        terminal_epoch = value.get("_terminal_at_epoch")
+                        if isinstance(terminal_epoch, (int, float)):
+                            age = max(0.0, wall_now - float(terminal_epoch))
+                            record.terminal_at = monotonic_now - age
+                        else:
+                            # A v2 terminal row without a timestamp is corrupt;
+                            # make it immediately eligible for fail-closed prune.
+                            record.terminal_at = monotonic_now - self._terminal_ttl_s
+                    self._jobs[record.job_id] = record
+                    if record.idempotency_key is not None:
+                        self._idempotency[record.idempotency_key] = record.job_id
+                    self._store.update(record.storage_record(), terminal=True)
+                self._prune_locked()
+            self._worker = threading.Thread(
+                target=self._run_loop, name="hawavoclean-jobs", daemon=True
+            )
+            self._worker.start()
+        except BaseException:
+            if self._store is not None:
+                self._store.close()
+            if self._owner_lease is not None:
+                self._owner_lease.release()
+                self._owner_lease = None
+            raise
+
+    @staticmethod
+    def _closed_bundle_evidence(record: JobRecord, evidence: dict[str, Any]) -> dict[str, Any]:
+        """Validate the exact durable identity retained for one record ZIP."""
+
+        if record.bundle_path is None or set(evidence) != _BUNDLE_EVIDENCE_KEYS:
+            raise JobStoreError("record-bundle job lacks closed durable evidence")
+        expected_path = record.bundle_path.expanduser().absolute()
+        if Path(str(evidence.get("path"))).expanduser().absolute() != expected_path:
+            raise JobStoreError("Processing Record evidence path differs from its reservation")
+        for digest_field in (
+            "archive_sha256",
+            "content_sha256",
+            "master_sha256",
+            "report_sha256",
+            "summary_sha256",
+        ):
+            digest = evidence.get(digest_field)
+            if (
+                not isinstance(digest, str)
+                or len(digest) != _SHA256_LENGTH
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise JobStoreError(f"Processing Record {digest_field} is invalid")
+        size = evidence.get("total_uncompressed_bytes")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 1:
+            raise JobStoreError("Processing Record uncompressed size evidence is invalid")
+        if evidence.get("internal_hashes_verified") is not True or not isinstance(
+            evidence.get("authenticated_publisher"), bool
+        ):
+            raise JobStoreError("Processing Record verification evidence is invalid")
+        return dict(evidence)
+
+    @staticmethod
+    def _bundle_matches_evidence(verified: ProcessingRecord, evidence: dict[str, Any]) -> bool:
+        return _bundle_evidence(verified) == evidence
+
+    def _bundle_artifact_paths(
+        self, record: JobRecord, evidence: dict[str, Any]
+    ) -> tuple[Path, Path, Path]:
+        """Resolve the exact generation described by durable ZIP evidence."""
+
+        exact = resolve_immutable_publication_generation(
+            record.output_path,
+            audio_sha256=str(evidence["master_sha256"]),
+            report_sha256=str(evidence["report_sha256"]),
+            summary_sha256=str(evidence["summary_sha256"]),
+        )
+        if exact is not None:
+            return exact
+        current = resolve_committed_publication(record.output_path)
+        if current is not None:
+            raise JobStoreError("Processing Record's immutable publication generation is missing")
+        legacy = (record.output_path, record.report_path, self._summary_path(record))
+        if not self._artifacts_match_bundle_evidence(legacy, evidence):
+            raise JobStoreError("Processing Record differs from the legacy export triplet")
+        return legacy
+
+    @staticmethod
+    def _artifacts_match_bundle_evidence(
+        artifacts: tuple[Path, Path, Path], evidence: dict[str, Any]
+    ) -> bool:
+        try:
+            return all(
+                hash_file(path) == str(evidence[field])
+                for path, field in zip(
+                    artifacts,
+                    ("master_sha256", "report_sha256", "summary_sha256"),
+                    strict=True,
+                )
+            )
+        except OSError:
+            return False
+
+    def _current_publication_matches_bundle(
+        self, record: JobRecord, evidence: dict[str, Any]
+    ) -> bool:
+        try:
+            current = resolve_committed_publication(record.output_path)
+        except Exception:
+            return False
+        artifacts = (
+            current
+            if current is not None
+            else (record.output_path, record.report_path, self._summary_path(record))
+        )
+        return self._artifacts_match_bundle_evidence(artifacts, evidence)
+
+    def _validate_bundle_artifacts(
+        self,
+        record: JobRecord,
+        *,
+        expected_evidence: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Validate a bundle without rebinding an old job to shared current paths."""
+
+        if not record.record_bundle or record.bundle_path is None:
+            raise JobStoreError("record-bundle job is missing its durable bundle path")
+        if expected_evidence is None:
+            verified = verify_processing_record(record.bundle_path)
+            evidence = self._closed_bundle_evidence(record, _bundle_evidence(verified))
+        else:
+            evidence = self._closed_bundle_evidence(record, expected_evidence)
+            try:
+                shared = verify_processing_record(record.bundle_path)
+            except Exception:
+                shared_matches = False
+            else:
+                shared_matches = self._bundle_matches_evidence(shared, evidence)
+            current_matches = self._current_publication_matches_bundle(record, evidence)
+            if not shared_matches and current_matches:
+                raise JobStoreError("the current job's Processing Record is missing or changed")
+
+        export_audio, export_report, export_summary = self._bundle_artifact_paths(record, evidence)
+        if not self._artifacts_match_bundle_evidence(
+            (export_audio, export_report, export_summary), evidence
+        ):
+            raise JobStoreError("Processing Record evidence differs from its exact generation")
+        try:
+            report = json.loads(export_report.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise JobStoreError(f"published report is unreadable: {exc}") from exc
+        if not isinstance(report, dict):
+            raise JobStoreError("published report is not a JSON object")
+        if self._report_audio_sha256(cast(dict[str, Any], report)) != evidence["master_sha256"]:
+            raise JobStoreError("Processing Record report describes different audio")
+        return evidence, cast(dict[str, Any], report)
+
+    @staticmethod
+    def _report_audio_sha256(report: dict[str, Any]) -> str:
+        output = report.get("output")
+        digest = output.get("sha256") if isinstance(output, dict) else None
+        if (
+            not isinstance(digest, str)
+            or len(digest) != _SHA256_LENGTH
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise JobStoreError("published report lacks a canonical output SHA-256")
+        return digest
+
+    @staticmethod
+    def _artifact_record(path: Path) -> dict[str, Any]:
+        if is_reparse_or_symlink(path) or not path.is_file():
+            raise JobStoreError(f"completed artifact is missing or unsafe: {path}")
+        return {"sha256": hash_file(path), "size_bytes": path.stat().st_size}
+
+    @staticmethod
+    def _summary_path(record: JobRecord) -> Path:
+        return record.output_path.parent / f"{record.output_path.stem}.hawavoclean.txt"
+
+    def _capture_nonbundle_artifacts(self, record: JobRecord) -> None:
+        """Bind a successful job to exact immutable artifact hashes."""
+
+        if record.report is None:
+            raise JobStoreError("completed job has no report object")
+        expected_audio = self._report_audio_sha256(record.report)
+        committed = resolve_committed_publication(record.output_path)
+        if committed is None:
+            artifacts = (record.output_path, record.report_path, self._summary_path(record))
+            storage = "legacy_flat"
+            generation_id: str | None = None
+        else:
+            artifacts = committed
+            storage = "immutable_generation"
+            generation_id = committed[0].parent.name
+        audio_record, report_record, summary_record = (
+            self._artifact_record(path) for path in artifacts
+        )
+        if audio_record["sha256"] != expected_audio:
+            raise JobStoreError("published audio differs from report.output.sha256")
+        try:
+            report = json.loads(artifacts[1].read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise JobStoreError(f"published report is unreadable: {exc}") from exc
+        if not isinstance(report, dict):
+            raise JobStoreError("published report is not a JSON object")
+        if self._report_audio_sha256(cast(dict[str, Any], report)) != expected_audio:
+            raise JobStoreError("resolved report describes different audio")
+        record.report = cast(dict[str, Any], report)
+        record.artifact_evidence = {
+            "schema_version": _ARTIFACT_EVIDENCE_SCHEMA,
+            "storage": storage,
+            "generation_id": generation_id,
+            "audio": audio_record,
+            "report": report_record,
+            "summary": summary_record,
+        }
+
+    def _validate_nonbundle_artifacts(self, record: JobRecord) -> None:
+        """Rehydrate and verify one completed job from job-bound evidence."""
+
+        evidence = record.artifact_evidence
+        if not isinstance(evidence, dict) or set(evidence) != {
+            "schema_version",
+            "storage",
+            "generation_id",
+            "audio",
+            "report",
+            "summary",
+        }:
+            raise JobStoreError("completed job lacks closed artifact evidence")
+        if evidence.get("schema_version") != _ARTIFACT_EVIDENCE_SCHEMA:
+            raise JobStoreError("completed job artifact evidence has an unsupported schema")
+        storage = evidence.get("storage")
+        if storage not in {"immutable_generation", "legacy_flat"}:
+            raise JobStoreError("completed job artifact storage kind is invalid")
+        audio_evidence = evidence.get("audio")
+        report_evidence = evidence.get("report")
+        summary_evidence = evidence.get("summary")
+        for role, expected in (
+            ("audio", audio_evidence),
+            ("report", report_evidence),
+            ("summary", summary_evidence),
+        ):
+            if not isinstance(expected, dict) or set(expected) != {"sha256", "size_bytes"}:
+                raise JobStoreError(f"completed job {role} evidence is invalid")
+        assert isinstance(audio_evidence, dict)
+        assert isinstance(report_evidence, dict)
+        assert isinstance(summary_evidence, dict)
+        expected_audio = audio_evidence.get("sha256")
+        expected_report = report_evidence.get("sha256")
+        expected_summary = summary_evidence.get("sha256")
+        if not all(
+            isinstance(value, str) for value in (expected_audio, expected_report, expected_summary)
+        ):
+            raise JobStoreError("completed job artifact digest is missing")
+        committed = resolve_immutable_publication_generation(
+            record.output_path,
+            audio_sha256=cast(str, expected_audio),
+            report_sha256=cast(str, expected_report),
+            summary_sha256=cast(str, expected_summary),
+        )
+        if committed is None:
+            if storage != "legacy_flat":
+                raise JobStoreError("job's immutable publication generation is missing")
+            artifacts = (record.output_path, record.report_path, self._summary_path(record))
+        else:
+            artifacts = committed
+            expected_generation = evidence.get("generation_id")
+            if (
+                storage == "immutable_generation"
+                and isinstance(expected_generation, str)
+                and committed[0].parent.name != expected_generation
+            ):
+                raise JobStoreError("resolved publication generation differs from job evidence")
+        for role, path in zip(("audio", "report", "summary"), artifacts, strict=True):
+            expected = evidence.get(role)
+            assert isinstance(expected, dict)
+            if self._artifact_record(path) != expected:
+                raise JobStoreError(f"completed job {role} failed digest validation")
+        try:
+            report = json.loads(artifacts[1].read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise JobStoreError(f"published report is unreadable: {exc}") from exc
+        if not isinstance(report, dict):
+            raise JobStoreError("published report is not a JSON object")
+        if self._report_audio_sha256(cast(dict[str, Any], report)) != expected_audio:
+            raise JobStoreError("published report no longer describes the job audio")
+        record.report = cast(dict[str, Any], report)
+
+    @staticmethod
+    def _mark_artifact_invalid(record: JobRecord, exc: Exception) -> None:
+        record.bundle = None
+        record.artifact_evidence = None
+        record.state = "failed"
+        record.stage = "error"
+        record.message = "Completed artifacts failed startup validation"
+        record.error = {"code": "ARTIFACT_INVALID", "message": str(exc)}
+        record.finished_at = _now_iso()
+        record.seq += 1
+
+    def _reconcile_completed_after_restart(self, record: JobRecord) -> None:
+        """Revalidate completed artifacts; never infer completion from paths.
+
+        In replace mode the derived paths may still hold a perfectly valid
+        *prior* export when a new job crashes before doing any work. Without
+        job-bound evidence durably recorded before the terminal transition,
+        promoting an interrupted row would silently attribute that old export
+        to the new job. Interrupted therefore remains interrupted even when
+        its paths happen to verify.
+        """
+
+        if record.state != "done":
+            record.bundle = None
+            return
+        try:
+            if record.record_bundle:
+                if record.bundle is None:
+                    raise JobStoreError("completed record-bundle job lacks durable evidence")
+                bundle, report = self._validate_bundle_artifacts(
+                    record, expected_evidence=record.bundle
+                )
+            else:
+                self._validate_nonbundle_artifacts(record)
+        except Exception as exc:
+            self._mark_artifact_invalid(record, exc)
+            return
+        if record.record_bundle:
+            record.bundle = bundle
+            record.report = report
 
     # ------------------------------------------------------------------ public
 
@@ -212,47 +754,263 @@ class JobManager:
         mode: str = "natural",
         speaker_id: str | None = None,
         cutoff_hz: float | None = None,
+        idempotency_key: str | None = None,
+        conflict_policy: ConflictPolicy | None = None,
+        request_context_hash: str | None = None,
+        record_bundle: bool = False,
     ) -> dict[str, Any]:
-        """Queue a job; returns its initial status snapshot."""
+        """Queue a job or return its prior snapshot for an idempotent retry."""
+
+        if idempotency_key is not None:
+            if not idempotency_key.strip() or len(idempotency_key) > 128:
+                raise ValueError("idempotency_key must contain 1-128 characters")
+            if any(ord(char) < 0x21 or ord(char) > 0x7E for char in idempotency_key):
+                raise ValueError("idempotency_key must contain visible ASCII characters only")
+        policy: ConflictPolicy = conflict_policy or ("replace" if overwrite else "fail")
+        if policy not in {"unique", "fail", "replace"}:
+            raise ValueError(f"unsupported conflict policy: {policy}")
+        effective_overwrite = policy == "replace"
         report_path = output_path.parent / f"{output_path.stem}.hawavoclean.json"
+        bundle_path = (
+            output_path.parent / f"{output_path.stem}.hawavoclean.zip" if record_bundle else None
+        )
+        request_payload = {
+            "input_path": str(input_path),
+            "output_path": str(output_path),
+            "profile": profile,
+            "mode": mode,
+            "speaker_id": speaker_id,
+            "cutoff_hz": cutoff_hz,
+            "conflict_policy": policy,
+            "request_context_hash": request_context_hash,
+            "record_bundle": record_bundle,
+        }
+        request_hash = canonical_request_hash(request_payload)
         record = JobRecord(
             job_id=f"j_{uuid.uuid4().hex[:16]}",
             input_path=input_path,
             output_path=output_path,
             report_path=report_path,
             profile=profile,
-            overwrite=overwrite,
+            overwrite=effective_overwrite,
+            idempotency_key=idempotency_key,
+            conflict_policy=policy,
+            request_hash=request_hash,
             mode=mode,
             speaker_id=speaker_id,
             cutoff_hz=cutoff_hz,
+            record_bundle=record_bundle,
+            bundle_path=bundle_path,
         )
         with self._wake:
             if self._closed:
                 raise RuntimeError("job manager is shut down")
             self._prune_locked()
+            if idempotency_key is not None and idempotency_key in self._idempotency:
+                existing = self._jobs.get(self._idempotency[idempotency_key])
+                if existing is not None:
+                    if existing.request_hash != request_hash:
+                        raise IdempotencyConflictError(
+                            "idempotency key is already bound to a different request"
+                        )
+                    return existing.snapshot()
+            if self._store is not None and idempotency_key is not None:
+                durable_retry = self._store.find_idempotent(
+                    idempotency_key, request_hash=request_hash
+                )
+                if durable_retry is not None:
+                    return self._snapshot_durable_retry_locked(durable_retry)
             active = sum(record.state not in TERMINAL_STATES for record in self._jobs.values())
             if active >= self._max_active_jobs:
                 raise QueueFullError(
                     f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
                 )
+            if self._store is not None:
+                reservation = self._store.reserve(
+                    record=record.storage_record(),
+                    request_hash=request_hash,
+                    idempotency_key=idempotency_key,
+                    conflict_policy=policy,
+                )
+                record = JobRecord.from_storage(reservation.record)
+                if reservation.reused:
+                    return self._snapshot_durable_retry_locked(reservation)
+            else:
+                record = self._reserve_in_memory(record)
             self._jobs[record.job_id] = record
+            if idempotency_key is not None:
+                self._idempotency[idempotency_key] = record.job_id
             self._queue.append(record.job_id)
             running = any(r.state == "running" for r in self._jobs.values())
             position = queue_position(len(self._queue), running)
             record.message = "Queued" if position == 1 else f"Queued (position {position})"
+            self._persist_locked(record)
             self._wake.notify_all()
             return record.snapshot()
+
+    def _snapshot_durable_retry_locked(self, reservation: Reservation) -> dict[str, Any]:
+        """Rehydrate an exact retry without turning it into fresh history."""
+
+        record = JobRecord.from_storage(reservation.record)
+        prior_state = record.state
+        self._reconcile_completed_after_restart(record)
+        if prior_state == "done" and record.state == "failed" and self._store is not None:
+            self._store.update(record.storage_record(), terminal=True)
+        if record.state in TERMINAL_STATES and reservation.terminal_at_epoch is not None:
+            age = max(0.0, self._wall_clock() - reservation.terminal_at_epoch)
+            record.terminal_at = self._clock() - age
+        # A terminal row absent from ``_jobs`` was already pruned (or its
+        # durable prune hit an I/O failure). Returning it must not re-expand
+        # bounded history. Nonterminal rows are cached defensively, though a
+        # normal owned broker always has them in memory already.
+        if reservation.history_visible and record.state not in TERMINAL_STATES:
+            self._jobs.setdefault(record.job_id, record)
+            if record.idempotency_key is not None:
+                self._idempotency[record.idempotency_key] = record.job_id
+            return self._jobs[record.job_id].snapshot()
+        return record.snapshot()
+
+    @contextlib.contextmanager
+    def prepare_batch(self) -> Iterator[None]:
+        """Prevent any new item from executing until the whole batch is accepted.
+
+        The API validates sources first, then performs its normal ``submit``
+        calls inside this boundary. If a late collision/queue/persistence
+        error escapes, every newly prepared row is removed before the worker
+        can observe it. Existing idempotent jobs are never rolled back.
+        """
+
+        with self._wake:
+            if self._closed:
+                raise RuntimeError("job manager is shut down")
+            before = set(self._jobs)
+            try:
+                yield
+            except BaseException:
+                prepared = [
+                    job_id
+                    for job_id in self._jobs
+                    if job_id not in before and self._jobs[job_id].state == "queued"
+                ]
+                for job_id in prepared:
+                    with contextlib.suppress(ValueError):
+                        self._queue.remove(job_id)
+                try:
+                    if self._store is not None:
+                        self._store.delete_queued(prepared)
+                except JobStoreError as exc:
+                    self._persistence_error = str(exc)
+                    # The scheduling lock still guarantees none can publish.
+                    # Leave them cancelled and durable rather than forgetting
+                    # an accepted row whose deletion did not commit.
+                    for job_id in prepared:
+                        record = self._jobs[job_id]
+                        record.state = "cancelled"
+                        record.stage = "cancelled"
+                        record.finished_at = _now_iso()
+                        record.terminal_at = self._clock()
+                        record.message = "Batch preparation rolled back"
+                        self._notify_locked(record)
+                    raise JobStoreError(
+                        f"batch preparation failed and rollback was not durable: {exc}"
+                    ) from exc
+                else:
+                    for job_id in prepared:
+                        record = self._jobs.pop(job_id)
+                        if record.idempotency_key is not None:
+                            self._idempotency.pop(record.idempotency_key, None)
+                        self._subscribers.pop(job_id, None)
+                raise
+        self._drain_terminal_callbacks()
+
+    def _reserve_in_memory(self, record: JobRecord) -> JobRecord:
+        """Apply the same conflict contract when no SQLite store is configured."""
+
+        desired = record.output_path
+        candidate = desired
+        ordinal = 1
+        active_keys = {
+            output_key(item.output_path)
+            for item in self._jobs.values()
+            if item.state not in TERMINAL_STATES
+        }
+        while True:
+            key = output_key(candidate)
+            occupied = key in active_keys or any(
+                os.path.lexists(path)
+                for path in user_artifact_paths(candidate, record_bundle=record.record_bundle)
+            )
+            stale_processing_record = not record.record_bundle and os.path.lexists(
+                processing_record_path(candidate)
+            )
+            if record.conflict_policy == "unique" and occupied:
+                ordinal += 1
+                candidate = unique_candidate(desired, ordinal)
+                if ordinal > 100_000:
+                    raise OutputConflictError("could not allocate a unique output name")
+                continue
+            if key in active_keys:
+                raise OutputConflictError(f"output is reserved by an active job: {candidate}")
+            if record.conflict_policy == "replace" and stale_processing_record:
+                raise OutputConflictError(
+                    "same-stem Processing Record already exists; use unique naming "
+                    "or request a replacement Processing Record"
+                )
+            if record.conflict_policy == "fail" and occupied:
+                raise OutputConflictError(f"output or sidecar already exists for: {candidate}")
+            break
+        record.output_path = candidate
+        record.report_path = candidate.parent / f"{candidate.stem}.hawavoclean.json"
+        record.bundle_path = (
+            candidate.parent / f"{candidate.stem}.hawavoclean.zip" if record.record_bundle else None
+        )
+        return record
 
     def get_status(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
             self._prune_locked()
             record = self._jobs.get(job_id)
-            return record.snapshot() if record is not None else None
+            if record is not None:
+                return record.snapshot()
+            if self._store is None:
+                return None
+            resource = self._store.find_job(job_id)
+            return self._snapshot_durable_retry_locked(resource) if resource is not None else None
+
+    def get_by_idempotency(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Return the durable prior job for a client retry, if one exists."""
+
+        with self._lock:
+            job_id = self._idempotency.get(idempotency_key)
+            record = self._jobs.get(job_id) if job_id is not None else None
+            if record is not None:
+                return record.snapshot()
+            if self._store is None:
+                return None
+            reservation = self._store.find_idempotent(idempotency_key)
+            return (
+                self._snapshot_durable_retry_locked(reservation)
+                if reservation is not None
+                else None
+            )
 
     def list_jobs(self) -> list[dict[str, Any]]:
         with self._lock:
             self._prune_locked()
             return [r.snapshot() for r in self._jobs.values()]
+
+    @property
+    def persistence_error(self) -> str | None:
+        """Latest durable-ledger failure, exposed for health/readiness checks."""
+
+        with self._lock:
+            return self._persistence_error
+
+    @property
+    def durable(self) -> bool:
+        """Whether submissions survive an engine restart."""
+
+        return self._store is not None
 
     def active_input_paths(self) -> set[Path]:
         """Inputs that retention cleanup must not remove while queued/running."""
@@ -326,9 +1084,9 @@ class JobManager:
                     self._queue.remove(job_id)
                 self._finish_locked(record, "cancelled", "Cancelled before start")
                 return True
-            proc = record.process
-        if proc is not None:
-            self._terminate(proc)
+            supervisor = record.supervisor
+        if supervisor is not None:
+            self._terminate(supervisor)
         return True
 
     def subscribe(self, job_id: str) -> asyncio.Queue[dict[str, Any]] | None:
@@ -359,7 +1117,7 @@ class JobManager:
             if self._closed:
                 return
             self._closed = True
-            running: subprocess.Popen[str] | None = None
+            running: ProcessSupervisor | None = None
             for job_id in list(self._queue):
                 record = self._jobs[job_id]
                 record.cancel_requested = True
@@ -368,43 +1126,36 @@ class JobManager:
             for record in self._jobs.values():
                 if record.state == "running":
                     record.cancel_requested = True
-                    running = record.process
+                    running = record.supervisor
             self._wake.notify_all()
-        if running is not None and running.poll() is None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                running.send_signal(signal.SIGTERM)
-            deadline = time.monotonic() + grace_s
-            while running.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.02)
-            if running.poll() is None:
-                with contextlib.suppress(ProcessLookupError, OSError):
-                    running.kill()
+        if running is not None:
+            running.terminate_tree(grace_s)
         self._worker.join(timeout=grace_s + 1.0)
+        try:
+            if self._store is not None:
+                self._store.close()
+        finally:
+            if self._owner_lease is not None:
+                self._owner_lease.release()
+                self._owner_lease = None
 
     # ---------------------------------------------------------------- internal
 
-    def _terminate(self, proc: subprocess.Popen[str]) -> None:
-        """SIGTERM now; SIGKILL if still alive after the grace period."""
-        with contextlib.suppress(ProcessLookupError, OSError):
-            proc.send_signal(signal.SIGTERM)
+    def _terminate(self, supervisor: ProcessSupervisor) -> None:
+        """End the complete job process tree without blocking the API caller."""
 
         def _reap() -> None:
-            deadline = time.monotonic() + self._kill_grace_s
-            while proc.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if proc.poll() is None:
-                logger.warning(f"Job child pid {proc.pid} ignored SIGTERM; sending SIGKILL")
-                with contextlib.suppress(ProcessLookupError, OSError):
-                    proc.kill()
+            supervisor.terminate_tree(self._kill_grace_s)
 
         threading.Thread(target=_reap, name="hawavoclean-job-kill", daemon=True).start()
 
-    def _notify_locked(self, record: JobRecord) -> None:
+    def _notify_locked(self, record: JobRecord) -> bool:
         """Record a change (``seq``) and push the snapshot to every subscriber."""
         record.seq += 1
+        persisted = self._persist_locked(record)
         subs = self._subscribers.get(record.job_id)
         if not subs:
-            return
+            return persisted
         snap = record.snapshot()
         alive: list[_Subscriber] = []
 
@@ -422,6 +1173,20 @@ class JobManager:
                 continue  # loop closed: subscriber is gone
             alive.append((loop, queue))
         self._subscribers[record.job_id] = alive
+        return persisted
+
+    def _persist_locked(self, record: JobRecord) -> bool:
+        """Persist while the caller owns the state lock; surface failures in health."""
+
+        if self._store is None:
+            return True
+        try:
+            self._store.update(record.storage_record(), terminal=record.state in TERMINAL_STATES)
+        except JobStoreError as exc:
+            self._persistence_error = str(exc)
+            logger.error(f"Durable job state update failed for {record.job_id}: {exc}")
+            return False
+        return True
 
     def _finish_locked(self, record: JobRecord, state: JobState, message: str) -> None:
         record.state = state
@@ -433,7 +1198,20 @@ class JobManager:
             record.progress = 1.0
         elif state == "failed":
             record.stage = "error"
-        self._notify_locked(record)
+        persisted = self._notify_locked(record)
+        if state == "done" and not persisted:
+            # A verified export that cannot make its terminal transition
+            # durable must never be reported as completed. The files remain
+            # recoverable, but this job verdict is explicitly failed.
+            record.state = "failed"
+            record.stage = "error"
+            record.message = "Verified artifacts were not recorded durably"
+            record.error = {
+                "code": "DURABILITY_FAILURE",
+                "message": self._persistence_error or "durable job update failed",
+            }
+            record.bundle = None
+            self._notify_locked(record)
         # Queue the callbacks; ``_locked`` runs them once the lock is released.
         self._pending_terminal.append(record)
 
@@ -454,9 +1232,17 @@ class JobManager:
         retained.sort(key=lambda record: (record.terminal_at or 0.0, record.job_id))
         overflow = max(0, len(retained) - self._max_terminal_jobs)
         expired.update(record.job_id for record in retained[:overflow])
+        if self._store is not None and expired:
+            try:
+                self._store.prune_terminal(expired)
+            except JobStoreError as exc:
+                self._persistence_error = str(exc)
+                logger.error(f"Durable job history prune failed: {exc}")
         for job_id in expired:
-            self._jobs.pop(job_id, None)
+            removed = self._jobs.pop(job_id, None)
             self._subscribers.pop(job_id, None)
+            if removed is not None and removed.idempotency_key is not None:
+                self._idempotency.pop(removed.idempotency_key, None)
 
     def _run_loop(self) -> None:
         while True:
@@ -496,7 +1282,7 @@ class JobManager:
     def _run_job(self, record: JobRecord) -> None:
         cmd = self._command_factory(record)
         try:
-            proc = subprocess.Popen(
+            supervisor = ProcessSupervisor.spawn(
                 cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -507,6 +1293,7 @@ class JobManager:
                 bufsize=1,
                 env=self._child_env(),
             )
+            proc = supervisor.process
         except OSError as e:
             with self._locked():
                 record.error = {"code": "SPAWN_FAILED", "message": str(e)}
@@ -515,9 +1302,10 @@ class JobManager:
 
         with self._lock:
             record.process = proc
+            record.supervisor = supervisor
             cancel_now = record.cancel_requested
         if cancel_now:
-            self._terminate(proc)
+            self._terminate(supervisor)
 
         assert proc.stderr is not None and proc.stdout is not None
         stderr_stream = proc.stderr
@@ -535,35 +1323,43 @@ class JobManager:
 
         done_event: dict[str, Any] | None = None
         error_event: dict[str, Any] | None = None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except ValueError:
-                logger.warning(f"Job {record.job_id}: non-JSON line on stdout: {line[:200]}")
-                continue
-            if not isinstance(event, dict):
-                continue
-            kind = event.get("event")
-            if kind == "progress":
-                with self._lock:
-                    record.stage = str(event.get("stage", record.stage))
-                    record.progress = float(event.get("progress", record.progress))
-                    record.message = str(event.get("message", record.message))
-                    unit = event.get("unit")
-                    if isinstance(unit, dict) and "index" in unit and "total" in unit:
-                        record.unit = {"index": int(unit["index"]), "total": int(unit["total"])}
-                    else:
-                        record.unit = None
-                    self._notify_locked(record)
-            elif kind == "done":
-                done_event = event
-            elif kind == "error":
-                error_event = event
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    logger.warning(f"Job {record.job_id}: non-JSON line on stdout: {line[:200]}")
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                kind = event.get("event")
+                if kind == "progress":
+                    with self._lock:
+                        record.stage = str(event.get("stage", record.stage))
+                        record.progress = float(event.get("progress", record.progress))
+                        record.message = str(event.get("message", record.message))
+                        unit = event.get("unit")
+                        if isinstance(unit, dict) and "index" in unit and "total" in unit:
+                            record.unit = {
+                                "index": int(unit["index"]),
+                                "total": int(unit["total"]),
+                            }
+                        else:
+                            record.unit = None
+                        self._notify_locked(record)
+                elif kind == "done":
+                    done_event = event
+                elif kind == "error":
+                    error_event = event
 
-        returncode = proc.wait()
+            returncode = proc.wait()
+        finally:
+            # The leader's exit is not proof that every decoder/model child
+            # exited.  Releasing the boundary is therefore fail-closed.
+            supervisor.close(kill_remaining=True)
         stderr_thread.join(timeout=2.0)
 
         with self._locked():
@@ -572,7 +1368,7 @@ class JobManager:
             if done_event is not None and returncode == 0:
                 report_path = Path(str(done_event.get("report_path") or record.report_path))
                 try:
-                    record.report = json.loads(report_path.read_text(encoding="utf-8"))
+                    parsed_report = json.loads(report_path.read_text(encoding="utf-8"))
                 except (OSError, ValueError) as e:
                     record.error = {
                         "code": ExitCode.PUBLICATION_FAILURE.name,
@@ -580,6 +1376,50 @@ class JobManager:
                     }
                     self._finish_locked(record, "failed", record.error["message"])
                     return
+                if not isinstance(parsed_report, dict):
+                    record.error = {
+                        "code": ExitCode.PUBLICATION_FAILURE.name,
+                        "message": "Published report is not a JSON object",
+                    }
+                    self._finish_locked(record, "failed", record.error["message"])
+                    return
+                record.report = cast(dict[str, Any], parsed_report)
+                if record.record_bundle:
+                    try:
+                        record.bundle, record.report = self._validate_bundle_artifacts(record)
+                    except Exception as e:
+                        record.error = {
+                            "code": ExitCode.PUBLICATION_FAILURE.name,
+                            "message": f"Processing Record verification failed: {e}",
+                        }
+                        self._finish_locked(record, "failed", record.error["message"])
+                        return
+                else:
+                    try:
+                        # Durable jobs may cross a restart, so a report alone
+                        # is not sufficient evidence of which generation they
+                        # completed. In-memory compatibility fakes without an
+                        # output digest remain usable, but production-shaped
+                        # reports are bound and validated even without SQLite.
+                        self._report_audio_sha256(record.report)
+                    except JobStoreError as e:
+                        if self._store is not None:
+                            record.error = {
+                                "code": ExitCode.PUBLICATION_FAILURE.name,
+                                "message": f"Completed artifact evidence is invalid: {e}",
+                            }
+                            self._finish_locked(record, "failed", record.error["message"])
+                            return
+                    else:
+                        try:
+                            self._capture_nonbundle_artifacts(record)
+                        except Exception as e:
+                            record.error = {
+                                "code": ExitCode.PUBLICATION_FAILURE.name,
+                                "message": f"Completed artifact verification failed: {e}",
+                            }
+                            self._finish_locked(record, "failed", record.error["message"])
+                            return
                 record.unit = None
                 self._finish_locked(record, "done", "Done")
                 return

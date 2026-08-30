@@ -51,10 +51,8 @@ controls, not a claim that the upstream package was rebuilt.
 ## Studio core
 
 - Core version: 1.1.0.
-- Parameter SHA-256: `f20eb492ca9d39bc099382efa94f755f1157012a7efdadb165e5fca31859b1ac`.
-- WPE implementation: [nara_wpe](https://github.com/fgnt/nara_wpe), MIT.
-- DFN3 receives the full 48 kHz signal with unlimited attenuation; WPE and bounded late-tail
-  suppression surround the neural stage.
+- Parameter SHA-256: `aa892d84acfbfcc694dc6afd99ad739cb55933026432f1c455b05434af30de6d`.
+- DFN3 receives the full 48 kHz signal with unlimited attenuation (pure high-fidelity neural model).
 - The core is non-phase-coherent. Accept/revert is per unit; residual blending is prohibited.
 
 The 94.6-second real engineering reference measured noise floor −49.9 to −76.9 dBFS, an SNR proxy

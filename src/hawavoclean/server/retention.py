@@ -15,7 +15,8 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -67,6 +68,7 @@ class UploadStore:
             lambda path: DiskUsage(*shutil.disk_usage(path))
         )
         self._lock = threading.Lock()
+        self._leases: dict[Path, int] = {}
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _read_marker(self, directory: Path) -> tuple[Path, float] | None:
@@ -129,6 +131,7 @@ class UploadStore:
         active = {path.resolve() for path in active_inputs}
         removed = 0
         with self._lock:
+            active.update(self._leases)
             now = self._clock()
             for directory, input_path, created in self._managed():
                 if input_path.resolve() in active or now - created < self.ttl_s:
@@ -208,11 +211,95 @@ class UploadStore:
                 raise
             return directory / input_name
 
+    def source_id(self, input_path: Path) -> str:
+        """Return the opaque API id for one marker-owned input."""
+
+        candidate = input_path.resolve()
+        directory = candidate.parent
+        with self._lock:
+            record = self._read_marker(directory)
+            if record is None or record[0].resolve() != candidate:
+                raise ValueError("input is not owned by this upload store")
+            return directory.name
+
+    def authorizes(self, input_path: Path) -> bool:
+        """Whether ``input_path`` is the exact, live marker-owned upload.
+
+        This is the path-form compatibility check used by legacy renderer
+        endpoints.  It deliberately shares the same marker, symlink and
+        regular-file validation as opaque ``source_id`` resolution.
+        """
+
+        try:
+            candidate = input_path.resolve()
+        except (OSError, ValueError):
+            return False
+        directory = candidate.parent
+        with self._lock:
+            record = self._read_marker(directory)
+            if record is None or record[0].resolve() != candidate:
+                return False
+            try:
+                return not candidate.is_symlink() and candidate.is_file()
+            except OSError:
+                return False
+
+    def resolve_source(self, source_id: str) -> Path | None:
+        """Resolve an opaque source id without accepting paths or traversal."""
+
+        with self._lock:
+            return self._resolve_source_locked(source_id)
+
+    def _resolve_source_locked(self, source_id: str) -> Path | None:
+        if _UPLOAD_DIR.fullmatch(source_id) is None:
+            return None
+        directory = self.root / source_id
+        if directory.is_symlink() or not directory.is_dir():
+            return None
+        record = self._read_marker(directory)
+        if record is None:
+            return None
+        input_path = record[0]
+        try:
+            if input_path.is_symlink() or not input_path.is_file():
+                return None
+        except OSError:
+            return None
+        return input_path.resolve()
+
+    @contextmanager
+    def lease_source(self, source_id: str) -> Iterator[Path | None]:
+        """Keep one managed input alive for a bounded analysis/read operation.
+
+        Resolving a source and later opening it leaves a race with TTL or job
+        cleanup.  A lease closes that gap without exposing a filesystem path
+        to the client.  Cleanup remains idempotent: if it observes a lease it
+        leaves the input for the next scavenging pass.
+        """
+
+        leased: Path | None = None
+        with self._lock:
+            leased = self._resolve_source_locked(source_id)
+            if leased is not None:
+                self._leases[leased] = self._leases.get(leased, 0) + 1
+        try:
+            yield leased
+        finally:
+            if leased is not None:
+                with self._lock:
+                    remaining = self._leases.get(leased, 0) - 1
+                    if remaining > 0:
+                        self._leases[leased] = remaining
+                    else:
+                        self._leases.pop(leased, None)
+
     def cleanup_input(self, input_path: Path) -> bool:
         """Delete one marker-owned input. Sibling files (committed outputs) survive."""
         candidate = input_path.resolve()
         directory = candidate.parent
         with self._lock:
+            if candidate in self._leases:
+                return False
             record = self._read_marker(directory)
             if record is None or record[0].resolve() != candidate:
                 return False

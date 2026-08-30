@@ -10,7 +10,6 @@ import type {
 
 export interface Endpoint {
   baseUrl: string;
-  token: string;
 }
 
 /**
@@ -78,11 +77,9 @@ async function parseBody<T>(res: Response): Promise<T> {
 
 export class EngineClient {
   readonly baseUrl: string;
-  readonly token: string;
 
   constructor(endpoint: Endpoint) {
     this.baseUrl = endpoint.baseUrl.replace(/\/+$/, '');
-    this.token = endpoint.token;
   }
 
   /**
@@ -116,20 +113,19 @@ export class EngineClient {
     }
   }
 
-  private headers(extra?: Record<string, string>): HeadersInit {
-    return { 'X-Hawa-Token': this.token, ...(extra ?? {}) };
-  }
-
   private async json<T>(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<T> {
-    const res = await this.fetchOrOffline(`${this.baseUrl}${path}`, {
+    const request: RequestInit = {
       ...init,
-      headers: this.headers(
-        init.body !== undefined && !(init.body instanceof FormData)
-          ? { 'Content-Type': 'application/json' }
-          : undefined,
-      ),
+      // Same-origin web mode authenticates with its HttpOnly session cookie.
+      // The custom-scheme desktop shell injects a short-lived Authorization
+      // header in main; renderer code never receives either credential.
+      credentials: 'same-origin',
       signal: signal ?? null,
-    });
+    };
+    if (init.body !== undefined && !(init.body instanceof FormData)) {
+      request.headers = { 'Content-Type': 'application/json' };
+    }
+    const res = await this.fetchOrOffline(`${this.baseUrl}${path}`, request);
     if (!res.ok) throw await parseError(res);
     return await parseBody<T>(res);
   }
@@ -208,7 +204,6 @@ export class EngineClient {
     return new Promise<{ path: string }>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${this.baseUrl}/api/upload`, true);
-      xhr.setRequestHeader('X-Hawa-Token', this.token);
       xhr.responseType = 'text';
       let cancelled = false;
       opts.onCancelHandle?.(() => {
@@ -276,6 +271,7 @@ export class EngineClient {
     const res = await this.fetchOrOffline(this.fileUrl(path), {
       headers: { Range: 'bytes=0-0' },
       cache: 'no-store',
+      credentials: 'same-origin',
       signal: signal ?? null,
     });
     let delivered = false;
@@ -300,7 +296,10 @@ export class EngineClient {
 
   /** Plain text of a served file (the human-readable report sidecar). */
   async fetchText(path: string, signal?: AbortSignal): Promise<string> {
-    const res = await this.fetchOrOffline(this.fileUrl(path), { signal: signal ?? null });
+    const res = await this.fetchOrOffline(this.fileUrl(path), {
+      credentials: 'same-origin',
+      signal: signal ?? null,
+    });
     if (!res.ok) throw await parseError(res);
     return await res.text();
   }
@@ -313,17 +312,17 @@ export class EngineClient {
    * URL for any file the engine will serve under its path policy: the audio a
    * deck plays, and equally the JSON report and its .txt sidecar (`/api/audio`
    * types the response from the file's own extension, so it serves all three).
-   * The token must travel as a query parameter — an `<audio src>` and a
-   * download anchor cannot carry a header.
+   * Authentication is deliberately absent from this URL. Same-origin web
+   * mode uses an HttpOnly cookie; the hardened shell injects Authorization at
+   * its network boundary for `<audio>`, downloads and ordinary fetches.
    */
   fileUrl(path: string): string {
-    const q = new URLSearchParams({ path, token: this.token });
+    const q = new URLSearchParams({ path });
     return `${this.baseUrl}/api/audio?${q.toString()}`;
   }
 
-  /** URL for the job's `EventSource` stream. */
+  /** Credential-free URL for the job's `EventSource` stream. */
   eventsUrl(jobId: string): string {
-    const q = new URLSearchParams({ token: this.token });
-    return `${this.baseUrl}/api/jobs/${encodeURIComponent(jobId)}/events?${q.toString()}`;
+    return `${this.baseUrl}/api/jobs/${encodeURIComponent(jobId)}/events`;
   }
 }

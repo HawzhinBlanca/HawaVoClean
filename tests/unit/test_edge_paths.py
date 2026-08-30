@@ -30,9 +30,12 @@ def test_paths_env_overrides(monkeypatch: Any, tmp_path: Path) -> None:
     monkeypatch.setenv("HAWAVOCLEAN_CONFIG_DIR", str(tmp_path / "c"))
     monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(tmp_path / "m"))
     monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path / "w"))
+    monkeypatch.setenv("HAWAVOCLEAN_STATE_DIR", str(tmp_path / "state"))
     assert paths.config_dir() == (tmp_path / "c").resolve()
     assert paths.models_dir() == (tmp_path / "m").resolve()
     assert paths.work_root() == (tmp_path / "w").resolve()
+    assert paths.app_data_root() == (tmp_path / "state").resolve()
+    assert paths.job_store_path() == (tmp_path / "state").resolve() / "state" / "jobs.sqlite3"
     assert paths.profile_config_path("production").name == "production.toml"
     assert paths.resolve_calibration_file("x.json") == (tmp_path / "m").resolve() / "x.json"
     absolute = tmp_path / "abs.json"
@@ -43,9 +46,22 @@ def test_paths_defaults_inside_package(monkeypatch: Any) -> None:
     monkeypatch.delenv("HAWAVOCLEAN_CONFIG_DIR", raising=False)
     monkeypatch.delenv("HAWAVOCLEAN_MODEL_DIR", raising=False)
     monkeypatch.delenv("HAWAVOCLEAN_WORK_DIR", raising=False)
+    monkeypatch.delenv("HAWAVOCLEAN_STATE_DIR", raising=False)
     assert paths.config_dir().exists()
     assert paths.models_dir().exists()
     assert paths.work_root().name == "work"
+    assert paths.job_store_path().name == "jobs.sqlite3"
+
+
+def test_app_data_root_platform_contract(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.delenv("HAWAVOCLEAN_STATE_DIR", raising=False)
+    monkeypatch.setattr("hawavoclean.paths.sys.platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    assert paths.app_data_root() == tmp_path / "Local" / "HawaVoClean"
+
+    monkeypatch.setattr("hawavoclean.paths.sys.platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert paths.app_data_root() == tmp_path / "xdg" / "hawavoclean"
 
 
 # ---- config validation --------------------------------------------------

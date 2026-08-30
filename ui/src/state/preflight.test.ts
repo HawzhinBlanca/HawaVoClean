@@ -22,7 +22,7 @@ vi.mock('../audio/player', () => ({ getPlayer: () => ({}) }));
 vi.mock('../bridge', () => ({
   getBridge: () => ({
     host: 'web',
-    engine: { getEndpoint: async () => ({ baseUrl: 'http://127.0.0.1:8765', token: 't' }) },
+    engine: { getEndpoint: async () => ({ baseUrl: 'http://127.0.0.1:8765' }) },
   }),
 }));
 

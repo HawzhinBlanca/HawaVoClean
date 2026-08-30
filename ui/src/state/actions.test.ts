@@ -36,16 +36,18 @@ const player = vi.hoisted(() => ({
   // which Chromium reports as MediaError.code 4.
   setLivenessProbe: vi.fn((_fn: (() => boolean) | null) => undefined),
 }));
+const registerDroppedFile = vi.hoisted(() => vi.fn());
 vi.mock('../audio/player', () => ({ getPlayer: () => player }));
 
 vi.mock('../bridge', () => ({
   getBridge: () => ({
     host: 'web',
     engine: {
-      getEndpoint: async () => ({ baseUrl: 'http://127.0.0.1:8765', token: 'devtok' }),
+      getEndpoint: async () => ({ baseUrl: 'http://127.0.0.1:8765' }),
     },
     files: {
       pickAudio: async () => null,
+      registerDroppedFile: (file: File) => registerDroppedFile(file),
       pathForFile: () => null,
       revealInFinder: async () => undefined,
     },
@@ -190,7 +192,7 @@ function makeClient(): FakeClient {
     // otherwise.
     verify: vi.fn(async (_path: string) => ({ status: 206, delivered: true, size: 1000 })),
     fileUrl: (p: string) => `http://127.0.0.1:8765/api/audio?path=${encodeURIComponent(p)}`,
-    eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events?token=devtok`,
+    eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events`,
   };
 }
 
@@ -241,6 +243,8 @@ beforeEach(() => {
   player.hasDeck.mockReturnValue(true);
   player.deckFault.mockReturnValue(null);
   player.onFault.mockClear();
+  registerDroppedFile.mockReset();
+  registerDroppedFile.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -774,11 +778,18 @@ describe('report access and helpers (B7)', () => {
     expect(actions.baseName('a.wav')).toBe('a.wav');
   });
 
-  it('isAcceptedFile takes audio and video containers and refuses the rest', async () => {
+  it('accepts exactly the production media extension contract', async () => {
     const { actions } = await boot();
     const f = (name: string, type = ''): File => new File(['x'], name, { type });
-    expect(actions.isAcceptedFile(f('take.wav', 'audio/wav'))).toBe(true);
-    expect(actions.isAcceptedFile(f('take.MP4'))).toBe(true);
+    const allowed = ['wav', 'wave', 'aif', 'aiff', 'aifc', 'flac', 'mp3', 'm4a', 'mp4'];
+    expect([...actions.ACCEPTED_EXTENSIONS]).toEqual(allowed);
+    for (const extension of allowed) {
+      expect(actions.isAcceptedFile(f(`take.${extension}`))).toBe(true);
+    }
+    for (const extension of ['mov', 'aac', 'ogg', 'oga', 'opus', 'caf', 'w64', 'mkv', 'webm']) {
+      expect(actions.isAcceptedFile(f(`take.${extension}`, 'audio/mpeg'))).toBe(false);
+    }
+    expect(actions.isAcceptedFile(f('take', 'audio/wav'))).toBe(false);
     expect(actions.isAcceptedFile(f('notes.txt', 'text/plain'))).toBe(false);
     expect(actions.extensionOf('Flute 09.m4a.mp4')).toBe('mp4');
     expect(actions.extensionOf('noext')).toBe('');
@@ -2195,6 +2206,36 @@ describe('the web-mode upload state machine', () => {
     Object.defineProperty(f, 'size', { value: size });
     return f;
   };
+
+  it('uses only a main-registered native path and skips upload', async () => {
+    const { actions, store, client } = await boot();
+    registerDroppedFile.mockResolvedValue('/native/selected.wav');
+    client.uploadWithProgress = vi.fn();
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(registerDroppedFile).toHaveBeenCalledTimes(1);
+    expect(client.uploadWithProgress).not.toHaveBeenCalled();
+    expect(client.analyze).toHaveBeenCalledWith(
+      '/native/selected.wav',
+      expect.any(Number),
+      expect.anything(),
+    );
+    expect(store.useStore.getState().source?.path).toBe('/native/selected.wav');
+  });
+
+  it('falls back to managed upload when native registration fails', async () => {
+    const { actions, store, client } = await boot();
+    registerDroppedFile.mockRejectedValue(new Error('registration unavailable'));
+    client.uploadWithProgress = vi.fn(() => Promise.resolve({ path: '/work/up/fallback.wav' }));
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(client.uploadWithProgress).toHaveBeenCalledTimes(1);
+    expect(store.useStore.getState().source?.path).toBe('/work/up/fallback.wav');
+  });
 
   it('publishes progress so the bar can move, and flips to "finishing" at 100%', async () => {
     const { actions, store, client } = await boot();

@@ -23,6 +23,7 @@ from hawavoclean.publication import (
     publication_paths,
     publish_output_generation,
     resolve_committed_publication,
+    resolve_immutable_publication_generation,
 )
 
 
@@ -47,7 +48,9 @@ def _publish(root: Path, audio: bytes, *, overwrite: bool = False) -> tuple[Path
 
 
 def _current(root: Path) -> str:
-    return os.readlink(publication_paths(root / "out.wav").current).split("/", 1)[1]
+    pointer = json.loads(publication_paths(root / "out.wav").current.read_text())
+    assert pointer["schema_version"] == publication._POINTER_SCHEMA
+    return str(pointer["generation_id"])
 
 
 def _assert_complete_generation(root: Path) -> bytes:
@@ -61,11 +64,11 @@ def _assert_complete_generation(root: Path) -> bytes:
     return audio
 
 
-def test_first_publish_commits_three_public_aliases_through_one_pointer(tmp_path: Path) -> None:
+def test_first_publish_commits_regular_exports_through_one_pointer(tmp_path: Path) -> None:
     audio, report, summary = _publish(tmp_path, b"generation-one")
     paths = publication_paths(audio)
 
-    assert all(path.is_symlink() for path in (audio, report, summary))
+    assert all(path.is_file() and not path.is_symlink() for path in (audio, report, summary))
     assert audio.read_bytes() == b"generation-one"
     assert (
         json.loads(report.read_text())["output"]["sha256"]
@@ -74,10 +77,12 @@ def test_first_publish_commits_three_public_aliases_through_one_pointer(tmp_path
     assert summary.read_text() == "summary:generation-one"
     generation = paths.generations / _current(tmp_path)
     assert generation.is_dir()
+    assert paths.current.is_file() and not paths.current.is_symlink()
     assert json.loads(paths.transaction.read_text())["phase"] == "committed"
 
-    for role, public in (("master.wav", audio), ("report.json", report), ("summary.txt", summary)):
-        assert os.readlink(public) == f"{paths.bundle.name}/current/{role}"
+    # The user-facing master survives without the adjacent private bundle.
+    shutil.rmtree(paths.bundle)
+    assert audio.read_bytes() == b"generation-one"
 
 
 def test_public_output_path_resolves_parent_but_not_final_alias(tmp_path: Path) -> None:
@@ -105,6 +110,82 @@ def test_overwrite_retains_prior_immutable_generation(tmp_path: Path) -> None:
     assert old[0].read_bytes() == b"old"
     assert json.loads(old[1].read_text())["output"]["sha256"] == hashlib.sha256(b"old").hexdigest()
     assert new[0].read_bytes() == b"new"
+
+
+def test_job_bound_generation_lookup_ignores_current_and_mixed_public_exports(
+    tmp_path: Path,
+) -> None:
+    old_bytes = b"old"
+    new_bytes = b"new"
+    _publish(tmp_path, old_bytes)
+    _publish(tmp_path, new_bytes, overwrite=True)
+    paths = publication_paths(tmp_path / "out.wav")
+
+    # A process can die between these recoverable export copies. Artifact
+    # readers must never consume this mixed public state.
+    paths.audio.write_bytes(new_bytes)
+    paths.json.write_text(_report(old_bytes))
+    paths.txt.write_text("summary:new")
+
+    old = resolve_immutable_publication_generation(
+        paths.audio,
+        audio_sha256=hashlib.sha256(old_bytes).hexdigest(),
+    )
+    new = resolve_immutable_publication_generation(
+        paths.audio,
+        audio_sha256=hashlib.sha256(new_bytes).hexdigest(),
+    )
+    assert old is not None and new is not None
+    assert old[0].read_bytes() == old_bytes
+    assert (
+        json.loads(old[1].read_text())["output"]["sha256"] == hashlib.sha256(old_bytes).hexdigest()
+    )
+    assert old[2].read_text() == "summary:old"
+    assert new[0].read_bytes() == new_bytes
+    # Lookup is read-only with respect to convenience exports.
+    assert paths.json.read_text() == _report(old_bytes)
+
+
+def test_job_bound_lookup_refuses_same_master_ambiguity_without_sidecar_digests(
+    tmp_path: Path,
+) -> None:
+    audio = b"same-master"
+    first_summary = b"summary:first"
+    publish_output_generation(
+        _candidate(tmp_path, audio),
+        tmp_path / "out.wav",
+        _report(audio),
+        first_summary.decode(),
+    )
+    second = publish_output_generation(
+        _candidate(tmp_path, audio),
+        tmp_path / "out.wav",
+        _report(audio),
+        "summary:second",
+        overwrite=True,
+    )
+    audio_sha256 = hashlib.sha256(audio).hexdigest()
+    assert (
+        resolve_immutable_publication_generation(tmp_path / "out.wav", audio_sha256=audio_sha256)
+        is None
+    )
+
+    exact = resolve_immutable_publication_generation(
+        tmp_path / "out.wav",
+        audio_sha256=audio_sha256,
+        report_sha256=hashlib.sha256(second[1].read_bytes()).hexdigest(),
+        summary_sha256=hashlib.sha256(second[2].read_bytes()).hexdigest(),
+    )
+    assert exact is not None
+    assert exact[2].read_text() == "summary:second"
+    first_exact = resolve_immutable_publication_generation(
+        tmp_path / "out.wav",
+        audio_sha256=audio_sha256,
+        report_sha256=hashlib.sha256(_report(audio).encode()).hexdigest(),
+        summary_sha256=hashlib.sha256(first_summary).hexdigest(),
+    )
+    assert first_exact is not None
+    assert first_exact[2].read_text() == "summary:first"
 
 
 def test_no_overwrite_refusal_does_not_migrate_or_modify_legacy_files(tmp_path: Path) -> None:
@@ -226,7 +307,7 @@ def test_first_publish_failure_exposes_no_resolvable_partial_triplet(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def fail(name: str) -> None:
-        if name == "alias_json_replaced":
+        if name == "before_pointer_commit":
             raise OSError(28, "disk full")
 
     monkeypatch.setattr(publication, "_checkpoint", fail)
@@ -248,17 +329,22 @@ def test_legacy_triplet_migrates_without_destroying_prior_bytes(tmp_path: Path) 
     generations = list(paths.generations.iterdir())
     assert len(generations) == 2
     assert any((generation / "master.wav").read_bytes() == old for generation in generations)
-    assert paths.audio.is_symlink() and paths.audio.read_bytes() == b"new"
+    assert paths.audio.is_file() and not paths.audio.is_symlink()
+    assert paths.audio.read_bytes() == b"new"
 
 
-def test_interrupted_legacy_alias_migration_remains_old_and_recovers(
+def test_legacy_symlink_bundle_migrates_to_regular_pointer_and_exports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = b"legacy"
+    old = b"old"
+    _publish(tmp_path, old)
     paths = publication_paths(tmp_path / "out.wav")
-    paths.audio.write_bytes(old)
-    paths.json.write_text(_report(old))
-    paths.txt.write_text("legacy summary")
+    generation_id = _current(tmp_path)
+    paths.current.unlink()
+    os.symlink(f"generations/{generation_id}", paths.current)
+    for role, public in publication._public_roles(paths):
+        public.unlink()
+        os.symlink(publication._relative_alias_target(paths, role), public)
 
     def fail(name: str) -> None:
         if name == "alias_json_replaced":
@@ -266,17 +352,14 @@ def test_interrupted_legacy_alias_migration_remains_old_and_recovers(
 
     monkeypatch.setattr(publication, "_checkpoint", fail)
     with pytest.raises(PublicationError, match="migration interrupted"):
-        _publish(tmp_path, b"new", overwrite=True)
+        resolve_committed_publication(paths.audio)
 
-    assert tuple(path.read_bytes() for path in paths.public) == (
-        old,
-        _report(old).encode(),
-        b"legacy summary",
-    )
+    assert paths.current.is_symlink()
     monkeypatch.setattr(publication, "_checkpoint", lambda _name: None)
-    _publish(tmp_path, b"new", overwrite=True)
-    assert tuple(path.is_symlink() for path in paths.public) == (True, True, True)
-    assert paths.audio.read_bytes() == b"new"
+    resolved = resolve_committed_publication(paths.audio)
+    assert resolved is not None and resolved[0].read_bytes() == old
+    assert not paths.current.is_symlink()
+    assert all(path.is_file() and not path.is_symlink() for path in paths.public)
 
 
 def test_incomplete_legacy_triplet_is_never_overwritten(tmp_path: Path) -> None:
@@ -307,6 +390,37 @@ def test_unexpected_public_symlink_fails_closed(tmp_path: Path) -> None:
         _publish(tmp_path, b"new", overwrite=True)
     assert outside.read_bytes() == b"do not touch"
     assert os.readlink(tmp_path / "out.wav") == outside.name
+
+
+def test_edited_public_export_is_never_silently_overwritten(tmp_path: Path) -> None:
+    _publish(tmp_path, b"old")
+    public = tmp_path / "out.wav"
+    public.write_bytes(b"user-edited")
+
+    with pytest.raises(PublicationError, match="differs from the committed generation"):
+        _publish(tmp_path, b"new", overwrite=True)
+
+    assert public.read_bytes() == b"user-edited"
+    resolved = publication_paths(public).generations / _current(tmp_path) / "master.wav"
+    assert resolved.read_bytes() == b"old"
+
+
+def test_candidate_symlink_is_rejected_without_touching_target(tmp_path: Path) -> None:
+    target = tmp_path / "target.wav"
+    target.write_bytes(b"audio")
+    candidate = tmp_path / "candidate-link.wav"
+    os.symlink(target.name, candidate)
+
+    with pytest.raises(PublicationError, match="candidate audio file missing or unsafe"):
+        publish_output_generation(
+            candidate,
+            tmp_path / "out.wav",
+            _report(b"audio"),
+            "summary",
+        )
+
+    assert target.read_bytes() == b"audio"
+    assert not publication_exists(tmp_path / "out.wav")
 
 
 def test_symlinked_lock_file_is_rejected_without_touching_target(tmp_path: Path) -> None:
@@ -439,9 +553,8 @@ def test_concurrent_publishers_serialize_to_one_complete_generation(tmp_path: Pa
         ("copy", publication, "_copy_fsync"),
         ("write", publication, "_write_bytes_fsync"),
         ("directory-fsync", publication, "_fsync_directory"),
-        ("rename", os, "rename"),
-        ("replace", os, "replace"),
-        ("symlink", os, "symlink"),
+        ("rename-no-replace", publication, "rename_new_path"),
+        ("replace", publication, "replace_path"),
         ("staging-cleanup", shutil, "rmtree"),
     ],
 )
@@ -544,9 +657,7 @@ def test_real_signals_at_every_durable_state_recover_idempotently(
 ) -> None:
     root = tmp_path / f"{checkpoint}-{signal_name}"
     root.mkdir()
-    first_publish_state = checkpoint.startswith("alias_")
-    if not first_publish_state:
-        _publish(root, b"old")
+    _publish(root, b"old")
     candidate = _candidate(root, b"new")
     report = _report(b"new")
     script = """
@@ -573,21 +684,22 @@ publication.publish_output_generation(
             report,
             checkpoint,
             signal_name,
-            "0" if first_publish_state else "1",
+            "1",
         ],
         check=False,
         capture_output=True,
         timeout=10,
     )
-    assert result.returncode != 0 or checkpoint in {"pointer_replaced", "pointer_durable"}
+    assert result.returncode != 0 or checkpoint in {
+        "pointer_replaced",
+        "pointer_durable",
+        "alias_audio_replaced",
+        "alias_json_replaced",
+        "alias_txt_replaced",
+    }
 
-    paths = publication_paths(root / "out.wav")
-    if first_publish_state and not os.path.lexists(paths.current):
-        assert not publication_exists(paths.audio)
-        _publish(root, b"new")
-    else:
-        assert _assert_complete_generation(root) in {b"old", b"new"}
-        _publish(root, b"new", overwrite=True)
+    assert _assert_complete_generation(root) in {b"old", b"new"}
+    _publish(root, b"new", overwrite=True)
     assert _assert_complete_generation(root) == b"new"
 
 
@@ -616,7 +728,7 @@ publication.publish_output_generation(
     assert result.returncode == -signal.SIGKILL
 
     # Re-running the same publish verifies/reuses the immutable generation,
-    # repairs journal/aliases, and cannot delete the old generation.
+    # repairs the journal/exports, and cannot delete the old generation.
     _publish(tmp_path, b"after-kill", overwrite=True)
     resolved = resolve_committed_publication(tmp_path / "out.wav")
     assert resolved is not None
@@ -636,7 +748,7 @@ from pathlib import Path
 import hawavoclean.publication as publication
 
 def checkpoint(name: str) -> None:
-    if name == "alias_json_replaced":
+    if name == "before_pointer_commit":
         os.kill(os.getpid(), signal.SIGKILL)
 
 publication._checkpoint = checkpoint
@@ -654,7 +766,7 @@ publication.publish_output_generation(
     assert not publication_exists(paths.audio)
 
     # No --overwrite opt-in is needed because the killed process never made a
-    # generation authoritative. Recovery removes its owned dangling aliases.
+    # generation authoritative. Recovery ignores uncommitted private staging.
     audio, _, _ = _publish(tmp_path, b"after-kill")
     assert audio.read_bytes() == b"after-kill"
 

@@ -34,6 +34,8 @@ PROMISED_ARTIFACTS = (
     "audio-regression",
     "container-audio",
     "container-image",
+    "desktop-app",
+    "desktop-engine-smoke-audio",
     "resolve-engine",
     "resolve-plugin",
     "sbom",
@@ -241,7 +243,7 @@ def _artifact_identity(name: str, path: Path) -> dict[str, Any]:
     return {
         "sha256": digest,
         "kind": details.get("hawavoclean:artifact-kind", "unknown"),
-        "file_count": int(details.get("hawavoclean:artifact-tree-file-count", "0")),
+        "file_count": int(details.get("hawavoclean:artifact-tree-regular-files", "0")),
         "symlink_count": int(details.get("hawavoclean:artifact-tree-symlink-count", "0")),
         "total_size": int(
             details.get(
@@ -538,6 +540,27 @@ def _run_pass(
     runner.run("ui-tests", ["node", str(pnpm), "--dir", "ui", "test:run"], timeout=3600)
     runner.run("ui-build", ["node", str(pnpm), "--dir", "ui", "build"])
     runner.run(
+        "desktop-lock-install",
+        ["node", str(pnpm), "--dir", "desktop", "install", "--frozen-lockfile"],
+        timeout=3600,
+    )
+    runner.run("desktop-typecheck", ["node", str(pnpm), "--dir", "desktop", "typecheck"])
+    runner.run("desktop-tests", ["node", str(pnpm), "--dir", "desktop", "test"])
+    runner.run(
+        "desktop-config-contract",
+        ["node", str(pnpm), "--dir", "desktop", "verify:config"],
+    )
+    runner.run(
+        "desktop-source-shell-self-test",
+        ["node", str(pnpm), "--dir", "desktop", "test:shell"],
+        timeout=180,
+    )
+    runner.run(
+        "desktop-source-hard-crash-self-test",
+        ["node", str(pnpm), "--dir", "desktop", "test:hard-crash"],
+        timeout=180,
+    )
+    runner.run(
         "plugin-lock-install",
         [
             "node",
@@ -550,6 +573,10 @@ def _run_pass(
     )
     runner.run(
         "ui-audit", ["node", str(pnpm), "--dir", "ui", "audit", "--audit-level", "low", "--json"]
+    )
+    runner.run(
+        "desktop-audit",
+        ["node", str(pnpm), "--dir", "desktop", "audit", "--audit-level", "low", "--json"],
     )
     runner.run(
         "plugin-audit",
@@ -696,6 +723,70 @@ def _run_pass(
         ],
         timeout=7200,
     )
+    desktop_package_root = artifact_root / "desktop-package"
+    runner.run(
+        "desktop-package-unsigned-proof",
+        [
+            "node",
+            "desktop/scripts/package-proof.cjs",
+            "--engine",
+            str(engine),
+            "--source-sha",
+            commit,
+            "--output",
+            str(desktop_package_root),
+        ],
+        timeout=3600,
+    )
+    desktop_app = desktop_package_root / "mac-arm64" / "HawaVoClean.app"
+    desktop_proof_json = build_root / "desktop-package-proof.json"
+    desktop_integrity_command = [
+        "uv",
+        "run",
+        "--frozen",
+        "python",
+        "scripts/validate_desktop_app.py",
+        str(desktop_app),
+        "--source-sha",
+        commit,
+        "--require-engine",
+        "--output-json",
+        str(desktop_proof_json),
+    ]
+    runner.run("desktop-package-integrity-pre-smoke", desktop_integrity_command)
+    runner.run(
+        "desktop-packaged-app-self-test",
+        ["node", "desktop/scripts/packaged-selftest.cjs", str(desktop_app)],
+        timeout=180,
+    )
+    packaged_engine = desktop_app / "Contents" / "Resources" / "engine" / "hawavoclean-engine"
+    runner.run("desktop-packaged-engine-version", [str(packaged_engine), "--version"])
+    runner.run("desktop-packaged-engine-doctor", [str(packaged_engine), "doctor"])
+    desktop_smoke_dir = build_root / "desktop-engine-smoke"
+    desktop_smoke_dir.mkdir()
+    desktop_smoke_output = desktop_smoke_dir / "clean.wav"
+    runner.run(
+        "desktop-packaged-engine-process",
+        [
+            str(packaged_engine),
+            "process",
+            "tests/fixtures/sample_sorani_podcast.wav",
+            "--output",
+            str(desktop_smoke_output),
+            "--profile",
+            SMOKE_PROFILE,
+            "--overwrite",
+        ],
+    )
+    runner.run(
+        "desktop-packaged-engine-verify",
+        _verify_command(
+            [str(packaged_engine)],
+            str(desktop_smoke_output),
+            str(desktop_smoke_output.with_suffix(".hawavoclean.json")),
+        ),
+    )
+    runner.run("desktop-package-integrity-post-smoke", desktop_integrity_command)
     runner.run(
         "resolve-plugin-self-test",
         [
@@ -845,6 +936,8 @@ def _run_pass(
             "--artifact",
             f"ui={checkout / 'ui' / 'dist'}",
             "--artifact",
+            f"desktop-app={desktop_app}",
+            "--artifact",
             f"resolve-plugin={plugin}",
             "--output",
             str(sbom),
@@ -859,6 +952,10 @@ def _run_pass(
         "audio-regression": _artifact_identity("audio-regression", regression_output),
         "container-audio": _artifact_identity("container-audio", container_dir / "output.wav"),
         "container-image": {"sha256": image_id.removeprefix("sha256:"), "kind": "oci-image"},
+        "desktop-app": _artifact_identity("desktop-app", desktop_app),
+        "desktop-engine-smoke-audio": _artifact_identity(
+            "desktop-engine-smoke-audio", desktop_smoke_output
+        ),
         "resolve-engine": _artifact_identity("resolve-engine", engine),
         "resolve-plugin": _artifact_identity("resolve-plugin", plugin),
         "sbom": _artifact_identity("sbom", sbom),
@@ -885,6 +982,7 @@ def _run_pass(
             sdist=sdist,
             runtime_requirements=smoke_requirements,
             ui=checkout / "ui" / "dist",
+            desktop_app=desktop_app,
             resolve_plugin=plugin,
             sbom=sbom,
             container_image=image_id,
@@ -1000,7 +1098,7 @@ def main() -> int:
     parser.add_argument(
         "--retain-candidate-assets",
         action="store_true",
-        help="export and compare the six distributable assets from both isolated passes",
+        help="export and compare the eight proof-bound candidate assets from both isolated passes",
     )
     args = parser.parse_args()
     if args.runs < 2:
@@ -1012,7 +1110,7 @@ def main() -> int:
     session = args.output_dir.resolve() / session_name
     report_path = session / "release-gate-proof.json"
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_commit": None,
         "source_date_epoch": None,
         "started_at": started_at,
@@ -1027,7 +1125,8 @@ def main() -> int:
             "Real Sorani human acceptance remains Phase 5 and is not implied by this automated gate.",
             "Actual in-Resolve workflow and accessibility acceptance remain Phase 6.",
             "Vendor-owned Resolve Electron risk still requires explicit acceptance or a qualifying update.",
-            "GitHub required-check and branch-protection proof remains T3.2/T3.3 after user checkpoint U1.",
+            "GitHub governance is proven for the prior governed commit; this final candidate still needs exact-commit CI and independent approval.",
+            "The source shell and unsigned engine-bearing macOS app are tested here; Developer ID signing, notarization/stapling, DMG/ZIP, Authenticode Windows packaging and installer qualification remain native release-host gates.",
         ],
     }
     if args.retain_candidate_assets:

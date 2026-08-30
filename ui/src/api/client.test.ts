@@ -7,10 +7,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EngineClient, EngineError } from './client';
 
 const BASE = 'http://127.0.0.1:8765';
-const TOKEN = 'devtok';
 
 function client(baseUrl = `${BASE}/`): EngineClient {
-  return new EngineClient({ baseUrl, token: TOKEN });
+  return new EngineClient({ baseUrl });
 }
 
 /** A Response stand-in: only the four members the client actually touches. */
@@ -41,25 +40,28 @@ function lastHeaders(fn: ReturnType<typeof vi.fn>): Record<string, string> {
 
 describe('endpoint handling', () => {
   it('strips trailing slashes so no URL ever doubles up', () => {
-    expect(new EngineClient({ baseUrl: `${BASE}///`, token: TOKEN }).baseUrl).toBe(BASE);
-    expect(client().eventsUrl('j1').startsWith(`${BASE}/api/jobs/j1/events?`)).toBe(true);
+    expect(new EngineClient({ baseUrl: `${BASE}///` }).baseUrl).toBe(BASE);
+    expect(client().eventsUrl('j1')).toBe(`${BASE}/api/jobs/j1/events`);
   });
 });
 
-describe('the token travels as a header on API calls', () => {
-  it('sends X-Hawa-Token and JSON content type on a body call', async () => {
+describe('renderer requests contain no authentication secret', () => {
+  it('leaves authentication to the shell and sends only JSON content type', async () => {
     const fetchFn = mockFetch(res(200, '{"path":"/a.wav"}'));
     await client().analyze('/a.wav', 1200);
     expect(fetchFn).toHaveBeenCalledWith(`${BASE}/api/analyze`, expect.anything());
-    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBe(TOKEN);
+    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBeUndefined();
+    expect(lastHeaders(fetchFn).Authorization).toBeUndefined();
     expect(lastHeaders(fetchFn)['Content-Type']).toBe('application/json');
+    expect(lastInit(fetchFn).credentials).toBe('same-origin');
     expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual({ path: '/a.wav', buckets: 1200 });
   });
 
   it('sends no content type on a GET, so no preflight is provoked', async () => {
     const fetchFn = mockFetch(res(200, '{"ok":true}'));
     await client().health();
-    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBe(TOKEN);
+    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBeUndefined();
+    expect(lastHeaders(fetchFn).Authorization).toBeUndefined();
     expect(lastHeaders(fetchFn)['Content-Type']).toBeUndefined();
   });
 
@@ -71,20 +73,19 @@ describe('the token travels as a header on API calls', () => {
   });
 });
 
-describe('the token travels as a query parameter where a header cannot go', () => {
-  it('puts path and token in the query for <audio src> and download anchors', () => {
+describe('media and SSE URLs are credential-free', () => {
+  it('puts only the path in the query for <audio src> and download anchors', () => {
     const url = new URL(client().fileUrl('/Users/me/My Clip #1.wav'));
     expect(url.origin + url.pathname).toBe(`${BASE}/api/audio`);
     expect(url.searchParams.get('path')).toBe('/Users/me/My Clip #1.wav');
-    expect(url.searchParams.get('token')).toBe(TOKEN);
+    expect([...url.searchParams.keys()]).toEqual(['path']);
   });
 
-  it('encodes the job id in the SSE path and the token in its query', () => {
+  it('encodes the job id in the SSE path and has no query', () => {
     const url = new URL(client().eventsUrl('job/with space'));
     expect(url.pathname).toBe('/api/jobs/job%2Fwith%20space/events');
-    expect(url.searchParams.get('token')).toBe(TOKEN);
+    expect(url.search).toBe('');
   });
-
 });
 
 describe('error shape parsing', () => {
@@ -243,10 +244,13 @@ describe('request bodies and paths', () => {
     expect(fetchFn.mock.calls[1]?.[0]).toBe(`${BASE}/api/jobs/a%20b%2Fc/cancel`);
   });
 
-  it('fetchText reads a served sidecar through the token-in-query URL', async () => {
+  it('fetchText reads a served sidecar through a credential-free URL', async () => {
     const fetchFn = mockFetch(res(200, 'HAWAVOCLEAN REPORT'));
     await expect(client().fetchText('/out/a.hawavoclean.txt')).resolves.toBe('HAWAVOCLEAN REPORT');
-    expect(String(fetchFn.mock.calls[0]?.[0])).toContain('token=devtok');
+    const url = new URL(String(fetchFn.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('path')).toBe('/out/a.hawavoclean.txt');
+    expect(url.searchParams.has('token')).toBe(false);
+    expect(lastInit(fetchFn).credentials).toBe('same-origin');
   });
 
   it('fetchText reports a refused file as an EngineError', async () => {
@@ -320,12 +324,13 @@ describe('uploadWithProgress', () => {
     vi.stubGlobal('XMLHttpRequest', FakeXhr);
   });
 
-  it('opens a POST to /api/upload with the token header and a multipart body', () => {
+  it('opens a POST to /api/upload without renderer-owned auth and with a multipart body', () => {
     void client().uploadWithProgress(bigFile(8));
     const xhr = FakeXhr.last as FakeXhr;
     expect(xhr.method).toBe('POST');
     expect(xhr.url).toBe(`${BASE}/api/upload`);
-    expect(xhr.headers['X-Hawa-Token']).toBe(TOKEN);
+    expect(xhr.headers['X-Hawa-Token']).toBeUndefined();
+    expect(xhr.headers.Authorization).toBeUndefined();
     expect(xhr.body).toBeInstanceOf(FormData);
     expect(xhr.sent).toBe(true);
   });

@@ -15,7 +15,7 @@
   },
   "ci": {
     "workflow": ".github/workflows/ci.yml",
-    "workflow_sha256": "351f9aaa9952b5a838fc66268cb8b24365f94dcd7077b729176fd82ab843df09",
+    "workflow_sha256": "9e51196b279d18bf599c979cd1f96905105d3aac507a53fe2747341cabc1a244",
     "workflow_name": "release",
     "required_status_context": "required",
     "jobs": [
@@ -111,12 +111,12 @@
     "approved_contract_sha256": null
   },
   "known_limits": [
-    "This is a machine-validated design contract, not proof that GitHub Actions ran or that repository protections are active.",
-    "U1 remains required before any external GitHub setting is changed or the exact CI proof can be claimed.",
-    "The required release environment needs an explicit reviewer identity and a dedicated Apple-silicon runner before activation.",
-    "T3.3 remains open until a deliberately failing disposable pull request is mechanically prevented from merging."
+    "The prior workflow and active branch protection were proven on 2026-08-26; this digest is a changed candidate contract and does not transfer that proof to the new commit.",
+    "Independent review remains required before this workflow revision can merge under the active main protection.",
+    "The release runner still uses the owner's workstation account rather than a dedicated unprivileged account; that remains a recorded deviation.",
+    "A deliberately failing Python test already proved required-check enforcement. The new UI pipe-failure regression still needs a disposable remote pull-request proof."
   ],
   "integrity": {
-    "contract_sha256": "1d334b0c9f06eb7059d872946229dd964718e80abd6223c423973102059dd6f4"
+    "contract_sha256": "0d7aa9c068341b71c301e896e7e2b35ded319892c284dbbb818519b18eb91d1c"
   }
 }

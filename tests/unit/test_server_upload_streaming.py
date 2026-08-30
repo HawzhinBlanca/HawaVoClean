@@ -55,7 +55,7 @@ def _client(work: Path, **kwargs: Any) -> Iterator[TestClient]:
     assert work.is_dir()
     manager = JobManager()
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None, **kwargs)
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         yield c
     manager.shutdown()
 

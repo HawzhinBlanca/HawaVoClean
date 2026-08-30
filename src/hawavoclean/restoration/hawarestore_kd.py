@@ -142,6 +142,8 @@ class HawaRestoreKDNet(nn.Module):
         cutoff_hz: torch.Tensor,  # (B,)
         speaker_idx: torch.Tensor | None = None,  # (B,)
         speaker_prototype: torch.Tensor | None = None,  # (B, 192)
+        x_obs: torch.Tensor | None = None,  # (B, 2, F, T)
+        _f0_hz: torch.Tensor | None = None,  # (B,)
     ) -> torch.Tensor:
         """Predict velocity field v_t(x_t)."""
         B = x_t.shape[0]
@@ -163,8 +165,11 @@ class HawaRestoreKDNet(nn.Module):
 
         cond = self.cond_mlp(torch.cat([t_emb, c_emb, spk_emb, proto_emb], dim=-1))
 
-        # 2. Forward through vector field network
+        # 2. Forward through vector field network with low-band observed conditioning
         h = self.in_proj(x_t)
+        if x_obs is not None:
+            # Low-band observed guidance injection
+            h = h + 0.5 * self.in_proj(x_obs)
         h = self.film1(self.block1(h), cond)
 
         h_down = self.down1(h)
@@ -199,6 +204,7 @@ class HawaRestoreKD(Restorer):
         checkpoint_path: Path | str | None = None,
         chunk_seconds: float = 1.0,
         chunk_overlap_seconds: float = 0.25,
+        solver: str = "midpoint",
     ) -> None:
         self.sample_rate = sample_rate
         self.n_fft = n_fft
@@ -207,6 +213,7 @@ class HawaRestoreKD(Restorer):
         self.transition_hz = transition_hz
         self.chunk_seconds = chunk_seconds
         self.chunk_overlap_seconds = chunk_overlap_seconds
+        self.solver = solver
 
         # CPU by default, deliberately. torch.manual_seed does not give the same
         # stream on CUDA/MPS as on CPU, and the ODE solver starts from randn, so
@@ -281,7 +288,7 @@ class HawaRestoreKD(Restorer):
         generator: torch.Generator,
         steps: int = 4,
     ) -> torch.Tensor:
-        """Midpoint flow-matching ODE solver for missing-band trajectory integration."""
+        """Midpoint or Heun flow-matching ODE solver with low-band guidance."""
         dt = 1.0 / steps
         # An explicit generator, not torch.manual_seed: seeding the global RNG
         # from inside inference would reach every other torch consumer in the
@@ -297,13 +304,22 @@ class HawaRestoreKD(Restorer):
         for step in range(steps):
             t_val = step * dt
             t_curr = torch.tensor([t_val], device=self.device, dtype=torch.float32)
-            t_mid = torch.tensor([t_val + dt / 2.0], device=self.device, dtype=torch.float32)
 
             with torch.no_grad():
-                v_curr = self.net(x_t, t_curr, cutoff_t, speaker_idx, speaker_proto)
-                x_mid = x_t + v_curr * (dt / 2.0)
-                v_mid = self.net(x_mid, t_mid, cutoff_t, speaker_idx, speaker_proto)
-                x_t = x_t + v_mid * dt
+                if self.solver == "heun":
+                    # Heun 2nd-order predictor-corrector
+                    t_next = torch.tensor([min(1.0, t_val + dt)], device=self.device, dtype=torch.float32)
+                    v_0 = self.net(x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    x_pred = x_t + v_0 * dt
+                    v_1 = self.net(x_pred, t_next, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    x_t = x_t + 0.5 * (v_0 + v_1) * dt
+                else:
+                    # Midpoint 2nd-order solver
+                    t_mid = torch.tensor([t_val + dt / 2.0], device=self.device, dtype=torch.float32)
+                    v_curr = self.net(x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    x_mid = x_t + v_curr * (dt / 2.0)
+                    v_mid = self.net(x_mid, t_mid, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    x_t = x_t + v_mid * dt
 
         return x_t
 

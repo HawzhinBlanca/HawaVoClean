@@ -921,26 +921,18 @@ export async function openFileDialog(): Promise<void> {
  */
 export const ACCEPTED_EXTENSIONS = [
   'wav',
-  'aiff',
+  'wave',
   'aif',
+  'aiff',
   'aifc',
-  'mp3',
   'flac',
+  'mp3',
   'm4a',
   'mp4',
-  'mov',
-  'aac',
-  'ogg',
-  'oga',
-  'opus',
-  'caf',
-  'w64',
-  'mkv',
-  'webm',
 ] as const;
 
 /** The short version, for the one line the drop well has room for. */
-export const ACCEPTED_SHORTLIST = 'wav · aiff · mp3 · flac · m4a · mp4 · mov';
+export const ACCEPTED_SHORTLIST = 'wav · aiff · flac · mp3 · m4a · mp4';
 
 export function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -949,9 +941,7 @@ export function extensionOf(name: string): string {
 
 export function isAcceptedFile(file: File): boolean {
   const ext = extensionOf(file.name);
-  if ((ACCEPTED_EXTENSIONS as readonly string[]).includes(ext)) return true;
-  // A file with no extension but an honest media MIME type is still media.
-  return file.type.startsWith('audio/') || file.type.startsWith('video/');
+  return (ACCEPTED_EXTENSIONS as readonly string[]).includes(ext);
 }
 
 /**
@@ -1039,7 +1029,20 @@ export async function ingestFile(file: File): Promise<void> {
     });
     return;
   }
-  const local = bridge.files.pathForFile(file);
+  // A native drop is not authority by itself. The preload asks main to bind
+  // its OS path through the broker's root-only registration route; if that
+  // cannot complete, send the File bytes through the managed upload path.
+  // A host without the registration bridge is not allowed to turn a raw
+  // renderer path into authority; it takes the same managed-upload fallback
+  // as a failed registration.
+  let local: string | null = null;
+  try {
+    local = bridge.files.registerDroppedFile
+      ? await bridge.files.registerDroppedFile(file)
+      : null;
+  } catch {
+    local = null;
+  }
   if (local) {
     await loadSource({ path: local, name: file.name, origin: 'drop' });
     return;
@@ -2111,3 +2114,34 @@ export function togglePlay(): void {
 export function seekTo(time: number): void {
   getPlayer().seek(time);
 }
+
+/** D2 · Plays only the current selection range. Auto-pauses at the end. */
+export function playSelection(loop = false): void {
+  const sel = getState().selectionRange;
+  if (!sel || sel.end <= sel.start) return;
+
+  const player = getPlayer();
+  player.seek(sel.start);
+  void player.play();
+
+  // Poll transport time and stop/loop when we pass the end
+  let handle = 0;
+  const check = (): void => {
+    if (!getState().playing) {
+      cancelAnimationFrame(handle);
+      return;
+    }
+    if (player.time >= sel.end) {
+      if (loop) {
+        player.seek(sel.start);
+      } else {
+        player.pause();
+        cancelAnimationFrame(handle);
+        return;
+      }
+    }
+    handle = requestAnimationFrame(check);
+  };
+  handle = requestAnimationFrame(check);
+}
+

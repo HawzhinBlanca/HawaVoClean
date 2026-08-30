@@ -12,6 +12,7 @@ tests and deployments can isolate state:
 """
 
 import os
+import sys
 from pathlib import Path
 
 _PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -72,6 +73,29 @@ def work_root() -> Path:
     if override:
         return Path(override).resolve()
     return Path.home() / ".cache" / "hawavoclean" / "work"
+
+
+def app_data_root() -> Path:
+    """Durable per-user application data, never the disposable work cache."""
+
+    override = os.environ.get("HAWAVOCLEAN_STATE_DIR")
+    if override:
+        return Path(override).resolve()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "HawaVoClean"
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        base = Path(local) if local else Path.home() / "AppData" / "Local"
+        return base / "HawaVoClean"
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "hawavoclean"
+
+
+def job_store_path() -> Path:
+    """SQLite ledger used by the installed local engine broker."""
+
+    return app_data_root() / "state" / "jobs.sqlite3"
 
 
 def profile_config_path(profile: str) -> Path:

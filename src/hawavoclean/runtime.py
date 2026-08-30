@@ -48,8 +48,8 @@ and would need one locked hash per device to say anything useful.
 """
 
 import os
-import resource
 import sys
+from ctypes import Structure, byref, c_size_t, c_ulong
 from dataclasses import dataclass
 
 from hawavoclean.errors import ConfigError, WorkerOOMError
@@ -228,6 +228,34 @@ def apply_thread_budget(num_threads: int, cpu_count: int | None = None) -> int |
     return int(budget)
 
 
+def _windows_peak_rss_bytes() -> int:
+    """Peak working set from the native process counters on Windows."""
+
+    import ctypes
+
+    class ProcessMemoryCounters(Structure):
+        _fields_ = [
+            ("cb", c_ulong),
+            ("PageFaultCount", c_ulong),
+            ("PeakWorkingSetSize", c_size_t),
+            ("WorkingSetSize", c_size_t),
+            ("QuotaPeakPagedPoolUsage", c_size_t),
+            ("QuotaPagedPoolUsage", c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", c_size_t),
+            ("QuotaNonPagedPoolUsage", c_size_t),
+            ("PagefileUsage", c_size_t),
+            ("PeakPagefileUsage", c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    windll = vars(ctypes)["windll"]
+    process = windll.kernel32.GetCurrentProcess()
+    if not windll.psapi.GetProcessMemoryInfo(process, byref(counters), counters.cb):
+        raise OSError("GetProcessMemoryInfo failed")
+    return int(counters.PeakWorkingSetSize)
+
+
 def process_peak_rss_bytes() -> int:
     """High-water resident set of *this* process, in bytes.
 
@@ -236,6 +264,12 @@ def process_peak_rss_bytes() -> int:
     that spike is gone from the instantaneous reading by the time anyone
     looks. ``ru_maxrss`` is bytes on macOS/BSD and kibibytes on Linux.
     """
+    if sys.platform == "win32":
+        return _windows_peak_rss_bytes()
+    # ``resource`` does not exist on Windows. Import it only inside the POSIX
+    # branch so a base Windows install can import the engine at all.
+    import resource
+
     peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     return peak if sys.platform == "darwin" else peak * 1024
 

@@ -11,9 +11,14 @@ import { RestoreControl } from './components/RestoreControl';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { SourceStrip } from './components/SourceStrip';
 import { SpectrumDisplay } from './components/SpectrumDisplay';
+import { SpectrogramDisplay } from './components/SpectrogramDisplay';
 import { Transport } from './components/Transport';
 import { UnitInspector } from './components/UnitInspector';
 import { WaveformDisplay } from './components/WaveformDisplay';
+import {
+  installRendererProofResponder,
+  RENDERER_PROOF_CONTRACT,
+} from './rendererProof';
 import { connectEngine, ingestDataTransfer } from './state/actions';
 import { useJobAnnouncer } from './state/announcer';
 import { useKeyboardMap } from './state/keymap';
@@ -92,6 +97,12 @@ export default function App() {
   const offline =
     engineStatus === 'offline' || (engineStatus === 'connecting' && offlineSince !== null);
 
+  // The desktop release gate challenges this listener from the real packaged
+  // BrowserWindow.  A successful response proves that the production React
+  // bundle reached an App commit; loading index.html and preload alone is not
+  // enough release evidence.
+  useEffect(() => installRendererProofResponder(__UI_VERSION__), []);
+
   useEffect(() => {
     void connectEngine();
     const prevent = (e: DragEvent): void => {
@@ -129,6 +140,8 @@ export default function App() {
   return (
     <div
       className="app"
+      data-hawa-renderer-contract={RENDERER_PROOF_CONTRACT}
+      data-hawa-ui-version={__UI_VERSION__}
       data-phase={phase}
       data-deck={deck}
       data-drag={dragOver ? 'true' : 'false'}
@@ -146,6 +159,7 @@ export default function App() {
       <main className="main">
         <div className="left">
           <WaveformDisplay />
+          <SpectrogramDisplay />
           {/* The inspector answers "why did this unit go that way"; the run
               list answers "which pass am I looking at". They share the bottom
               row because they are the same kind of question about the same

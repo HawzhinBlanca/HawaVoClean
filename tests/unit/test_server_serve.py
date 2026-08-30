@@ -35,13 +35,16 @@ def _get(url: str, token: str | None = "t") -> tuple[int, Any]:
 
 def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
     proc = subprocess.Popen(
-        [sys.executable, "-m", "hawavoclean.cli", "serve", "--port", "0", "--token", "t"],
+        [sys.executable, "-m", "hawavoclean.cli", "serve", "--port", "0", "--token-stdin"],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         cwd=REPO,
     )
-    assert proc.stdout is not None and proc.stderr is not None
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    proc.stdin.write("t\n")
+    proc.stdin.close()
     try:
         line = proc.stdout.readline()
         ready = json.loads(line)
@@ -145,6 +148,37 @@ def test_cmd_serve_requires_token_and_checks_ui_dir(
     assert exc.value.code == int(ExitCode.INVALID_USER_INPUT)  # no index.html
 
     monkeypatch.setattr(sys, "argv", ["hawavoclean", "serve", "--port", "0", "--token", ""])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == int(ExitCode.INVALID_USER_INPUT)
+
+
+def test_cmd_serve_reads_bounded_token_from_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hawavoclean.server.app as app_mod
+
+    observed: dict[str, object] = {}
+
+    def fake_run_server(host: str, port: int, token: str, ui_dir: Path | None) -> int:
+        observed.update(host=host, port=port, token=token, ui_dir=ui_dir)
+        return 0
+
+    monkeypatch.setattr(app_mod, "run_server", fake_run_server)
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO("pipe-secret\n"))
+    monkeypatch.setattr(sys, "argv", ["hawavoclean", "serve", "--token-stdin"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+    assert observed == {
+        "host": "127.0.0.1",
+        "port": 0,
+        "token": "pipe-secret",
+        "ui_dir": None,
+    }
+
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO("x" * 258))
+    monkeypatch.setattr(sys, "argv", ["hawavoclean", "serve", "--token-stdin"])
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == int(ExitCode.INVALID_USER_INPUT)

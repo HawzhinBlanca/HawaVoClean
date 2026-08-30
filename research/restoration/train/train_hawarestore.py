@@ -366,14 +366,21 @@ def _run_epoch(
         B = clean_stft.shape[0]
 
         with torch.set_grad_enabled(training):
-            # Flow matching on the linear probability path.
+            # Compute low-pass observed STFT from clean_stft using batch cutoff
+            freqs = torch.linspace(0, SAMPLE_RATE / 2, clean_stft.shape[2], device=device)
+            cutoff_expand = cutoff_hz.view(B, 1, 1, 1)
+            freqs_expand = freqs.view(1, 1, -1, 1)
+            lp_mask = (freqs_expand < cutoff_expand).float()
+            x_obs = clean_stft * lp_mask
+
+            # Flow matching on the linear probability path with low-band guidance
             t = torch.rand(B, device=device)
             x0 = torch.randn_like(clean_stft)
             x1 = clean_stft
             t_expand = t.view(B, 1, 1, 1)
             x_t = (1.0 - (1.0 - SIGMA_MIN) * t_expand) * x0 + t_expand * x1
             target_v = x1 - (1.0 - SIGMA_MIN) * x0
-            pred_v = model(x_t, t, cutoff_hz, spk_idx, spk_proto)
+            pred_v = model(x_t, t, cutoff_hz, spk_idx, spk_proto, x_obs=x_obs)
 
             # One-step clean estimate from the path identity
             #   x1 = (1 - sigma_min) * x_t + (1 - (1 - sigma_min) * t) * v,

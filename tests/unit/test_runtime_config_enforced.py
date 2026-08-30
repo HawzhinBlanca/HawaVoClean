@@ -232,6 +232,14 @@ def test_peak_rss_is_a_plausible_positive_number() -> None:
     assert peak > 8 * 1024 * 1024  # a live CPython is never under 8 MB
 
 
+def test_peak_rss_uses_native_windows_counter_without_importing_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("hawavoclean.runtime.sys.platform", "win32")
+    monkeypatch.setattr(runtime, "_windows_peak_rss_bytes", lambda: 123_456_789)
+    assert runtime.process_peak_rss_bytes() == 123_456_789
+
+
 def test_an_overrun_worker_refuses_further_units(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(runtime.MEMORY_LIMIT_ENV_VAR, "1")
     with pytest.raises(WorkerOOMError, match="worker_memory_limit_mb"):

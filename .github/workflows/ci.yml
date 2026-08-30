@@ -70,7 +70,9 @@ jobs:
           git diff --exit-code
 
       - name: Run adversarial and mutation gates
+        shell: bash
         run: |
+          set -Eeuo pipefail
           mkdir -p build/ci-evidence/source-contract
           uv run --frozen pytest -q -m fuzz tests/fuzz \
             --junitxml=build/ci-evidence/source-contract/fuzz-junit.xml
@@ -83,7 +85,7 @@ jobs:
         with:
           name: source-contract-${{ github.sha }}
           path: build/ci-evidence/source-contract/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
   core-support:
@@ -169,12 +171,12 @@ jobs:
         with:
           name: core-${{ matrix.os }}-py${{ matrix.python }}-${{ github.sha }}
           path: build/ci-evidence/${{ matrix.os }}-py${{ matrix.python }}/
-          if-no-files-found: warn
+          if-no-files-found: error
           include-hidden-files: true
           retention-days: 30
 
   web-resolve:
-    name: web and Resolve shell
+    name: web, desktop, and Resolve shell
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -197,22 +199,31 @@ jobs:
         run: |
           PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
           node "$PNPM" --dir ui install --frozen-lockfile
+          node "$PNPM" --dir desktop install --frozen-lockfile
           node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve install --frozen-lockfile
 
       - name: Test and build the web surface
+        shell: bash
         run: |
+          set -Eeuo pipefail
           PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
           mkdir -p build/ci-evidence/web-resolve
           node "$PNPM" --dir ui typecheck
           node "$PNPM" --dir ui test:run \
             | tee build/ci-evidence/web-resolve/ui-tests.log
           node "$PNPM" --dir ui build
+          node "$PNPM" --dir desktop typecheck
+          node "$PNPM" --dir desktop test \
+            | tee build/ci-evidence/web-resolve/desktop-tests.log
+          node "$PNPM" --dir desktop verify:config
 
       - name: Audit all JavaScript dependency graphs
         run: |
           PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
           node "$PNPM" --dir ui audit --audit-level low --json \
             > build/ci-evidence/web-resolve/ui-audit.json
+          node "$PNPM" --dir desktop audit --audit-level low --json \
+            > build/ci-evidence/web-resolve/desktop-audit.json
           node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve audit --audit-level low --json \
             > build/ci-evidence/web-resolve/plugin-audit.json
           npm --prefix resolve-plugin/toolchain audit --audit-level=low --json \
@@ -224,6 +235,24 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
 
+      - name: Package and validate the unsigned desktop shell proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PROOF_ROOT="$RUNNER_TEMP/hawavoclean-desktop-shell-proof"
+          EVIDENCE_DIR=build/ci-evidence/web-resolve
+          node desktop/scripts/package-proof.cjs \
+            --shell-only \
+            --source-sha "$GITHUB_SHA" \
+            --output "$PROOF_ROOT"
+          uv run --frozen python scripts/validate_desktop_app.py \
+            "$PROOF_ROOT/mac-arm64/HawaVoClean.app" \
+            --source-sha "$GITHUB_SHA" \
+            --shell-only \
+            --output-json "$EVIDENCE_DIR/desktop-shell-package-proof.json"
+          cp "$PROOF_ROOT/mac-arm64/HawaVoClean.app/Contents/Resources/HAWAVOCLEAN-PACKAGE-PROVENANCE.json" \
+            "$EVIDENCE_DIR/desktop-shell-package-provenance.json"
+
       # The Resolve engine is a shipped surface that, until this step existed,
       # only the self-hosted release gate ever assembled. A bundle that could
       # not start — or could start and not run — was therefore invisible to
@@ -233,7 +262,9 @@ jobs:
       # numeric stack and every packaged profile and core lock, and
       # process/verify proves the runtime end to end against its own digests.
       - name: Build and smoke the shipped Resolve engine
+        shell: bash
         run: |
+          set -Eeuo pipefail
           EVIDENCE_DIR=build/ci-evidence/web-resolve
           SMOKE_DIR="$RUNNER_TEMP/hawavoclean-engine-smoke"
           mkdir -p "$EVIDENCE_DIR" "$SMOKE_DIR"
@@ -264,7 +295,8 @@ jobs:
           path: |
             build/ci-evidence/web-resolve/
             ui/dist/
-          if-no-files-found: warn
+            desktop/dist/
+          if-no-files-found: error
           retention-days: 30
 
   exact-release-gate:
@@ -309,7 +341,7 @@ jobs:
         with:
           name: exact-release-gate-${{ github.sha }}-${{ github.run_attempt }}
           path: build/release-gate/
-          if-no-files-found: warn
+          if-no-files-found: error
           include-hidden-files: true
           compression-level: 0
           retention-days: 90
@@ -327,7 +359,9 @@ jobs:
           CORE_SUPPORT: ${{ needs.core-support.result }}
           WEB_RESOLVE: ${{ needs.web-resolve.result }}
           EXACT_RELEASE_GATE: ${{ needs.exact-release-gate.result }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
           test "$SOURCE_CONTRACT" = success
           test "$CORE_SUPPORT" = success
           test "$WEB_RESOLVE" = success

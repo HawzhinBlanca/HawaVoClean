@@ -34,6 +34,7 @@ def test_browser_window_enables_every_required_isolation_control() -> None:
 
 def test_permissions_network_and_ipc_fail_closed() -> None:
     main = (PLUGIN / "main.js").read_text()
+    auth = (PLUGIN / "session-auth.js").read_text()
 
     assert "setPermissionRequestHandler" in main
     assert "session.fromPartition(SESSION_PARTITION)" in main
@@ -50,10 +51,16 @@ def test_permissions_network_and_ipc_fail_closed() -> None:
     assert "setDevicePermissionHandler(() => false)" in main
     assert "permission === 'clipboard-sanitized-write'" in main
     assert "webRequest.onBeforeRequest" in main
-    assert "url.hostname === '127.0.0.1'" in main
-    assert "Number(url.port) === engine.port" in main
+    assert "webRequest.onBeforeSendHeaders" in main
+    assert "{ urls: ['http://127.0.0.1:*/*'] }" in main
+    assert "isEngineApiRequest(details.url, engineOrigin())" in main
+    assert "url.pathname !== '/api/session'" in main
+    assert "withEngineAuthorization(details.requestHeaders, authorization)" in main
+    assert "url.hostname !== '127.0.0.1'" in auth
+    assert "url.origin === engineOrigin" in auth
+    assert "url.pathname.startsWith('/api/')" in auth
     assert "IPC sender is not the trusted HawaVoClean renderer" in main
-    assert main.count("requireTrustedIpcSender(event);") == 8
+    assert main.count("requireTrustedIpcSender(event);") == 9
 
 
 def test_preload_exposes_only_the_declared_narrow_bridge() -> None:
@@ -66,6 +73,15 @@ def test_preload_exposes_only_the_declared_narrow_bridge() -> None:
     assert "ipcRenderer.on(" not in preload
     assert "const { contextBridge, ipcRenderer, webUtils } = require('electron')" in preload
     assert "child_process" not in preload
+    for secret_marker in (
+        "X-Hawa-Token",
+        "Authorization",
+        "sessionToken",
+        "hawa_session",
+        "localStorage",
+        "sessionStorage",
+    ):
+        assert secret_marker not in preload
 
 
 def test_ui_csp_allows_only_local_assets_loopback_engine_and_declared_workers() -> None:

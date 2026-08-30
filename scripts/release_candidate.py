@@ -31,6 +31,7 @@ SIGNATURE_NAME = f"{CHECKSUMS_NAME}.sig"
 SIGNATURE_NAMESPACE = "hawavoclean-release"
 REQUIRED_ASSETS = {
     "container",
+    "desktop-proof",
     "python-runtime-lock",
     "resolve-plugin",
     "sbom",
@@ -250,6 +251,7 @@ def export_release_assets(
     sdist: Path,
     runtime_requirements: Path,
     ui: Path,
+    desktop_app: Path,
     resolve_plugin: Path,
     sbom: Path,
     container_image: str,
@@ -277,9 +279,16 @@ def export_release_assets(
             shutil.copyfile(source, target)
 
         ui_target = stage / "hawavoclean-ui-3.3.0.tar.gz"
+        desktop_target = stage / "hawavoclean-desktop-proof-3.3.0-macos-arm64-unsigned.tar.gz"
         plugin_target = stage / "hawavoclean-resolve-plugin-3.3.0-macos-arm64.tar.gz"
         container_target = stage / "hawavoclean-container-3.3.0-linux-arm64.tar"
         normalized_directory_archive(ui, ui_target, prefix="hawavoclean-ui-3.3.0", epoch=epoch)
+        normalized_directory_archive(
+            desktop_app,
+            desktop_target,
+            prefix="HawaVoClean-3.3.0-macos-arm64-unsigned.app",
+            epoch=epoch,
+        )
         normalized_directory_archive(
             resolve_plugin,
             plugin_target,
@@ -300,6 +309,9 @@ def export_release_assets(
 
         assets = {
             "container": _asset_identity(container_target, kind="oci-docker-archive"),
+            "desktop-proof": _asset_identity(
+                desktop_target, kind="unsigned-macos-app-proof-tar-gzip-tree"
+            ),
             "python-runtime-lock": _asset_identity(
                 runtime_lock_target, kind="hash-locked-python-requirements"
             ),
@@ -492,6 +504,14 @@ def _capture_smoke(command: list[str], *, cwd: Path | None = None) -> tuple[dict
     return record, completed.stdout
 
 
+def _packaged_desktop_selftest_command(desktop_app: Path) -> list[str]:
+    return [
+        "node",
+        os.fspath(ROOT / "desktop" / "scripts" / "packaged-selftest.cjs"),
+        os.fspath(desktop_app),
+    ]
+
+
 def assemble_candidate(
     proof_path: Path,
     assets_dir: Path,
@@ -534,7 +554,7 @@ def assemble_candidate(
         if not isinstance(source_epoch, int) or isinstance(source_epoch, bool) or source_epoch < 0:
             raise CandidateError("release-gate proof has no valid source epoch")
         manifest: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "release": {"product": "hawavoclean", "version": "3.3.0"},
             "status": "signed" if signing_key is not None else "unsigned_pending_signing",
             "source_commit": proof["source_commit"],
@@ -550,6 +570,13 @@ def assemble_candidate(
                 "tested_artifact_sha256": proof["reproducibility"].get("artifact_sha256"),
             },
             "assets": manifest_assets,
+            "distribution_boundary": {
+                "desktop-proof": "unsigned qualification evidence only; not an installable release",
+                "native_release_artifacts": (
+                    "Developer ID signed, notarized and stapled macOS artifacts plus "
+                    "Authenticode-signed Windows artifacts require separate native gates"
+                ),
+            },
             "signature": {
                 "algorithm": "openssh-sshsig" if signing_key is not None else None,
                 "namespace": SIGNATURE_NAMESPACE if signing_key is not None else None,
@@ -617,6 +644,14 @@ def verify_candidate(
         raise CandidateError("candidate manifest digest mismatch")
     if manifest.get("release") != {"product": "hawavoclean", "version": "3.3.0"}:
         raise CandidateError("candidate targets the wrong release")
+    if manifest.get("schema_version") != 2 or manifest.get("distribution_boundary") != {
+        "desktop-proof": "unsigned qualification evidence only; not an installable release",
+        "native_release_artifacts": (
+            "Developer ID signed, notarized and stapled macOS artifacts plus "
+            "Authenticode-signed Windows artifacts require separate native gates"
+        ),
+    }:
+        raise CandidateError("candidate distribution boundary differs from the version-2 contract")
     if HEX40.fullmatch(str(manifest.get("source_commit"))) is None:
         raise CandidateError("candidate source commit is malformed")
 
@@ -792,7 +827,13 @@ def smoke_candidate(
             temp / "plugin",
             prefix="hawavoclean-resolve-plugin-3.3.0-macos-arm64",
         )
+        desktop_tree = _extract_normalized_tree(
+            asset_path("desktop-proof"),
+            temp / "desktop",
+            prefix="HawaVoClean-3.3.0-macos-arm64-unsigned.app",
+        )
         reconstructed = {
+            "desktop-app": _tree_sha256(desktop_tree),
             "ui": _tree_sha256(ui_tree),
             "resolve-plugin": _tree_sha256(plugin_tree),
         }
@@ -801,6 +842,44 @@ def smoke_candidate(
                 raise CandidateError(
                     f"candidate {name} archive does not reconstruct the tested tree"
                 )
+
+        commands.append(_run_smoke(_packaged_desktop_selftest_command(desktop_tree)))
+        desktop_engine = desktop_tree / "Contents" / "Resources" / "engine" / "hawavoclean-engine"
+        if desktop_engine.is_symlink() or not desktop_engine.is_file():
+            raise CandidateError("candidate desktop proof omits its embedded engine")
+        commands.append(_run_smoke([os.fspath(desktop_engine), "--version"]))
+        commands.append(_run_smoke([os.fspath(desktop_engine), "doctor"]))
+        desktop_output = temp / "desktop-engine-smoke.wav"
+        commands.append(
+            _run_smoke(
+                [
+                    os.fspath(desktop_engine),
+                    "process",
+                    os.fspath(input_path),
+                    "--output",
+                    os.fspath(desktop_output),
+                    "--profile",
+                    "production",
+                    "--overwrite",
+                ]
+            )
+        )
+        commands.append(
+            _run_smoke(
+                [
+                    os.fspath(desktop_engine),
+                    "verify",
+                    os.fspath(desktop_output),
+                    "--report",
+                    os.fspath(desktop_output.with_suffix(".hawavoclean.json")),
+                ]
+            )
+        )
+        desktop_digest = _sha256(desktop_output)
+        if desktop_digest != tested.get("desktop-engine-smoke-audio"):
+            raise CandidateError(
+                "candidate desktop engine output differs from the exact tested audio identity"
+            )
 
         venv = temp / "venv"
         commands.append(
@@ -950,6 +1029,7 @@ def smoke_candidate(
             "container_image_id": image_id,
             "wheel_output_sha256": wheel_digest,
             "container_output_sha256": container_digest,
+            "desktop_engine_output_sha256": desktop_digest,
             "commands": commands,
         }
     result["proof_sha256"] = _canonical_sha256(result)

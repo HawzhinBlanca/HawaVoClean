@@ -256,6 +256,14 @@ export interface AppState {
    * a new report or a new source clears it.
    */
   selectedUnit: UnitDecisionRecord | null;
+
+  /**
+   * D2 · Click-drag selection range in seconds. `null` = no active selection.
+   * Set by click-drag on the waveform; cleared by Escape or a new source.
+   * `I` sets in-point, `O` sets out-point (NLE convention).
+   */
+  selectionRange: { start: number; end: number } | null;
+
   /** Keyboard-map overlay (`?`). */
   shortcutsOpen: boolean;
 
@@ -308,6 +316,7 @@ export interface AppState {
   setHoverUnit(h: HoverUnit | null): void;
   setHighlight(r: { start: number; end: number; channel?: number } | null): void;
   setSelectedUnit(u: UnitDecisionRecord | null): void;
+  setSelectionRange(r: { start: number; end: number } | null): void;
   setShortcutsOpen(v: boolean): void;
   setStatus(line: string): void;
   setError(msg: string | null, label?: string): void;
@@ -358,6 +367,7 @@ export const useStore = create<AppState>((set) => ({
   highlightRange: null,
 
   selectedUnit: null,
+  selectionRange: null,
   shortcutsOpen: false,
 
   upload: null,
@@ -440,6 +450,7 @@ export const useStore = create<AppState>((set) => ({
         ? { start: selectedUnit.start_time_s, end: selectedUnit.end_time_s }
         : null,
     }),
+  setSelectionRange: (selectionRange) => set({ selectionRange }),
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setStatus: (statusLine) => set({ statusLine }),
   setError: (error, label) => set({ error, errorLabel: error ? (label ?? null) : null }),
@@ -492,6 +503,7 @@ export const useStore = create<AppState>((set) => ({
       hoverUnit: null,
       highlightRange: null,
       selectedUnit: null,
+      selectionRange: null,
       error: null,
       errorLabel: null,
       view: { start: 0, end: 0 },

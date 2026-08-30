@@ -10,6 +10,10 @@ This directory is the machine-checkable evidence ledger for the true-10 release 
 - `ledger.jsonl` is append-only and SHA-256 chained. Each entry hashes its complete canonical content
   and the prior entry hash. Git history supplies the external anchor: rewriting history and recomputing
   the chain changes the committed file hash and commit.
+- The append-only ledger is the completion authority for the true-10 plan. For each task, the
+  generated status uses its latest result; a later failure or blocked correction reopens it. Mutable
+  governance tasks must additionally bind the exact current contract hash, so an older pass cannot
+  survive a workflow change. Plan checkboxes mirror that evidence and cannot inflate the count.
 - `t4.1-container-proof.json` binds the reproducible, non-root CPU image, exact transitive Wolfi lock,
   read-only operational probe and current vulnerability/misconfiguration results.
 - `hawavoclean-3.3.0.cdx.json` and its checksum are the deterministic CycloneDX 1.6 T4.2 proof

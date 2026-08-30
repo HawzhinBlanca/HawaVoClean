@@ -15,6 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTRACT = ROOT / "evidence" / "release" / "github-governance-contract.json"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 USE_PATTERN = re.compile(r"^\s*uses:\s*([^@\s]+)@([^\s#]+)", re.MULTILINE)
+SHELL_PIPELINE_PATTERN = re.compile(r"(?<!\|)\|(?!\|)")
+REQUIRED_UPSTREAM_RESULTS = (
+    ("source-contract", "SOURCE_CONTRACT"),
+    ("core-support", "CORE_SUPPORT"),
+    ("web-resolve", "WEB_RESOLVE"),
+    ("exact-release-gate", "EXACT_RELEASE_GATE"),
+)
 TOP_LEVEL_FIELDS = {
     "schema_version",
     "contract_id",
@@ -54,6 +61,122 @@ def _require(condition: bool, message: str) -> None:
         raise GovernanceError(message)
 
 
+def _validate_shell_pipelines(workflow_text: str) -> None:
+    """Require fail-closed Bash semantics for every shell pipeline in the workflow."""
+    lines = workflow_text.splitlines()
+    pipeline_lines = {
+        index
+        for index, line in enumerate(lines)
+        if not line.lstrip().startswith("#")
+        and re.fullmatch(r"\s*[A-Za-z0-9_-]+:\s*[|>][-+]?\s*", line) is None
+        and SHELL_PIPELINE_PATTERN.search(line)
+    }
+    covered_lines: set[int] = set()
+
+    for run_index, line in enumerate(lines):
+        match = re.fullmatch(r"(?P<indent> *)run:\s*\|\s*", line)
+        if match is None:
+            continue
+        run_indent = len(match.group("indent"))
+        end_index = run_index + 1
+        while end_index < len(lines):
+            candidate = lines[end_index]
+            candidate_indent = len(candidate) - len(candidate.lstrip(" "))
+            if candidate.strip() and candidate_indent <= run_indent:
+                break
+            end_index += 1
+
+        block_pipeline_lines = pipeline_lines.intersection(range(run_index + 1, end_index))
+        if not block_pipeline_lines:
+            continue
+        covered_lines.update(block_pipeline_lines)
+
+        commands = [
+            candidate.strip()
+            for candidate in lines[run_index + 1 : end_index]
+            if candidate.strip() and not candidate.lstrip().startswith("#")
+        ]
+        first_pipeline_line = min(block_pipeline_lines) + 1
+        _require(
+            bool(commands) and commands[0] == "set -Eeuo pipefail",
+            f"shell pipeline at workflow line {first_pipeline_line} lacks "
+            "a leading 'set -Eeuo pipefail'",
+        )
+
+        step_indent = max(run_indent - 2, 0)
+        step_start = run_index - 1
+        while step_start >= 0:
+            candidate = lines[step_start]
+            if candidate.startswith(" " * step_indent + "- "):
+                break
+            step_start -= 1
+        explicit_shell = " " * run_indent + "shell: bash"
+        _require(
+            step_start >= 0 and explicit_shell in lines[step_start + 1 : run_index],
+            f"shell pipeline at workflow line {first_pipeline_line} does not declare shell: bash",
+        )
+
+    uncovered = sorted(pipeline_lines - covered_lines)
+    if uncovered:
+        raise GovernanceError(
+            "shell pipeline is outside a protected multiline run block at workflow line "
+            + str(uncovered[0] + 1)
+        )
+
+
+def _validate_required_aggregate(workflow_text: str) -> None:
+    """Ensure one failed leaf cannot be hidden by a later successful leaf check."""
+    match = re.search(
+        r"^  required:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        workflow_text,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    _require(match is not None, "stable required job is absent")
+    assert match is not None
+    body = match.group("body")
+
+    expected_jobs = [job for job, _variable in REQUIRED_UPSTREAM_RESULTS]
+    needs = re.search(r"^    needs:\s*\[(?P<jobs>[^]]+)]\s*$", body, re.MULTILINE)
+    _require(needs is not None, "required job needs list is absent or malformed")
+    assert needs is not None
+    actual_jobs = [value.strip() for value in needs.group("jobs").split(",")]
+    _require(actual_jobs == expected_jobs, "required job does not depend on every shipped surface")
+    _require(
+        re.search(r"^    if: always\(\)\s*$", body, re.MULTILINE) is not None,
+        "required job must report even when an upstream job fails",
+    )
+
+    for job, variable in REQUIRED_UPSTREAM_RESULTS:
+        expected_binding = f"          {variable}: ${{{{ needs.{job}.result }}}}"
+        _require(
+            expected_binding in body,
+            f"required job result binding is missing or fabricated: {variable}",
+        )
+
+    lines = body.splitlines()
+    try:
+        run_index = lines.index("        run: |")
+    except ValueError as exc:
+        raise GovernanceError("required aggregate script is absent") from exc
+    _require(
+        "        shell: bash" in lines[:run_index],
+        "required aggregate does not declare shell: bash",
+    )
+    commands: list[str] = []
+    for line in lines[run_index + 1 :]:
+        if line.strip() and len(line) - len(line.lstrip(" ")) <= 8:
+            break
+        if line.strip() and not line.lstrip().startswith("#"):
+            commands.append(line.strip())
+    expected_commands = ["set -Eeuo pipefail"] + [
+        f'test "${variable}" = success' for _job, variable in REQUIRED_UPSTREAM_RESULTS
+    ]
+    _require(
+        commands == expected_commands,
+        "required aggregate script can ignore, reorder, or mask a failed leaf result",
+    )
+
+
 def _canonical_contract(contract: dict[str, Any]) -> bytes:
     design = {key: value for key, value in contract.items() if key not in {"approval", "integrity"}}
     return json.dumps(
@@ -90,6 +213,16 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
 
 def _validate_workflow(contract: dict[str, Any], workflow_text: str) -> None:
     ci = _object(contract["ci"], "ci")
+    _validate_shell_pipelines(workflow_text)
+    _validate_required_aggregate(workflow_text)
+    artifact_uploads = len(re.findall(r"uses:\s*actions/upload-artifact@", workflow_text))
+    strict_artifact_uploads = len(
+        re.findall(r"^\s+if-no-files-found:\s*error\s*$", workflow_text, re.MULTILINE)
+    )
+    _require(
+        artifact_uploads > 0 and strict_artifact_uploads == artifact_uploads,
+        "every evidence upload must fail when its artifact path is missing",
+    )
     _require("pull_request_target:" not in workflow_text, "pull_request_target is forbidden")
     _require(
         "permissions:\n  contents: read" in workflow_text, "workflow permissions are not least"

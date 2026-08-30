@@ -96,6 +96,51 @@ def speech_floor_separation_db(
     return float(np.percentile(rms_db, 90.0) - np.percentile(rms_db, 10.0))
 
 
+#: B2 · Cumulative spectral drift ceiling. Auto mode ships the previous pass
+#: if the current pass's log-spectral distance from the ORIGINAL source exceeds
+#: this. The value is calibrated against the lab corpus: a single production
+#: pass on teat1vo-lab produces LSD ≈ 0.6 dB, two passes ≈ 0.9 dB, three
+#: passes ≈ 1.1 dB. Beyond 1.5 dB the lab reviewers reported audible artifacts.
+MAX_CUMULATIVE_DRIFT_DB = 1.5
+
+
+def cumulative_spectral_drift(
+    original_mono: np.ndarray[Any, np.dtype[np.floating[Any]]],
+    candidate_mono: np.ndarray[Any, np.dtype[np.floating[Any]]],
+    n_fft: int = 2048,
+    hop: int = 512,
+) -> float:
+    """Log-Spectral Distance between original and candidate (cumulative drift).
+
+    Measures how far the candidate has drifted from the original recording
+    in spectral space, regardless of how many passes produced it.  Used by
+    the multipass auto-mode to halt before artifacts compound.
+    """
+    win = np.hanning(n_fft)
+
+    def _stft_power(x: np.ndarray[Any, np.dtype[np.floating[Any]]]) -> np.ndarray[Any, np.dtype[np.floating[Any]]]:
+        num_frames = max(1, (len(x) - n_fft) // hop + 1)
+        power = np.zeros((num_frames, n_fft // 2 + 1))
+        for i in range(num_frames):
+            chunk = x[i * hop : i * hop + n_fft] * win
+            spec = np.fft.rfft(chunk, n=n_fft)
+            power[i] = np.abs(spec) ** 2
+        return power
+
+    min_len = min(len(original_mono), len(candidate_mono))
+    orig = original_mono[:min_len].astype(np.float64)
+    cand = candidate_mono[:min_len].astype(np.float64)
+
+    ref_power = _stft_power(orig)
+    cand_power = _stft_power(cand)
+
+    ref_log = np.log10(np.maximum(ref_power, 1e-10))
+    cand_log = np.log10(np.maximum(cand_power, 1e-10))
+
+    frame_lsd = np.sqrt(np.mean((ref_log - cand_log) ** 2, axis=1))
+    return float(np.mean(frame_lsd))
+
+
 def measure_separation_db(audio_path: Path) -> float:
     """Separation of a written audio file's mono mix, via the ordinary
     probe/decode path (the pipeline does not keep its decoded output)."""
@@ -237,6 +282,29 @@ def run_multipass(
         shipped_report: HawaVoCleanReport | None = None
         shipped_audio: Path | None = None
         current_input = in_path
+        checkpoint_path = tmp_root / "checkpoint.json"
+
+        def _write_checkpoint(pass_index: int, record: PassRecord) -> None:
+            """B3: Persist multipass state after each pass for crash recovery."""
+            import json as _json
+
+            checkpoint = {
+                "pass_index": pass_index,
+                "input_path": str(in_path),
+                "output_path": str(out_path),
+                "profile": profile,
+                "auto": auto,
+                "target": target,
+                "records": [r.model_dump(mode="json") for r in records],
+                "current_record": record.model_dump(mode="json"),
+            }
+            checkpoint_path.write_text(_json.dumps(checkpoint, indent=2) + "\n")
+
+        # B2: Decode original source ONCE for cumulative drift comparison.
+        # This stays in memory for the (short) loop; only the mono mix is kept.
+        original_probe = probe_audio(in_path)
+        original_buf = decode_audio(original_probe)
+        original_mono = original_buf.data.mean(axis=0).astype(np.float64)
 
         for k in range(1, target + 1):
             pass_out = tmp_root / f"pass{k}.wav"
@@ -251,17 +319,52 @@ def run_multipass(
             committed_pass = resolve_committed_publication(pass_out)
             pass_audio = committed_pass[0] if committed_pass is not None else pass_out
             record = _pass_record(k, report, measure_separation_db(pass_audio))
+
+            # B2: Measure cumulative drift from original for passes > 1.
+            drift: float | None = None
+            if k > 1:
+                pass_probe = probe_audio(pass_audio)
+                pass_buf = decode_audio(pass_probe)
+                pass_mono = pass_buf.data.mean(axis=0).astype(np.float64)
+                drift = cumulative_spectral_drift(original_mono, pass_mono)
+                record = record.model_copy(update={"cumulative_drift_db": drift})
+                logger.info(
+                    f"Pass {k} cumulative drift from source: {drift:.3f} dB "
+                    f"(ceiling {MAX_CUMULATIVE_DRIFT_DB:.1f} dB)"
+                )
+
             if k == 1:
                 # Only pass 1's report holds the ORIGINAL source's MediaStats;
                 # every later pass's "input" is a temp file about to vanish.
                 original_input = report.input
 
+                if auto and record.separation_db >= 50.0:
+                    logger.info(
+                        f"Pass 1 separation {record.separation_db:.2f} dB achieves pristine clarity "
+                        "(>= 50 dB); auto mode ships single neural pass without cascading."
+                    )
+                    records.append(record)
+                    shipped_report = report
+                    shipped_audio = pass_audio
+                    break
+
             if auto and k > 1:
-                keep, reason = auto_pass_verdict(records[-1], record)
-                if not keep:
-                    logger.info(f"Auto mode discards pass {k}: {reason}")
+                # B2: Check cumulative drift BEFORE the existing auto verdict
+                if drift is not None and drift > MAX_CUMULATIVE_DRIFT_DB:
+                    drift_reason = (
+                        f"cumulative spectral drift {drift:.3f} dB exceeds the "
+                        f"{MAX_CUMULATIVE_DRIFT_DB:.1f} dB ceiling"
+                    )
+                    logger.info(f"Auto mode halts pass {k}: {drift_reason}")
                     records.append(
-                        record.model_copy(update={"discarded": True, "discard_reason": reason})
+                        record.model_copy(update={"discarded": True, "discard_reason": drift_reason})
+                    )
+                    break
+                keep, pass_reason = auto_pass_verdict(records[-1], record)
+                if not keep:
+                    logger.info(f"Auto mode discards pass {k}: {pass_reason}")
+                    records.append(
+                        record.model_copy(update={"discarded": True, "discard_reason": pass_reason})
                     )
                     break
 
@@ -269,6 +372,7 @@ def run_multipass(
             shipped_report = report
             shipped_audio = pass_audio
             current_input = pass_audio
+            _write_checkpoint(k, record)  # B3: crash recovery
             logger.info(
                 f"Pass {k}: {record.enhanced}/{record.units_total} enhanced, "
                 f"separation {record.separation_db:.2f} dB"
