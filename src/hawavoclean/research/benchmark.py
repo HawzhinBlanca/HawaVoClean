@@ -146,4 +146,3 @@ def run_benchmark(
     with open(out, "w", encoding="utf-8") as f:
         json.dump(benchmark_data, f, indent=2)
     return benchmark_data
-

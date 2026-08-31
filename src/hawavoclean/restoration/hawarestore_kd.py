@@ -308,17 +308,29 @@ class HawaRestoreKD(Restorer):
             with torch.no_grad():
                 if self.solver == "heun":
                     # Heun 2nd-order predictor-corrector
-                    t_next = torch.tensor([min(1.0, t_val + dt)], device=self.device, dtype=torch.float32)
-                    v_0 = self.net(x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    t_next = torch.tensor(
+                        [min(1.0, t_val + dt)], device=self.device, dtype=torch.float32
+                    )
+                    v_0 = self.net(
+                        x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                    )
                     x_pred = x_t + v_0 * dt
-                    v_1 = self.net(x_pred, t_next, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    v_1 = self.net(
+                        x_pred, t_next, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                    )
                     x_t = x_t + 0.5 * (v_0 + v_1) * dt
                 else:
                     # Midpoint 2nd-order solver
-                    t_mid = torch.tensor([t_val + dt / 2.0], device=self.device, dtype=torch.float32)
-                    v_curr = self.net(x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    t_mid = torch.tensor(
+                        [t_val + dt / 2.0], device=self.device, dtype=torch.float32
+                    )
+                    v_curr = self.net(
+                        x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                    )
                     x_mid = x_t + v_curr * (dt / 2.0)
-                    v_mid = self.net(x_mid, t_mid, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real)
+                    v_mid = self.net(
+                        x_mid, t_mid, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                    )
                     x_t = x_t + v_mid * dt
 
         return x_t

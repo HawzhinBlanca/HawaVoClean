@@ -46,9 +46,9 @@ class TestRegressionGate:
         candidate = {
             "quality_metrics": {
                 "pesq_wb": {"mean": 2.76},  # -0.04, tolerance is 0.05
-                "estoi": {"mean": 0.84},    # -0.01, tolerance is 0.02
+                "estoi": {"mean": 0.84},  # -0.01, tolerance is 0.02
                 "si_snr_db": {"mean": 14.6},  # -0.4, tolerance is 0.5
-                "lsd_db": {"mean": 0.84},     # +0.04, tolerance is 0.05
+                "lsd_db": {"mean": 0.84},  # +0.04, tolerance is 0.05
                 "separation_db": {"mean": 19.6},  # -0.4, tolerance is 0.5
             }
         }

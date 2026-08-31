@@ -1495,9 +1495,7 @@ def create_app(
             raise ApiError(404, "not_found", f"unknown job: {job_id}")
         state = snapshot.get("state")
         if state not in {"done", "completed"}:
-            raise ApiError(
-                409, "invalid_state", f"job {job_id} is {state}, not completed"
-            )
+            raise ApiError(409, "invalid_state", f"job {job_id} is {state}, not completed")
         report = snapshot.get("report")
         report_file: Path | None = None
         if report is None:
@@ -1559,7 +1557,11 @@ def create_app(
 
         logger.info(
             "Unit %d of job %s: %s → %s (override=%s)",
-            req.unit_index, job_id, old_decision, unit["final_decision"], req.decision,
+            req.unit_index,
+            job_id,
+            old_decision,
+            unit["final_decision"],
+            req.decision,
         )
 
         return {

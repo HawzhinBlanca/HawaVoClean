@@ -118,7 +118,9 @@ def cumulative_spectral_drift(
     """
     win = np.hanning(n_fft)
 
-    def _stft_power(x: np.ndarray[Any, np.dtype[np.floating[Any]]]) -> np.ndarray[Any, np.dtype[np.floating[Any]]]:
+    def _stft_power(
+        x: np.ndarray[Any, np.dtype[np.floating[Any]]],
+    ) -> np.ndarray[Any, np.dtype[np.floating[Any]]]:
         num_frames = max(1, (len(x) - n_fft) // hop + 1)
         power = np.zeros((num_frames, n_fft // 2 + 1))
         for i in range(num_frames):
@@ -357,7 +359,9 @@ def run_multipass(
                     )
                     logger.info(f"Auto mode halts pass {k}: {drift_reason}")
                     records.append(
-                        record.model_copy(update={"discarded": True, "discard_reason": drift_reason})
+                        record.model_copy(
+                            update={"discarded": True, "discard_reason": drift_reason}
+                        )
                     )
                     break
                 keep, pass_reason = auto_pass_verdict(records[-1], record)

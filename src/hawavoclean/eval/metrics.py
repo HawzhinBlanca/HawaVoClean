@@ -83,9 +83,7 @@ def _load_mono(path: Path) -> tuple[np.ndarray, int]:
         return mono.astype(np.float32), int(sr)
 
 
-def _match_lengths(
-    ref: np.ndarray, cand: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
+def _match_lengths(ref: np.ndarray, cand: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Trim or pad to match lengths (required by all metrics)."""
     min_len = min(len(ref), len(cand))
     return ref[:min_len], cand[:min_len]
@@ -111,8 +109,7 @@ def _compute_si_snr(reference: np.ndarray, candidate: np.ndarray) -> float:
     e_noise = cand - s_target
 
     si_snr = 10.0 * np.log10(
-        max(float(np.dot(s_target, s_target)), 1e-10)
-        / max(float(np.dot(e_noise, e_noise)), 1e-10)
+        max(float(np.dot(s_target, s_target)), 1e-10) / max(float(np.dot(e_noise, e_noise)), 1e-10)
     )
     return float(si_snr)
 
@@ -173,9 +170,7 @@ def compute_metrics(
 
     # Resample candidate to reference rate if different
     if cand_sr != ref_sr:
-        cand_mono = resample_audio(
-            cand_mono, cand_sr, ref_sr, target_samples=len(ref_mono)
-        )
+        cand_mono = resample_audio(cand_mono, cand_sr, ref_sr, target_samples=len(ref_mono))
         warnings.append(f"Resampled candidate from {cand_sr} Hz to {ref_sr} Hz")
 
     ref_mono, cand_mono = _match_lengths(ref_mono, cand_mono)
