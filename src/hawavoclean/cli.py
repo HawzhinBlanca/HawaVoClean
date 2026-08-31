@@ -412,10 +412,20 @@ def cmd_process(args: argparse.Namespace) -> int:
         def on_progress(event: ProgressEvent) -> None:
             sink.emit(event.to_dict())
 
-    passes: int | str = getattr(args, "passes", 1)
-    if passes != 1 and getattr(args, "mode", "natural") == "restore":
-        # run_multipass has no restoration stage. Silently dropping --mode would
-        # publish a Natural master that the report never admits was un-restored.
+    clean_only = bool(getattr(args, "clean_only", False))
+    in_path = Path(args.input)
+    if in_path.is_dir():
+        # Route directory input directly to batch processing
+        args.inputs = [in_path]
+        args.output_dir = args.output
+        args.suffix = getattr(args, "suffix", "_clean")
+        args.skip_existing = False
+        args.per_file_timeout_s = 1800.0
+        return cmd_batch(args)
+
+    mode = getattr(args, "mode", "natural")
+    passes = getattr(args, "passes", 1)
+    if mode == "restore" and passes != 1:
         exit_with_code(
             ExitCode.INVALID_USER_INPUT,
             "Restore mode is single-pass only: --mode restore cannot be combined with "
@@ -437,6 +447,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 cutoff=getattr(args, "cutoff", "auto"),
                 cutoff_hz=getattr(args, "cutoff_hz", None),
                 profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
+                clean_only=clean_only,
             )
         else:
             run_multipass(
@@ -447,6 +458,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 profile=args.profile,
                 overwrite=args.overwrite,
                 on_progress=on_progress,
+                clean_only=clean_only,
             )
         processing_record: ProcessingRecord | None = None
         record_destination = getattr(args, "record_bundle", None)
@@ -633,6 +645,7 @@ def cmd_batch_worker(_args: argparse.Namespace) -> int:
                     cutoff=str(req.get("cutoff", "auto")),
                     cutoff_hz=req.get("cutoff_hz"),
                     profiles_dir=_resolve_profiles_dir(req.get("profiles_dir")),
+                    clean_only=bool(req.get("clean_only", False)),
                 )
                 reply = {"ok": True}
             except HawaVoCleanError as e:
@@ -760,6 +773,7 @@ class _BatchChild:
         cutoff: str = "auto",
         cutoff_hz: float | None = None,
         profiles_dir: str | Path | None = None,
+        clean_only: bool = False,
     ) -> str:
         deadline = time.monotonic() + timeout_s
         try:
@@ -778,6 +792,7 @@ class _BatchChild:
                 "cutoff": cutoff,
                 "cutoff_hz": cutoff_hz,
                 "profiles_dir": str(_resolve_profiles_dir(profiles_dir)),
+                "clean_only": clean_only,
             }
             self._proc.stdin.write(json.dumps(payload) + "\n")
             self._proc.stdin.flush()
@@ -832,15 +847,19 @@ atexit.register(_batch_child.close)
 def _summarize_published(dest: Path) -> str:
     """The one-line status of a file that published successfully."""
     report_path = dest.parent / f"{dest.stem}.hawavoclean.json"
-    try:
-        rep = json.loads(report_path.read_text(encoding="utf-8"))
-        summ = rep["summary"]
-        return (
-            f"ok: {summ['enhanced']}/{summ['units_total']} units enhanced, "
-            f"{rep['output']['integrated_lufs']:.1f} LUFS"
-        )
-    except Exception as e:
-        return f"FAILED: published but report unreadable ({type(e).__name__})"
+    if report_path.exists():
+        try:
+            rep = json.loads(report_path.read_text(encoding="utf-8"))
+            summ = rep["summary"]
+            return (
+                f"ok: {summ['enhanced']}/{summ['units_total']} units enhanced, "
+                f"{rep['output']['integrated_lufs']:.1f} LUFS"
+            )
+        except Exception as e:
+            return f"FAILED: published but report unreadable ({type(e).__name__})"
+    if dest.exists() and dest.stat().st_size > 0:
+        return f"ok: published clean master ({dest.stat().st_size / (1024 * 1024):.1f} MB)"
+    return "FAILED: output file missing after publish"
 
 
 def _run_one_isolated(
@@ -854,6 +873,7 @@ def _run_one_isolated(
     cutoff: str = "auto",
     cutoff_hz: float | None = None,
     profiles_dir: str | Path | None = None,
+    clean_only: bool = False,
 ) -> str:
     """Process one file in a child process under a hard deadline."""
     return _batch_child.run(
@@ -867,6 +887,7 @@ def _run_one_isolated(
         cutoff=cutoff,
         cutoff_hz=cutoff_hz,
         profiles_dir=_resolve_profiles_dir(profiles_dir),
+        clean_only=clean_only,
     )
 
 
@@ -885,8 +906,16 @@ def cmd_batch(args: argparse.Namespace) -> int:
         candidate = Path(raw)
         if candidate.is_file():
             inputs.append(candidate)
+        elif candidate.is_dir():
+            for child in sorted(candidate.iterdir()):
+                if (
+                    child.is_file()
+                    and child.suffix.lower() in _AUDIO_SUFFIXES
+                    and not child.name.startswith(".")
+                ):
+                    inputs.append(child)
         else:
-            print(f"[SKIP] not a file: {candidate}")
+            print(f"[SKIP] not an audio file or directory: {candidate}")
 
     if not inputs:
         exit_with_code(ExitCode.INVALID_USER_INPUT, "No input files to process.")
@@ -910,6 +939,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
 
     mode = getattr(args, "mode", "natural")
     speaker_id = getattr(args, "speaker_id", None)
+    clean_only = bool(getattr(args, "clean_only", False))
     if mode == "restore" and not speaker_id:
         exit_with_code(
             ExitCode.INVALID_USER_INPUT,
@@ -938,6 +968,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
                     cutoff=getattr(args, "cutoff", "auto"),
                     cutoff_hz=getattr(args, "cutoff_hz", None),
                     profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
+                    clean_only=clean_only,
                 )
             else:
                 status = _run_one_isolated(
@@ -946,6 +977,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
                     args.profile,
                     args.overwrite or args.skip_existing,
                     args.per_file_timeout_s,
+                    clean_only=clean_only,
                 )
             if not status.startswith("ok"):
                 failed += 1
@@ -1593,6 +1625,13 @@ def _main() -> None:
             "process only — batch always runs single-pass jobs."
         ),
     )
+    p_proc.add_argument(
+        "--clean-only",
+        "--no-sidecars",
+        dest="clean_only",
+        action="store_true",
+        help="Output only the master audio WAV file; omit .json and .txt sidecar reports",
+    )
     p_proc.set_defaults(func=cmd_process)
 
     # batch
@@ -1604,6 +1643,13 @@ def _main() -> None:
     p_batch.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
     p_batch.add_argument(
         "--suffix", default="_clean", help="Appended to each stem (default: _clean)"
+    )
+    p_batch.add_argument(
+        "--clean-only",
+        "--no-sidecars",
+        dest="clean_only",
+        action="store_true",
+        help="Output only master audio WAV files; omit .json and .txt sidecar reports",
     )
     p_batch.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
     p_batch.add_argument(

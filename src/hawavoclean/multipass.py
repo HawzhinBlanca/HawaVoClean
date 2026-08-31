@@ -234,6 +234,7 @@ def run_multipass(
     profile: str = "production",
     overwrite: bool = False,
     on_progress: ProgressCallback | None = None,
+    clean_only: bool = False,
 ) -> HawaVoCleanReport:
     """Run the pipeline ``passes`` times (or ``"auto"``) and publish the
     final master with a per-pass audit trail in its report.
@@ -261,6 +262,7 @@ def run_multipass(
                 profile=profile,
                 overwrite=overwrite,
                 on_progress=on_progress,
+                clean_only=clean_only,
             )
     target = MAX_PASSES if auto else pass_count
 
@@ -405,6 +407,7 @@ def run_multipass(
             json_report_str=serialize_json_report(final_report),
             txt_summary_str=generate_human_summary(final_report),
             overwrite=overwrite,
+            clean_only=clean_only,
         )
         shipped_index = next(r.pass_index for r in reversed(records) if not r.discarded)
         logger.info(

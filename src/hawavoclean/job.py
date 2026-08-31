@@ -112,6 +112,7 @@ class JobWorkspace:
         json_report_str: str,
         txt_summary_str: str,
         overwrite: bool = False,
+        clean_only: bool = False,
     ) -> tuple[Path, Path, Path]:
         """Publish output audio, JSON report, and TXT as one committed generation.
 
@@ -120,10 +121,8 @@ class JobWorkspace:
         three artifacts together; immutable prior generations remain available
         for recovery. See ADR 0005.
 
-        A staticmethod on purpose: it touches no workspace state, and the
-        multi-pass orchestrator publishes its amended final report through
-        this exact code path rather than a second implementation of the
-        atomic-publish discipline.
+        If clean_only is True, emits only the destination .wav master file without
+        creating public sidecars or hidden bundle directories.
         """
         return publish_output_generation(
             temp_audio_path=temp_audio_path,
@@ -131,6 +130,7 @@ class JobWorkspace:
             json_report_str=json_report_str,
             txt_summary_str=txt_summary_str,
             overwrite=overwrite,
+            clean_only=clean_only,
         )
 
     def cleanup(self) -> None:

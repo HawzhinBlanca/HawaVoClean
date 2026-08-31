@@ -367,6 +367,7 @@ def run_pipeline(
     cutoff: str = "auto",
     cutoff_hz: float | None = None,
     profiles_dir: str | Path = "profiles",
+    clean_only: bool = False,
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
@@ -495,6 +496,7 @@ def run_pipeline(
             cutoff=cutoff,
             cutoff_hz=cutoff_hz,
             profiles_dir=profiles_dir,
+            clean_only=clean_only,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
@@ -615,6 +617,7 @@ def _run_after_preflight(
     cutoff: str = "auto",
     cutoff_hz: float | None = None,
     profiles_dir: str | Path = "profiles",
+    clean_only: bool = False,
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
     # Probe metadata is not trusted to choose the decoder: a damaged container
@@ -1480,6 +1483,7 @@ def _run_after_preflight(
         json_report_str=json_str,
         txt_summary_str=txt_str,
         overwrite=overwrite,
+        clean_only=clean_only,
     )
 
     workspace.journal.append(

@@ -602,13 +602,33 @@ def publish_output_generation(
     json_report_str: str,
     txt_summary_str: str,
     overwrite: bool = False,
+    clean_only: bool = False,
 ) -> tuple[Path, Path, Path]:
-    """Durably publish a complete generation through one atomic pointer."""
+    """Durably publish output audio.
+
+    If clean_only is True, emits only the destination .wav master file without
+    creating public sidecars or hidden bundle directories.
+    """
     source = Path(temp_audio_path)
     if is_reparse_or_symlink(source) or not source.is_file():
         raise PublicationError(f"Temporary candidate audio file missing or unsafe: {source}")
     paths = publication_paths(destination_audio_path)
     paths.audio.parent.mkdir(parents=True, exist_ok=True)
+
+    if clean_only:
+        if not overwrite and paths.audio.exists():
+            raise PublicationError(
+                f"Destination output file already exists and overwrite=False: {paths.audio}"
+            )
+        _replace_regular_file(source, paths.audio)
+        for sidecar in (paths.json, paths.txt, paths.lock):
+            with contextlib.suppress(OSError):
+                if sidecar.is_file():
+                    sidecar.unlink()
+        with contextlib.suppress(OSError):
+            if paths.bundle.is_dir():
+                shutil.rmtree(paths.bundle)
+        return paths.public
 
     with _publication_lock(paths.lock):
         if not overwrite and (
