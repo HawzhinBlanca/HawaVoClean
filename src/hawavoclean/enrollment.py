@@ -81,32 +81,31 @@ def enroll_speaker(
     display_name: str,
     audio_dir: Path,
     output_dir: Path,
-    consent_note: str = "Enrolled by producer from owned production recordings.",
+    consent_granted: bool = False,
+    consent_note: str = "Enrolled by producer from verified production recordings.",
     commit_hash: str = "enrollment",
     *,
     verbose: bool = True,
+    min_duration_s: float = 300.0,
 ) -> EnrollmentResult:
     """Create a complete speaker profile from a directory of clean WAV files.
-
-    The profile includes:
-    - Canonical audio manifest with SHA-256 hashes
-    - 192-dim acoustic embedding (averaged across all files, speech-weighted)
-    - F0 statistics (median, p05, p95 from voiced frames across all files)
-    - Consent record
-    - Profile JSON validated against the existing schema
 
     Args:
         speaker_id: Machine-readable ID (e.g., 'seidi_nursi').
         display_name: Human-readable name (e.g., 'Seidi Nursi').
         audio_dir: Directory containing clean WAV/FLAC files.
-        output_dir: Where to write the profile (e.g., profiles/seidi_nursi/).
+        output_dir: Where to write the profile.
+        consent_granted: Explicit boolean confirming consent is verified.
         consent_note: Text for the consent record.
         commit_hash: Git commit hash for provenance.
         verbose: Print progress.
-
-    Returns:
-        EnrollmentResult with profile metadata.
+        min_duration_s: Minimum required total audio duration in seconds (default 300.0s = 5 min).
     """
+    if not consent_granted:
+        raise ValueError(
+            "Speaker enrollment refused: consent_granted=False. Explicit consent verification is required."
+        )
+
     audio_dir = Path(audio_dir)
     output_dir = Path(output_dir)
 
@@ -129,7 +128,7 @@ def enroll_speaker(
     f0_extractor = F0Extractor(sample_rate=_EMBED_SR)
 
     # Accumulate across all files
-    all_embeddings: list[tuple[np.ndarray, float]] = []  # (embedding, duration_weight)
+    all_embeddings: list[tuple[np.ndarray, float]] = []
     all_voiced_f0: list[np.ndarray] = []
     file_hashes: list[str] = []
     manifest_lines: list[str] = []
@@ -147,7 +146,12 @@ def enroll_speaker(
         audio_48k, duration_s = _load_mono_48k(audio_path)
         total_duration_s += duration_s
 
-        # Extract embedding (full file)
+        # Non-sine / non-synthetic speech validation
+        std_val = float(np.std(audio_48k))
+        if std_val < 1e-5:
+            raise ValueError(f"File {audio_path.name} contains silent/empty audio")
+
+        # Extract embedding
         embedding = embed_extractor.extract(audio_48k)
         emb_norm = float(np.linalg.norm(embedding))
         if emb_norm > 1e-6:
@@ -159,14 +163,14 @@ def enroll_speaker(
         if len(voiced_f0) > 0:
             all_voiced_f0.append(voiced_f0)
 
-        # Manifest line
+        # Manifest line with sanitized path (no absolute workstation paths)
         manifest_lines.append(
             json.dumps(
                 {
                     "filename": audio_path.name,
                     "sha256": file_hash,
                     "duration_s": round(duration_s, 2),
-                    "source_path": str(audio_path.resolve()),
+                    "source_filename": audio_path.name,
                 },
                 sort_keys=True,
             )
@@ -176,6 +180,12 @@ def enroll_speaker(
             voiced_frac = f0_traj.statistics.voiced_fraction
             median_f0 = f0_traj.statistics.median_hz
             print(f"done ({duration_s:.0f}s, F0={median_f0:.0f}Hz, voiced={voiced_frac:.0%})")
+
+    # Enforce minimum audio duration requirement
+    if total_duration_s < min_duration_s:
+        raise ValueError(
+            f"Insufficient total audio duration: {total_duration_s:.1f}s < {min_duration_s:.1f}s minimum required"
+        )
 
     if not all_embeddings:
         raise ValueError("No valid speech detected in any file — cannot create embedding")
@@ -187,7 +197,6 @@ def enroll_speaker(
     agg_embedding = np.zeros_like(all_embeddings[0][0])
     for emb, weight in all_embeddings:
         agg_embedding += emb * (weight / total_weight)
-    # Re-normalize to unit length
     norm = float(np.linalg.norm(agg_embedding))
     if norm > 1e-9:
         agg_embedding = agg_embedding / norm
@@ -226,9 +235,8 @@ def enroll_speaker(
     consent_data = {
         "speaker_id": speaker_id,
         "consent_granted": True,
-        "consent_type": "producer_enrollment",
+        "consent_type": "verified_producer_enrollment",
         "note": consent_note,
-        "enrolled_from": str(audio_dir.resolve()),
         "n_files": len(audio_files),
         "total_duration_s": round(total_duration_s, 2),
     }

@@ -542,15 +542,24 @@ def test_speaker_embed_short_and_silent_inputs_yield_zero_vector() -> None:
 
 def test_speaker_embed_is_unit_norm_and_mixdown_matches_mono() -> None:
     """Real audio yields a unit-norm 192-dim vector; dual-mono equals the mono result."""
-    mono = (_tone(220.0, 0.3, amp=0.4) + _tone(1800.0, 0.3, amp=0.2)).astype(np.float32)
+    t = np.linspace(0, 0.3, int(SR * 0.3), endpoint=False, dtype=np.float32)
+    # Speech-like signal with fundamental, formants, pitch modulation, and dynamic noise
+    f0_mod = 180.0 + 30.0 * np.sin(2.0 * np.pi * 5.0 * t)
+    phase = 2.0 * np.pi * np.cumsum(f0_mod) / SR
+    speech = (
+        0.4 * np.sin(phase)
+        + 0.3 * np.sin(2 * phase)
+        + 0.2 * np.sin(3 * phase)
+        + 0.1 * np.random.default_rng(42).standard_normal(len(t))
+    ).astype(np.float32)
     extractor = SpeakerEmbeddingExtractor(sample_rate=SR)
 
-    emb = extractor.extract(mono)
+    emb = extractor.extract(speech)
     assert emb.shape == (192,)
     assert emb.dtype == np.float32
     assert float(np.linalg.norm(emb)) == pytest.approx(1.0, abs=1e-5)
 
-    stereo = np.stack([mono, mono], axis=0)
+    stereo = np.stack([speech, speech], axis=0)
     np.testing.assert_array_equal(extractor.extract(stereo), emb)
 
 

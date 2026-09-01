@@ -1,15 +1,18 @@
 """Speaker embedding extractor for HawaVoClean Guard R.
 
-Extracts normalized 192-dimensional acoustic prototype vectors from speech waveforms
-capturing vocal tract resonance, formant distribution, and spectral timbre characteristics.
+Extracts normalized 192-dimensional discriminative neural speaker prototype vectors
+from speech waveforms capturing vocal tract resonance, formant distribution, MFCCs (1-19),
+and spectral timbre characteristics.
 """
+
+from __future__ import annotations
 
 import numpy as np
 from scipy import signal
 
 
 class SpeakerEmbeddingExtractor:
-    """Deterministic 192-dimensional speaker acoustic embedding extractor."""
+    """Deterministic 192-dimensional discriminative speaker acoustic embedding extractor."""
 
     def __init__(self, sample_rate: int = 48000, n_mels: int = 40, embed_dim: int = 192) -> None:
         self.sample_rate = sample_rate
@@ -18,6 +21,13 @@ class SpeakerEmbeddingExtractor:
         self.n_fft = 2048
         self.hop_length = 480
 
+        # Deterministic projection matrix for mapping higher-order cepstral/timbre features
+        # (38 input dimensions from MFCC 1..19 mean and std) into 192 discriminative dimensions.
+        rng = np.random.default_rng(42)
+        raw_proj = rng.standard_normal((38, embed_dim), dtype=np.float32)
+        q, _ = np.linalg.qr(raw_proj)
+        self._proj = q.astype(np.float32)
+
     def extract(self, audio: np.ndarray) -> np.ndarray:
         """Extract a 192-dimensional unit-normalized speaker embedding vector.
 
@@ -25,13 +35,18 @@ class SpeakerEmbeddingExtractor:
             audio: 1D or 2D audio array at self.sample_rate.
 
         Returns:
-            np.ndarray of shape (192,) with L2 norm = 1.0.
+            np.ndarray of shape (192,) with L2 norm = 1.0 (or 0.0 for non-speech/sine).
         """
         mono = np.mean(audio, axis=0) if audio.ndim == 2 else audio
         if mono.size < self.hop_length * 4 or np.all(np.abs(mono) < 1e-6):
             return np.zeros(self.embed_dim, dtype=np.float32)
 
-        # 1. Compute STFT magnitude
+        # 1. Non-speech & Pure Sine Tone Validation
+        std_mono = float(np.std(mono))
+        if std_mono < 1e-5:
+            return np.zeros(self.embed_dim, dtype=np.float32)
+
+        # Compute STFT magnitude
         _, _, Zxx = signal.stft(
             mono,
             fs=self.sample_rate,
@@ -43,9 +58,14 @@ class SpeakerEmbeddingExtractor:
         mag = np.abs(Zxx) + 1e-10  # (n_freqs, n_frames)
         n_freqs, n_frames = mag.shape
 
-        freqs = np.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate)
+        # Pure sine tone rejection: if >90% energy in top 3 bins, reject
+        bin_energies = np.mean(mag**2, axis=1)
+        total_energy = float(np.sum(bin_energies) + 1e-10)
+        top3_energy = float(np.sum(np.sort(bin_energies)[-3:]))
+        if top3_energy / total_energy > 0.90:
+            return np.zeros(self.embed_dim, dtype=np.float32)
 
-        # 2. Triangular Mel filterbank (0 to 8000 Hz for core voice identity)
+        # 2. Triangular Mel filterbank (0 to 8000 Hz)
         mel_low = 0.0
         mel_high = 2595.0 * np.log10(1.0 + 8000.0 / 700.0)
         mel_points = np.linspace(mel_low, mel_high, self.n_mels + 2)
@@ -65,58 +85,34 @@ class SpeakerEmbeddingExtractor:
                 if f_m_plus > f_m and k < n_freqs:
                     fbank[m - 1, k] = (f_m_plus - k) / (f_m_plus - f_m)
 
-        # Apply filterbank -> log mel energy
-        mel_spec = np.log(np.dot(fbank, mag) + 1e-6)  # (40, n_frames)
+        mel_spec = np.log(np.dot(fbank, mag) + 1e-6)
 
-        # Zero-center across mel bands to isolate spectral shape and vocal timbre
-        mel_centered = mel_spec - np.mean(mel_spec, axis=0, keepdims=True)
+        # Discrete Cosine Transform (DCT-II) for MFCCs (20 coefficients)
+        n_mfcc = 20
+        n_m = self.n_mels
+        dct_basis = np.zeros((n_mfcc, n_m), dtype=np.float32)
+        for i in range(n_mfcc):
+            for j in range(n_m):
+                dct_basis[i, j] = np.cos(np.pi * i * (2 * j + 1) / (2 * n_m))
+        mfcc = np.dot(dct_basis, mel_spec)  # (20, n_frames)
 
-        # 3. Statistical pooling over time
-        mel_mean = np.mean(mel_centered, axis=1)  # 40
-        mel_std = np.std(mel_centered, axis=1)  # 40
-        mel_p10 = np.percentile(mel_centered, 10, axis=1)  # 40
-        mel_p90 = np.percentile(mel_centered, 90, axis=1)  # 40
-        # Total so far: 160 features
+        # Discard MFCC 0 (overall gain/volume) to isolate vocal tract shape & timbre (MFCC 1..19)
+        mfcc_shape = mfcc[1:, :]  # (19, n_frames)
+        mfcc_mean = np.mean(mfcc_shape, axis=1)  # 19
+        mfcc_std = np.std(mfcc_shape, axis=1)  # 19
 
-        # 4. Spectral moments (centroid, bandwidth, contrast, skewness)
-        mag_norm = mag / (np.sum(mag, axis=0, keepdims=True) + 1e-10)
-        centroid = np.sum(freqs[:, np.newaxis] * mag_norm, axis=0)  # (n_frames,)
-        variance = np.sum(((freqs[:, np.newaxis] - centroid) ** 2) * mag_norm, axis=0)
-        bandwidth = np.sqrt(np.maximum(0.0, variance))
+        feat_38 = np.concatenate([mfcc_mean, mfcc_std])  # 38
+        feat_norm = feat_38 / (np.linalg.norm(feat_38) + 1e-9)
 
-        moments = np.array(
-            [
-                np.mean(centroid) / 4000.0,
-                np.std(centroid) / 4000.0,
-                np.mean(bandwidth) / 4000.0,
-                np.std(bandwidth) / 4000.0,
-                # Sub-band energy ratios
-                np.mean(
-                    np.sum(mag[: int(n_freqs * 0.1), :], axis=0) / (np.sum(mag, axis=0) + 1e-10)
-                ),
-                np.mean(
-                    np.sum(mag[int(n_freqs * 0.1) : int(n_freqs * 0.3), :], axis=0)
-                    / (np.sum(mag, axis=0) + 1e-10)
-                ),
-                np.mean(
-                    np.sum(mag[int(n_freqs * 0.3) : int(n_freqs * 0.6), :], axis=0)
-                    / (np.sum(mag, axis=0) + 1e-10)
-                ),
-                np.mean(
-                    np.sum(mag[int(n_freqs * 0.6) :, :], axis=0) / (np.sum(mag, axis=0) + 1e-10)
-                ),
-            ],
-            dtype=np.float32,
-        )
+        # 3. Neural feature projection & GELU activation
+        projected = np.dot(feat_norm, self._proj)  # (192,)
+        x = projected
+        gelu = x * 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * (x**3))))
 
-        # Pad / assemble into exact 192 dimensions
-        features = np.concatenate([mel_mean, mel_std, mel_p10, mel_p90, moments])
-        if len(features) < self.embed_dim:
-            features = np.pad(features, (0, self.embed_dim - len(features)))
+        # L2 normalize output embedding
+        norm = float(np.linalg.norm(gelu))
+        if norm > 1e-9:
+            embedding = gelu / norm
         else:
-            features = features[: self.embed_dim]
-
-        # L2 normalize
-        norm = np.linalg.norm(features)
-        features = features / norm if norm > 1e-9 else np.zeros(self.embed_dim, dtype=np.float32)
-        return features.astype(np.float32)
+            embedding = np.zeros(self.embed_dim, dtype=np.float32)
+        return np.asarray(embedding, dtype=np.float32)

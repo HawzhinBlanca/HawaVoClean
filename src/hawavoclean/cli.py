@@ -359,6 +359,7 @@ def cmd_enroll_speaker(args: argparse.Namespace) -> int:
             display_name=args.display_name or args.speaker_id.replace("_", " ").title(),
             audio_dir=audio_dir,
             output_dir=output_dir,
+            consent_granted=args.consent_granted,
             consent_note=args.consent_note
             or "Enrolled by producer from owned production recordings.",
             verbose=True,
@@ -1621,6 +1622,12 @@ def _main() -> None:
         "--consent-note",
         default=None,
         help="Consent record note (default: producer enrollment)",
+    )
+    p_enroll.add_argument(
+        "--consent-granted",
+        action="store_true",
+        default=False,
+        help="Explicitly confirm speaker consent verification",
     )
     p_enroll.set_defaults(func=cmd_enroll_speaker)
 

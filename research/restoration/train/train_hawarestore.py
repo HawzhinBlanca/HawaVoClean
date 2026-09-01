@@ -389,12 +389,8 @@ def _run_epoch(
         B = clean_stft.shape[0]
 
         with torch.set_grad_enabled(training):
-            # Compute low-pass observed STFT from clean_stft using batch cutoff
-            freqs = torch.linspace(0, SAMPLE_RATE / 2, clean_stft.shape[2], device=device)
-            cutoff_expand = cutoff_hz.view(B, 1, 1, 1)
-            freqs_expand = freqs.view(1, 1, -1, 1)
-            lp_mask = (freqs_expand < cutoff_expand).float()
-            x_obs = clean_stft * lp_mask
+            # Use real degraded observation STFT from DegradationSimulator
+            x_obs = batch["degraded_stft"].to(device)
 
             # Flow matching on the linear probability path with low-band guidance
             t = torch.rand(B, device=device)
