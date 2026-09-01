@@ -207,8 +207,23 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
                     if len(emb) == 192 and np.linalg.norm(emb) > 1e-6:
                         self.canonical_embeddings[speaker_id] = emb
 
+        # In-memory file cache: source_path -> (resampled_full_audio_48k, orig_sr)
+        # Eliminates millions of redundant soundfile read/resample calls.
+        self._file_cache: dict[str, tuple[np.ndarray, int]] = {}
+
     def __len__(self) -> int:
         return len(self.items)
+
+    def _get_full_audio(self, source_path: str) -> tuple[np.ndarray, int]:
+        if source_path not in self._file_cache:
+            audio, file_sr = sf.read(source_path, dtype="float32", always_2d=False)
+            if audio.ndim == 2:
+                audio = np.mean(audio, axis=1)
+            if int(file_sr) != self.sr:
+                g = int(np.gcd(self.sr, int(file_sr)))
+                audio = signal.resample_poly(audio, self.sr // g, int(file_sr) // g)
+            self._file_cache[source_path] = (audio.astype(np.float32), int(file_sr))
+        return self._file_cache[source_path]
 
     def _synthesize(self, item: ItemSpec, rng: np.random.Generator) -> np.ndarray:
         f0 = float(rng.uniform(90.0, 260.0))
@@ -224,30 +239,20 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         return out
 
     def _load_real(self, item: ItemSpec) -> np.ndarray:
-        info = sf.info(item.source)
-        chunk_src = int(item.duration_s * info.samplerate)
-        audio, file_sr = sf.read(
-            item.source,
-            start=item.start_frame,
-            stop=item.start_frame + chunk_src,
-            dtype="float32",
-            always_2d=False,
-        )
-        if audio.ndim == 2:
-            audio = np.mean(audio, axis=1)
-        if int(file_sr) != self.sr:
-            g = int(np.gcd(self.sr, int(file_sr)))
-            audio = signal.resample_poly(audio, self.sr // g, int(file_sr) // g)
+        full_audio, orig_sr = self._get_full_audio(item.source)
+        if orig_sr != self.sr:
+            start_48k = int(round(item.start_frame * (self.sr / orig_sr)))
+        else:
+            start_48k = item.start_frame
         n = int(self.sr * item.duration_s)
-        audio = np.asarray(audio, dtype=np.float32)
+        audio = full_audio[start_48k : start_48k + n]
         if len(audio) < n:
             audio = np.pad(audio, (0, n - len(audio)))
         audio = audio[:n]
         peak = float(np.max(np.abs(audio)))
         if peak > 1e-6:
             audio = audio / peak * 0.7
-        result: np.ndarray = audio.astype(np.float32)
-        return result
+        return audio.astype(np.float32)
 
     def _degrade(
         self, clean: np.ndarray, item: ItemSpec, rng: np.random.Generator, cutoff_hz: float
@@ -443,6 +448,18 @@ def _run_epoch(
             sums[key] = sums.get(key, 0.0) + value
         n_batches += 1
 
+        if n_batches % 10 == 0 or n_batches == len(loader):
+            mode_lbl = "Train" if training else "Val"
+            total_b = len(loader)
+            loss_val = metrics.get("loss_total", 0.0)
+            flow_val = metrics.get("loss_flow", 0.0)
+            stft_val = metrics.get("loss_stft", 0.0)
+            print(
+                f"[{mode_lbl}] Batch {n_batches}/{total_b} - "
+                f"loss={loss_val:.4f} (flow={flow_val:.4f}, stft={stft_val:.4f})",
+                flush=True,
+            )
+
     return {key: value / max(1, n_batches) for key, value in sums.items()}
 
 
@@ -468,6 +485,7 @@ def train_model(
     device: str | None = None,
     overwrite: bool = False,
     profiles_dir: Path | str | None = None,
+    num_workers: int = 4,
 ) -> Path:
     """Train HawaRestoreKDNet with speaker-disjoint splits and the full composite loss.
 
@@ -529,10 +547,18 @@ def train_model(
         val_items, speaker_table, n_fft=n_fft, profiles_dir=prof_path
     )
     train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
     )
     val_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
     )
 
     torch.manual_seed(split_seed)
@@ -560,7 +586,7 @@ def train_model(
         val_metrics = _run_epoch(model, val_loader, loss_fn, spk_embed, None, device, n_fft)
         train_str = " ".join(f"{k}={v:.4f}" for k, v in sorted(train_metrics.items()))
         val_str = " ".join(f"{k}={v:.4f}" for k, v in sorted(val_metrics.items()))
-        print(f"Epoch {epoch}/{epochs} - train: {train_str} | val: {val_str}")
+        print(f"Epoch {epoch}/{epochs} - train: {train_str} | val: {val_str}", flush=True)
 
     torch.save(
         {
@@ -631,6 +657,12 @@ def main() -> None:
         help="Path to enrolled profiles directory (e.g., profiles/). "
         "Uses canonical embeddings for voice conditioning when available.",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader worker subprocesses for parallel audio loading.",
+    )
     args = parser.parse_args()
     train_model(
         epochs=args.epochs,
@@ -648,6 +680,7 @@ def main() -> None:
         device=args.device,
         overwrite=args.overwrite,
         profiles_dir=args.profiles_dir,
+        num_workers=args.num_workers,
     )
 
 

@@ -36,3 +36,8 @@ resolve-plugin/toolchain/node_modules/
 # our work; restoration resolves it at runtime from vendors/universr.
 vendors/
 
+# Scratch & temporary candidate models
+scratch/
+models/*-candidate/
+
+
