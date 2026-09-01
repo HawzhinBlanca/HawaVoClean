@@ -316,22 +316,32 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
 
 
 class DifferentiableSpeakerEmbed(nn.Module):
-    """Differentiable log-mel statistics embedding for the speaker-identity loss.
+    """Differentiable 192-dimensional neural speaker embedding for speaker-identity loss.
 
-    Torch re-implementation of the pooling idea in ``SpeakerEmbeddingExtractor``
-    (which is numpy and non-differentiable), so gradients flow from the cosine
-    identity term back through the predicted audio.
+    Torch re-implementation of ``SpeakerEmbeddingExtractor`` (which is numpy and non-differentiable),
+    so gradients flow from the cosine identity term back through the predicted audio into 192 dimensions.
     """
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE, n_fft: int = 1024, n_mels: int = 40) -> None:
+    def __init__(
+        self,
+        sample_rate: int = SAMPLE_RATE,
+        n_fft: int = 1024,
+        n_mels: int = 40,
+        embed_dim: int = 192,
+    ) -> None:
         super().__init__()
+        self.sample_rate = sample_rate
         self.n_fft = n_fft
         self.hop = n_fft // 4
+        self.embed_dim = embed_dim
         n_freqs = n_fft // 2 + 1
+
+        mel_low = 0.0
         mel_high = 2595.0 * math.log10(1.0 + 8000.0 / 700.0)
-        mel_points = np.linspace(0.0, mel_high, n_mels + 2)
+        mel_points = np.linspace(mel_low, mel_high, n_mels + 2)
         hz_points = 700.0 * (10.0 ** (mel_points / 2595.0) - 1.0)
         bin_points = np.floor((n_fft + 1) * hz_points / sample_rate).astype(int)
+
         fbank = np.zeros((n_mels, n_freqs), dtype=np.float32)
         for m in range(1, n_mels + 1):
             lo, mid, hi = int(bin_points[m - 1]), int(bin_points[m]), int(bin_points[m + 1])
@@ -341,11 +351,27 @@ class DifferentiableSpeakerEmbed(nn.Module):
             for k in range(mid, hi):
                 if hi > mid and k < n_freqs:
                     fbank[m - 1, k] = (hi - k) / (hi - mid)
+
+        # DCT basis for MFCCs (20 coefficients)
+        n_mfcc = 20
+        dct_basis = np.zeros((n_mfcc, n_mels), dtype=np.float32)
+        for i in range(n_mfcc):
+            for j in range(n_mels):
+                dct_basis[i, j] = math.cos(math.pi * i * (2 * j + 1) / (2 * n_mels))
+
+        # Deterministic projection matrix (38 -> 192)
+        rng = np.random.default_rng(42)
+        raw_proj = rng.standard_normal((192, embed_dim), dtype=np.float32)
+        q_proj, _ = np.linalg.qr(raw_proj)
+        q_proj = q_proj[:38, :].astype(np.float32)
+
         self.register_buffer("fbank", torch.from_numpy(fbank))
+        self.register_buffer("dct_basis", torch.from_numpy(dct_basis))
+        self.register_buffer("proj_matrix", torch.from_numpy(q_proj))
         self.register_buffer("window", torch.hann_window(n_fft))
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """(B, N) waveforms -> (B, 2 * n_mels) unit-normalised embeddings."""
+        """(B, N) waveforms -> (B, 192) unit-normalised embeddings."""
         spec = torch.stft(
             audio,
             n_fft=self.n_fft,
@@ -353,11 +379,22 @@ class DifferentiableSpeakerEmbed(nn.Module):
             window=cast(torch.Tensor, self.window),
             return_complex=True,
         )
-        mag = torch.abs(spec) + 1e-6
-        mel = torch.log(torch.einsum("mf,bft->bmt", self.fbank, mag) + 1e-6)
-        mel = mel - mel.mean(dim=1, keepdim=True)
-        emb = torch.cat([mel.mean(dim=-1), mel.std(dim=-1)], dim=-1)
-        return torch.nn.functional.normalize(emb, dim=-1)
+        mag = torch.abs(spec) + 1e-10  # (B, F, T)
+        mel = torch.log(torch.einsum("mf,bft->bmt", self.fbank, mag) + 1e-6)  # (B, 40, T)
+
+        # MFCCs (20, T)
+        mfcc = torch.einsum("km,bmt->bkt", self.dct_basis, mel)
+        mfcc_shape = mfcc[:, 1:, :]  # (B, 19, T) discarding gain MFCC 0
+
+        mfcc_mean = mfcc_shape.mean(dim=-1)  # (B, 19)
+        mfcc_std = mfcc_shape.std(dim=-1)  # (B, 19)
+        feat_38 = torch.cat([mfcc_mean, mfcc_std], dim=-1)  # (B, 38)
+        feat_norm = feat_38 / (torch.norm(feat_38, dim=-1, keepdim=True) + 1e-9)
+
+        # Neural feature projection & GELU activation
+        projected = torch.matmul(feat_norm, self.proj_matrix)  # (B, 192)
+        gelu = torch.nn.functional.gelu(projected)
+        return torch.nn.functional.normalize(gelu, dim=-1)
 
 
 def _run_epoch(

@@ -10,6 +10,13 @@ from __future__ import annotations
 import numpy as np
 from scipy import signal
 
+# Deterministic projection matrix for mapping higher-order cepstral/timbre features
+# (38 input dimensions from MFCC 1..19 mean and std) into 192 discriminative dimensions.
+_RNG = np.random.default_rng(42)
+_RAW_PROJ = _RNG.standard_normal((192, 192), dtype=np.float32)
+_Q_PROJ, _ = np.linalg.qr(_RAW_PROJ)
+_PROJ_MATRIX: np.ndarray = _Q_PROJ[:38, :].astype(np.float32)  # (38, 192)
+
 
 class SpeakerEmbeddingExtractor:
     """Deterministic 192-dimensional discriminative speaker acoustic embedding extractor."""
@@ -20,13 +27,7 @@ class SpeakerEmbeddingExtractor:
         self.embed_dim = embed_dim
         self.n_fft = 2048
         self.hop_length = 480
-
-        # Deterministic projection matrix for mapping higher-order cepstral/timbre features
-        # (38 input dimensions from MFCC 1..19 mean and std) into 192 discriminative dimensions.
-        rng = np.random.default_rng(42)
-        raw_proj = rng.standard_normal((38, embed_dim), dtype=np.float32)
-        q, _ = np.linalg.qr(raw_proj)
-        self._proj = q.astype(np.float32)
+        self.proj = _PROJ_MATRIX
 
     def extract(self, audio: np.ndarray) -> np.ndarray:
         """Extract a 192-dimensional unit-normalized speaker embedding vector.
@@ -105,14 +106,11 @@ class SpeakerEmbeddingExtractor:
         feat_norm = feat_38 / (np.linalg.norm(feat_38) + 1e-9)
 
         # 3. Neural feature projection & GELU activation
-        projected = np.dot(feat_norm, self._proj)  # (192,)
+        projected = np.dot(feat_norm, self.proj)  # (192,)
         x = projected
         gelu = x * 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * (x**3))))
 
         # L2 normalize output embedding
         norm = float(np.linalg.norm(gelu))
-        if norm > 1e-9:
-            embedding = gelu / norm
-        else:
-            embedding = np.zeros(self.embed_dim, dtype=np.float32)
+        embedding = gelu / norm if norm > 1e-9 else np.zeros(self.embed_dim, dtype=np.float32)
         return np.asarray(embedding, dtype=np.float32)

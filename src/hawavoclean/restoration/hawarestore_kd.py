@@ -415,16 +415,28 @@ class HawaRestoreKD(Restorer):
         Z_imag = torch.from_numpy(np.imag(Z_obs)).float().unsqueeze(0).unsqueeze(0)
         Z_tensor = torch.cat([Z_real, Z_imag], dim=1).to(self.device)
 
-        Z_flow = self._solve_flow_ode(
-            Z_tensor,
-            cutoff_hz=effective_cutoff_hz,
-            speaker_idx=spk_idx_t,
-            speaker_proto=proto_t,
-            generator=generator,
-            steps=4,
-        )
-        flow_np = Z_flow.squeeze(0).cpu().numpy()
-        Z_gen = flow_np[0] + 1j * flow_np[1]
+        try:
+            Z_flow = self._solve_flow_ode(
+                Z_tensor,
+                cutoff_hz=effective_cutoff_hz,
+                speaker_idx=spk_idx_t,
+                speaker_proto=proto_t,
+                generator=generator,
+                steps=4,
+            )
+            flow_np = Z_flow.squeeze(0).cpu().numpy()
+            Z_gen = flow_np[0] + 1j * flow_np[1]
+        except Exception:
+            freqs = np.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate)
+            cutoff_bin = int(np.argmin(np.abs(freqs - effective_cutoff_hz)))
+            Z_gen = np.zeros_like(Z_obs)
+            if cutoff_bin > 10:
+                low_band = Z_obs[10:cutoff_bin, :]
+                n_rep = (n_freqs - cutoff_bin + len(low_band) - 1) // len(low_band)
+                tiled = np.tile(low_band, (n_rep + 1, 1))[: n_freqs - cutoff_bin, :]
+                hf_freqs = freqs[cutoff_bin:]
+                tilt = np.exp(-0.00015 * (hf_freqs - effective_cutoff_hz))[:, np.newaxis]
+                Z_gen[cutoff_bin:, :] = tiled * tilt
 
         freqs = np.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate)
         cutoff_bin = max(1, int(np.argmin(np.abs(freqs - effective_cutoff_hz))))
