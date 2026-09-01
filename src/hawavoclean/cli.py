@@ -340,6 +340,50 @@ def cmd_speaker_profile(args: argparse.Namespace) -> int:
         return int(ExitCode.INVALID_USER_INPUT)
 
 
+def cmd_enroll_speaker(args: argparse.Namespace) -> int:
+    """Enroll a real speaker from production audio files."""
+    from hawavoclean.enrollment import enroll_speaker
+
+    audio_dir = Path(args.audio_dir)
+    if not audio_dir.is_dir():
+        print(f"[FAIL] Audio directory not found: {audio_dir}")
+        return int(ExitCode.INVALID_USER_INPUT)
+
+    output_dir = Path(args.output_dir) if args.output_dir else (
+        paths_profiles_root() / args.speaker_id
+    )
+
+    try:
+        result = enroll_speaker(
+            speaker_id=args.speaker_id,
+            display_name=args.display_name or args.speaker_id.replace("_", " ").title(),
+            audio_dir=audio_dir,
+            output_dir=output_dir,
+            consent_note=args.consent_note or "Enrolled by producer from owned production recordings.",
+            verbose=True,
+        )
+        print(f"\n{'=' * 60}")
+        print(f"✅ Enrollment complete: {result.speaker_id}")
+        print(f"   Files: {result.n_files}")
+        print(f"   Duration: {result.total_duration_s / 3600:.1f} hours")
+        print(f"   F0: {result.f0_median_hz:.1f} Hz (range {result.f0_p05_hz:.1f} – {result.f0_p95_hz:.1f})")
+        print(f"   Embedding: {result.embedding_dim}-dim")
+        print(f"   Profile: {result.profile_dir}")
+        print(f"{'=' * 60}")
+
+        # Auto-validate the created profile
+        from hawavoclean.restoration.profiles import validate_speaker_profile
+        prof = validate_speaker_profile(
+            output_dir / "profile.json", base_dir=output_dir
+        )
+        print(f"   Validation: ✅ PASS ({prof.speaker_id})")
+        return int(ExitCode.SUCCESS)
+    except Exception as e:
+        print(f"[FAIL] Enrollment failed: {e}")
+        logger.exception("Enrollment error")
+        return int(ExitCode.INTERNAL_ERROR)
+
+
 def cmd_restoration_benchmark(args: argparse.Namespace) -> int:
     """Run comprehensive restoration benchmark across cutoffs and baselines."""
     import sys
@@ -1545,6 +1589,33 @@ def _main() -> None:
     p_spk_val = p_spk_sub.add_parser("validate", help="Validate speaker profile")
     p_spk_val.add_argument("profile_target", help="Path to profile.json or profiles directory")
     p_spk_val.set_defaults(func=cmd_speaker_profile)
+
+    # enroll-speaker
+    p_enroll = subparsers.add_parser(
+        "enroll-speaker",
+        help="Enroll a real speaker from production audio files",
+    )
+    p_enroll.add_argument(
+        "--speaker-id", required=True,
+        help="Machine-readable speaker ID (e.g., seidi_nursi)",
+    )
+    p_enroll.add_argument(
+        "--display-name", default=None,
+        help="Human-readable name (default: derived from speaker-id)",
+    )
+    p_enroll.add_argument(
+        "--audio-dir", required=True,
+        help="Directory containing clean WAV/FLAC files for this speaker",
+    )
+    p_enroll.add_argument(
+        "--output-dir", default=None,
+        help="Output profile directory (default: profiles/<speaker-id>/)",
+    )
+    p_enroll.add_argument(
+        "--consent-note", default=None,
+        help="Consent record note (default: producer enrollment)",
+    )
+    p_enroll.set_defaults(func=cmd_enroll_speaker)
 
     # restoration-benchmark
     p_rest_bench = subparsers.add_parser(

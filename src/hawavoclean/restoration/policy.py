@@ -102,9 +102,16 @@ class RestorationPolicyManager:
                 guard_result=no_restore_res,
             )
 
-        # 2. Extract speaker embeddings if profile present
+        # 2. Extract speaker embeddings and F0 stats if profile present
         speaker_id = speaker_profile.speaker_id if speaker_profile else None
         speaker_emb = speaker_profile.embedding_vector if speaker_profile else None
+        f0_stats: dict[str, float] | None = None
+        if speaker_profile is not None and speaker_profile.f0_statistics is not None:
+            f0_stats = {
+                "median_hz": speaker_profile.f0_statistics.median_hz,
+                "p05_hz": speaker_profile.f0_statistics.p05_hz,
+                "p95_hz": speaker_profile.f0_statistics.p95_hz,
+            }
 
         # 3. Generate candidate ladder
         try:
@@ -148,6 +155,7 @@ class RestorationPolicyManager:
                 speaker_embedding=speaker_emb,
                 canonical_embedding=speaker_emb,
                 speech_mask=speech_mask,
+                f0_statistics=f0_stats,
             )
         except Exception as e:
             logger.warning("Guard R exception on segment; failing closed to Natural: %s", e)

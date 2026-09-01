@@ -222,9 +222,6 @@ class HawaRestoreKD(Restorer):
         # policy. An explicit device is honoured for callers who accept that.
         self.device = device or "cpu"
 
-        self.speaker_ids = [f"character_{i:02d}" for i in range(1, 11)]
-        self.net = HawaRestoreKDNet(n_fft=n_fft).to(self.device).eval()
-
         ckpt_path = (
             Path(checkpoint_path) if checkpoint_path is not None else restoration_checkpoint_path()
         )
@@ -240,6 +237,23 @@ class HawaRestoreKD(Restorer):
                 raise ModelProvenanceError(
                     f"HawaRestore-KD checkpoint {ckpt_path} has no 'model_state_dict' entry."
                 )
+
+            # Dynamic config from checkpoint (real-data trained) or legacy defaults.
+            net_config = ckpt.get("config", {})
+            num_speakers = int(net_config.get("num_speakers", 10))
+            ckpt_n_fft = int(net_config.get("n_fft", n_fft))
+
+            # Speaker table: from checkpoint metadata or legacy character_XX list.
+            train_speakers = ckpt.get("train_speakers", [])
+            val_speakers = ckpt.get("val_speakers", [])
+            if train_speakers or val_speakers:
+                self.speaker_ids = sorted(set(train_speakers + val_speakers))
+            else:
+                self.speaker_ids = [f"character_{i:02d}" for i in range(1, num_speakers + 1)]
+
+            self.net = HawaRestoreKDNet(
+                n_fft=ckpt_n_fft, num_speakers=num_speakers,
+            ).to(self.device).eval()
             self.net.load_state_dict(ckpt["model_state_dict"])
         except ModelProvenanceError:
             raise
@@ -491,6 +505,18 @@ class HawaRestoreKD(Restorer):
         if speaker_id is not None and speaker_id in self.speaker_ids:
             idx = self.speaker_ids.index(speaker_id)
             spk_idx_t = torch.tensor([idx], device=self.device, dtype=torch.long)
+
+        # Auto-load enrolled profile embedding when available.
+        if speaker_embedding is None and speaker_id is not None:
+            try:
+                from hawavoclean.paths import profiles_root
+                from hawavoclean.restoration.profiles import load_speaker_profile
+
+                prof = load_speaker_profile(speaker_id, profiles_root=profiles_root())
+                if prof.embedding_vector is not None:
+                    speaker_embedding = prof.embedding_vector
+            except Exception:
+                pass  # Profile not found or not enrolled — proceed without prototype.
 
         proto_t: torch.Tensor | None = None
         if speaker_embedding is not None and len(speaker_embedding) == 192:

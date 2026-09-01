@@ -112,7 +112,7 @@ def test_restore_doctor_reports_a_complete_research_checkout(
 def test_restore_doctor_fails_on_a_profiles_root_that_cannot_validate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A profiles root that cannot validate all 10 speakers IS a preflight failure.
+    """A profiles root with no speaker subdirectories IS a preflight failure.
 
     Resolved through paths.profiles_root(), not the working directory, so the
     doctor reports on the profiles the pipeline would really load.
@@ -127,7 +127,7 @@ def test_restore_doctor_fails_on_a_profiles_root_that_cannot_validate(
     assert code == int(ExitCode.PREFLIGHT_FAILURE)
     out = capsys.readouterr().out
     assert "[FAIL] Profile validation failed" in out
-    assert "character_01" in out  # the first missing speaker is named
+    assert "No speaker profiles found" in out  # dynamic discovery error
     assert "ALL RESTORATION CHECKS PASSED" not in out
 
 

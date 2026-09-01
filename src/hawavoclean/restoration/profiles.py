@@ -231,13 +231,27 @@ def load_speaker_profile(
 
 
 def validate_all_profiles(profiles_root: Path | str = "profiles") -> dict[str, SpeakerProfile]:
-    """Validate all 10 registered profiles and verify embedding distinctness."""
+    """Validate all registered speaker profiles and verify embedding distinctness.
+
+    Discovers profiles dynamically: any subdirectory of ``profiles_root``
+    containing a ``profile.json`` is a registered profile.  Also checks the
+    legacy ``character_01..10`` fixture directories when present.
+    """
     root = Path(profiles_root)
     profiles: dict[str, SpeakerProfile] = {}
     seen_hashes: dict[str, str] = {}
 
-    for i in range(1, 11):
-        spk_id = f"character_{i:02d}"
+    # Dynamic discovery: any dir with profile.json
+    profile_dirs = sorted(
+        d for d in root.iterdir()
+        if d.is_dir() and (d / "profile.json").exists()
+    ) if root.exists() else []
+
+    if not profile_dirs:
+        raise ProfileValidationError(f"No speaker profiles found under {root}")
+
+    for profile_dir in profile_dirs:
+        spk_id = profile_dir.name
         prof = load_speaker_profile(spk_id, profiles_root=root)
         profiles[spk_id] = prof
 
@@ -250,3 +264,4 @@ def validate_all_profiles(profiles_root: Path | str = "profiles") -> dict[str, S
         seen_hashes[emb_hash] = spk_id
 
     return profiles
+

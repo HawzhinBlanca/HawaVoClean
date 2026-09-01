@@ -59,6 +59,7 @@ class RestorationGuard:
         speaker_embedding: np.ndarray | None = None,  # noqa: ARG002
         canonical_embedding: np.ndarray | None = None,
         speech_mask: np.ndarray | None = None,
+        f0_statistics: dict[str, float] | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
         """Evaluate a single restoration candidate against all Guard R layers.
 
@@ -208,7 +209,8 @@ class RestorationGuard:
 
         # 6. Sorani Linguistic / Acoustic Posterior Stability Check
         ling_res: LinguisticGuardResult = self.linguistic_guard.evaluate(
-            natural_audio, candidate_audio, speech_mask=speech_mask
+            natural_audio, candidate_audio, speech_mask=speech_mask,
+            f0_statistics=f0_statistics,
         )
         ctc_info = ling_res.to_dict()
         if not ling_res.passes_check:
@@ -235,6 +237,7 @@ class RestorationGuard:
         speaker_embedding: np.ndarray | None = None,
         canonical_embedding: np.ndarray | None = None,
         speech_mask: np.ndarray | None = None,
+        f0_statistics: dict[str, float] | None = None,
     ) -> tuple[np.ndarray, GuardRResult]:
         if not candidates:
             result = GuardRResult(
@@ -278,6 +281,7 @@ class RestorationGuard:
                 speaker_embedding=speaker_embedding,
                 canonical_embedding=canonical_embedding,
                 speech_mask=speech_mask,
+                f0_statistics=f0_statistics,
             )
             last_metrics = metrics
             last_reason = f"strength {cand.strength:.2f}: {reason}"

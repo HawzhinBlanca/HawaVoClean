@@ -186,6 +186,7 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         speaker_table: list[str],
         sr: int = SAMPLE_RATE,
         n_fft: int = 1024,
+        profiles_dir: Path | None = None,
     ) -> None:
         self.items = items
         self.speaker_index = {speaker: i for i, speaker in enumerate(speaker_table)}
@@ -194,6 +195,17 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         self.hop = n_fft // 2
         self.extractor = SpeakerEmbeddingExtractor(sample_rate=sr)
         self.simulator = DegradationSimulator(sample_rate=sr)
+
+        # Load canonical embeddings from enrolled profiles when available.
+        # Falls back to per-chunk extraction for speakers without profiles.
+        self.canonical_embeddings: dict[str, np.ndarray] = {}
+        if profiles_dir is not None:
+            for speaker_id in speaker_table:
+                emb_path = profiles_dir / speaker_id / "embedding" / "profile.npy"
+                if emb_path.exists():
+                    emb = np.load(emb_path).astype(np.float32)
+                    if len(emb) == 192 and np.linalg.norm(emb) > 1e-6:
+                        self.canonical_embeddings[speaker_id] = emb
 
     def __len__(self) -> int:
         return len(self.items)
@@ -280,7 +292,13 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         cutoff_hz = float(rng.uniform(2500.0, 16000.0))
         clean = self._synthesize(item, rng) if item.source == "synthetic" else self._load_real(item)
         degraded = self._degrade(clean, item, rng, cutoff_hz)
-        proto = self.extractor.extract(clean)
+
+        # Prefer enrolled canonical embedding; fall back to per-chunk extraction.
+        if item.speaker_id in self.canonical_embeddings:
+            proto = self.canonical_embeddings[item.speaker_id]
+        else:
+            proto = self.extractor.extract(clean)
+
         return {
             "clean_audio": torch.from_numpy(np.ascontiguousarray(clean)).float(),
             "degraded_audio": torch.from_numpy(np.ascontiguousarray(degraded)).float(),
@@ -449,6 +467,7 @@ def train_model(
     val_fraction: float = 0.2,
     device: str | None = None,
     overwrite: bool = False,
+    profiles_dir: Path | str | None = None,
 ) -> Path:
     """Train HawaRestoreKDNet with speaker-disjoint splits and the full composite loss.
 
@@ -502,8 +521,13 @@ def train_model(
         f"{len(train_speakers)} train / {len(val_speakers)} val speakers, disjoint)"
     )
 
-    train_ds = RestorationTrainingDataset(train_items, speaker_table, n_fft=n_fft)
-    val_ds = RestorationTrainingDataset(val_items, speaker_table, n_fft=n_fft)
+    prof_path = Path(profiles_dir) if profiles_dir is not None else None
+    train_ds = RestorationTrainingDataset(
+        train_items, speaker_table, n_fft=n_fft, profiles_dir=prof_path
+    )
+    val_ds = RestorationTrainingDataset(
+        val_items, speaker_table, n_fft=n_fft, profiles_dir=prof_path
+    )
     train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True
     )
@@ -600,6 +624,13 @@ def main() -> None:
         action="store_true",
         help="Allow replacing an existing checkpoint at the output path.",
     )
+    parser.add_argument(
+        "--profiles-dir",
+        type=Path,
+        default=None,
+        help="Path to enrolled profiles directory (e.g., profiles/). "
+        "Uses canonical embeddings for voice conditioning when available.",
+    )
     args = parser.parse_args()
     train_model(
         epochs=args.epochs,
@@ -616,6 +647,7 @@ def main() -> None:
         val_fraction=args.val_fraction,
         device=args.device,
         overwrite=args.overwrite,
+        profiles_dir=args.profiles_dir,
     )
 
 
