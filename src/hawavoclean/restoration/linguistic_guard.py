@@ -88,7 +88,9 @@ class SoraniLinguisticGuard:
         rest_mono = rest_mono[:min_len]
 
         # Bandpass filter to speech phonetic range (speaker-adaptive or default 300–4000 Hz)
-        sos = signal.butter(4, [bp_low, bp_high], btype="bandpass", fs=self.sample_rate, output="sos")
+        sos = signal.butter(
+            4, [bp_low, bp_high], btype="bandpass", fs=self.sample_rate, output="sos"
+        )
         nat_speech = signal.sosfiltfilt(sos, nat_mono)
         rest_speech = signal.sosfiltfilt(sos, rest_mono)
 

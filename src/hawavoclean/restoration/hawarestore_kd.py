@@ -251,9 +251,14 @@ class HawaRestoreKD(Restorer):
             else:
                 self.speaker_ids = [f"character_{i:02d}" for i in range(1, num_speakers + 1)]
 
-            self.net = HawaRestoreKDNet(
-                n_fft=ckpt_n_fft, num_speakers=num_speakers,
-            ).to(self.device).eval()
+            self.net = (
+                HawaRestoreKDNet(
+                    n_fft=ckpt_n_fft,
+                    num_speakers=num_speakers,
+                )
+                .to(self.device)
+                .eval()
+            )
             self.net.load_state_dict(ckpt["model_state_dict"])
         except ModelProvenanceError:
             raise

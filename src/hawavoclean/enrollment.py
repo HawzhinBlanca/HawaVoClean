@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 
-from hawavoclean.hashing import hash_bytes, hash_file, hash_json_canonical
+from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.restoration.f0 import F0Extractor
 from hawavoclean.restoration.speaker_embed import SpeakerEmbeddingExtractor
 
@@ -48,14 +47,11 @@ def _resample_to_48k(audio: np.ndarray, source_sr: int) -> np.ndarray:
     from scipy.signal import resample_poly
 
     g = int(np.gcd(_EMBED_SR, source_sr))
-    return np.asarray(
-        resample_poly(audio, _EMBED_SR // g, source_sr // g), dtype=np.float32
-    )
+    return np.asarray(resample_poly(audio, _EMBED_SR // g, source_sr // g), dtype=np.float32)
 
 
 def _load_mono_48k(path: Path) -> tuple[np.ndarray, float]:
     """Load an audio file as mono float32 at 48 kHz. Returns (audio, duration_s)."""
-    info = sf.info(str(path))
     audio, sr = sf.read(str(path), dtype="float32", always_2d=False)
     if audio.ndim == 2:
         audio = np.mean(audio, axis=1)
@@ -116,9 +112,7 @@ def enroll_speaker(
 
     # Discover audio files
     audio_files = sorted(
-        p
-        for p in audio_dir.iterdir()
-        if p.is_file() and p.suffix.lower() in {".wav", ".flac"}
+        p for p in audio_dir.iterdir() if p.is_file() and p.suffix.lower() in {".wav", ".flac"}
     )
     if not audio_files:
         raise FileNotFoundError(f"No .wav/.flac files found in {audio_dir}")
@@ -208,7 +202,9 @@ def enroll_speaker(
     if verbose:
         print(f"\n  Aggregated: {len(audio_files)} files, {total_duration_s / 60:.1f} min total")
         print(f"  F0: median={f0_median:.1f} Hz, p05={f0_p05:.1f} Hz, p95={f0_p95:.1f} Hz")
-        print(f"  Embedding: {len(agg_embedding)}-dim, norm={float(np.linalg.norm(agg_embedding)):.4f}")
+        print(
+            f"  Embedding: {len(agg_embedding)}-dim, norm={float(np.linalg.norm(agg_embedding)):.4f}"
+        )
 
     # Create output directory structure
     output_dir.mkdir(parents=True, exist_ok=True)

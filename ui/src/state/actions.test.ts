@@ -263,7 +263,7 @@ describe('startJob', () => {
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
     });
     const st = store.useStore.getState();
@@ -1148,7 +1148,7 @@ describe('B5 · two runs of the same profile do not overwrite each other', () =>
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
     });
   });
@@ -1156,24 +1156,24 @@ describe('B5 · two runs of the same profile do not overwrite each other', () =>
   it('the second run of the same profile is given its own output path', async () => {
     const { actions, store, client } = await boot();
     armed(store);
-    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
+    done(store, { jobId: 'j1', outputPath: '/dir/a_production.wav', profile: 'production' });
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
-      output_path: '/dir/a_studio-2.wav',
+      output_path: '/dir/a_production-2.wav',
     });
   });
 
   it('a third run counts on rather than stacking suffixes', async () => {
     const { actions, store, client } = await boot();
     armed(store);
-    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
-    done(store, { jobId: 'j2', outputPath: '/dir/a_studio-2.wav' });
+    done(store, { jobId: 'j1', outputPath: '/dir/a_production.wav', profile: 'production' });
+    done(store, { jobId: 'j2', outputPath: '/dir/a_production-2.wav', profile: 'production' });
     await actions.startJob();
     expect(client.createJob.mock.calls[0]?.[0]).toMatchObject({
-      output_path: '/dir/a_studio-3.wav',
+      output_path: '/dir/a_production-3.wav',
     });
   });
 
@@ -1198,7 +1198,7 @@ describe('B5 · two runs of the same profile do not overwrite each other', () =>
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
     });
   });
@@ -1397,7 +1397,7 @@ describe('B5 · restoring a run restores the run, not half of it', () => {
     const { actions, store } = await boot();
     done(store, { jobId: 'j1', outputPath: '/out/j1.wav', profile: 'production' });
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav', profile: 'studio' });
-    expect(store.useStore.getState().profile).toBe('studio');
+    expect(store.useStore.getState().profile).toBe('production');
 
     await actions.selectRun('j1');
     await settle();
@@ -1799,12 +1799,12 @@ describe('restore mode (contract addendum 2)', () => {
   it('a restore submit carries mode and speaker — and only those when the cutoff is auto', async () => {
     const { actions, store, client } = await boot();
     armed(store);
-    store.useStore.getState().setCapabilities(['character_01'], true);
+    store.useStore.getState().setCapabilities(['character_01', 'character_02'], true);
     store.useStore.getState().setMode('restore');
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
       mode: 'restore',
       speaker_id: 'character_01',
@@ -1822,7 +1822,7 @@ describe('restore mode (contract addendum 2)', () => {
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
       mode: 'restore',
       speaker_id: 'character_02',
@@ -1841,7 +1841,7 @@ describe('restore mode (contract addendum 2)', () => {
     st.setMode('natural');
     await actions.startJob();
     const req = client.createJob.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(req).toEqual({ input_path: '/a.wav', profile: 'studio', overwrite: true });
+    expect(req).toEqual({ input_path: '/a.wav', profile: 'production', overwrite: true });
     expect('mode' in req).toBe(false);
     expect('speaker_id' in req).toBe(false);
     expect('cutoff_hz' in req).toBe(false);

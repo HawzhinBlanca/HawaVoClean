@@ -209,7 +209,9 @@ class RestorationGuard:
 
         # 6. Sorani Linguistic / Acoustic Posterior Stability Check
         ling_res: LinguisticGuardResult = self.linguistic_guard.evaluate(
-            natural_audio, candidate_audio, speech_mask=speech_mask,
+            natural_audio,
+            candidate_audio,
+            speech_mask=speech_mask,
             f0_statistics=f0_statistics,
         )
         ctc_info = ling_res.to_dict()

@@ -344,7 +344,7 @@ export const useStore = create<AppState>((set) => ({
   original: null,
   cleaned: null,
 
-  profile: 'studio',
+  profile: 'production',
   speakers: [],
   restoreAvailable: false,
   mode: 'natural',

@@ -15,12 +15,11 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 function mockAnalysis(over: Partial<AudioAnalysis> = {}): AudioAnalysis {
   return {
     path: '/path/to/test.wav',
-    sha256: 'a'.repeat(64),
     sample_rate: 48000,
     channels: 1,
     duration_s: 2.0,
-    loudness_lufs: -18.0,
-    true_peak_dbfs: -1.0,
+    loudness: { integrated_lufs: -18.0, true_peak_dbtp: -1.0 },
+    noise_floor_db: -50.0,
     rms_db: [-20, -18, -19, -21],
     peaks: {
       min: [-0.5, -0.6, -0.4, -0.3],
@@ -59,7 +58,7 @@ describe('SpectrogramDisplay component', () => {
 
   it('renders header with SHOW button when clip is loaded', () => {
     act(() => {
-      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', size: 1024 });
+      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', origin: 'file' });
       useStore.getState().setOriginal(mockAnalysis());
       root.render(createElement(SpectrogramDisplay));
     });
@@ -74,7 +73,7 @@ describe('SpectrogramDisplay component', () => {
 
   it('toggles body and canvas when SHOW/HIDE button is clicked', () => {
     act(() => {
-      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', size: 1024 });
+      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', origin: 'file' });
       useStore.getState().setOriginal(mockAnalysis());
       root.render(createElement(SpectrogramDisplay));
     });
@@ -105,7 +104,7 @@ describe('SpectrogramDisplay component', () => {
 
   it('reflects cleaned deck when abMode is cleaned', () => {
     act(() => {
-      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', size: 1024 });
+      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', origin: 'file' });
       useStore.getState().setOriginal(mockAnalysis());
       useStore.getState().setCleaned(mockAnalysis({ path: '/out.wav' }), '/out.wav');
       useStore.getState().setAbMode('cleaned');

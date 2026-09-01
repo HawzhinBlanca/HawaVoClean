@@ -91,7 +91,7 @@ class NativeSourceRegistry:
             info = current.stat()
         except (OSError, ValueError):
             return None
-        if current != path or not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG(info.st_mode):
             return None
         return int(info.st_dev), int(info.st_ino)
 

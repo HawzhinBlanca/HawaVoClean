@@ -63,7 +63,7 @@ const REDRAW_DEBOUNCE_MS = 80;
 function renderEnergyMap(
   peakMin: number[],
   peakMax: number[],
-  rmsDb: number[],
+  _rmsDb: number[],
   viewStart: number,
   viewEnd: number,
   totalDuration: number,

@@ -242,10 +242,11 @@ def validate_all_profiles(profiles_root: Path | str = "profiles") -> dict[str, S
     seen_hashes: dict[str, str] = {}
 
     # Dynamic discovery: any dir with profile.json
-    profile_dirs = sorted(
-        d for d in root.iterdir()
-        if d.is_dir() and (d / "profile.json").exists()
-    ) if root.exists() else []
+    profile_dirs = (
+        sorted(d for d in root.iterdir() if d.is_dir() and (d / "profile.json").exists())
+        if root.exists()
+        else []
+    )
 
     if not profile_dirs:
         raise ProfileValidationError(f"No speaker profiles found under {root}")
@@ -264,4 +265,3 @@ def validate_all_profiles(profiles_root: Path | str = "profiles") -> dict[str, S
         seen_hashes[emb_hash] = spk_id
 
     return profiles
-
