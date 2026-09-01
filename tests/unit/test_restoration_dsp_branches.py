@@ -641,10 +641,10 @@ def test_hawarestore_unknown_speaker_and_bad_embedding_are_ignored(
         assert np.all(np.isfinite(cond_cand.audio))
 
 
-def test_hawarestore_ode_failure_falls_back_to_dsp_extrapolation(
+def test_hawarestore_ode_failure_falls_back_to_natural_passthrough(
     restorer: HawaRestoreKD, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A crashing ODE solver must degrade to tiled DSP extrapolation, not fail the job."""
+    """A crashing ODE solver must degrade to Natural audio passthrough, not fabricate fake DSP."""
 
     def _boom(*_args: object, **_kwargs: object) -> torch.Tensor:
         raise RuntimeError("simulated ODE solver failure")
@@ -660,14 +660,9 @@ def test_hawarestore_ode_failure_falls_back_to_dsp_extrapolation(
     passthrough = next(c.audio for c in cands if c.strength == 0.0)
 
     np.testing.assert_array_equal(passthrough, sig)
+    np.testing.assert_array_equal(restored, sig)
     assert restored.shape == sig.shape
     assert np.all(np.isfinite(restored))
-
-    sos = signal.butter(6, 6000.0, btype="highpass", fs=SR, output="sos")
-    hf_in = float(np.sqrt(np.mean(signal.sosfiltfilt(sos, sig) ** 2)))
-    hf_out = float(np.sqrt(np.mean(signal.sosfiltfilt(sos, restored) ** 2)))
-    assert hf_out > 1e-4
-    assert hf_out > 50.0 * hf_in
 
 
 def test_highband_does_not_reject_a_recording_for_its_own_transients() -> None:

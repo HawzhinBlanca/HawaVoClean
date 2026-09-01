@@ -392,7 +392,7 @@ class DifferentiableSpeakerEmbed(nn.Module):
         feat_norm = feat_38 / (torch.norm(feat_38, dim=-1, keepdim=True) + 1e-9)
 
         # Neural feature projection & GELU activation
-        projected = torch.matmul(feat_norm, self.proj_matrix)  # (B, 192)
+        projected = torch.matmul(feat_norm, cast(torch.Tensor, self.proj_matrix))  # (B, 192)
         gelu = torch.nn.functional.gelu(projected)
         return torch.nn.functional.normalize(gelu, dim=-1)
 
