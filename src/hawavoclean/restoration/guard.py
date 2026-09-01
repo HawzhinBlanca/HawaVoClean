@@ -34,6 +34,62 @@ class GuardRResult:
         return asdict(self)
 
 
+def compute_highband_lsd(
+    ref_audio: np.ndarray,
+    cand_audio: np.ndarray,
+    sample_rate: int = 48000,
+    cutoff_hz: float = 4000.0,
+    n_fft: int = 2048,
+    hop_length: int = 512,
+) -> float:
+    """Compute Log-Spectral Distance (LSD) in dB over the generated high band."""
+    from scipy import signal
+
+    ref_mono = np.mean(ref_audio, axis=0) if ref_audio.ndim == 2 else ref_audio
+    cand_mono = np.mean(cand_audio, axis=0) if cand_audio.ndim == 2 else cand_audio
+
+    min_len = min(len(ref_mono), len(cand_mono))
+    if min_len < n_fft:
+        return 0.0
+
+    ref_mono = ref_mono[:min_len]
+    cand_mono = cand_mono[:min_len]
+
+    _, _, Z_ref = signal.stft(
+        ref_mono,
+        fs=sample_rate,
+        window="hann",
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        boundary=None,
+        padded=False,
+    )
+    _, _, Z_cand = signal.stft(
+        cand_mono,
+        fs=sample_rate,
+        window="hann",
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        boundary=None,
+        padded=False,
+    )
+
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
+    band_mask = (freqs >= cutoff_hz) & (freqs <= sample_rate / 2.0)
+
+    if not np.any(band_mask):
+        return 0.0
+
+    P_ref = np.abs(Z_ref[band_mask, :]) ** 2 + 1e-12
+    P_cand = np.abs(Z_cand[band_mask, :]) ** 2 + 1e-12
+
+    log_ref = 10.0 * np.log10(P_ref)
+    log_cand = 10.0 * np.log10(P_cand)
+
+    frame_lsd = np.sqrt(np.mean((log_ref - log_cand) ** 2, axis=0))
+    return float(np.mean(frame_lsd))
+
+
 class RestorationGuard:
     """Restoration Guard R orchestrating multi-layer fidelity verification."""
 
@@ -222,12 +278,25 @@ class RestorationGuard:
                 ctc_info,
             )
 
+        # 7. High-Band Objective Spectral Distance (LSD) Check
+        lsd_highband = compute_highband_lsd(
+            natural_audio, candidate_audio, sample_rate=self.sample_rate, cutoff_hz=cutoff_hz
+        )
+        lsd_info = {"highband_lsd_db": round(lsd_highband, 2), "threshold_db": 18.0}
+        if lsd_highband > 18.0:
+            return (
+                False,
+                f"High-band LSD divergence {lsd_highband:.2f} dB > 18.00 dB limit",
+                {"highband_lsd": lsd_info},
+            )
+
         metrics = {
             "protected_band": asdict(prot_verif),
             "highband_events": asdict(hf_res),
             "harmonic": harmonic_info,
             "speaker": speaker_info,
             "ctc": ctc_info,
+            "highband_lsd": lsd_info,
         }
         return True, "Passed all Guard R layers", metrics
 
