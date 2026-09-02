@@ -464,6 +464,22 @@ def test_a_terminal_callback_may_ask_the_manager_a_question(tmp_path: Path) -> N
     seen: list[int] = []
 
     def ask_the_manager(record: JobRecord) -> None:
+        # Terminal callbacks must run with the manager lock released so other threads can query/submit.
+        acquired_from_other_thread = threading.Event()
+
+        def probe() -> None:
+            if manager._lock.acquire(timeout=0.5):
+                try:
+                    acquired_from_other_thread.set()
+                finally:
+                    manager._lock.release()
+
+        probe_thread = threading.Thread(target=probe)
+        probe_thread.start()
+        probe_thread.join(timeout=1.0)
+        assert acquired_from_other_thread.is_set(), (
+            "manager lock was held during terminal callback execution"
+        )
         # Every one of these re-enters the lock the callback used to hold.
         manager.active_input_paths()
         manager.list_jobs()

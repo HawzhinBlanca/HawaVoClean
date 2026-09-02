@@ -43,8 +43,8 @@ def test_replacing_or_redirecting_selected_path_revokes_authority() -> None:
     source = _source("replace.wav", b"first")
     registered = registry.register(str(source))
 
-    source.unlink()
-    source.write_bytes(b"different inode")
+    replacement = _source("replacement.wav", b"different inode")
+    replacement.replace(source)
     assert registry.resolve_source(registered.source_id) is None
     assert not registry.authorizes(source)
 
