@@ -235,6 +235,11 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
 
+      - name: Synchronize Python dependencies
+        run: |
+          uv python install ${{ env.PYTHON_RELEASE_VERSION }}
+          uv sync --frozen --all-extras
+
       - name: Package and validate the unsigned desktop shell proof
         shell: bash
         run: |
