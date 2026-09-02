@@ -309,3 +309,56 @@ lease.release()
         text=True,
     )
     assert acquired.returncode == 0, acquired.stderr
+
+
+def test_windows_try_lock_and_linux_renameat2_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+    from typing import Any
+
+    # 1. Windows try_lock raises BlockingIOError on contention
+    fake_msvcrt = SimpleNamespace(
+        LK_NBLCK=12,
+        locking=lambda _descriptor, _mode, _count: (_ for _ in ()).throw(
+            OSError(errno.EACCES, "Permission denied")
+        ),
+    )
+    monkeypatch.setattr(platform_fs, "_platform_name", lambda: "nt")
+    monkeypatch.setattr(platform_fs, "_load_native_module", lambda _name: fake_msvcrt)
+
+    lock_path = tmp_path / "test_try_lock.lock"
+    with pytest.raises(BlockingIOError, match="already held"):
+        platform_fs.try_acquire_exclusive_file_lease(lock_path)
+
+    # 2. Linux renameat2 branch
+    calls: list[tuple[Any, ...]] = []
+
+    class _MockRenameat2:
+        argtypes: list[Any] = []
+        restype: Any = None
+
+        def __call__(self, *args: Any) -> int:
+            calls.append(args)
+            return 0
+
+    mock_renameat2 = _MockRenameat2()
+    fake_libc = SimpleNamespace(renameat2=mock_renameat2)
+    fake_ctypes = SimpleNamespace(
+        CDLL=lambda *_a, **_kw: fake_libc,
+        c_int=int,
+        c_char_p=bytes,
+        c_uint=int,
+        get_errno=lambda: 0,
+    )
+
+    monkeypatch.setattr(platform_fs, "_platform_name", lambda: "posix")
+    monkeypatch.setattr(platform_fs, "_platform_system", lambda: "linux")
+    monkeypatch.setattr(platform_fs, "_load_native_module", lambda _name: fake_ctypes)
+
+    src = tmp_path / "linux_src"
+    dst = tmp_path / "linux_dst"
+    platform_fs._posix_rename_new_path(src, dst)
+    assert len(calls) == 1
+    assert calls[0][0] == -100  # AT_FDCWD
+    assert calls[0][4] == 0x00000001  # RENAME_NOREPLACE

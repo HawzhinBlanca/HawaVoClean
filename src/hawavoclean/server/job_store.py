@@ -149,18 +149,28 @@ class DurableJobStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._closed = False
+        conn: sqlite3.Connection | None = None
         try:
-            self._conn = sqlite3.connect(
+            conn = sqlite3.connect(
                 path,
                 timeout=30.0,
                 isolation_level=None,
                 check_same_thread=False,
             )
-            self._conn.row_factory = sqlite3.Row
+            conn.row_factory = sqlite3.Row
+            self._conn = conn
             self._configure()
             self._migrate()
         except (OSError, sqlite3.Error) as exc:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
             raise JobStoreError(f"could not open durable job store {path}: {exc}") from exc
+        except BaseException:
+            if conn is not None:
+                with contextlib.suppress(Exception):
+                    conn.close()
+            raise
 
     def _configure(self) -> None:
         with self._lock:

@@ -310,3 +310,175 @@ def test_posix_spawn_forces_a_new_session_in_factory() -> None:
     finally:
         # The fake pid must never be signalled on the real host.
         supervisor.close(kill_remaining=False)
+
+
+def test_ctypes_windows_job_api_full_qualification(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ctypes
+
+    from hawavoclean.process_supervisor import _NativeWindowsJobApi
+
+    class _MockKernel32:
+        def __init__(self) -> None:
+            self.CreateJobObjectW = lambda *_a: 1001
+            self.SetInformationJobObject = lambda *_a: 1
+            self.OpenProcess = lambda *_a: 2001
+            self.AssignProcessToJobObject = lambda *_a: 1
+            self.CreateToolhelp32Snapshot = lambda *_a: 3001
+            self.Thread32First = lambda *_a: True
+            self.Thread32Next = lambda *_a: False
+            self.OpenThread = lambda *_a: 4001
+            self.ResumeThread = lambda *_a: 1
+            self.TerminateJobObject = lambda *_a: 1
+            self.CloseHandle = lambda *_a: 1
+            self.GetLastError = lambda: 0
+
+    mock_k32 = _MockKernel32()
+
+    class _MockWinDLL:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(mock_k32, name)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            setattr(mock_k32, name, value)
+
+    monkeypatch.setitem(vars(ctypes), "WinDLL", _MockWinDLL)
+
+    api = _NativeWindowsJobApi()
+
+    # 1. create_kill_on_close_job
+    h_job = api.create_kill_on_close_job()
+    assert h_job == 1001
+
+    mock_k32.CreateJobObjectW = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.create_kill_on_close_job()
+    mock_k32.CreateJobObjectW = lambda *_a: 1001
+
+    mock_k32.SetInformationJobObject = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.create_kill_on_close_job()
+    mock_k32.SetInformationJobObject = lambda *_a: 1
+
+    # 2. assign_process
+    api.assign_process(1001, 1234)
+    mock_k32.OpenProcess = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.assign_process(1001, 1234)
+    mock_k32.OpenProcess = lambda *_a: 2001
+
+    mock_k32.AssignProcessToJobObject = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.assign_process(1001, 1234)
+    mock_k32.AssignProcessToJobObject = lambda *_a: 1
+
+    # 3. resume_process
+    def _tfirst(_h: Any, ptr: Any) -> bool:
+        entry = ptr._obj if hasattr(ptr, "_obj") else ptr
+        entry.th32OwnerProcessID = 1234
+        entry.th32ThreadID = 5678
+        return True
+
+    mock_k32.Thread32First = _tfirst
+    mock_k32.Thread32Next = lambda *_a: False
+    api.resume_process(1234)
+
+    mock_k32.CreateToolhelp32Snapshot = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.resume_process(1234)
+    mock_k32.CreateToolhelp32Snapshot = lambda *_a: 3001
+
+    mock_k32.OpenThread = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.resume_process(1234)
+    mock_k32.OpenThread = lambda *_a: 4001
+
+    mock_k32.ResumeThread = lambda *_a: 0xFFFFFFFF
+    with pytest.raises(OSError):
+        api.resume_process(1234)
+    mock_k32.ResumeThread = lambda *_a: 1
+
+    def _tfirst_mismatch(_h: Any, ptr: Any) -> bool:
+        entry = ptr._obj if hasattr(ptr, "_obj") else ptr
+        entry.th32OwnerProcessID = 9999
+        entry.th32ThreadID = 5678
+        return True
+
+    mock_k32.Thread32First = _tfirst_mismatch
+    with pytest.raises(OSError, match="expected one suspended initial thread"):
+        api.resume_process(1234)
+
+    # 4. terminate_job
+    api.terminate_job(1001, 1)
+    mock_k32.TerminateJobObject = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.terminate_job(1001, 1)
+    mock_k32.TerminateJobObject = lambda *_a: 1
+
+    # 5. close_handle
+    api.close_handle(1001)
+    mock_k32.CloseHandle = lambda *_a: 0
+    with pytest.raises(OSError):
+        api.close_handle(1001)
+
+
+def test_process_supervisor_branches_and_edge_cases() -> None:
+    # 1. Invalid platform
+    with pytest.raises(ValueError, match="unsupported process-supervisor platform"):
+        ProcessSupervisor.spawn(["cmd"], platform="invalid_platform")
+
+    # 2. Context manager and platform property
+    proc = _FakeProcess()
+    with ProcessSupervisor.spawn(
+        ["cmd"],
+        platform="posix",
+        popen_factory=lambda *_a, **_kw: cast(subprocess.Popen[str], proc),
+    ) as sup:
+        assert sup.platform == "posix"
+        with pytest.raises(ValueError, match="grace_s must be non-negative"):
+            sup.terminate_tree(-1.0)
+
+    # 3. Factory exception cleans up windows job handle
+    api = _FakeWindowsJobApi()
+
+    def _boom_factory(*_a: Any, **_kw: Any) -> subprocess.Popen[str]:
+        raise RuntimeError("spawn failed")
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        ProcessSupervisor.spawn(
+            ["cmd"],
+            platform="nt",
+            windows_api=api,
+            popen_factory=_boom_factory,
+        )
+    assert api.closed == [9001]
+
+    # 4. request_graceful_shutdown and kill_tree on closed supervisor
+    sup2 = ProcessSupervisor.spawn(
+        ["cmd"],
+        platform="nt",
+        windows_api=api,
+        popen_factory=lambda *_a, **_kw: cast(subprocess.Popen[str], proc),
+    )
+    sup2.close()
+    # Calling on closed supervisor is a safe no-op
+    sup2.request_graceful_shutdown()
+    sup2.kill_tree()
+
+    # 5. kill_tree when api.terminate_job raises OSError
+    class _FailingTerminateApi(_FakeWindowsJobApi):
+        def terminate_job(self, _job_handle: int, _exit_code: int) -> None:
+            raise OSError(5, "Access Denied")
+
+    proc3 = _FakeProcess()
+    sup3 = ProcessSupervisor.spawn(
+        ["cmd"],
+        platform="nt",
+        windows_api=_FailingTerminateApi(),
+        popen_factory=lambda *_a, **_kw: cast(subprocess.Popen[str], proc3),
+    )
+    sup3.kill_tree()
+    assert proc3.killed is True
+    sup3.close()

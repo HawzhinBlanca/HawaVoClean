@@ -38,3 +38,31 @@ def _stable_cwd() -> object:
     prev = os.getcwd()
     yield
     os.chdir(prev)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:  # noqa: ARG001
+    """Cleanly teardown internal weakref handles and run garbage collection before module dict teardown."""
+    import contextlib
+    import gc
+    import sys
+
+    gc.collect()
+
+    # Prevent torch StorageWeakRef noisy deallocator exceptions on Python 3.14 exit
+    if "torch" in sys.modules:
+        try:
+            import torch.multiprocessing.reductions
+
+            swr = getattr(torch.multiprocessing.reductions, "StorageWeakRef", None)
+            if swr is not None and hasattr(swr, "__del__"):
+                orig_del = swr.__del__
+
+                def _safe_del(self: object) -> None:
+                    with contextlib.suppress(Exception):
+                        orig_del(self)
+
+                swr.__del__ = _safe_del
+        except Exception:
+            pass
+
+    gc.collect()

@@ -75,3 +75,48 @@ def test_native_lease_never_deletes_user_owned_file() -> None:
     with registry.lease_source(registered.source_id) as leased:
         assert leased == source.resolve()
     assert source.is_file()
+
+
+def test_resolve_native_selected_path_and_registry_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hawavoclean.server.source_caps import resolve_native_selected_path
+
+    # Empty path
+    with pytest.raises(PathPolicyError, match="selected source path is required"):
+        resolve_native_selected_path("")
+    with pytest.raises(PathPolicyError, match="selected source path is required"):
+        resolve_native_selected_path("   ")
+
+    # Relative path
+    with pytest.raises(PathPolicyError, match="must be absolute"):
+        resolve_native_selected_path("relative/path.wav")
+
+    # Non-existent path
+    with pytest.raises(PathPolicyError, match="not found"):
+        resolve_native_selected_path("/nonexistent/file/path_12345.wav")
+
+    registry = NativeSourceRegistry()
+    source = _source("reg_path.wav")
+
+    # resolve_registered_path before registering
+    assert registry.resolve_registered_path(str(source)) is None
+    # resolve_registered_path with invalid path
+    assert registry.resolve_registered_path("relative/path.wav") is None
+
+    # Register and resolve
+    registry.register(str(source))
+    assert registry.resolve_registered_path(str(source)) == source.resolve()
+
+    # Re-register path after inode changed
+    source.write_bytes(b"modified bytes")
+    # Replace file to change inode
+    temp_new = _source("temp_new.wav", b"new content")
+    os.replace(temp_new, source)
+    reg_new = registry.register(str(source))
+    assert reg_new.path == source.resolve()
+
+    # _identity returns None when file is missing during register
+    monkeypatch.setattr(registry, "_identity", lambda _p: None)
+    with pytest.raises(PathPolicyError, match="not a regular file"):
+        registry.register(str(source))

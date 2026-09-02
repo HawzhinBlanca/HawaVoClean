@@ -94,3 +94,43 @@ def test_speaker_embed_discriminates_distinct_speakers() -> None:
     # Different speaker cosine similarity should be low (< 0.40)
     sim_diff = float(np.dot(emb_a1, emb_b))
     assert sim_diff < 0.40
+
+
+def test_enroll_speaker_end_to_end_and_validation(tmp_path: Path) -> None:
+    from hawavoclean.restoration.profiles import validate_speaker_profile
+
+    audio_dir = tmp_path / "speaker_audio"
+    audio_dir.mkdir()
+
+    # Generate 3 files of 105s each (~315s total)
+    for i in range(3):
+        audio = _generate_synthetic_speaker(160.0 + i * 2.0, seed=100 + i, duration_s=105.0)
+        sf.write(audio_dir / f"session_{i}.wav", audio, SR)
+
+    out_dir = tmp_path / "profiles"
+    result = enroll_speaker(
+        speaker_id="kurdish_speaker_01",
+        display_name="Kurdish Speaker 01",
+        audio_dir=audio_dir,
+        output_dir=out_dir,
+        consent_granted=True,
+        consent_note="Verified studio recording consent",
+        min_duration_s=300.0,
+        verbose=False,
+    )
+
+    assert result.speaker_id == "kurdish_speaker_01"
+    assert result.n_files == 3
+    assert result.total_duration_s >= 300.0
+    assert result.embedding_dim == 192
+    assert (result.profile_dir / "profile.json").is_file()
+    assert (result.profile_dir / "embedding" / "profile.npy").is_file()
+    assert (result.profile_dir / "consent" / "consent.json").is_file()
+
+    # Validate the generated profile
+    profile = validate_speaker_profile(result.profile_dir / "profile.json")
+    assert profile.speaker_id == "kurdish_speaker_01"
+    assert profile.display_name == "Kurdish Speaker 01"
+    assert profile.embedding_vector is not None
+    assert profile.embedding_vector.shape == (192,)
+    assert 0.99 <= float(np.linalg.norm(profile.embedding_vector)) <= 1.01

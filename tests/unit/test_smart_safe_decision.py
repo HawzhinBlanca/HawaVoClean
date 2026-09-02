@@ -283,3 +283,78 @@ def test_region_input_must_be_contiguous() -> None:
                 RegionRecommendation(2.0, 3.0, "production", 1.0, 1.0),
             )
         )
+
+
+def test_smart_safe_decision_error_branches() -> None:
+    from hawavoclean.smart_safe.decision import SmartSafePolicy, _probability
+
+    # 1. _probability validation
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        _probability(1.5, "test_field")
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        _probability(-0.1, "test_field")
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        _probability(float("nan"), "test_field")
+
+    # 2. AcousticEvidence validation
+    with pytest.raises(ValueError, match="non-zero confidence"):
+        AcousticEvidence(
+            speech_dominance=0.9,
+            music_risk=0.1,
+            crosstalk_risk=0.1,
+            rumble_confidence=0.1,
+            band_limited_confidence=0.1,
+            recorded_high_frequency_speech_confidence=0.1,
+            speaker_match_confidence=0.0,
+            speaker_match_verified=True,
+        )
+
+    # 3. SmartSafePolicy validation
+    with pytest.raises(ValueError, match="tie_margin_mos"):
+        SmartSafePolicy(tie_margin_mos=-1.0)
+    with pytest.raises(ValueError, match="intervention_penalty_mos"):
+        SmartSafePolicy(intervention_penalty_mos=-1.0)
+    with pytest.raises(ValueError, match="uncertain_region_max_s"):
+        SmartSafePolicy(uncertain_region_max_s=-1.0)
+
+    # 4. CandidateEvidence validation
+    with pytest.raises(ValueError, match="unknown candidate route"):
+        CandidateEvidence(
+            route="unknown_route",  # type: ignore[arg-type]
+            predicted_quality_mos=4.0,
+            prediction_confidence=0.9,
+            content_guard_passed=True,
+            speaker_guard_passed=True,
+            protected_band_guard_passed=True,
+            artifact_guard_passed=True,
+            post_master_guard_passed=True,
+        )
+    with pytest.raises(ValueError, match="between 1 and 5"):
+        CandidateEvidence(
+            route="preserve",
+            predicted_quality_mos=0.5,
+            prediction_confidence=0.9,
+            content_guard_passed=True,
+            speaker_guard_passed=True,
+            protected_band_guard_passed=True,
+            artifact_guard_passed=True,
+            post_master_guard_passed=True,
+        )
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        CandidateEvidence(
+            route="preserve",
+            predicted_quality_mos=4.0,
+            prediction_confidence=0.9,
+            content_guard_passed=True,
+            speaker_guard_passed=True,
+            protected_band_guard_passed=True,
+            artifact_guard_passed=True,
+            post_master_guard_passed=True,
+            evidence_sha256="bad_sha",
+        )
+
+    # 5. RegionRecommendation validation
+    with pytest.raises(ValueError, match="0 <= start < end"):
+        RegionRecommendation(5.0, 4.0, "preserve", 1.0, 1.0)
+    with pytest.raises(ValueError, match="0 <= start < end"):
+        RegionRecommendation(-1.0, 1.0, "preserve", 1.0, 1.0)

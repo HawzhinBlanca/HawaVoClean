@@ -339,3 +339,97 @@ def test_invalid_temp_never_replaces_valid_prior_record_when_source_changes(
         )
     assert destination.read_bytes() == original
     verify_processing_record(destination)
+
+
+def test_manifest_parsing_and_validation_branches() -> None:
+    from hawavoclean.record_bundle import _manifest_object, _validated_manifest
+
+    # 1. Non-canonical or malformed JSON
+    with pytest.raises(PublicationError, match="invalid JSON"):
+        _manifest_object(b"invalid json")
+    with pytest.raises(PublicationError, match="duplicate key"):
+        _manifest_object(b'{"a": 1, "a": 2}')
+    with pytest.raises(PublicationError, match="must be a JSON object"):
+        _manifest_object(b"[1, 2, 3]")
+    with pytest.raises(PublicationError, match="not canonical JSON"):
+        _manifest_object(b'{"schema_version": 1, "product": "hawavoclean"} ')
+
+    # 2. _validated_manifest schema validation
+    with pytest.raises(PublicationError, match="fields differ from schema v1"):
+        _validated_manifest({"wrong": 1})
+
+    valid_manifest = {
+        "schema_version": 1,
+        "product": "hawavoclean-full-processing-record",
+        "files": {
+            "master.wav": {"role": "master", "sha256": "a" * 64, "size_bytes": 100},
+            "report.json": {"role": "report", "sha256": "b" * 64, "size_bytes": 200},
+            "summary.txt": {"role": "summary", "sha256": "c" * 64, "size_bytes": 300},
+        },
+        "content_sha256": "bad_content_sha",
+    }
+    with pytest.raises(PublicationError, match="content identity does not recompute"):
+        _validated_manifest(valid_manifest)
+
+    # Missing file entry
+    bad_files_manifest = dict(
+        valid_manifest,
+        files={"master.wav": {"role": "master", "sha256": "a" * 64, "size_bytes": 100}},
+    )
+    with pytest.raises(PublicationError, match="file inventory is incomplete"):
+        _validated_manifest(bad_files_manifest)
+
+
+def test_record_bundle_file_and_header_branches(tmp_path: Path) -> None:
+    from hawavoclean.record_bundle import _regular_file, _validate_wave_header
+
+    # 1. _validate_wave_header error branches
+    with pytest.raises(PublicationError, match="not a RIFF/RF64 WAVE"):
+        _validate_wave_header(b"too_short")
+    with pytest.raises(PublicationError, match="not a RIFF/RF64 WAVE"):
+        _validate_wave_header(b"FORM" + b"\x00" * 8)
+    with pytest.raises(PublicationError, match="not a RIFF/RF64 WAVE"):
+        _validate_wave_header(b"RIFF" + b"\x00" * 4 + b"AIFF")
+
+    # Valid header
+    _validate_wave_header(b"RIFF" + b"\x00" * 4 + b"WAVE")
+    _validate_wave_header(b"RF64" + b"\x00" * 4 + b"WAVE")
+
+    # 2. _regular_file error branches
+    empty_file = tmp_path / "empty.txt"
+    empty_file.touch()
+    with pytest.raises(PublicationError, match="is empty"):
+        _regular_file(empty_file, label="test_file", maximum_bytes=1000)
+
+    too_large = tmp_path / "large.txt"
+    too_large.write_bytes(b"a" * 100)
+    with pytest.raises(PublicationError, match="exceeds the"):
+        _regular_file(too_large, label="test_file", maximum_bytes=50)
+
+    # 3. create_processing_record destination not ending in .zip
+    master, report, summary = _sources(tmp_path / "src_test")
+    with pytest.raises(PublicationError, match="must end in .zip"):
+        create_processing_record(
+            master_path=master,
+            report_path=report,
+            summary_path=summary,
+            destination=tmp_path / "dest.tar",
+        )
+
+    # 4. create_processing_record refusing to overwrite source file
+    src_dir = tmp_path / "src_overwrite"
+    src_dir.mkdir()
+    fake_master = src_dir / "master.zip"
+    fake_master.write_bytes(b"RIFF" + b"\x00" * 4 + b"WAVE" + b"extra audio")
+    fake_report = src_dir / "report.json"
+    fake_report.write_bytes(b'{"output": {"sha256": "abc"}}')
+    fake_summary = src_dir / "summary.txt"
+    fake_summary.write_bytes(b"summary")
+
+    with pytest.raises(PublicationError, match="Refusing to overwrite a Processing Record source"):
+        create_processing_record(
+            master_path=fake_master,
+            report_path=fake_report,
+            summary_path=fake_summary,
+            destination=fake_master,
+        )

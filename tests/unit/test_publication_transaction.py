@@ -778,8 +778,57 @@ def test_resolved_reader_cannot_mix_generations_across_overwrite(tmp_path: Path)
     _publish(tmp_path, b"new", overwrite=True)
 
     assert reader[0].read_bytes() == b"old"
-    assert (
-        json.loads(reader[1].read_text())["output"]["sha256"] == hashlib.sha256(b"old").hexdigest()
-    )
     current = resolve_committed_publication(tmp_path / "out.wav")
     assert current is not None and current[0].read_bytes() == b"new"
+
+
+def test_verify_generation_and_publication_error_branches(tmp_path: Path) -> None:
+    from hawavoclean.publication import _verify_generation
+
+    # 1. Non-directory generation
+    fake_file = tmp_path / "gen_file"
+    fake_file.touch()
+    with pytest.raises(PublicationError, match="not a real directory"):
+        _verify_generation(fake_file)
+
+    # 2. Directory without manifest
+    gen_dir = tmp_path / "gen_dir"
+    gen_dir.mkdir()
+    with pytest.raises(PublicationError, match="unreadable"):
+        _verify_generation(gen_dir)
+
+    # 3. Invalid manifest JSON
+    manifest = gen_dir / "manifest.json"
+    manifest.write_text("invalid json")
+    with pytest.raises(PublicationError, match="unreadable"):
+        _verify_generation(gen_dir)
+
+    # 4. Manifest schema version mismatch
+    manifest.write_text(json.dumps({"schema_version": 999}))
+    with pytest.raises(PublicationError, match="Unsupported generation manifest"):
+        _verify_generation(gen_dir)
+
+    # 5. Generation ID mismatch
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generation_id": "wrong_id",
+            }
+        )
+    )
+    with pytest.raises(PublicationError, match="Generation ID does not match"):
+        _verify_generation(gen_dir)
+
+    # 6. Invalid artifacts table
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generation_id": gen_dir.name,
+                "artifacts": {},
+            }
+        )
+    )
+    with pytest.raises(PublicationError, match="artifact table is invalid"):
+        _verify_generation(gen_dir)

@@ -368,13 +368,17 @@ def run_pipeline(
     cutoff_hz: float | None = None,
     profiles_dir: str | Path = "profiles",
     clean_only: bool = False,
+    original_input_path: Path | str | None = None,
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
     ``on_progress`` (optional) receives a :class:`ProgressEvent` at every
     stage boundary; exceptions it raises are logged and ignored.
     """
-    in_path = Path(input_path).resolve()
+    raw_in_path = Path(input_path).resolve()
+    in_path = (
+        Path(original_input_path).resolve() if original_input_path is not None else raw_in_path
+    )
     out_path = public_output_path(output_path)
 
     if mode not in ("natural", "restore"):
@@ -424,7 +428,7 @@ def run_pipeline(
     # Replacing or rewriting the original path after this point cannot mix
     # report identity from one file with decoded samples from another.
     pinned = PinnedSource.create(
-        in_path,
+        raw_in_path,
         staging_root=work_root(),
         max_file_size_bytes=MAX_INPUT_FILE_BYTES,
     )

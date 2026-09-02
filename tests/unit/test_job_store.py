@@ -667,3 +667,160 @@ def test_prepare_batch_late_failure_rolls_back_rows_keys_and_output_leases(
         assert marker.exists()
     finally:
         manager.shutdown()
+
+
+def test_job_store_edge_cases_and_branch_coverage(tmp_path: Path) -> None:
+    from hawavoclean.server.job_store import unique_candidate
+
+    # 1. unique_candidate
+    with pytest.raises(ValueError, match="ordinal must be positive"):
+        unique_candidate(Path("a.wav"), 0)
+    assert unique_candidate(Path("a.wav"), 1) == Path("a.wav")
+
+    # 2. _encode and _decode validation
+    with pytest.raises(JobStoreError, match="not canonical JSON"):
+        DurableJobStore._encode({"bad": object()})
+    with pytest.raises(JobStoreError, match="invalid JSON"):
+        DurableJobStore._decode("{invalid json")
+    with pytest.raises(JobStoreError, match="not an object"):
+        DurableJobStore._decode("123")
+
+    # 3. Schema Version 1 migration
+    v1_db = tmp_path / "v1.sqlite3"
+    conn = sqlite3.connect(v1_db)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                idempotency_key TEXT UNIQUE,
+                request_hash TEXT NOT NULL,
+                conflict_policy TEXT NOT NULL,
+                output_path TEXT NOT NULL,
+                output_key TEXT NOT NULL,
+                terminal INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                record_json TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX active_output_lease ON jobs(output_key) WHERE terminal = 0;
+            PRAGMA user_version = 1;
+            """
+        )
+        conn.execute(
+            "INSERT INTO jobs VALUES ('j1', 'k1', 'h1', 'fail', '/out.wav', '/out.wav', 1, "
+            "'done', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z', '{}')"
+        )
+    finally:
+        conn.close()
+    v1_store = DurableJobStore(v1_db)
+    v1_store.close()
+
+    # 4. Closed store methods
+    store = DurableJobStore(tmp_path / "closed.sqlite3")
+    store.close()
+    # Double close is a no-op
+    store.close()
+
+    record = _stored_record(tmp_path)
+    with pytest.raises(JobStoreError, match="closed"):
+        store.reserve(
+            record=record, request_hash="a" * 64, idempotency_key=None, conflict_policy="fail"
+        )
+    with pytest.raises(JobStoreError, match="closed"):
+        store.find_idempotent("key", request_hash="a" * 64)
+    with pytest.raises(JobStoreError, match="closed"):
+        store.find_job("j_one")
+    with pytest.raises(JobStoreError, match="closed"):
+        store.update(record, terminal=True)
+    with pytest.raises(JobStoreError, match="closed"):
+        store.load_and_interrupt()
+    with pytest.raises(JobStoreError, match="closed"):
+        store.prune_terminal({"j_one"})
+    with pytest.raises(JobStoreError, match="closed"):
+        store.delete_queued(["j_one"])
+
+    # 5. Unsupported conflict policy, unknown job update, and invalid load params
+    live_store = DurableJobStore(tmp_path / "live.sqlite3")
+    try:
+        with pytest.raises(ValueError, match="unsupported conflict policy"):
+            live_store.reserve(
+                record=record,
+                request_hash="a" * 64,
+                idempotency_key=None,
+                conflict_policy="bad_policy",  # type: ignore[arg-type]
+            )
+        with pytest.raises(JobStoreError, match="durable job is missing"):
+            live_store.update({**record, "job_id": "nonexistent_job"}, terminal=True)
+        with pytest.raises(ValueError, match="max_terminal_jobs"):
+            live_store.load_and_interrupt(max_terminal_jobs=0)
+        with pytest.raises(ValueError, match="terminal_ttl_s"):
+            live_store.load_and_interrupt(terminal_ttl_s=0.0)
+        # Empty prune and delete_queued are no-ops
+        live_store.prune_terminal(set())
+        live_store.delete_queued([])
+        assert live_store.find_job("nonexistent") is None
+
+        # Stale processing record in replace mode without record_bundle
+        stale_out = tmp_path / "stale_out.wav"
+        stale_zip = tmp_path / "stale_out.hawavoclean.zip"
+        stale_zip.write_bytes(b"fake zip")
+        stale_record = {**record, "job_id": "j_stale", "output_path": str(stale_out)}
+        with pytest.raises(OutputConflictError, match="same-stem Processing Record already exists"):
+            live_store.reserve(
+                record=stale_record,
+                request_hash="b" * 64,
+                idempotency_key="stale_key",
+                conflict_policy="replace",
+            )
+    finally:
+        live_store.close()
+
+
+def test_job_store_error_branches(tmp_path: Path) -> None:
+    store = DurableJobStore(tmp_path / "errors.sqlite3")
+    try:
+        record = _stored_record(tmp_path, job_id="j_err1")
+        store.reserve(
+            record=record,
+            request_hash="a" * 64,
+            idempotency_key="k1",
+            conflict_policy="fail",
+        )
+        # Update to terminal state
+        record["state"] = "done"
+        store.update(record, terminal=True)
+
+        # Attempt to delete_queued on a finished/terminal job
+        with pytest.raises(JobStoreError, match="no longer queued"):
+            store.delete_queued(["j_err1"])
+
+        # Attempt to delete_queued with non-existent job
+        with pytest.raises(JobStoreError, match="no longer queued"):
+            store.delete_queued(["nonexistent_job_id"])
+
+        # Injected SQLite error on operations
+        class _FailingConnProxy:
+            def __init__(self, real: sqlite3.Connection) -> None:
+                self._real = real
+
+            def execute(self, *_args: object, **_kwargs: object) -> Any:
+                raise sqlite3.OperationalError("disk I/O error")
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._real, name)
+
+        real_conn = store._conn
+        store._conn = _FailingConnProxy(real_conn)  # type: ignore[assignment]
+        with pytest.raises(JobStoreError, match="could not look up"):
+            store.find_job("j_err1")
+        with pytest.raises(JobStoreError, match="could not update"):
+            store.update(record, terminal=True)
+        with pytest.raises(JobStoreError, match="could not prune"):
+            store.prune_terminal({"j_err1"})
+        with pytest.raises(JobStoreError, match="could not recover"):
+            store.load_and_interrupt()
+        store._conn = real_conn
+    finally:
+        store.close()

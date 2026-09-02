@@ -30,7 +30,8 @@ def _get(url: str, token: str | None = "t") -> tuple[int, Any]:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode())
+        with e:
+            return e.code, json.loads(e.read().decode())
 
 
 def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
@@ -82,6 +83,10 @@ def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
         err = proc.stderr.read()
         assert "listening on" in err
     finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
         if proc.poll() is None:
             proc.kill()
             proc.wait()

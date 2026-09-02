@@ -235,6 +235,7 @@ def run_multipass(
     overwrite: bool = False,
     on_progress: ProgressCallback | None = None,
     clean_only: bool = False,
+    original_input_path: Path | str | None = None,
 ) -> HawaVoCleanReport:
     """Run the pipeline ``passes`` times (or ``"auto"``) and publish the
     final master with a per-pass audit trail in its report.
@@ -263,10 +264,14 @@ def run_multipass(
                 overwrite=overwrite,
                 on_progress=on_progress,
                 clean_only=clean_only,
+                original_input_path=original_input_path,
             )
     target = MAX_PASSES if auto else pass_count
 
-    in_path = Path(input_path).resolve()
+    raw_in_path = Path(input_path).resolve()
+    in_path = (
+        Path(original_input_path).resolve() if original_input_path is not None else raw_in_path
+    )
     out_path = public_output_path(output_path)
     # Refuse a bad destination BEFORE pass 1 decodes a sample — the per-pass
     # preflight only ever sees the private temp destinations.
@@ -285,7 +290,7 @@ def run_multipass(
         original_input: MediaStats | None = None
         shipped_report: HawaVoCleanReport | None = None
         shipped_audio: Path | None = None
-        current_input = in_path
+        current_input = raw_in_path
         checkpoint_path = tmp_root / "checkpoint.json"
 
         def _write_checkpoint(pass_index: int, record: PassRecord) -> None:

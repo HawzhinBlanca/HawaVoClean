@@ -228,3 +228,48 @@ def test_v1_submission_rechecks_selected_route_capability(
         }
     finally:
         manager.shutdown()
+
+
+def test_load_core_lock_and_natural_contract_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hawavoclean.errors import PreflightError
+    from hawavoclean.natural_contract import load_core_lock
+
+    # 1. Unknown core id
+    with pytest.raises(PreflightError, match="Unknown enhancement core"):
+        load_core_lock("nonexistent_core_id")
+
+    # 2. Corrupted / unreadable lockfile
+    staged_models = tmp_path / "corrupt-models"
+    staged_models.mkdir()
+    (staged_models / "production-core.lock.toml").write_text("invalid [[ toml", encoding="utf-8")
+    monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(staged_models))
+    with pytest.raises(PreflightError, match="unreadable"):
+        load_core_lock("wiener-dd-48k-v1")
+
+    # 3. Lockfile core_id mismatch
+    (staged_models / "production-core.lock.toml").write_text(
+        'core_id = "wrong_core"\nparams_hash = "abc"\n', encoding="utf-8"
+    )
+    with pytest.raises(PreflightError, match="does not match"):
+        load_core_lock("wiener-dd-48k-v1")
+
+    # 4. _probe_optional_runtime_contract timeout and OSError branches
+    import subprocess
+
+    from hawavoclean.natural_contract import _probe_optional_runtime_contract
+
+    def failing_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd="probe", timeout=0.1)
+
+    monkeypatch.setattr(subprocess, "run", failing_run)
+    with pytest.raises(PreflightError, match="timed out"):
+        _probe_optional_runtime_contract("test-core", "probe_ref", ("test_mod",), ("/fake/path",))
+
+    def oserror_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("exec failed")
+
+    monkeypatch.setattr(subprocess, "run", oserror_run)
+    with pytest.raises(PreflightError, match="could not start"):
+        _probe_optional_runtime_contract("test-core2", "probe_ref", ("test_mod",), ("/fake/path",))

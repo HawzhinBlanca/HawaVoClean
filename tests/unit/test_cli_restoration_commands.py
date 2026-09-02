@@ -413,3 +413,32 @@ def test_an_unknown_speaker_id_is_refused_before_the_audio_is_decoded(
             mode="restore",
             speaker_id="no_such_speaker",
         )
+
+
+def test_pipeline_run_in_restore_mode(tmp_path: Path) -> None:
+    import numpy as np
+    import soundfile as sf
+
+    import hawavoclean.pipeline as pipeline
+
+    sr = 48000
+    t = np.linspace(0, 0.5, int(0.5 * sr), endpoint=False, dtype=np.float32)
+    sig = (0.3 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)
+
+    in_wav = tmp_path / "in.wav"
+    sf.write(str(in_wav), sig, sr, format="WAV", subtype="PCM_16")
+
+    out_wav = tmp_path / "out_restored.wav"
+    report = pipeline.run_pipeline(
+        input_path=in_wav,
+        output_path=out_wav,
+        profile="development",
+        overwrite=True,
+        mode="restore",
+        speaker_id="character_01",
+        profiles_dir=_REPO_PROFILES,
+    )
+    assert out_wav.is_file()
+    assert report.restoration is not None
+    assert report.restoration["mode"] == "restore"
+    assert report.restoration["speaker_id"] == "character_01"

@@ -658,3 +658,41 @@ def test_pinned_store_fails_closed_if_rotation_state_is_missing(
             now=NOW,
         )
     assert missing.value.code == "rotation_state_required"
+
+
+def test_model_pack_store_qualification_and_error_branches(tmp_path: Path) -> None:
+    # 1. Invalid pinned_rotation_root type
+    with pytest.raises(ModelPackSignatureError, match="must be a PinnedRotationRoot"):
+        ModelPackStore(tmp_path / "store", pinned_rotation_root="not_a_root")  # type: ignore[arg-type]
+
+    # 2. Invalid qualification_policies type
+    with pytest.raises(TypeError, match="qualification_policies"):
+        ModelPackStore(
+            tmp_path / "store",
+            qualification_policies=("bad_policy",),  # type: ignore[arg-type]
+        )
+
+    # 3. Duplicate qualification policy pack_id
+    policy1 = ModelPackQualificationPolicy(
+        pack_id="pack-one",
+        version="1.0.0",
+        manifest_sha256="a" * 64,
+        providers=("CPUExecutionProvider",),
+    )
+    policy2 = ModelPackQualificationPolicy(
+        pack_id="pack-one",
+        version="2.0.0",
+        manifest_sha256="b" * 64,
+        providers=("CPUExecutionProvider",),
+    )
+    with pytest.raises(ValueError, match="duplicate qualification policy"):
+        ModelPackStore(tmp_path / "store", qualification_policies=(policy1, policy2))
+
+    # 4. application_default classmethod
+    default_store = ModelPackStore.application_default()
+    assert default_store.root.name == "model-packs"
+
+    # 5. verify_and_commit_key_rotation with invalid pinned_root
+    store = ModelPackStore(tmp_path / "store")
+    with pytest.raises(ModelPackSignatureError, match="pinned rotation root is required"):
+        store.verify_and_commit_key_rotation(b"", b"", "bad_root")  # type: ignore[arg-type]

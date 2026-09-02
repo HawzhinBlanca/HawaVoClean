@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import multiprocessing
@@ -845,3 +846,108 @@ def test_store_rejects_a_windows_reparse_root(
     capability = ModelPackStore(root).inspect(PACK_ID, trust_store, now=NOW)
     assert capability.status == "blocked"
     assert capability.reason_code == "unsafe_pack_store"
+
+
+def test_trust_module_branches_and_edge_cases(tmp_path: Path) -> None:
+    # 1. _validated_now with naive datetime
+    naive = datetime(2026, 1, 1, 0, 0)
+    with pytest.raises(ModelPackCompatibilityError, match="timezone-aware"):
+        trust_module._validated_now(naive)
+
+    # 2. _require_real_directory on non-directory
+    test_file = tmp_path / "not_a_dir.txt"
+    test_file.touch()
+    with pytest.raises(ModelPackPayloadError, match="must be a real directory"):
+        trust_module._require_real_directory(test_file, subject="model pack")
+
+    # 3. _safe_declared_file on missing file
+    with pytest.raises(ModelPackPayloadError, match="declared payload is missing"):
+        trust_module._safe_declared_file(tmp_path, "nonexistent.onnx")
+
+    # 4. _safe_declared_file on directory
+    sub_dir = tmp_path / "sub"
+    sub_dir.mkdir()
+    with pytest.raises(ModelPackPayloadError, match="not a regular file"):
+        trust_module._safe_declared_file(tmp_path, "sub")
+
+    # 5. parse_signature_bytes error branches
+    with pytest.raises(ModelPackManifestError, match="exceeds the 16 KiB"):
+        trust_module.parse_signature_bytes(b"a" * 20000)
+
+    with pytest.raises(ModelPackManifestError, match="must be a JSON object"):
+        trust_module.parse_signature_bytes(b"[]")
+
+    with pytest.raises(ModelPackManifestError, match="fields do not match"):
+        trust_module.parse_signature_bytes(json.dumps({"schema_version": 1}).encode())
+
+    with pytest.raises(ModelPackManifestError, match="unsupported manifest.sig schema"):
+        trust_module.parse_signature_bytes(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "algorithm": "Ed25519",
+                    "key_id": "k1",
+                    "signature": base64.b64encode(b"a" * 64).decode(),
+                }
+            ).encode()
+        )
+
+    with pytest.raises(ModelPackManifestError, match="must use Ed25519"):
+        trust_module.parse_signature_bytes(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "algorithm": "RSA",
+                    "key_id": "k1",
+                    "signature": base64.b64encode(b"a" * 64).decode(),
+                }
+            ).encode()
+        )
+
+    with pytest.raises(ModelPackManifestError, match="key_id is invalid"):
+        trust_module.parse_signature_bytes(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "algorithm": "Ed25519",
+                    "key_id": "invalid key with spaces",
+                    "signature": base64.b64encode(b"a" * 64).decode(),
+                }
+            ).encode()
+        )
+
+    with pytest.raises(ModelPackManifestError, match="must be base64 text"):
+        trust_module.parse_signature_bytes(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "algorithm": "Ed25519",
+                    "key_id": "k1",
+                    "signature": 12345,
+                }
+            ).encode()
+        )
+
+    with pytest.raises(ModelPackManifestError, match="not canonical base64"):
+        trust_module.parse_signature_bytes(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "algorithm": "Ed25519",
+                    "key_id": "k1",
+                    "signature": "%%%invalid base64%%%",
+                }
+            ).encode()
+        )
+
+    with pytest.raises(ModelPackManifestError, match="must be exactly 64 bytes"):
+        trust_module.parse_signature_bytes(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "algorithm": "Ed25519",
+                    "key_id": "k1",
+                    "signature": base64.b64encode(b"too_short").decode(),
+                }
+            ).encode()
+        )

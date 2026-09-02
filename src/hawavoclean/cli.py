@@ -298,7 +298,10 @@ def cmd_restore_doctor(_args: argparse.Namespace) -> int:
 
     print("================================================================================")
     if all_passed:
-        print("Restore-Doctor status: ALL RESTORATION CHECKS PASSED. Ready for restore mode.")
+        print(
+            "Restore-Doctor status: ALL RESTORATION CHECKS PASSED "
+            "(quarantined research prototype, not production qualified)."
+        )
         return int(ExitCode.SUCCESS)
     print("Restore-Doctor status: PREFLIGHT FAILED. Address errors above.")
     return int(ExitCode.PREFLIGHT_FAILURE)
@@ -495,6 +498,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 cutoff_hz=getattr(args, "cutoff_hz", None),
                 profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
                 clean_only=clean_only,
+                original_input_path=getattr(args, "original_input_path", None),
             )
         else:
             run_multipass(
@@ -506,6 +510,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 overwrite=args.overwrite,
                 on_progress=on_progress,
                 clean_only=clean_only,
+                original_input_path=getattr(args, "original_input_path", None),
             )
         processing_record: ProcessingRecord | None = None
         record_destination = getattr(args, "record_bundle", None)
@@ -1716,6 +1721,11 @@ def _main() -> None:
         dest="clean_only",
         action="store_true",
         help="Output only the master audio WAV file; omit .json and .txt sidecar reports",
+    )
+    p_proc.add_argument(
+        "--original-input-path",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     p_proc.set_defaults(func=cmd_process)
 

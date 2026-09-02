@@ -21,12 +21,15 @@ from scipy import signal
 
 from hawavoclean.errors import ModelProvenanceError
 from hawavoclean.hashing import hash_file
+from hawavoclean.logging import get_logger
 from hawavoclean.paths import restoration_checkpoint_path
 from hawavoclean.restoration.base import RestorationCandidate, Restorer
 from hawavoclean.restoration.protected_band import (
     compute_transition_mask,
     merge_protected_spectrum,
 )
+
+logger = get_logger("restoration.hawarestore_kd")
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -426,10 +429,13 @@ class HawaRestoreKD(Restorer):
             )
             flow_np = Z_flow.squeeze(0).cpu().numpy()
             Z_gen = flow_np[0] + 1j * flow_np[1]
-        except Exception:
+        except Exception as exc:
             # Explicit fail-closed Natural fallback: on solver error, do not fabricate fake DSP frequencies
+            logger.warning(
+                "ODE flow solver failed: %s; falling back to 0.0-strength Natural passthrough", exc
+            )
             x_rec = block[:n_block].copy()
-            return {s: x_rec.astype(np.float32) for s in strengths}
+            return {0.0: x_rec.astype(np.float32)}
 
         freqs = np.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate)
         cutoff_bin = max(1, int(np.argmin(np.abs(freqs - effective_cutoff_hz))))
@@ -452,15 +458,14 @@ class HawaRestoreKD(Restorer):
 
         out: dict[float, np.ndarray] = {}
         for s in strengths:
+            if s <= 0.0:
+                continue
             Z_merged = merge_protected_spectrum(Z_obs, Z_gen_scaled, mask, strength=s)
             x_rec = self._istft(Z_merged)
             if len(x_rec) < n_block:
                 x_rec = np.pad(x_rec, (0, n_block - len(x_rec)))
             else:
                 x_rec = x_rec[:n_block]
-            # Deliberately not clipped to ±1: hard-clipping here would guarantee
-            # a peak below Guard R's 1.05 rejection threshold, hiding an
-            # overshoot from the guard and distorting the protected band with it.
             out[s] = x_rec.astype(np.float32)
         return out
 
@@ -498,6 +503,7 @@ class HawaRestoreKD(Restorer):
 
         candidates: list[RestorationCandidate] = []
         restored_channels_by_strength: dict[float, list[np.ndarray]] = {s: [] for s in strengths}
+        active_strengths_failed: set[float] = set()
 
         spk_idx_t: torch.Tensor | None = None
         if speaker_id is not None and speaker_id in self.speaker_ids:
@@ -518,7 +524,9 @@ class HawaRestoreKD(Restorer):
 
         proto_t: torch.Tensor | None = None
         if speaker_embedding is not None and len(speaker_embedding) == 192:
-            proto_t = torch.from_numpy(speaker_embedding).float().unsqueeze(0).to(self.device)
+            proto_t = (
+                torch.from_numpy(speaker_embedding.astype(np.float32)).unsqueeze(0).to(self.device)
+            )
 
         active_strengths = [s for s in strengths if s > 0.0]
 
@@ -542,8 +550,9 @@ class HawaRestoreKD(Restorer):
                 gen = torch.Generator(device=self.device)
                 gen.manual_seed((seed + 10007 * ch_idx + 65537 * block_idx) % (2**63 - 1))
 
+                block = ch_audio[p0:p1]
                 block_out = self._restore_block(
-                    ch_audio[p0:p1],
+                    block,
                     effective_cutoff_hz=effective_cutoff_hz,
                     strengths=active_strengths,
                     spk_idx_t=spk_idx_t,
@@ -551,10 +560,16 @@ class HawaRestoreKD(Restorer):
                     generator=gen,
                 )
 
+                for s in active_strengths:
+                    if s not in block_out:
+                        active_strengths_failed.add(s)
+
                 # Blocks overlap; cross-fade the seam so no click is introduced
                 # at a boundary the listener never chose.
                 xfade = max(0, min(covered - p0, p1 - p0)) if block_idx > 0 else 0
                 for s, y in block_out.items():
+                    if s not in chan_out:
+                        continue
                     dst = chan_out[s]
                     if xfade > 0:
                         ramp = np.linspace(0.0, 1.0, xfade, endpoint=False, dtype=np.float32)
@@ -568,11 +583,15 @@ class HawaRestoreKD(Restorer):
             for s in strengths:
                 if s == 0.0:
                     restored_channels_by_strength[s].append(ch_audio)
-                else:
+                elif s not in active_strengths_failed:
                     restored_channels_by_strength[s].append(chan_out[s])
 
         for s in strengths:
-            arr_list = restored_channels_by_strength[s]
+            if s > 0.0 and s in active_strengths_failed:
+                continue
+            arr_list = restored_channels_by_strength.get(s, [])
+            if not arr_list or len(arr_list) != n_channels:
+                continue
             merged_audio = np.stack(arr_list, axis=0) if is_multichannel else arr_list[0]
             final_audio = np.asarray(merged_audio, dtype=np.float32)
             if np.any(~np.isfinite(final_audio)):
@@ -581,6 +600,15 @@ class HawaRestoreKD(Restorer):
                 RestorationCandidate(
                     strength=s,
                     audio=final_audio,
+                    cutoff_hz=effective_cutoff_hz,
+                )
+            )
+
+        if not any(c.strength == 0.0 for c in candidates):
+            candidates.append(
+                RestorationCandidate(
+                    strength=0.0,
+                    audio=audio_48k.copy(),
                     cutoff_hz=effective_cutoff_hz,
                 )
             )

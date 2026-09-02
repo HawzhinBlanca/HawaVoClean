@@ -656,13 +656,18 @@ def test_hawarestore_ode_failure_falls_back_to_natural_passthrough(
         sig, sample_rate=SR, effective_cutoff_hz=4000.0, strengths=[1.0, 0.0], seed=3
     )
 
-    restored = next(c.audio for c in cands if c.strength == 1.0)
+    assert not any(c.strength > 0.0 for c in cands)
     passthrough = next(c.audio for c in cands if c.strength == 0.0)
 
     np.testing.assert_array_equal(passthrough, sig)
-    np.testing.assert_array_equal(restored, sig)
-    assert restored.shape == sig.shape
-    assert np.all(np.isfinite(restored))
+    assert passthrough.shape == sig.shape
+    assert np.all(np.isfinite(passthrough))
+
+    guard = RestorationGuard(sample_rate=SR)
+    sel, res = guard.select_best_candidate(sig, cands, cutoff_hz=4000.0)
+    assert sel is sig
+    assert res.verdict == "NO_RESTORE"
+    assert res.accepted_strength == 0.0
 
 
 def test_highband_does_not_reject_a_recording_for_its_own_transients() -> None:
@@ -687,3 +692,33 @@ def test_highband_does_not_reject_a_recording_for_its_own_transients() -> None:
     assert res.impulse_discontinuity_ratio < 10.0, (
         "the recording's own transient was scored as damage the restoration did"
     )
+
+
+def test_hawarestore_speaker_conditioning_and_nan_handling(restorer: HawaRestoreKD) -> None:
+    sig = (_tone(440.0, 0.2, amp=0.4) + _tone(3800.0, 0.2, amp=0.25)).astype(np.float32)
+
+    # 1. Known speaker id and 192-dim embedding
+    spk_id = restorer.speaker_ids[0] if restorer.speaker_ids else None
+    spk_embed = np.ones(192, dtype=np.float32) / np.sqrt(192)
+    cands = restorer.restore(
+        sig,
+        sample_rate=SR,
+        effective_cutoff_hz=4000.0,
+        speaker_id=spk_id,
+        speaker_embedding=spk_embed,
+        strengths=[1.0],  # only 1.0, to trigger auto-append 0.0
+        seed=42,
+    )
+    assert any(c.strength == 0.0 for c in cands)
+
+    # 2. Multi-channel audio handling (stereo)
+    stereo_sig = np.stack([sig, sig], axis=0)
+    cands_stereo = restorer.restore(
+        stereo_sig,
+        sample_rate=SR,
+        effective_cutoff_hz=4000.0,
+        strengths=[0.0, 1.0],
+        seed=42,
+    )
+    assert len(cands_stereo) >= 1
+    assert cands_stereo[0].audio.shape == (2, len(sig))

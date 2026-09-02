@@ -32,10 +32,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from hawavoclean.errors import ExitCode
+from hawavoclean.errors import ExitCode, MediaPreflightError, MediaPreflightReason
 from hawavoclean.hashing import hash_file
 from hawavoclean.logging import get_logger
-from hawavoclean.paths import profiles_root
+from hawavoclean.paths import profiles_root, work_root
 from hawavoclean.platform_fs import (
     ExclusiveFileLease,
     is_reparse_or_symlink,
@@ -60,8 +60,10 @@ from hawavoclean.server.job_store import (
     unique_candidate,
     user_artifact_paths,
 )
+from hawavoclean.source_pin import PinnedSource, remove_source_snapshot_tree
 from hawavoclean.watchdog import child_env
 
+MAX_INPUT_FILE_BYTES = 8 * 1024**3
 logger = get_logger("server.jobs")
 
 JobState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
@@ -115,6 +117,10 @@ class JobRecord:
     record_bundle: bool = False
     bundle_path: Path | None = None
     bundle: dict[str, Any] | None = None
+    source_snapshot_path: Path | None = None
+    source_snapshot_dir: Path | None = None
+    source_sha256: str | None = None
+    source_size_bytes: int | None = None
     state: JobState = "queued"
     stage: str = "preflight"
     progress: float = 0.0
@@ -196,6 +202,14 @@ class JobRecord:
             "record_bundle": self.record_bundle,
             "bundle_path": str(self.bundle_path) if self.bundle_path is not None else None,
             "bundle": self.bundle,
+            "source_snapshot_path": (
+                str(self.source_snapshot_path) if self.source_snapshot_path is not None else None
+            ),
+            "source_snapshot_dir": (
+                str(self.source_snapshot_dir) if self.source_snapshot_dir is not None else None
+            ),
+            "source_sha256": self.source_sha256,
+            "source_size_bytes": self.source_size_bytes,
             "state": self.state,
             "stage": self.stage,
             "progress": self.progress,
@@ -249,6 +263,24 @@ class JobRecord:
                 if isinstance(value.get("bundle"), dict)
                 else None
             ),
+            source_snapshot_path=(
+                Path(str(value["source_snapshot_path"]))
+                if value.get("source_snapshot_path") is not None
+                else None
+            ),
+            source_snapshot_dir=(
+                Path(str(value["source_snapshot_dir"]))
+                if value.get("source_snapshot_dir") is not None
+                else None
+            ),
+            source_sha256=(
+                str(value["source_sha256"]) if value.get("source_sha256") is not None else None
+            ),
+            source_size_bytes=(
+                int(value["source_size_bytes"])
+                if value.get("source_size_bytes") is not None
+                else None
+            ),
             state=cast(JobState, state),
             stage=str(value.get("stage", "preflight")),
             progress=float(value.get("progress", 0.0)),
@@ -275,17 +307,24 @@ TerminalCallback = Callable[[JobRecord], None]
 
 def default_command(record: JobRecord) -> list[str]:
     """The contract child command (same isolation pattern as ``cli._run_one_isolated``)."""
+    input_arg = (
+        str(record.source_snapshot_path)
+        if record.source_snapshot_path is not None
+        else str(record.input_path)
+    )
     cmd = [
         sys.executable,
         "-m",
         "hawavoclean.cli",
         "process",
-        str(record.input_path),
+        input_arg,
         "-o",
         str(record.output_path),
         "--profile",
         record.profile,
     ]
+    if record.source_snapshot_path is not None and str(record.input_path) != input_arg:
+        cmd += ["--original-input-path", str(record.input_path)]
     if record.mode == "restore":
         # The speaker id is validated at the API boundary (``^[a-z0-9_]{1,64}$``)
         # before it may reach a child argv, and the profiles dir is resolved
@@ -786,22 +825,7 @@ class JobManager:
             "record_bundle": record_bundle,
         }
         request_hash = canonical_request_hash(request_payload)
-        record = JobRecord(
-            job_id=f"j_{uuid.uuid4().hex[:16]}",
-            input_path=input_path,
-            output_path=output_path,
-            report_path=report_path,
-            profile=profile,
-            overwrite=effective_overwrite,
-            idempotency_key=idempotency_key,
-            conflict_policy=policy,
-            request_hash=request_hash,
-            mode=mode,
-            speaker_id=speaker_id,
-            cutoff_hz=cutoff_hz,
-            record_bundle=record_bundle,
-            bundle_path=bundle_path,
-        )
+
         with self._wake:
             if self._closed:
                 raise RuntimeError("job manager is shut down")
@@ -820,33 +844,81 @@ class JobManager:
                 )
                 if durable_retry is not None:
                     return self._snapshot_durable_retry_locked(durable_retry)
-            active = sum(record.state not in TERMINAL_STATES for record in self._jobs.values())
+            active = sum(r.state not in TERMINAL_STATES for r in self._jobs.values())
             if active >= self._max_active_jobs:
                 raise QueueFullError(
                     f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
                 )
-            if self._store is not None:
-                reservation = self._store.reserve(
-                    record=record.storage_record(),
-                    request_hash=request_hash,
-                    idempotency_key=idempotency_key,
-                    conflict_policy=policy,
-                )
-                record = JobRecord.from_storage(reservation.record)
-                if reservation.reused:
-                    return self._snapshot_durable_retry_locked(reservation)
-            else:
-                record = self._reserve_in_memory(record)
-            self._jobs[record.job_id] = record
-            if idempotency_key is not None:
-                self._idempotency[idempotency_key] = record.job_id
-            self._queue.append(record.job_id)
-            running = any(r.state == "running" for r in self._jobs.values())
-            position = queue_position(len(self._queue), running)
-            record.message = "Queued" if position == 1 else f"Queued (position {position})"
-            self._persist_locked(record)
-            self._wake.notify_all()
-            return record.snapshot()
+
+        pinned: PinnedSource | None = None
+        if input_path.exists() and input_path.is_file():
+            pinned = PinnedSource.create(
+                input_path,
+                staging_root=work_root(),
+                max_file_size_bytes=MAX_INPUT_FILE_BYTES,
+            )
+        elif self._command_factory is default_command:
+            raise MediaPreflightError(
+                MediaPreflightReason.NOT_FOUND,
+                f"Input audio file does not exist or cannot be read: {input_path}",
+            )
+
+        try:
+            record = JobRecord(
+                job_id=f"j_{uuid.uuid4().hex[:16]}",
+                input_path=input_path,
+                output_path=output_path,
+                report_path=report_path,
+                profile=profile,
+                overwrite=effective_overwrite,
+                idempotency_key=idempotency_key,
+                conflict_policy=policy,
+                request_hash=request_hash,
+                mode=mode,
+                speaker_id=speaker_id,
+                cutoff_hz=cutoff_hz,
+                record_bundle=record_bundle,
+                bundle_path=bundle_path,
+                source_snapshot_path=pinned.path if pinned is not None else None,
+                source_snapshot_dir=pinned.directory if pinned is not None else None,
+                source_sha256=pinned.sha256 if pinned is not None else None,
+                source_size_bytes=pinned.size_bytes if pinned is not None else None,
+            )
+            with self._wake:
+                if self._closed:
+                    raise RuntimeError("job manager is shut down")
+                self._prune_locked()
+                active = sum(r.state not in TERMINAL_STATES for r in self._jobs.values())
+                if active >= self._max_active_jobs:
+                    raise QueueFullError(
+                        f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
+                    )
+                if self._store is not None:
+                    reservation = self._store.reserve(
+                        record=record.storage_record(),
+                        request_hash=request_hash,
+                        idempotency_key=idempotency_key,
+                        conflict_policy=policy,
+                    )
+                    record = JobRecord.from_storage(reservation.record)
+                    if reservation.reused:
+                        return self._snapshot_durable_retry_locked(reservation)
+                else:
+                    record = self._reserve_in_memory(record)
+                self._jobs[record.job_id] = record
+                if idempotency_key is not None:
+                    self._idempotency[idempotency_key] = record.job_id
+                self._queue.append(record.job_id)
+                running = any(r.state == "running" for r in self._jobs.values())
+                position = queue_position(len(self._queue), running)
+                record.message = "Queued" if position == 1 else f"Queued (position {position})"
+                self._persist_locked(record)
+                self._wake.notify_all()
+                return record.snapshot()
+        except BaseException:
+            if pinned is not None:
+                pinned.cleanup_unadopted()
+            raise
 
     def _snapshot_durable_retry_locked(self, reservation: Reservation) -> dict[str, Any]:
         """Rehydrate an exact retry without turning it into fresh history."""
@@ -1212,6 +1284,9 @@ class JobManager:
             }
             record.bundle = None
             self._notify_locked(record)
+        if record.source_snapshot_dir is not None:
+            remove_source_snapshot_tree(record.source_snapshot_dir)
+            record.source_snapshot_dir = None
         # Queue the callbacks; ``_locked`` runs them once the lock is released.
         self._pending_terminal.append(record)
 

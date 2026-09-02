@@ -255,3 +255,57 @@ def test_pipeline_fails_before_decode_if_private_snapshot_changes_after_probe(
             probe_override=FixedProbe(),
         )
     assert raised.value.reason is MediaPreflightReason.SOURCE_CHANGED
+
+
+@pytest.mark.unit
+def test_source_pin_edge_cases_and_error_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hawavoclean.errors import PreflightError
+    from hawavoclean.source_pin import remove_source_snapshot_tree
+
+    source = tmp_path / "source.wav"
+    source.write_bytes(b"content for error branches")
+    staging = tmp_path / "staging"
+
+    # 1. os.open raises OSError
+    def failing_open(*_args: object, **_kwargs: object) -> int:
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr("hawavoclean.source_pin.os.open", failing_open)
+    with pytest.raises(MediaPreflightError) as exc:
+        PinnedSource.create(source, staging_root=staging, max_file_size_bytes=MAX_SOURCE_BYTES)
+    assert exc.value.reason is MediaPreflightReason.SOURCE_CHANGED
+
+    # 2. Insufficient scratch space
+    monkeypatch.undo()
+
+    class FakeDiskUsage:
+        free = 10  # very small
+
+    monkeypatch.setattr("hawavoclean.source_pin.shutil.disk_usage", lambda _p: FakeDiskUsage())
+    with pytest.raises(PreflightError, match="Insufficient scratch space"):
+        PinnedSource.create(source, staging_root=staging, max_file_size_bytes=MAX_SOURCE_BYTES)
+
+    # 3. Empty file
+    empty_source = tmp_path / "empty.wav"
+    empty_source.touch()
+    with pytest.raises(MediaPreflightError) as exc_empty:
+        PinnedSource.create(
+            empty_source, staging_root=staging, max_file_size_bytes=MAX_SOURCE_BYTES
+        )
+    assert exc_empty.value.reason is MediaPreflightReason.EMPTY_FILE
+
+    # 4. File too large
+    with pytest.raises(MediaPreflightError) as exc_large:
+        PinnedSource.create(source, staging_root=staging, max_file_size_bytes=5)
+    assert exc_large.value.reason is MediaPreflightReason.FILE_TOO_LARGE
+
+    # 5. remove_source_snapshot_tree handles non-existent and directories
+    remove_source_snapshot_tree(tmp_path / "nonexistent_dir")
+
+    test_dir = tmp_path / "to_clean"
+    test_dir.mkdir()
+    (test_dir / "file.txt").write_text("hello")
+    remove_source_snapshot_tree(test_dir)
+    assert not test_dir.exists()
