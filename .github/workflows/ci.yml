@@ -193,7 +193,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Bootstrap the lockfile-pinned package manager
-        run: npm --prefix resolve-plugin/toolchain ci --ignore-scripts --audit=false --fund=false
+        run: |
+          npm --prefix resolve-plugin/toolchain ci --ignore-scripts --audit=false --fund=false
+          echo "$PWD/resolve-plugin/toolchain/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Install frozen JavaScript dependency graphs
         run: |

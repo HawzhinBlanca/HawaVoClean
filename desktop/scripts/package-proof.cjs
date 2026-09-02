@@ -66,9 +66,17 @@ for (const required of [
   if (!fs.existsSync(required) || !fs.statSync(required).isFile()) fail(`build input is missing: ${required}`);
 }
 
+const toolchainBin = path.join(repositoryRoot, 'resolve-plugin', 'toolchain', 'node_modules', '.bin');
+const pathDelimiter = process.platform === 'win32' ? ';' : ':';
+const currentPath = process.env.PATH || '';
+const augmentedPath = fs.existsSync(toolchainBin) && !currentPath.includes(toolchainBin)
+  ? `${toolchainBin}${pathDelimiter}${currentPath}`
+  : currentPath;
+
 const cli = require.resolve('electron-builder/out/cli/cli.js');
 const env = {
   ...process.env,
+  PATH: augmentedPath,
   CSC_IDENTITY_AUTO_DISCOVERY: 'false',
   HAWAVOCLEAN_RELEASE_BUILD: '0',
   HAWAVOCLEAN_DESKTOP_PROOF_BUILD: '1',
