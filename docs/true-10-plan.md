@@ -1,5 +1,10 @@
 # HawaVoClean: True 10/10 Release Plan
 
+The current full-product execution ledger is
+[`true-10-readiness-task-sheet.md`](true-10-readiness-task-sheet.md). It extends this historical
+release plan across the macOS/Windows apps, real Restore/Smart qualification, Resolve, optional UAE
+cloud and final signed release; its 2026-09-02 snapshot is not a completion claim.
+
 Status: **implementation in progress — see the generated release status for the evidence-derived count;
 human, real-host, current-candidate and final-release gates remain open**
 Baseline: `continuity-taper` at `bf6d932`, audited 2026-08-21  
