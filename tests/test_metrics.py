@@ -138,3 +138,94 @@ class TestCorpusMetrics:
         """Empty corpus should produce empty aggregates."""
         report = compute_corpus_metrics([])
         assert report["total_pairs"] == 0
+
+    def test_load_mono_fallback(self, clean_sine: Path) -> None:
+        from unittest.mock import patch
+
+        from hawavoclean.eval.metrics import _load_mono
+
+        with patch("hawavoclean.audio.probe.probe_audio", side_effect=RuntimeError("probe failed")):
+            mono, sr = _load_mono(clean_sine)
+            assert sr == 16000
+            assert len(mono) == 16000
+
+    def test_sample_rate_mismatch_and_mocked_pesq_estoi(self, tmp_path: Path) -> None:
+        import sys
+        import types
+        from unittest.mock import patch
+
+        t_ref = np.linspace(0, 1.0, 16000, endpoint=False)
+        ref_16k = _write_wav(
+            tmp_path / "ref_16k.wav", np.sin(2 * np.pi * 440 * t_ref).astype(np.float32), sr=16000
+        )
+
+        t_cand = np.linspace(0, 1.0, 48000, endpoint=False)
+        cand_16k = _write_wav(
+            tmp_path / "cand_48k.wav", np.sin(2 * np.pi * 440 * t_cand).astype(np.float32), sr=48000
+        )
+
+        fake_pesq_mod = types.ModuleType("pesq")
+        fake_pesq_mod.pesq = lambda *_a, **_kw: 3.8  # type: ignore[attr-defined]
+
+        fake_pystoi_mod = types.ModuleType("pystoi")
+        fake_pystoi_mod.stoi = lambda *_a, **_kw: 0.95  # type: ignore[attr-defined]
+
+        with patch.dict(sys.modules, {"pesq": fake_pesq_mod, "pystoi": fake_pystoi_mod}):
+            res = compute_metrics(ref_16k, cand_16k)
+            assert res.pesq_wb == 3.8
+            assert res.estoi == 0.95
+            assert any("Resampled candidate" in w for w in res.warnings)
+
+            # Test corpus aggregation with pesq and estoi populated
+            corp = compute_corpus_metrics([(ref_16k, cand_16k)])
+            assert corp["aggregate"]["pesq_wb"]["mean"] == 3.8
+            assert corp["aggregate"]["estoi"]["mean"] == 0.95
+
+    def test_compute_metrics_pesq_pystoi_exception_handling(
+        self, clean_sine: Path, noisy_sine: Path
+    ) -> None:
+        """Verify fallback None when pesq or pystoi raise exceptions."""
+        import sys
+        import types
+        from unittest.mock import patch
+
+        def broken_pesq(*_args: object, **_kwargs: object) -> float:
+            raise ValueError("pesq math overflow")
+
+        def broken_stoi(*_args: object, **_kwargs: object) -> float:
+            raise RuntimeError("stoi crashed")
+
+        fake_pesq_mod = types.ModuleType("pesq")
+        fake_pesq_mod.pesq = broken_pesq  # type: ignore[attr-defined]
+
+        fake_pystoi_mod = types.ModuleType("pystoi")
+        fake_pystoi_mod.stoi = broken_stoi  # type: ignore[attr-defined]
+
+        with patch.dict(sys.modules, {"pesq": fake_pesq_mod, "pystoi": fake_pystoi_mod}):
+            res = compute_metrics(clean_sine, noisy_sine)
+            assert res.pesq_wb is None
+            assert res.estoi is None
+
+    def test_48k_reference_resampling(self, tmp_path: Path) -> None:
+        import sys
+        import types
+        from unittest.mock import patch
+
+        t = np.linspace(0, 1.0, 48000, endpoint=False)
+        ref_48k = _write_wav(
+            tmp_path / "ref_48k.wav", np.sin(2 * np.pi * 440 * t).astype(np.float32), sr=48000
+        )
+        cand_48k = _write_wav(
+            tmp_path / "cand_48k_same.wav", np.sin(2 * np.pi * 440 * t).astype(np.float32), sr=48000
+        )
+
+        fake_pesq_mod = types.ModuleType("pesq")
+        fake_pesq_mod.pesq = lambda *_a, **_kw: 4.1  # type: ignore[attr-defined]
+
+        fake_pystoi_mod = types.ModuleType("pystoi")
+        fake_pystoi_mod.stoi = lambda *_a, **_kw: 0.98  # type: ignore[attr-defined]
+
+        with patch.dict(sys.modules, {"pesq": fake_pesq_mod, "pystoi": fake_pystoi_mod}):
+            res = compute_metrics(ref_48k, cand_48k)
+            assert res.pesq_wb == 4.1
+            assert res.estoi == 0.98
