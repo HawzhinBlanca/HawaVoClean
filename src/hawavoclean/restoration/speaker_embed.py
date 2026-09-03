@@ -106,16 +106,11 @@ class SpeakerEmbeddingExtractor:
         feat_38 = np.concatenate([mfcc_mean, mfcc_std])  # 38
         timbre_norm = feat_38 / (np.linalg.norm(feat_38) + 1e-9)
 
-        # 3. Pitch & Harmonic Resonance Characterization
-        sub = mono[: min(len(mono), self.sample_rate)]
-        corr = np.correlate(sub, sub, mode="full")[len(sub) - 1 :]
-        min_lag = int(self.sample_rate / 500)
-        max_lag = int(self.sample_rate / 50)
-        if max_lag < len(corr):
-            peak_lag = min_lag + int(np.argmax(corr[min_lag:max_lag]))
-            f0_est = self.sample_rate / peak_lag
-        else:
-            f0_est = 150.0
+        from hawavoclean.restoration.f0 import F0Extractor
+
+        f0_traj = F0Extractor(sample_rate=self.sample_rate).extract(mono)
+        voiced_f0 = f0_traj.f0_hz[f0_traj.vuv_mask > 0.5]
+        f0_est = float(np.median(voiced_f0)) if len(voiced_f0) > 0 else 150.0
 
         f0_centers = np.geomspace(80.0, 400.0, 16)
         pitch_rbf = np.exp(

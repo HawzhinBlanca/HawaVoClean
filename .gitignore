@@ -18,6 +18,7 @@ coverage.xml
 .hawavoclean-work/
 test_output/
 data/acceptance/outputs/
+data/kurdish_speakers/
 
 # OS
 .DS_Store
