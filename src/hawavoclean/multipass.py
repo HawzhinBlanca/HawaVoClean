@@ -103,6 +103,60 @@ def speech_floor_separation_db(
 #: passes ≈ 1.1 dB. Beyond 1.5 dB the lab reviewers reported audible artifacts.
 MAX_CUMULATIVE_DRIFT_DB = 1.5
 
+#: Minimum cumulative energy retention in the 2 kHz - 8 kHz consonant presence band
+#: relative to original active speech across multiple passes.
+MIN_CUMULATIVE_CONSONANT_RETENTION = 0.80
+
+#: Maximum auto passes for the neural studio profile to prevent cumulative over-processing.
+MAX_STUDIO_AUTO_PASSES = 2
+
+
+def cumulative_consonant_retention(
+    original_mono: np.ndarray[Any, np.dtype[np.floating[Any]]],
+    candidate_mono: np.ndarray[Any, np.dtype[np.floating[Any]]],
+    sample_rate: int = 48000,
+    n_fft: int = 2048,
+    hop: int = 512,
+) -> float:
+    """Ratio of candidate energy to original energy in the 2 kHz - 8 kHz consonant band.
+
+    Evaluated across active speech frames of the original recording to ensure multi-pass
+    enhancement does not progressively swallow consonants and speech articulation.
+    """
+    min_len = min(len(original_mono), len(candidate_mono))
+    if min_len < n_fft:
+        return 1.0
+    orig = np.asarray(original_mono[:min_len], dtype=np.float64)
+    cand = np.asarray(candidate_mono[:min_len], dtype=np.float64)
+
+    win = np.hanning(n_fft)
+    num_frames = max(1, (min_len - n_fft) // hop + 1)
+    orig_spec = np.zeros((num_frames, n_fft // 2 + 1), dtype=np.float64)
+    cand_spec = np.zeros((num_frames, n_fft // 2 + 1), dtype=np.float64)
+
+    for i in range(num_frames):
+        chunk_orig = orig[i * hop : i * hop + n_fft] * win
+        chunk_cand = cand[i * hop : i * hop + n_fft] * win
+        orig_spec[i] = np.abs(np.fft.rfft(chunk_orig, n=n_fft))
+        cand_spec[i] = np.abs(np.fft.rfft(chunk_cand, n=n_fft))
+
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / max(1, sample_rate))
+    consonant_bins = (freqs >= 2000.0) & (freqs <= 8000.0)
+    if not np.any(consonant_bins):
+        return 1.0
+
+    frame_energy = np.sqrt(np.mean(orig_spec**2, axis=1) + 1e-12)
+    loud_ref = float(np.percentile(frame_energy, 90.0))
+    active = frame_energy >= loud_ref * 0.1
+    if not np.any(active):
+        active = np.ones(num_frames, dtype=bool)
+
+    e_orig = float(np.mean(orig_spec[active][:, consonant_bins] ** 2))
+    e_cand = float(np.mean(cand_spec[active][:, consonant_bins] ** 2))
+    if e_orig <= 1e-6:
+        return 1.0
+    return float(np.clip(e_cand / e_orig, 0.0, 10.0))
+
 
 def cumulative_spectral_drift(
     original_mono: np.ndarray[Any, np.dtype[np.floating[Any]]],
@@ -266,7 +320,7 @@ def run_multipass(
                 clean_only=clean_only,
                 original_input_path=original_input_path,
             )
-    target = MAX_PASSES if auto else pass_count
+    target = (MAX_STUDIO_AUTO_PASSES if profile == "studio" else MAX_PASSES) if auto else pass_count
 
     raw_in_path = Path(input_path).resolve()
     in_path = (
@@ -329,17 +383,28 @@ def run_multipass(
             pass_audio = committed_pass[0] if committed_pass is not None else pass_out
             record = _pass_record(k, report, measure_separation_db(pass_audio))
 
-            # B2: Measure cumulative drift from original for passes > 1.
+            # B2: Measure cumulative drift and consonant retention from original for passes > 1.
             drift: float | None = None
+            cons_retention: float | None = None
             if k > 1:
                 pass_probe = probe_audio(pass_audio)
                 pass_buf = decode_audio(pass_probe)
                 pass_mono = pass_buf.data.mean(axis=0).astype(np.float64)
                 drift = cumulative_spectral_drift(original_mono, pass_mono)
-                record = record.model_copy(update={"cumulative_drift_db": drift})
+                cons_retention = cumulative_consonant_retention(
+                    original_mono, pass_mono, sample_rate=original_probe.sample_rate
+                )
+                record = record.model_copy(
+                    update={
+                        "cumulative_drift_db": drift,
+                        "cumulative_consonant_retention": cons_retention,
+                    }
+                )
                 logger.info(
                     f"Pass {k} cumulative drift from source: {drift:.3f} dB "
-                    f"(ceiling {MAX_CUMULATIVE_DRIFT_DB:.1f} dB)"
+                    f"(ceiling {MAX_CUMULATIVE_DRIFT_DB:.1f} dB), "
+                    f"consonant retention: {cons_retention:.3f} "
+                    f"(floor {MIN_CUMULATIVE_CONSONANT_RETENTION:.2f})"
                 )
 
             if k == 1:
@@ -358,7 +423,7 @@ def run_multipass(
                     break
 
             if auto and k > 1:
-                # B2: Check cumulative drift BEFORE the existing auto verdict
+                # B2: Check cumulative drift and consonant retention BEFORE the existing auto verdict
                 if drift is not None and drift > MAX_CUMULATIVE_DRIFT_DB:
                     drift_reason = (
                         f"cumulative spectral drift {drift:.3f} dB exceeds the "
@@ -369,6 +434,19 @@ def run_multipass(
                         record.model_copy(
                             update={"discarded": True, "discard_reason": drift_reason}
                         )
+                    )
+                    break
+                if (
+                    cons_retention is not None
+                    and cons_retention < MIN_CUMULATIVE_CONSONANT_RETENTION
+                ):
+                    cons_reason = (
+                        f"cumulative consonant retention {cons_retention:.3f} below the "
+                        f"{MIN_CUMULATIVE_CONSONANT_RETENTION:.2f} floor"
+                    )
+                    logger.info(f"Auto mode halts pass {k}: {cons_reason}")
+                    records.append(
+                        record.model_copy(update={"discarded": True, "discard_reason": cons_reason})
                     )
                     break
                 keep, pass_reason = auto_pass_verdict(records[-1], record)

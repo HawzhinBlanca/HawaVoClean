@@ -176,6 +176,9 @@ class PassRecord(ReportBaseModel):
     #: B2 · Log-spectral distance from the ORIGINAL source (dB). Tracks how
     #: far each successive pass drifts from the recording. None for pass 1.
     cumulative_drift_db: float | None = None
+    #: Ratio of candidate consonant energy (2 kHz - 8 kHz) to the original source.
+    #: Tracks speech articulation preservation across multiple passes.
+    cumulative_consonant_retention: float | None = None
     integrated_lufs: float | None = None
     discarded: bool = False
     discard_reason: str | None = None
