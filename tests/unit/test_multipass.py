@@ -746,6 +746,7 @@ def test_auto_discards_on_consonant_attenuation(
 
     assert len(report.passes) == 2
     assert report.passes[1].discarded is True
+    assert report.passes[1].discard_reason is not None
     assert "consonant retention" in report.passes[1].discard_reason.lower()
     # Output must be pass 1
     assert report.output.sha256 == report.passes[0].output_sha256
