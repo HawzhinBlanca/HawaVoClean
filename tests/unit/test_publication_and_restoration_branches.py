@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -43,14 +44,15 @@ def test_read_generation_manifest_errors(tmp_path: Path) -> None:
         _verify_generation(gen_dir)
 
     # 2. Missing artifact file
-    valid_record_manifest = {
+    artifacts_map: dict[str, dict[str, Any]] = {
+        "audio": {"filename": "master.wav", "size_bytes": 10, "sha256": "a" * 64},
+        "json": {"filename": "report.json", "size_bytes": 10, "sha256": "b" * 64},
+        "txt": {"filename": "summary.txt", "size_bytes": 10, "sha256": "c" * 64},
+    }
+    valid_record_manifest: dict[str, Any] = {
         "schema_version": 1,
         "generation_id": gen_dir.name,
-        "artifacts": {
-            "audio": {"filename": "master.wav", "size_bytes": 10, "sha256": "a" * 64},
-            "json": {"filename": "report.json", "size_bytes": 10, "sha256": "b" * 64},
-            "txt": {"filename": "summary.txt", "size_bytes": 10, "sha256": "c" * 64},
-        },
+        "artifacts": artifacts_map,
     }
     manifest_file.write_text(json.dumps(valid_record_manifest), encoding="utf-8")
     with pytest.raises(PublicationError, match="missing or unsafe"):
@@ -58,10 +60,12 @@ def test_read_generation_manifest_errors(tmp_path: Path) -> None:
 
     # 3. Artifact exists and matches digest, but payload hash does not derive generation ID
     (gen_dir / "master.wav").write_bytes(b"1234567890")
-    (gen_dir / "report.json").write_text(
-        json.dumps({"output": {"sha256": "a" * 64}}), encoding="utf-8"
-    )
+    report_bytes = json.dumps({"output": {"sha256": "a" * 64}}).encode("utf-8")
+    (gen_dir / "report.json").write_bytes(report_bytes)
     (gen_dir / "summary.txt").write_bytes(b"1234567890")
+
+    artifacts_map["json"]["size_bytes"] = len(report_bytes)
+    manifest_file.write_text(json.dumps(valid_record_manifest), encoding="utf-8")
 
     def mock_sha(p: Path) -> str:
         if "master.wav" in p.name:
@@ -72,7 +76,6 @@ def test_read_generation_manifest_errors(tmp_path: Path) -> None:
 
     with (
         patch("hawavoclean.publication._sha256_file", side_effect=mock_sha),
-        patch.object(Path, "stat", return_value=MagicMock(st_size=10)),
         pytest.raises(PublicationError, match="does not derive its ID"),
     ):
         _verify_generation(gen_dir)
