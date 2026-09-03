@@ -352,6 +352,18 @@
           "default": null,
           "title": "Cumulative Drift Db"
         },
+        "cumulative_consonant_retention": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cumulative Consonant Retention"
+        },
         "integrated_lufs": {
           "anyOf": [
             {
