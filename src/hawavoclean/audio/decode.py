@@ -220,24 +220,17 @@ def decode_audio_window(
     ffmpeg_bin = shutil.which("ffmpeg")
 
     if ffmpeg_bin:
-        seek_start = max(0, start - int(round(WINDOW_PREROLL_S * probe.sample_rate)))
-        prefix = start - seek_start
-        # From the very beginning, seek nothing at all: an explicit "-ss 0" makes
-        # ffmpeg hand back an mp4's encoder-priming samples that a plain decode
-        # trims away, which would shift the window by ~1024 samples.
-        seek_args = ["-ss", f"{seek_start / probe.sample_rate:.9f}"] if seek_start > 0 else []
+        seek_args = ["-ss", f"{start_s:.9f}"] if start_s > 0 else []
         cmd = [
             ffmpeg_bin,
             "-nostdin",  # never read the terminal: a stray 'q' aborted decodes silently
             "-v",
             "error",
-            # Fast seek: BEFORE -i so ffmpeg seeks the input instead of
-            # decoding and discarding everything ahead of the window.
-            *seek_args,
             "-i",
             str(file_path),
+            *seek_args,
             "-t",
-            f"{(prefix + want_samples) / probe.sample_rate:.9f}",
+            f"{want_samples / probe.sample_rate:.9f}",
             "-map",
             f"0:{probe.audio_stream_index}",
             "-vn",
@@ -269,18 +262,15 @@ def decode_audio_window(
 
         frame_bytes = probe.channels * 4
         # A container whose declared duration overshoots the real stream hands
-        # back fewer frames than asked; never more than pre-roll + window.
-        decoded = min(len(raw_bytes) // frame_bytes, prefix + want_samples)
-        actual_samples = decoded - prefix
-        if actual_samples <= 0:
+        # back fewer frames than asked; never more than window.
+        decoded = min(len(raw_bytes) // frame_bytes, want_samples)
+        if decoded <= 0:
             raise InvalidUserInputError(
                 f"Decoded zero samples from {file_path} window [{start_s}, {end_s})"
             )
-        flat_arr = np.frombuffer(
-            raw_bytes[prefix * frame_bytes : decoded * frame_bytes], dtype=np.float32
-        )
+        flat_arr = np.frombuffer(raw_bytes[: decoded * frame_bytes], dtype=np.float32)
         arr: np.ndarray[Any, np.dtype[np.float32]] = np.ascontiguousarray(
-            flat_arr.reshape((actual_samples, probe.channels)).T, dtype=np.float32
+            flat_arr.reshape((decoded, probe.channels)).T, dtype=np.float32
         )
     else:
         try:
