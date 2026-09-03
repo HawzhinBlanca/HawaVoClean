@@ -229,3 +229,73 @@ class TestCorpusMetrics:
             res = compute_metrics(ref_48k, cand_48k)
             assert res.pesq_wb == 4.1
             assert res.estoi == 0.98
+
+    def test_compute_metrics_with_cutoff_hz(self, clean_sine: Path, noisy_sine: Path) -> None:
+        """compute_metrics with cutoff_hz populates highband_lsd_db."""
+        res_none = compute_metrics(clean_sine, noisy_sine, cutoff_hz=None)
+        assert res_none.highband_lsd_db is None
+
+        res_cutoff = compute_metrics(clean_sine, noisy_sine, cutoff_hz=4000.0)
+        assert res_cutoff.highband_lsd_db is not None
+        assert res_cutoff.highband_lsd_db >= 0.0
+
+    def test_corpus_metrics_with_cutoff_hz(self, clean_sine: Path, noisy_sine: Path) -> None:
+        """compute_corpus_metrics with cutoff_hz aggregates highband_lsd_db."""
+        pairs = [(clean_sine, noisy_sine), (clean_sine, clean_sine)]
+        report = compute_corpus_metrics(pairs, cutoff_hz=5000.0)
+        assert "highband_lsd_db" in report["aggregate"]
+        assert report["aggregate"]["highband_lsd_db"] is not None
+        assert report["aggregate"]["highband_lsd_db"]["n"] == 2
+
+
+class TestBandLimitedMetrics:
+    """Tests for isolated high-band LSD and band-limited SI-SNR."""
+
+    def test_highband_lsd_identity_and_noise(self) -> None:
+        from hawavoclean.eval.metrics import compute_highband_lsd
+
+        rng = np.random.default_rng(42)
+        ref = rng.standard_normal(48000).astype(np.float32)
+
+        # Identical signals yield 0.0 high-band LSD
+        assert compute_highband_lsd(ref, ref, sample_rate=48000, cutoff_hz=6000.0) == 0.0
+
+        # High-band corrupted signal yields positive LSD
+        corrupted = ref.copy()
+        t = np.linspace(0, 1.0, 48000, endpoint=False, dtype=np.float32)
+        corrupted += (0.5 * np.sin(2 * np.pi * 10000.0 * t)).astype(np.float32)
+        lsd = compute_highband_lsd(ref, corrupted, sample_rate=48000, cutoff_hz=6000.0)
+        assert lsd > 0.0
+
+    def test_highband_lsd_edge_cases(self) -> None:
+        from hawavoclean.eval.metrics import compute_highband_lsd
+
+        short_ref = np.zeros(100, dtype=np.float32)
+        # Shorter than n_fft (2048) returns 0.0
+        assert (
+            compute_highband_lsd(short_ref, short_ref, sample_rate=48000, cutoff_hz=4000.0) == 0.0
+        )
+
+        # Cutoff above Nyquist returns 0.0
+        full_ref = np.zeros(48000, dtype=np.float32)
+        assert compute_highband_lsd(full_ref, full_ref, sample_rate=48000, cutoff_hz=30000.0) == 0.0
+
+    def test_bandlimited_si_snr(self) -> None:
+        from hawavoclean.eval.metrics import compute_bandlimited_si_snr
+
+        t = np.linspace(0, 1.0, 48000, endpoint=False, dtype=np.float32)
+        sig = (0.5 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)
+
+        # Identity should have very high SI-SNR
+        snr_ident = compute_bandlimited_si_snr(
+            sig, sig, sample_rate=48000, f_low=500.0, f_high=2000.0
+        )
+        assert snr_ident > 50.0
+
+        # Short input returns 0.0
+        assert (
+            compute_bandlimited_si_snr(
+                sig[:30], sig[:30], sample_rate=48000, f_low=500.0, f_high=2000.0
+            )
+            == 0.0
+        )

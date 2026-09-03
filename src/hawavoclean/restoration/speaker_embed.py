@@ -10,12 +10,13 @@ from __future__ import annotations
 import numpy as np
 from scipy import signal
 
-# Deterministic projection matrix for mapping higher-order cepstral/timbre features
-# (38 input dimensions from MFCC 1..19 mean and std) into 192 discriminative dimensions.
+# Deterministic projection matrix for mapping composite cepstral/timbre and pitch features
+# (38 timbre dimensions from MFCC 1..19 mean/std + 16 pitch RBF dimensions = 54 dimensions)
+# into 192 discriminative dimensions.
 _RNG = np.random.default_rng(42)
 _RAW_PROJ = _RNG.standard_normal((192, 192), dtype=np.float32)
 _Q_PROJ, _ = np.linalg.qr(_RAW_PROJ)
-_PROJ_MATRIX: np.ndarray = _Q_PROJ[:38, :].astype(np.float32)  # (38, 192)
+_PROJ_MATRIX: np.ndarray = _Q_PROJ[:54, :].astype(np.float32)  # (54, 192)
 
 
 class SpeakerEmbeddingExtractor:
@@ -59,11 +60,11 @@ class SpeakerEmbeddingExtractor:
         mag = np.abs(Zxx) + 1e-10  # (n_freqs, n_frames)
         n_freqs, n_frames = mag.shape
 
-        # Pure sine tone rejection: if >90% energy in top 3 bins, reject
+        # Pure sine tone rejection: if >88% energy in top 3 bins, reject
         bin_energies = np.mean(mag**2, axis=1)
         total_energy = float(np.sum(bin_energies) + 1e-10)
         top3_energy = float(np.sum(np.sort(bin_energies)[-3:]))
-        if top3_energy / total_energy > 0.90:
+        if top3_energy / total_energy > 0.88:
             return np.zeros(self.embed_dim, dtype=np.float32)
 
         # 2. Triangular Mel filterbank (0 to 8000 Hz)
@@ -103,10 +104,30 @@ class SpeakerEmbeddingExtractor:
         mfcc_std = np.std(mfcc_shape, axis=1)  # 19
 
         feat_38 = np.concatenate([mfcc_mean, mfcc_std])  # 38
-        feat_norm = feat_38 / (np.linalg.norm(feat_38) + 1e-9)
+        timbre_norm = feat_38 / (np.linalg.norm(feat_38) + 1e-9)
 
-        # 3. Neural feature projection & GELU activation
-        projected = np.dot(feat_norm, self.proj)  # (192,)
+        # 3. Pitch & Harmonic Resonance Characterization
+        sub = mono[: min(len(mono), self.sample_rate)]
+        corr = np.correlate(sub, sub, mode="full")[len(sub) - 1 :]
+        min_lag = int(self.sample_rate / 500)
+        max_lag = int(self.sample_rate / 50)
+        if max_lag < len(corr):
+            peak_lag = min_lag + int(np.argmax(corr[min_lag:max_lag]))
+            f0_est = self.sample_rate / peak_lag
+        else:
+            f0_est = 150.0
+
+        f0_centers = np.geomspace(80.0, 400.0, 16)
+        pitch_rbf = np.exp(
+            -0.5 * ((np.log(max(50.0, f0_est)) - np.log(f0_centers)) / 0.08) ** 2
+        ).astype(np.float32)
+        pitch_norm = pitch_rbf / (np.linalg.norm(pitch_rbf) + 1e-9)
+
+        # Balanced fusion: 38 dims timbre (weight 0.7) + 16 dims pitch (weight 0.7) = 54 dims
+        feat_54 = np.concatenate([timbre_norm * 0.7, pitch_norm * 0.7])
+
+        # 4. Neural feature projection & GELU activation
+        projected = np.dot(feat_54, self.proj)  # (192,)
         x = projected
         gelu = x * 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * (x**3))))
 

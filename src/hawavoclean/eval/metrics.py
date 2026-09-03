@@ -66,6 +66,9 @@ class MetricsResult:
     #: Any warnings encountered during computation.
     warnings: list[str]
 
+    #: High-band Log-Spectral Distance above cutoff (dB, lower is better), if cutoff_hz provided.
+    highband_lsd_db: float | None = None
+
 
 def _load_mono(path: Path) -> tuple[np.ndarray, int]:
     """Load an audio or video file and return mono float32 samples + sample rate."""
@@ -147,9 +150,82 @@ def _compute_lsd(
     return float(np.mean(frame_lsd))
 
 
+def compute_highband_lsd(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    sample_rate: int,
+    cutoff_hz: float,
+    n_fft: int = 2048,
+    hop: int = 512,
+) -> float:
+    """Log-Spectral Distance in dB evaluated strictly on frequencies >= cutoff_hz.
+
+    LSD = mean over frames of sqrt(mean over high-band bins of (log S_ref - log S_cand)^2)
+    Returns 0.0 if the input is shorter than n_fft or if no frequency bins exist above cutoff_hz.
+    """
+    min_len = min(len(reference), len(candidate))
+    if min_len < n_fft:
+        return 0.0
+    ref = reference[:min_len]
+    cand = candidate[:min_len]
+
+    win = np.hanning(n_fft)
+
+    def _stft_power(x: np.ndarray) -> np.ndarray:
+        num_frames = max(1, (len(x) - n_fft) // hop + 1)
+        power = np.zeros((num_frames, n_fft // 2 + 1))
+        for i in range(num_frames):
+            chunk = x[i * hop : i * hop + n_fft] * win
+            spec = np.fft.rfft(chunk, n=n_fft)
+            power[i] = np.abs(spec) ** 2
+        return power
+
+    ref_power = _stft_power(ref)
+    cand_power = _stft_power(cand)
+
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
+    hb_mask = freqs >= cutoff_hz
+    if not np.any(hb_mask):
+        return 0.0
+
+    ref_log = np.log10(np.maximum(ref_power[:, hb_mask], 1e-10))
+    cand_log = np.log10(np.maximum(cand_power[:, hb_mask], 1e-10))
+
+    frame_lsd = np.sqrt(np.mean((ref_log - cand_log) ** 2, axis=1))
+    return float(np.mean(frame_lsd))
+
+
+def compute_bandlimited_si_snr(
+    reference: np.ndarray,
+    candidate: np.ndarray,
+    sample_rate: int,
+    f_low: float,
+    f_high: float,
+) -> float:
+    """Scale-Invariant Signal-to-Noise Ratio (SI-SNR) in dB within a specific frequency band [f_low, f_high]."""
+    from scipy import signal
+
+    min_len = min(len(reference), len(candidate))
+    if min_len < 64:
+        return 0.0
+    ref = reference[:min_len]
+    cand = candidate[:min_len]
+
+    nyq = sample_rate / 2.0
+    f_low_c = max(20.0, min(f_low, nyq - 100.0))
+    f_high_c = max(f_low_c + 50.0, min(f_high, nyq - 20.0))
+
+    sos = signal.butter(4, [f_low_c, f_high_c], btype="bandpass", fs=sample_rate, output="sos")
+    ref_filtered = signal.sosfiltfilt(sos, ref)
+    cand_filtered = signal.sosfiltfilt(sos, cand)
+
+    return _compute_si_snr(ref_filtered, cand_filtered)
+
+
 def compute_metrics(
     reference_path: Path | str,
     candidate_path: Path | str,
+    cutoff_hz: float | None = None,
 ) -> MetricsResult:
     """Compute all standard speech enhancement metrics for a pair of WAV files.
 
@@ -220,6 +296,11 @@ def compute_metrics(
     except Exception as e:
         warnings.append(f"ESTOI computation failed: {e}")
 
+    # --- High-band LSD (optional, when cutoff_hz is supplied) ---
+    highband_lsd: float | None = None
+    if cutoff_hz is not None and cutoff_hz > 0.0:
+        highband_lsd = compute_highband_lsd(ref_mono, cand_mono, ref_sr, cutoff_hz)
+
     compute_time = time.perf_counter() - t_start
 
     return MetricsResult(
@@ -236,12 +317,14 @@ def compute_metrics(
         separation_db=sep,
         compute_time_s=compute_time,
         warnings=warnings,
+        highband_lsd_db=highband_lsd,
     )
 
 
 def compute_corpus_metrics(
     pairs: Sequence[tuple[Path | str, Path | str]],
     output_path: Path | str | None = None,
+    cutoff_hz: float | None = None,
 ) -> dict[str, Any]:
     """Compute metrics for a list of (reference, candidate) pairs.
 
@@ -253,10 +336,11 @@ def compute_corpus_metrics(
     estoi_vals: list[float] = []
     si_snr_vals: list[float] = []
     lsd_vals: list[float] = []
+    highband_lsd_vals: list[float] = []
     sep_vals: list[float] = []
 
     for ref_path, cand_path in pairs:
-        m = compute_metrics(ref_path, cand_path)
+        m = compute_metrics(ref_path, cand_path, cutoff_hz=cutoff_hz)
         results.append(asdict(m))
         if m.pesq_wb is not None:
             pesq_vals.append(m.pesq_wb)
@@ -264,6 +348,8 @@ def compute_corpus_metrics(
             estoi_vals.append(m.estoi)
         si_snr_vals.append(m.si_snr_db)
         lsd_vals.append(m.lsd_db)
+        if m.highband_lsd_db is not None:
+            highband_lsd_vals.append(m.highband_lsd_db)
         sep_vals.append(m.separation_db)
 
     def _stats(vals: list[float]) -> dict[str, float] | None:
@@ -286,6 +372,7 @@ def compute_corpus_metrics(
             "estoi": _stats(estoi_vals),
             "si_snr_db": _stats(si_snr_vals),
             "lsd_db": _stats(lsd_vals),
+            "highband_lsd_db": _stats(highband_lsd_vals),
             "separation_db": _stats(sep_vals),
         },
         "per_pair": results,
