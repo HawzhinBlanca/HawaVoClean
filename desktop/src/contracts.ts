@@ -1,4 +1,8 @@
+import fs from 'node:fs';
 import path from 'node:path';
+
+/** Ephemeral in-memory partition without persist: prefix to prevent disk caching of private media. */
+export const SESSION_PARTITION = 'hawavoclean-desktop';
 
 export const IPC = Object.freeze({
   engineEndpoint: 'hawa:engine:endpoint',
@@ -10,6 +14,7 @@ export const IPC = Object.freeze({
   appInfo: 'hawa:app:info',
   diagnosticsState: 'hawa:diagnostics:state',
   updateState: 'hawa:updates:state',
+  clearLocalData: 'hawa:session:clear-local-data',
 } as const);
 
 export const AUDIO_EXTENSIONS = Object.freeze([
@@ -50,6 +55,58 @@ export type UpdateState = Readonly<{
   reason: 'release_feed_not_configured';
   canCheck: false;
 }>;
+
+export type ClearLocalDataResult = Readonly<{
+  ok: boolean;
+  clearedItems: readonly string[];
+  retainedItems: readonly string[];
+}>;
+
+export async function safeClearSessionStorage(
+  userDataDir: string,
+  sessionClearers?: {
+    clearCache?: () => Promise<void>;
+    clearStorageData?: () => Promise<void>;
+    clearCodeCaches?: () => Promise<void>;
+  },
+): Promise<ClearLocalDataResult> {
+  const clearedItems: string[] = [];
+  if (sessionClearers?.clearCache) {
+    await sessionClearers.clearCache();
+    clearedItems.push('session_http_cache');
+  }
+  if (sessionClearers?.clearStorageData) {
+    await sessionClearers.clearStorageData();
+    clearedItems.push('session_storage_data');
+  }
+  if (sessionClearers?.clearCodeCaches) {
+    await sessionClearers.clearCodeCaches();
+    clearedItems.push('session_code_cache');
+  }
+  const partitionsDir = path.join(userDataDir, 'Partitions');
+  if (fs.existsSync(partitionsDir)) {
+    try {
+      const entries = fs.readdirSync(partitionsDir);
+      for (const entry of entries) {
+        const target = path.join(partitionsDir, entry);
+        fs.rmSync(target, { recursive: true, force: true });
+        clearedItems.push(`legacy_partition_${entry}`);
+      }
+    } catch {
+      // Best effort removal of legacy partition directory
+    }
+  }
+  return Object.freeze({
+    ok: true,
+    clearedItems: Object.freeze(clearedItems),
+    retainedItems: Object.freeze([
+      'exported_wav_masters',
+      'exported_processing_records',
+      'user_source_media',
+      'engine_jobs_database',
+    ]),
+  });
+}
 
 export function parseExportRequest(value: unknown): ExportRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {

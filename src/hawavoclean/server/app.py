@@ -186,7 +186,11 @@ def error_response(
     request_id: str | None = None,
 ) -> JSONResponse:
     body = {"error": code, "message": message}
-    response_headers = dict(headers or {})
+    response_headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, private",
+        "Pragma": "no-cache",
+        **dict(headers or {}),
+    }
     if request_id is not None:
         body["request_id"] = request_id
         response_headers["X-Hawa-Request-ID"] = request_id
@@ -523,6 +527,27 @@ class LocalSecurityMiddleware:
                         (key.lower().encode("ascii"), value.encode("ascii"))
                         for key, value in cors.items()
                     )
+                if path.startswith("/api/") or path == "/api":
+                    has_cache_control = False
+                    new_headers: list[tuple[bytes, bytes]] = []
+                    for name, value in mutable:
+                        if name.lower() == b"cache-control":
+                            has_cache_control = True
+                            if b"no-store" not in value.lower():
+                                new_headers.append(
+                                    (name, b"no-store, no-cache, must-revalidate, private")
+                                )
+                            else:
+                                new_headers.append((name, value))
+                        else:
+                            new_headers.append((name, value))
+                    if not has_cache_control:
+                        new_headers.append(
+                            (b"cache-control", b"no-store, no-cache, must-revalidate, private")
+                        )
+                    if not any(name.lower() == b"pragma" for name, _ in new_headers):
+                        new_headers.append((b"pragma", b"no-cache"))
+                    mutable = new_headers
                 message["headers"] = mutable
             await send(message)
 
@@ -908,7 +933,11 @@ def ranged_file_response(
     size = path.stat().st_size
     media_type = content_type_for(path)
     rng = parse_range(range_header, size) if size > 0 else None
-    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-cache"}
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store, no-cache, must-revalidate, private",
+        "Pragma": "no-cache",
+    }
     if rng is None:
         status, start, end = 200, 0, size - 1
         headers["Content-Length"] = str(size)
@@ -1898,7 +1927,8 @@ def create_app(
             stream(),
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                "Pragma": "no-cache",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
@@ -1950,7 +1980,7 @@ def create_app(
         )
 
     @app.post("/api/upload")
-    async def upload(file: UploadFile = File(...)) -> dict[str, str]:  # noqa: B008
+    async def upload(file: UploadFile = File(...)) -> JSONResponse:  # noqa: B008
         """Stream the part to disk a megabyte at a time.
 
         Starlette has already spooled anything over 1 MiB into a temp file, so
@@ -2007,7 +2037,13 @@ def create_app(
         finally:
             await file.close()
         assert dest is not None
-        return {"path": str(dest), "source_id": upload_store.source_id(dest)}
+        return JSONResponse(
+            {"path": str(dest), "source_id": upload_store.source_id(dest)},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                "Pragma": "no-cache",
+            },
+        )
 
     async def _shutdown_later() -> None:
         await asyncio.sleep(SHUTDOWN_DELAY_S)

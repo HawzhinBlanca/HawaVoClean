@@ -20,7 +20,9 @@ import {
   parseExportRequest,
   requireAbsolutePath,
   requireSupportedMediaPath,
+  safeClearSessionStorage,
   safeSuggestedExportName,
+  SESSION_PARTITION,
   type UpdateState,
 } from './contracts.js';
 import { EngineBroker } from './engine.js';
@@ -37,7 +39,6 @@ import {
 } from './security.js';
 
 const APP_TITLE = 'HawaVoClean';
-const SESSION_PARTITION = 'persist:hawavoclean-desktop';
 const QUIT_DEADLINE_MS = 10_000;
 const DEVTOOLS = !app.isPackaged && process.env.HAWAVOCLEAN_DESKTOP_DEVTOOLS === '1';
 const SELFTEST_REQUESTED = process.env.HAWAVOCLEAN_DESKTOP_SELFTEST === '1';
@@ -105,6 +106,15 @@ function saveDialogFor(event: IpcMainInvokeEvent, options: Electron.SaveDialogOp
 
 function configureSession(): void {
   const appSession = session.fromPartition(SESSION_PARTITION);
+  // Ensure legacy partition disk storage is cleaned and initial in-memory cache is flushed
+  void safeClearSessionStorage(app.getPath('userData'), {
+    clearCache: () => appSession.clearCache(),
+    clearStorageData: () =>
+      appSession.clearStorageData({
+        storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'],
+      }),
+    clearCodeCaches: () => appSession.clearCodeCaches({}),
+  });
   const requestAuthorization = new Map<number, string>();
   appSession.protocol.handle(APP_SCHEME, async (request) => {
     if (request.method !== 'GET') return new Response('not found', { status: 404 });
@@ -284,6 +294,19 @@ function registerIpc(): void {
       canCheck: false,
     });
   });
+
+  ipcMain.handle(IPC.clearLocalData, async (event) => {
+    requireTrustedIpcSender(event);
+    const appSession = session.fromPartition(SESSION_PARTITION);
+    return safeClearSessionStorage(app.getPath('userData'), {
+      clearCache: () => appSession.clearCache(),
+      clearStorageData: () =>
+        appSession.clearStorageData({
+          storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'],
+        }),
+      clearCodeCaches: () => appSession.clearCodeCaches({}),
+    });
+  });
 }
 
 function createWindow(): BrowserWindow {
@@ -446,6 +469,9 @@ async function runSelfTest(window: BrowserWindow): Promise<void> {
           cache: 'no-store'
         });
         const mediaResponse = await fetch(endpoint.baseUrl + '/api/audio', { cache: 'no-store' });
+        const mediaCacheControl = mediaResponse.headers.get('cache-control') ?? '';
+        const mediaNoStore = mediaCacheControl.includes('no-store');
+        const sessionClearing = await bridge.session.clearLocalData();
         let remoteBlocked = false;
         try { await fetch('https://example.invalid/hawa-selftest'); }
         catch { remoteBlocked = true; }
@@ -464,6 +490,8 @@ async function runSelfTest(window: BrowserWindow): Promise<void> {
           enginePid: Number.isInteger(health.engine_pid) ? health.engine_pid : null,
           authenticatedPostStatus: postResponse.status,
           authenticatedMediaStatus: mediaResponse.status,
+          mediaNoStore,
+          sessionClearing,
           remoteBlocked,
           popupBlocked: window.open('https://example.invalid/hawa-selftest') === null,
           nodeHidden: typeof window.require === 'undefined' && typeof window.process === 'undefined'

@@ -13,7 +13,9 @@ const {
   parseExportRequest,
   requireAbsolutePath,
   requireSupportedMediaPath,
+  safeClearSessionStorage,
   safeSuggestedExportName,
+  SESSION_PARTITION,
 } = require('../dist/contracts.js');
 const {
   engineSessionNeedsRenewal,
@@ -67,6 +69,7 @@ test('IPC surface is fixed, unique, and contains no generic transport', () => {
     'hawa:files:pick-folder',
     'hawa:files:register-dropped',
     'hawa:files:reveal',
+    'hawa:session:clear-local-data',
     'hawa:updates:state',
   ]);
   assert.ok(values.every((value) => !value.includes('*') && !value.includes('eval')));
@@ -374,4 +377,79 @@ test('desktop fuses require ASAR integrity without an unavailable custom V8 snap
   assert.match(afterPack, /OnlyLoadAppFromAsar\]: true/);
   assert.match(afterPack, /RunAsNode\]: false/);
   assert.match(afterPack, /LoadBrowserProcessSpecificV8Snapshot\]: false/);
+});
+
+test('session partition is in-memory and non-persistent to eliminate disk caching', () => {
+  assert.equal(typeof SESSION_PARTITION, 'string');
+  assert.equal(SESSION_PARTITION, 'hawavoclean-desktop');
+  assert.ok(!SESSION_PARTITION.startsWith('persist:'), 'partition must not use persist: prefix');
+  const mainCode = fs.readFileSync(path.join(__dirname, '..', 'dist', 'main.js'), 'utf8');
+  assert.doesNotMatch(mainCode, /persist:hawavoclean/, 'main process must not use persistent session partition');
+});
+
+test('safe local data clearing purges session and partition caches while strictly preserving user-exported masters and engine jobs database', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hawa-clear-test-'));
+  const userData = path.join(temp, 'user-data');
+  const documents = path.join(temp, 'documents');
+  const partitions = path.join(userData, 'Partitions', 'hawavoclean-desktop');
+  fs.mkdirSync(partitions, { recursive: true });
+  fs.mkdirSync(documents, { recursive: true });
+
+  // Simulate cached session files
+  const cacheFile = path.join(partitions, 'Cache_Data_0');
+  fs.writeFileSync(cacheFile, 'transient-cache-data');
+
+  // Simulate persistent engine database that MUST be retained
+  const jobsDb = path.join(userData, 'jobs.db');
+  fs.writeFileSync(jobsDb, 'sqlite-header-jobs-db');
+
+  // Simulate exported master WAV and Processing Record that MUST be retained
+  const exportedMaster = path.join(documents, 'Master-Output.wav');
+  fs.writeFileSync(exportedMaster, 'RIFF-master-audio-bytes');
+  const exportedRecord = path.join(documents, 'Processing-Record.zip');
+  fs.writeFileSync(exportedRecord, 'PK-zip-record-bytes');
+
+  let cacheCleared = false;
+  let storageDataCleared = false;
+  let codeCacheCleared = false;
+
+  const sessionClearers = {
+    clearCache: async () => { cacheCleared = true; },
+    clearStorageData: async () => { storageDataCleared = true; },
+    clearCodeCaches: async () => { codeCacheCleared = true; },
+  };
+
+  try {
+    const result = await safeClearSessionStorage(userData, sessionClearers);
+    assert.equal(result.ok, true);
+    assert.equal(cacheCleared, true);
+    assert.equal(storageDataCleared, true);
+    assert.equal(codeCacheCleared, true);
+
+    // Legacy partition cache must be deleted
+    assert.equal(fs.existsSync(cacheFile), false);
+    assert.equal(fs.existsSync(partitions), false);
+
+    // CRITICAL: User-exported masters and engine jobs database must survive completely intact
+    assert.equal(fs.existsSync(jobsDb), true);
+    assert.equal(fs.readFileSync(jobsDb, 'utf8'), 'sqlite-header-jobs-db');
+    assert.equal(fs.existsSync(exportedMaster), true);
+    assert.equal(fs.readFileSync(exportedMaster, 'utf8'), 'RIFF-master-audio-bytes');
+    assert.equal(fs.existsSync(exportedRecord), true);
+    assert.equal(fs.readFileSync(exportedRecord, 'utf8'), 'PK-zip-record-bytes');
+
+    // Retained and cleared item contracts must match privacy documentation
+    assert.deepEqual([...result.retainedItems], [
+      'exported_wav_masters',
+      'exported_processing_records',
+      'user_source_media',
+      'engine_jobs_database',
+    ]);
+    assert.ok(result.clearedItems.includes('session_http_cache'));
+    assert.ok(result.clearedItems.includes('session_storage_data'));
+    assert.ok(result.clearedItems.includes('session_code_cache'));
+    assert.ok(result.clearedItems.includes('legacy_partition_hawavoclean-desktop'));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });

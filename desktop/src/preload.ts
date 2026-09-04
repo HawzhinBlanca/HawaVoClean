@@ -13,6 +13,7 @@ const IPC = Object.freeze({
   appInfo: 'hawa:app:info',
   diagnosticsState: 'hawa:diagnostics:state',
   updateState: 'hawa:updates:state',
+  clearLocalData: 'hawa:session:clear-local-data',
 });
 type ExportRequest = Readonly<{
   kind: 'master' | 'record_bundle';
@@ -72,6 +73,9 @@ const bridge = Object.freeze({
   }),
   updates: Object.freeze({
     getState: () => invoke(IPC.updateState),
+  }),
+  session: Object.freeze({
+    clearLocalData: () => invoke(IPC.clearLocalData),
   }),
 });
 
