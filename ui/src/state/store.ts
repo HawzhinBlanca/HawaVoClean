@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { EngineClient } from '../api/client';
 import type {
   AudioAnalysis,
+  BatchSummary,
   CapabilityStatusV1,
   HawaVoCleanReport,
   JobMode,
@@ -299,6 +300,8 @@ export interface AppState {
    */
   errorLabel: string | null;
   dragOver: boolean;
+  batch: BatchSummary | null;
+  activeInspectJobId: string | null;
 
   // actions
   setHost(host: HawaHost): void;
@@ -339,6 +342,9 @@ export interface AppState {
   pushHistory(entry: HistoryEntry): void;
   patchHistory(jobId: string, patch: Partial<HistoryEntry>): void;
   setCurrentRun(jobId: string | null): void;
+  setBatch(b: BatchSummary | null): void;
+  patchBatch(patch: Partial<BatchSummary>): void;
+  setActiveInspectJobId(id: string | null): void;
   resetForNewSource(): void;
 }
 
@@ -395,6 +401,8 @@ export const useStore = create<AppState>((set) => ({
   error: null,
   errorLabel: null,
   dragOver: false,
+  batch: null,
+  activeInspectJobId: null,
 
   setHost: (host) => set({ host }),
   // Losing the engine must not lose anything else: the client object is a URL
@@ -516,6 +524,12 @@ export const useStore = create<AppState>((set) => ({
       history: s.history.map((h) => (h.jobId === jobId ? { ...h, ...patch } : h)),
     })),
   setCurrentRun: (currentRunId) => set({ currentRunId }),
+  setBatch: (batch) => set({ batch }),
+  patchBatch: (patch) =>
+    set((s) => ({
+      batch: s.batch ? { ...s.batch, ...patch } : null,
+    })),
+  setActiveInspectJobId: (activeInspectJobId) => set({ activeInspectJobId }),
   resetForNewSource: () =>
     set({
       original: null,

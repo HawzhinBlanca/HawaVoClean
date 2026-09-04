@@ -70,7 +70,7 @@ JobState = Literal["queued", "running", "done", "failed", "cancelled", "interrup
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled", "interrupted"})
 STDERR_TAIL_LINES = 50
 DEFAULT_KILL_GRACE_S = 3.0
-DEFAULT_MAX_ACTIVE_JOBS = 8
+DEFAULT_MAX_ACTIVE_JOBS = 128
 DEFAULT_MAX_TERMINAL_JOBS = 256
 DEFAULT_TERMINAL_JOB_TTL_S = 24 * 60 * 60.0
 _ARTIFACT_EVIDENCE_SCHEMA = 1
@@ -119,6 +119,7 @@ class JobRecord:
     record_bundle: bool = False
     bundle_path: Path | None = None
     bundle: dict[str, Any] | None = None
+    batch_id: str | None = None
     source_snapshot_path: Path | None = None
     source_snapshot_dir: Path | None = None
     source_sha256: str | None = None
@@ -168,6 +169,8 @@ class JobRecord:
             out["unit"] = dict(self.unit)
         if self.idempotency_key is not None:
             out["idempotency_key"] = self.idempotency_key
+        if self.batch_id is not None:
+            out["batch_id"] = self.batch_id
         out["conflict_policy"] = self.conflict_policy
         out["record_bundle"] = self.record_bundle
         if self.bundle_path is not None:
@@ -204,6 +207,7 @@ class JobRecord:
             "record_bundle": self.record_bundle,
             "bundle_path": str(self.bundle_path) if self.bundle_path is not None else None,
             "bundle": self.bundle,
+            "batch_id": self.batch_id,
             "source_snapshot_path": (
                 str(self.source_snapshot_path) if self.source_snapshot_path is not None else None
             ),
@@ -265,6 +269,7 @@ class JobRecord:
                 if isinstance(value.get("bundle"), dict)
                 else None
             ),
+            batch_id=(str(value["batch_id"]) if value.get("batch_id") is not None else None),
             source_snapshot_path=(
                 Path(str(value["source_snapshot_path"]))
                 if value.get("source_snapshot_path") is not None
@@ -423,6 +428,7 @@ class JobManager:
         self._jobs: dict[str, JobRecord] = {}
         self._idempotency: dict[str, str] = {}
         self._queue: deque[str] = deque()
+        self._paused_batches: set[str] = set()
         # Reentrant solely so ``prepare_batch`` can hold the scheduling
         # boundary while ordinary submit calls reuse their existing locking.
         self._lock = threading.RLock()
@@ -829,6 +835,7 @@ class JobManager:
         conflict_policy: ConflictPolicy | None = None,
         request_context_hash: str | None = None,
         record_bundle: bool = False,
+        batch_id: str | None = None,
     ) -> dict[str, Any]:
         """Queue a job or return its prior snapshot for an idempotent retry."""
 
@@ -911,6 +918,7 @@ class JobManager:
                 cutoff_hz=cutoff_hz,
                 record_bundle=record_bundle,
                 bundle_path=bundle_path,
+                batch_id=batch_id,
                 source_snapshot_path=pinned.path if pinned is not None else None,
                 source_snapshot_dir=pinned.directory if pinned is not None else None,
                 source_sha256=pinned.sha256 if pinned is not None else None,
@@ -1230,6 +1238,236 @@ class JobManager:
             else:
                 self._subscribers.pop(job_id, None)
 
+    def register_batch(
+        self,
+        batch_id: str,
+        total_items: int,
+        *,
+        options: dict[str, Any] | None = None,
+    ) -> None:
+        """Register batch submission metadata in the durable store."""
+        if self._store is not None:
+            self._store.create_batch(batch_id, total_items, options=options)
+
+    def pause_batch(self, batch_id: str) -> bool:
+        """Pause scheduling of queued items in this batch."""
+        with self._wake:
+            if self._closed:
+                raise RuntimeError("job manager is shut down")
+            self._prune_locked()
+            has_batch = any(r.batch_id == batch_id for r in self._jobs.values()) or (
+                self._store is not None and self._store.get_batch(batch_id) is not None
+            )
+            if not has_batch:
+                return False
+            self._paused_batches.add(batch_id)
+            for record in self._jobs.values():
+                if record.batch_id == batch_id and record.state == "queued":
+                    record.message = "Batch paused"
+                    self._notify_locked(record)
+            if self._store is not None:
+                self._store.update_batch_state(batch_id, "paused")
+            return True
+
+    def resume_batch(self, batch_id: str) -> bool:
+        """Resume scheduling of paused items in this batch."""
+        with self._wake:
+            if self._closed:
+                raise RuntimeError("job manager is shut down")
+            self._prune_locked()
+            has_batch = any(r.batch_id == batch_id for r in self._jobs.values()) or (
+                self._store is not None and self._store.get_batch(batch_id) is not None
+            )
+            if not has_batch:
+                return False
+            self._paused_batches.discard(batch_id)
+            running = any(r.state == "running" for r in self._jobs.values())
+            for record in self._jobs.values():
+                if record.batch_id == batch_id and record.state == "queued":
+                    idx = (
+                        list(self._queue).index(record.job_id) + 1
+                        if record.job_id in self._queue
+                        else 1
+                    )
+                    pos = queue_position(idx, running)
+                    record.message = "Queued" if pos == 1 else f"Queued (position {pos})"
+                    self._notify_locked(record)
+            if self._store is not None:
+                self._store.update_batch_state(batch_id, "running")
+            self._wake.notify_all()
+            return True
+
+    def cancel_batch(self, batch_id: str, *, wait: bool = False) -> bool:
+        """Cancel all queued and running jobs belonging to this batch."""
+        with self._locked():
+            self._prune_locked()
+            matching_ids = [r.job_id for r in self._jobs.values() if r.batch_id == batch_id]
+            if not matching_ids and self._store is not None:
+                db_jobs = self._store.find_batch_jobs(batch_id)
+                matching_ids = [
+                    str(r.record.get("job_id")) for r in db_jobs if r.record.get("job_id")
+                ]
+        if not matching_ids:
+            return False
+        for job_id in matching_ids:
+            self.cancel(job_id, wait=wait)
+        if self._store is not None:
+            self._store.update_batch_state(batch_id, "cancelled")
+        return True
+
+    def retry_job(self, job_id: str) -> dict[str, Any]:
+        """Retry a failed, interrupted, or cancelled job."""
+        with self._wake:
+            if self._closed:
+                raise RuntimeError("job manager is shut down")
+            self._prune_locked()
+            record = self._jobs.get(job_id)
+            if record is None and self._store is not None:
+                resource = self._store.find_job(job_id)
+                if resource is not None:
+                    record = JobRecord.from_storage(resource.record)
+                    self._jobs[record.job_id] = record
+            if record is None:
+                raise KeyError(f"job {job_id} not found")
+            if record.state not in TERMINAL_STATES:
+                return record.snapshot()
+
+            active = sum(r.state not in TERMINAL_STATES for r in self._jobs.values())
+            if active >= self._max_active_jobs:
+                raise QueueFullError(
+                    f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
+                )
+
+            if not record.input_path.exists() or not record.input_path.is_file():
+                raise MediaPreflightError(
+                    MediaPreflightReason.NOT_FOUND,
+                    f"Input audio file does not exist or cannot be read: {record.input_path}",
+                )
+
+            pinned = PinnedSource.create(
+                record.input_path,
+                staging_root=work_root(),
+                max_file_size_bytes=MAX_INPUT_FILE_BYTES,
+            )
+            record.source_snapshot_path = pinned.path
+            record.source_snapshot_dir = pinned.directory
+            record.source_sha256 = pinned.sha256
+            record.source_size_bytes = pinned.size_bytes
+
+            record.state = "queued"
+            record.stage = "preflight"
+            record.progress = 0.0
+            record.message = "Queued (retry)"
+            record.started_at = None
+            record.finished_at = None
+            record.terminal_at = None
+            record.error = None
+            record.cancel_requested = False
+            record.seq += 1
+
+            if self._store is not None:
+                self._store.update(record.storage_record(), terminal=False)
+                if record.batch_id is not None and record.batch_id not in self._paused_batches:
+                    self._store.update_batch_state(record.batch_id, "running")
+
+            self._queue.append(record.job_id)
+            running = any(r.state == "running" for r in self._jobs.values())
+            position = queue_position(len(self._queue), running)
+            record.message = "Queued" if position == 1 else f"Queued (position {position})"
+            self._notify_locked(record)
+            self._wake.notify_all()
+            return record.snapshot()
+
+    def get_batch_summary(self, batch_id: str) -> dict[str, Any] | None:
+        """Aggregate batch state across in-memory and durable jobs."""
+        with self._lock:
+            self._prune_locked()
+            batch_jobs = [r for r in self._jobs.values() if r.batch_id == batch_id]
+
+        db_batch = self._store.get_batch(batch_id) if self._store is not None else None
+        if not batch_jobs and db_batch is None:
+            return None
+
+        if self._store is not None:
+            db_job_res = self._store.find_batch_jobs(batch_id)
+            known_ids = {r.job_id for r in batch_jobs}
+            for res in db_job_res:
+                rec = JobRecord.from_storage(res.record)
+                if rec.job_id not in known_ids:
+                    batch_jobs.append(rec)
+
+        batch_jobs.sort(key=lambda j: j.created_at)
+        total = db_batch["total_items"] if db_batch else len(batch_jobs)
+        snapshots = [j.snapshot() for j in batch_jobs]
+
+        completed = sum(1 for s in snapshots if s["state"] == "done")
+        failed = sum(1 for s in snapshots if s["state"] in {"failed", "interrupted"})
+        cancelled = sum(1 for s in snapshots if s["state"] == "cancelled")
+        running = sum(1 for s in snapshots if s["state"] == "running")
+        queued = sum(1 for s in snapshots if s["state"] == "queued")
+
+        if total > 0:
+            sum_progress = sum(float(s.get("progress", 0.0)) for s in snapshots)
+            overall_progress = round(min(1.0, max(0.0, sum_progress / total)), 4)
+        else:
+            overall_progress = 0.0
+
+        is_paused = batch_id in self._paused_batches or (
+            db_batch is not None and db_batch.get("state") == "paused"
+        )
+
+        if is_paused:
+            batch_state = "paused"
+        elif running > 0:
+            batch_state = "running"
+        elif queued > 0:
+            batch_state = "queued"
+        elif completed + failed + cancelled >= total and total > 0:
+            if cancelled == total:
+                batch_state = "cancelled"
+            elif failed > 0 and completed == 0:
+                batch_state = "failed"
+            else:
+                batch_state = "done"
+        else:
+            batch_state = db_batch.get("state", "queued") if db_batch else "queued"
+
+        created_at = (
+            db_batch["created_at"]
+            if db_batch
+            else (snapshots[0]["created_at"] if snapshots else _now_iso())
+        )
+        updated_at = db_batch["updated_at"] if db_batch else _now_iso()
+
+        return {
+            "batch_id": batch_id,
+            "state": batch_state,
+            "total_items": total,
+            "completed_items": completed,
+            "failed_items": failed,
+            "cancelled_items": cancelled,
+            "running_items": running,
+            "queued_items": queued,
+            "progress": overall_progress,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "jobs": snapshots,
+        }
+
+    def list_batches(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List active and historical batches."""
+        if self._store is not None:
+            return self._store.list_batches(limit=limit)
+        with self._lock:
+            seen_batches = {r.batch_id for r in self._jobs.values() if r.batch_id is not None}
+        results = []
+        for b_id in seen_batches:
+            summary = self.get_batch_summary(b_id)
+            if summary is not None:
+                results.append(summary)
+        results.sort(key=lambda b: str(b["updated_at"]), reverse=True)
+        return results[:limit]
+
     def shutdown(self, grace_s: float = 0.5) -> None:
         """Cancel everything: queued jobs are marked cancelled, the running
         child gets SIGTERM then SIGKILL after ``grace_s``. Idempotent."""
@@ -1335,6 +1573,15 @@ class JobManager:
         if record.source_snapshot_dir is not None:
             remove_source_snapshot_tree(record.source_snapshot_dir)
             record.source_snapshot_dir = None
+        if record.batch_id is not None and self._store is not None:
+            with contextlib.suppress(Exception):
+                summary = self.get_batch_summary(record.batch_id)
+                if (
+                    summary is not None
+                    and summary["running_items"] == 0
+                    and summary["queued_items"] == 0
+                ):
+                    self._store.update_batch_state(record.batch_id, summary["state"])
         # Queue the callbacks; ``_locked`` runs them once the lock is released.
         self._pending_terminal.append(record)
 
@@ -1370,12 +1617,25 @@ class JobManager:
     def _run_loop(self) -> None:
         while True:
             with self._wake:
-                while not self._queue and not self._closed:
+                next_job_id: str | None = None
+                while not self._closed:
+                    for candidate_id in self._queue:
+                        rec = self._jobs.get(candidate_id)
+                        if (
+                            rec is not None
+                            and rec.batch_id is not None
+                            and rec.batch_id in self._paused_batches
+                        ):
+                            continue
+                        next_job_id = candidate_id
+                        break
+                    if next_job_id is not None:
+                        self._queue.remove(next_job_id)
+                        break
                     self._wake.wait()
-                if self._closed:
+                if self._closed or next_job_id is None:
                     return
-                job_id = self._queue.popleft()
-                record = self._jobs[job_id]
+                record = self._jobs[next_job_id]
                 record.state = "running"
                 record.started_at = _now_iso()
                 record.message = "Starting"

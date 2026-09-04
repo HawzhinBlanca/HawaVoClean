@@ -2,9 +2,12 @@
 // together. Components call these; nothing here renders.
 
 import { EngineClient, EngineError } from '../api/client';
-import { followJob, isTerminal } from '../api/sse';
+import { followBatch, followJob, isTerminal } from '../api/sse';
 import type {
   AudioAnalysis,
+  BatchItem,
+  BatchSummary,
+  HawaVoCleanReport,
   JobStatus,
   ManualRoute,
   ProcessingRequestV1,
@@ -323,6 +326,7 @@ async function probeEngine(): Promise<void> {
     }
     autoloadFromQuery();
     if (wasDown || restarted) await resumeAfterReconnect(client);
+    void rehydrateBatchQueue(client);
     scheduleProbe(HEALTH_OK_MS);
   } catch (e) {
     markOffline(describeError(e));
@@ -925,6 +929,19 @@ export async function useResolveClip(): Promise<void> {
 export async function openFileDialog(): Promise<void> {
   const bridge = getBridge();
   try {
+    if (bridge.files.pickAudioFiles) {
+      const paths = await bridge.files.pickAudioFiles();
+      if (!paths || paths.length === 0) return;
+      if (paths.length > 1) {
+        await submitBatch([...paths]);
+        return;
+      }
+      const path = paths[0];
+      if (path) {
+        await loadSource({ path, name: baseName(path), origin: 'file' });
+      }
+      return;
+    }
     const path = await bridge.files.pickAudio();
     if (!path) return;
     await loadSource({ path, name: baseName(path), origin: 'file' });
@@ -1017,6 +1034,38 @@ export async function ingestDataTransfer(dt: DataTransfer): Promise<void> {
       detail: `${first.type || `.${extensionOf(first.name) || 'no extension'}`} is not an audio or video format this tool opens.`,
     });
     return;
+  }
+
+  const acceptedFiles = files.filter(isAcceptedFile);
+  if (acceptedFiles.length > 1) {
+    const bridge = getBridge();
+    const sourcesToSubmit: Array<{ path: string; name: string; sourceId?: string }> = [];
+    for (const file of acceptedFiles) {
+      if (file.size === 0) continue;
+      let local: { sourceId: string; path: string } | string | null = null;
+      try {
+        local = bridge.files.registerDroppedFile
+          ? await bridge.files.registerDroppedFile(file)
+          : null;
+      } catch {
+        local = null;
+      }
+      if (local) {
+        if (typeof local === 'object' && local !== null) {
+          sourcesToSubmit.push({ path: local.path, name: file.name, sourceId: local.sourceId });
+        } else {
+          sourcesToSubmit.push({ path: local, name: file.name });
+        }
+      } else {
+        const client = requireClient();
+        const res = await client.upload(file);
+        sourcesToSubmit.push({ path: res.path, name: file.name });
+      }
+    }
+    if (sourcesToSubmit.length > 1) {
+      await submitBatch(sourcesToSubmit);
+      return;
+    }
   }
 
   if (files.length > 1) {
@@ -1605,6 +1654,342 @@ export async function cancelJob(): Promise<void> {
   } catch (e) {
     probeSoon(e);
     reportFailure(classifyFailure(e, st.source?.name), 'Cancel failed');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// True-10 D4.1 · Multi-file batch queue lifecycle & actions
+
+let stopBatchFollow: (() => void) | null = null;
+
+export function clearBatchSubscription(): void {
+  stopBatchFollow?.();
+  stopBatchFollow = null;
+}
+
+export function startBatchEventSubscription(batchId: string, client?: EngineClient): void {
+  const c = client ?? requireClient();
+  stopBatchFollow?.();
+  stopBatchFollow = followBatch(c, batchId, {
+    onBatchStatus: (summary) => {
+      const st = getState();
+      st.setBatch(summary);
+      const pct = Math.round(summary.progress * 100);
+      st.setStatus(
+        `Batch ${summary.state} · ${summary.completed_items}/${summary.total_items} complete (${pct}%)`,
+      );
+      if (st.activeInspectJobId) {
+        const item = summary.jobs.find((j) => j.job_id === st.activeInspectJobId);
+        if (item && item.state === 'done') {
+          const player = getPlayer();
+          if (!player.hasDeck('cleaned') && item.output_path) {
+            player.load('cleaned', c.fileUrl(item.output_path));
+          }
+        }
+      }
+    },
+    onEnd: () => {
+      stopBatchFollow = null;
+      void c
+        .getBatch(batchId)
+        .then((finalSummary) => {
+          getState().setBatch(finalSummary);
+          getState().setStatus(
+            `Batch ${finalSummary.state} · ${finalSummary.completed_items}/${finalSummary.total_items} complete`,
+          );
+        })
+        .catch(() => {});
+    },
+    onError: (err) => {
+      probeSoon(err);
+    },
+  });
+}
+
+export async function submitBatch(
+  sources: Array<{ path: string; name: string; sourceId?: string } | string>,
+): Promise<void> {
+  const st = getState();
+  if (sources.length === 0) return;
+  if (st.engineStatus !== 'ready') {
+    st.setStatus('Cannot start a batch while the engine is offline — waiting for it to come back');
+    return;
+  }
+  try {
+    const client = requireClient();
+    let strategy: ProcessingStrategyV1;
+    if (st.mode === 'smart_safe') {
+      if (isRouteBlocked(st.capabilities, 'smart_safe')) {
+        const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
+        st.setStatus(`Smart Safe is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Smart Safe capability is blocked', 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+      };
+    } else if (st.mode === 'restore') {
+      const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
+      if (isRouteBlocked(st.capabilities, restoreCapId)) {
+        const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
+        st.setStatus(`Restore is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Restore capability is blocked', 'Capability blocked');
+        return;
+      }
+      if (!st.reconstructionConsent) {
+        st.setStatus('Restore requires explicit generative reconstruction consent');
+        st.setError(
+          'Acknowledge generative reconstruction consent to proceed with Restore',
+          'Consent required',
+        );
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: restoreCapId as ManualRoute,
+        speaker_profile_id: st.speakerId,
+        expert_cutoff_hz: st.cutoffHz,
+        allow_generative_reconstruction: true,
+      };
+    } else {
+      if (isRouteBlocked(st.capabilities, st.profile)) {
+        const reason = getRouteBlockedReason(st.capabilities, st.profile);
+        st.setStatus(`Route ${st.profile} is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || `Route ${st.profile} is blocked`, 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: st.profile as ManualRoute,
+        allow_generative_reconstruction: false,
+      };
+    }
+
+    const sourceIds = sources.map((s) => (typeof s === 'string' ? s : s.sourceId || s.path));
+    const idempotencyKey = `v1-batch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    const v1Req: ProcessingRequestV1 = {
+      schema_version: 1,
+      source_ids: sourceIds,
+      strategy,
+      execution_policy: 'offline_only',
+      conflict_policy: 'unique',
+      record_bundle: false,
+      idempotency_key: idempotencyKey,
+    };
+
+    const res = await client.createV1Jobs(v1Req);
+    if (!res.batchId) {
+      throw new EngineError(500, 'bad_response', 'The engine did not return a batch identifier');
+    }
+
+    st.setStatus(`Batch queued · ${res.jobs.length} items`);
+    const initialSummary: BatchSummary = await client.getBatch(res.batchId).catch(() => ({
+      batch_id: res.batchId!,
+      state: 'queued',
+      total_items: res.jobs.length,
+      completed_items: 0,
+      failed_items: 0,
+      cancelled_items: 0,
+      running_items: 0,
+      queued_items: res.jobs.length,
+      progress: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      jobs: res.jobs.map((j, idx) => ({
+        job_id: j.jobId,
+        seq: idx + 1,
+        state: 'queued',
+        stage: 'queued',
+        progress: 0,
+        message: 'Queued',
+        input_path: sourceIds[idx] ?? '',
+        output_path: j.outputPath,
+        report_path: j.reportPath,
+        profile: st.profile,
+        mode: st.mode === 'restore' ? 'restore' : 'natural',
+        created_at: new Date().toISOString(),
+        started_at: null,
+        finished_at: null,
+      })),
+    }));
+
+    st.setBatch(initialSummary);
+    startBatchEventSubscription(res.batchId, client);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Could not start batch');
+  }
+}
+
+export async function pauseCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.pauseBatch(st.batch.batch_id);
+    st.patchBatch({ state: 'paused' });
+    st.setStatus(`Batch paused · ${st.batch.completed_items}/${st.batch.total_items} complete`);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Pause batch');
+  }
+}
+
+export async function resumeCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.resumeBatch(st.batch.batch_id);
+    st.patchBatch({ state: 'running' });
+    st.setStatus(`Batch resumed · ${st.batch.completed_items}/${st.batch.total_items} complete`);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Resume batch');
+  }
+}
+
+export async function cancelCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.cancelBatch(st.batch.batch_id, false);
+    st.patchBatch({ state: 'cancelled' });
+    st.setStatus('Batch cancelled');
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Cancel batch');
+  }
+}
+
+export async function cancelBatchItem(jobId: string): Promise<void> {
+  try {
+    const client = requireClient();
+    if (typeof client.cancelV1Job === 'function') {
+      await client.cancelV1Job(jobId);
+    } else {
+      await client.cancelJob(jobId);
+    }
+    const st = getState();
+    if (st.batch) {
+      const updatedJobs = st.batch.jobs.map((j) =>
+        j.job_id === jobId ? { ...j, state: 'cancelled' as const, stage: 'cancelled' } : j,
+      );
+      st.patchBatch({ jobs: updatedJobs });
+    }
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Cancel item');
+  }
+}
+
+export async function retryBatchItem(jobId: string): Promise<void> {
+  try {
+    const client = requireClient();
+    await client.retryJob(jobId);
+    const st = getState();
+    if (st.batch) {
+      const updatedJobs = st.batch.jobs.map((j) =>
+        j.job_id === jobId ? { ...j, state: 'queued' as const, stage: 'queued', progress: 0 } : j,
+      );
+      st.patchBatch({ jobs: updatedJobs });
+      if (
+        st.batch.state === 'done' ||
+        st.batch.state === 'failed' ||
+        st.batch.state === 'cancelled'
+      ) {
+        startBatchEventSubscription(st.batch.batch_id, client);
+      }
+    }
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Retry item');
+  }
+}
+
+export async function inspectBatchItem(item: BatchItem): Promise<void> {
+  const st = getState();
+  st.setActiveInspectJobId(item.job_id);
+  const client = requireClient();
+  const player = getPlayer();
+
+  st.setSource({ path: item.input_path, name: baseName(item.input_path), origin: 'file' });
+
+  const originalUrl = client.fileUrl(item.input_path);
+  player.load('original', originalUrl);
+
+  if (item.state === 'done' && item.output_path) {
+    const cleanedUrl = client.fileUrl(item.output_path);
+    player.load('cleaned', cleanedUrl);
+    player.setActive('cleaned');
+    st.setAbMode('cleaned');
+    st.setCleaned(null, item.output_path);
+    void client
+      .analyze(item.output_path, envelopeBuckets())
+      .then((analysis) => {
+        if (getState().activeInspectJobId === item.job_id) {
+          getState().setCleaned(analysis, item.output_path);
+        }
+      })
+      .catch(() => {});
+  } else {
+    player.load('cleaned', null);
+    player.setActive('original');
+    st.setAbMode('original');
+    st.setCleaned(null, null);
+  }
+
+  if (item.report) {
+    st.setReport(item.report);
+  } else if (item.report_path && item.state === 'done') {
+    void fetch(client.fileUrl(item.report_path))
+      .then((res) => res.json())
+      .then((rep: HawaVoCleanReport) => {
+        if (getState().activeInspectJobId === item.job_id) {
+          getState().setReport(rep);
+        }
+      })
+      .catch(() => {});
+  }
+
+  try {
+    const analysis = await client.analyze(item.input_path, envelopeBuckets());
+    if (getState().activeInspectJobId === item.job_id) {
+      st.setOriginal(analysis);
+      st.setStatus(`Inspecting: ${baseName(item.input_path)} (${item.state})`);
+    }
+  } catch {
+    st.setStatus(`Inspecting: ${baseName(item.input_path)} (${item.state})`);
+  }
+}
+
+export async function rehydrateBatchQueue(client?: EngineClient): Promise<void> {
+  const c = client ?? getState().client;
+  if (!c) return;
+  try {
+    const res = await c.listBatches(5);
+    if (!res || !Array.isArray(res.batches) || res.batches.length === 0) return;
+    const active =
+      res.batches.find(
+        (b) => b.state === 'running' || b.state === 'queued' || b.state === 'paused',
+      ) ?? res.batches[0];
+    if (active) {
+      const summary = await c.getBatch(active.batch_id);
+      getState().setBatch(summary);
+      if (
+        summary.state === 'running' ||
+        summary.state === 'queued' ||
+        summary.state === 'paused'
+      ) {
+        startBatchEventSubscription(summary.batch_id, c);
+      }
+    }
+  } catch {
+    /* ignore if engine does not support batches */
   }
 }
 

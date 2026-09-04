@@ -39,6 +39,9 @@ function buildWebBridge(): HawaBridge {
         // + POST /api/upload in web mode instead.
         return null;
       },
+      async pickAudioFiles() {
+        return null;
+      },
       pathForFile() {
         return null;
       },

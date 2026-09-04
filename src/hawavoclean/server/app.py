@@ -41,7 +41,7 @@ from hawavoclean import __version__
 from hawavoclean.audio.decode import iter_decode_audio
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.cli import _clean_stem
-from hawavoclean.errors import HawaVoCleanError, InvalidUserInputError
+from hawavoclean.errors import HawaVoCleanError, InvalidUserInputError, MediaPreflightError
 from hawavoclean.logging import get_logger
 from hawavoclean.natural_contract import load_natural_route_contract
 from hawavoclean.paths import config_dir, job_store_path, models_dir, profiles_root, work_root
@@ -1625,6 +1625,85 @@ def create_app(
             raise ApiError(404, "not_found", f"unknown job: {job_id}")
         return _job_status_v1(snapshot).model_dump(by_alias=True, mode="json", exclude_none=True)
 
+    @app.post("/api/v1/jobs/{job_id}/retry")
+    async def retry_v1_job(job_id: str) -> dict[str, Any]:
+        try:
+            snapshot = manager.retry_job(job_id)
+        except KeyError as exc:
+            raise ApiError(404, "not_found", f"unknown job: {job_id}") from exc
+        except QueueFullError as exc:
+            raise ApiError(503, "queue_full", str(exc)) from exc
+        except MediaPreflightError as exc:
+            raise ApiError(400, exc.reason.value, str(exc)) from exc
+        except RuntimeError as exc:
+            raise ApiError(503, "unavailable", str(exc)) from exc
+        return _job_status_v1(snapshot).model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    @app.get("/api/v1/batches")
+    async def list_v1_batches(limit: int = 50) -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "batches": manager.list_batches(limit=limit),
+        }
+
+    @app.get("/api/v1/batches/{batch_id}")
+    async def get_v1_batch(batch_id: str) -> dict[str, Any]:
+        summary = manager.get_batch_summary(batch_id)
+        if summary is None:
+            raise ApiError(404, "not_found", f"unknown batch: {batch_id}")
+        return summary
+
+    @app.post("/api/v1/batches/{batch_id}/pause")
+    async def pause_v1_batch(batch_id: str) -> dict[str, Any]:
+        if not manager.pause_batch(batch_id):
+            raise ApiError(404, "not_found", f"unknown batch: {batch_id}")
+        return {"ok": True, "batchId": batch_id, "state": "paused"}
+
+    @app.post("/api/v1/batches/{batch_id}/resume")
+    async def resume_v1_batch(batch_id: str) -> dict[str, Any]:
+        if not manager.resume_batch(batch_id):
+            raise ApiError(404, "not_found", f"unknown batch: {batch_id}")
+        return {"ok": True, "batchId": batch_id, "state": "running"}
+
+    @app.post("/api/v1/batches/{batch_id}/cancel")
+    async def cancel_v1_batch(batch_id: str, wait: bool = False) -> dict[str, Any]:
+        if not manager.cancel_batch(batch_id, wait=wait):
+            raise ApiError(404, "not_found", f"unknown batch: {batch_id}")
+        return {"ok": True, "batchId": batch_id, "state": "cancelled"}
+
+    @app.get("/api/v1/batches/{batch_id}/events")
+    async def batch_events(batch_id: str) -> StreamingResponse:
+        summary = manager.get_batch_summary(batch_id)
+        if summary is None:
+            raise ApiError(404, "not_found", f"unknown batch: {batch_id}")
+
+        async def stream() -> AsyncIterator[str]:
+            last_json = ""
+            while True:
+                current = manager.get_batch_summary(batch_id)
+                if current is None:
+                    yield _sse("end", {})
+                    return
+                current_json = json.dumps(current, sort_keys=True)
+                if current_json != last_json:
+                    yield _sse("batch_status", current)
+                    last_json = current_json
+                if current["state"] in {"done", "failed", "cancelled"}:
+                    yield _sse("end", {})
+                    return
+                await asyncio.sleep(0.5)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                "Pragma": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/api/v1/jobs/{job_id}/override")
     async def override_v1_unit(job_id: str, req: UnitOverrideRequestV1) -> dict[str, Any]:
         """Manually override a guard decision on a single unit.
@@ -1805,11 +1884,13 @@ def create_app(
                     raise ApiError(404, "not_found", f"unknown or expired sourceId: {source_id}")
                 sources.append(source)
 
+            batch_id = f"b_{batch_hash[:16]}"
             try:
                 # The scheduling boundary holds every new row out of the live
                 # worker queue until the whole batch has reserved its names and
                 # committed durably. A late collision therefore cannot return
                 # total failure after an earlier item has already published.
+                manager.register_batch(batch_id, len(sources), options=wire_request)
                 with manager.prepare_batch():
                     for index, source in enumerate(sources):
                         source_id = req.source_ids[index]
@@ -1824,6 +1905,7 @@ def create_app(
                             conflict_policy=req.conflict_policy,
                             request_context_hash=batch_hash,
                             record_bundle=req.record_bundle,
+                            batch_id=batch_id,
                         )
                         if str(snap["job_id"]) not in existing_job_ids:
                             newly_submitted.append(str(snap["job_id"]))

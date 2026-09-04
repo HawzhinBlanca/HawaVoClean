@@ -487,3 +487,40 @@ export function decisionLabel(decision: string): string {
       return decision.replace(/_/g, ' ').toUpperCase();
   }
 }
+
+// ---- Durable Batch Types (True-10 E1.2 / D4.1) ------------------------------
+
+export interface BatchItem {
+  job_id: string;
+  seq: number;
+  state: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
+  stage: string;
+  progress: number;
+  message: string;
+  input_path: string;
+  output_path: string;
+  report_path: string;
+  profile: Profile;
+  mode: JobMode;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error?: JobError | null;
+  report?: HawaVoCleanReport | null;
+}
+
+export interface BatchSummary {
+  batch_id: string;
+  state: 'queued' | 'running' | 'paused' | 'done' | 'failed' | 'cancelled';
+  total_items: number;
+  completed_items: number;
+  failed_items: number;
+  cancelled_items: number;
+  running_items: number;
+  queued_items: number;
+  progress: number;
+  created_at: string;
+  updated_at: string;
+  jobs: BatchItem[];
+}
+

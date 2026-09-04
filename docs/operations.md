@@ -192,7 +192,7 @@ Default bounds are finite:
 
 | Resource | Default |
 |---|---:|
-| Active jobs | 8 |
+| Active jobs | 128 |
 | Retained terminal jobs | 256 for at most 24 hours |
 | One upload | 8 GiB |
 | Concurrent uploads | 2 |

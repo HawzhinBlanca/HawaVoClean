@@ -1,5 +1,5 @@
 import { EngineError, type EngineClient } from './client';
-import type { JobState, JobStatus } from './types';
+import type { BatchSummary, JobState, JobStatus } from './types';
 
 const TERMINAL: ReadonlySet<JobState> = new Set<JobState>(['done', 'failed', 'cancelled']);
 
@@ -120,3 +120,90 @@ export function followJob(
     cleanup();
   };
 }
+
+export interface BatchStreamHandlers {
+  onBatchStatus: (status: BatchSummary) => void;
+  onEnd: () => void;
+  onError?: (err: unknown) => void;
+}
+
+/**
+ * Follow a batch over SSE (/api/v1/batches/{batchId}/events).
+ * Handles auto-reconnection and parses incoming `batch_status` frames.
+ */
+export function followBatch(
+  client: EngineClient,
+  batchId: string,
+  handlers: BatchStreamHandlers,
+): () => void {
+  let es: EventSource | null = null;
+  let closed = false;
+  let finished = false;
+  let retryTimer: number | null = null;
+
+  const finish = (): void => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    handlers.onEnd();
+  };
+
+  const cleanup = (): void => {
+    if (es) {
+      es.onopen = null;
+      es.onerror = null;
+      es.close();
+      es = null;
+    }
+    if (retryTimer !== null) {
+      window.clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
+
+  const connect = (): void => {
+    if (closed || finished) return;
+    cleanup();
+    try {
+      es = new EventSource(client.v1BatchEventsUrl(batchId));
+    } catch (e) {
+      handlers.onError?.(e);
+      return;
+    }
+
+    es.addEventListener('batch_status', (ev) => {
+      try {
+        const parsed = JSON.parse((ev as MessageEvent<string>).data) as BatchSummary;
+        handlers.onBatchStatus(parsed);
+        if (
+          parsed.state === 'done' ||
+          parsed.state === 'failed' ||
+          parsed.state === 'cancelled'
+        ) {
+          finish();
+        }
+      } catch {
+        /* malformed event */
+      }
+    });
+
+    es.addEventListener('end', () => {
+      finish();
+    });
+
+    es.onerror = (e) => {
+      if (closed || finished) return;
+      cleanup();
+      handlers.onError?.(e);
+      retryTimer = window.setTimeout(connect, 2000);
+    };
+  };
+
+  connect();
+
+  return () => {
+    closed = true;
+    cleanup();
+  };
+}
+

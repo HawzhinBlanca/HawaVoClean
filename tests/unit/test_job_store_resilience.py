@@ -149,8 +149,8 @@ def _create_v1_store(db_path: Path) -> None:
     conn.close()
 
 
-def test_schema_migration_v1_to_v2(tmp_path: Path) -> None:
-    """Test N-1 (v1) to N (v2) schema migration backfills terminal_at and history_visible."""
+def test_schema_migration_v1_to_v3(tmp_path: Path) -> None:
+    """Test legacy (v1) to current (v3) schema migration backfills terminal_at, history_visible, and batch_id."""
     db_path = tmp_path / "ledger_v1.sqlite3"
     _create_v1_store(db_path)
 
@@ -158,14 +158,24 @@ def test_schema_migration_v1_to_v2(tmp_path: Path) -> None:
     try:
         raw_conn = sqlite3.connect(str(db_path))
         version = raw_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 2
+        assert version == 3
 
         cols = {row[1] for row in raw_conn.execute("PRAGMA table_info(jobs)").fetchall()}
         assert "terminal_at" in cols
         assert "history_visible" in cols
+        assert "batch_id" in cols
+
+        tables = {
+            row[0]
+            for row in raw_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "batches" in tables
 
         indexes = {row[1] for row in raw_conn.execute("PRAGMA index_list(jobs)").fetchall()}
         assert "visible_terminal_retention" in indexes
+        assert "jobs_batch_id" in indexes
         raw_conn.close()
 
         loaded = store.load_and_interrupt(max_terminal_jobs=10, terminal_ttl_s=7 * 86400.0)
@@ -179,6 +189,84 @@ def test_schema_migration_v1_to_v2(tmp_path: Path) -> None:
         assert interrupted is not None
         assert interrupted.record["state"] == "interrupted"
         assert interrupted.record["error"]["code"] == "INTERRUPTED"
+    finally:
+        store.close()
+
+
+def test_schema_migration_v2_to_v3(tmp_path: Path) -> None:
+    """Test N-1 (v2) to N (v3) schema migration adds batch_id and batches table."""
+    db_path = tmp_path / "ledger_v2.sqlite3"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA synchronous = FULL")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.executescript(
+        """
+        BEGIN IMMEDIATE;
+        CREATE TABLE jobs (
+            job_id TEXT PRIMARY KEY,
+            idempotency_key TEXT UNIQUE,
+            request_hash TEXT NOT NULL,
+            output_key TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            state TEXT NOT NULL,
+            terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+            record_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            terminal_at REAL,
+            history_visible INTEGER NOT NULL DEFAULT 1
+                CHECK (history_visible IN (0, 1))
+        );
+        CREATE UNIQUE INDEX active_output_lease
+            ON jobs(output_key) WHERE terminal = 0;
+        CREATE INDEX jobs_updated_at ON jobs(updated_at DESC);
+        CREATE INDEX visible_terminal_retention
+            ON jobs(history_visible, terminal, terminal_at DESC, created_at DESC);
+        PRAGMA user_version = 2;
+        COMMIT;
+        """
+    )
+    conn.close()
+
+    store = DurableJobStore(db_path)
+    try:
+        raw_conn = sqlite3.connect(str(db_path))
+        version = raw_conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 3
+
+        cols = {row[1] for row in raw_conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        assert "batch_id" in cols
+
+        tables = {
+            row[0]
+            for row in raw_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "batches" in tables
+
+        indexes = {row[1] for row in raw_conn.execute("PRAGMA index_list(jobs)").fetchall()}
+        assert "jobs_batch_id" in indexes
+        raw_conn.close()
+
+        # Verify batch methods work seamlessly on migrated store
+        store.create_batch("batch_test_1", 2, options={"profile": "balanced"})
+        b = store.get_batch("batch_test_1")
+        assert b is not None
+        assert b["batch_id"] == "batch_test_1"
+        assert b["total_items"] == 2
+        assert b["state"] == "queued"
+        assert b["options"] == {"profile": "balanced"}
+
+        store.update_batch_state("batch_test_1", "running")
+        b = store.get_batch("batch_test_1")
+        assert b is not None
+        assert b["state"] == "running"
+
+        batches = store.list_batches()
+        assert len(batches) == 1
+        assert batches[0]["batch_id"] == "batch_test_1"
     finally:
         store.close()
 

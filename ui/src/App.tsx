@@ -12,6 +12,7 @@ import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { SourceStrip } from './components/SourceStrip';
 import { SpectrumDisplay } from './components/SpectrumDisplay';
 import { SpectrogramDisplay } from './components/SpectrogramDisplay';
+import { BatchQueue } from './components/BatchQueue';
 import { Transport } from './components/Transport';
 import { UnitInspector } from './components/UnitInspector';
 import { WaveformDisplay } from './components/WaveformDisplay';
@@ -87,6 +88,7 @@ export default function App() {
   const dragOver = useDragWatch();
   const abMode = useStore((s) => s.abMode);
   const cleanedPath = useStore((s) => s.cleanedPath);
+  const batch = useStore((s) => s.batch);
   const engineStatus = useStore((s) => s.engineStatus);
   const offlineSince = useStore((s) => s.engineOfflineSince);
   const deck = abMode === 'cleaned' && cleanedPath ? 'cleaned' : 'original';
@@ -166,7 +168,7 @@ export default function App() {
               report, and neither needs the full width. */}
           <div className="deskrow">
             <UnitInspector />
-            <JobHistory />
+            {batch ? <BatchQueue /> : <JobHistory />}
           </div>
         </div>
         <aside className="right" aria-label="Analysis and controls">

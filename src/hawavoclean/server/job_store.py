@@ -33,7 +33,7 @@ from typing import Any, Literal
 
 ConflictPolicy = Literal["unique", "fail", "replace"]
 NONTERMINAL_STATES: frozenset[str] = frozenset({"queued", "running"})
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _PRUNE_PAGE_SIZE = 128
 
 
@@ -221,18 +221,29 @@ class DurableJobStore:
                             updated_at TEXT NOT NULL,
                             terminal_at REAL,
                             history_visible INTEGER NOT NULL DEFAULT 1
-                                CHECK (history_visible IN (0, 1))
+                                CHECK (history_visible IN (0, 1)),
+                            batch_id TEXT
                         );
                         CREATE UNIQUE INDEX active_output_lease
                             ON jobs(output_key) WHERE terminal = 0;
                         CREATE INDEX jobs_updated_at ON jobs(updated_at DESC);
+                        CREATE INDEX jobs_batch_id ON jobs(batch_id);
                         CREATE INDEX visible_terminal_retention
                             ON jobs(history_visible, terminal, terminal_at DESC, created_at DESC);
-                        PRAGMA user_version = 2;
+                        CREATE TABLE batches (
+                            batch_id TEXT PRIMARY KEY,
+                            state TEXT NOT NULL,
+                            total_items INTEGER NOT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            options_json TEXT
+                        );
+                        CREATE INDEX batches_updated_at ON batches(updated_at DESC);
+                        PRAGMA user_version = 3;
                         COMMIT;
                         """
                     )
-                    version = 2
+                    version = 3
                 if version == 1:
                     # Version 1 stored only ``updated_at``.  It is the best
                     # available approximation for already-terminal rows and is
@@ -256,6 +267,26 @@ class DurableJobStore:
                         """
                     )
                     version = 2
+                if version == 2:
+                    self._conn.executescript(
+                        """
+                        BEGIN IMMEDIATE;
+                        ALTER TABLE jobs ADD COLUMN batch_id TEXT;
+                        CREATE INDEX jobs_batch_id ON jobs(batch_id);
+                        CREATE TABLE batches (
+                            batch_id TEXT PRIMARY KEY,
+                            state TEXT NOT NULL,
+                            total_items INTEGER NOT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            options_json TEXT
+                        );
+                        CREATE INDEX batches_updated_at ON batches(updated_at DESC);
+                        PRAGMA user_version = 3;
+                        COMMIT;
+                        """
+                    )
+                    version = 3
             except (sqlite3.Error, OSError) as exc:
                 with contextlib.suppress(sqlite3.Error):
                     self._conn.execute("ROLLBACK")
@@ -382,13 +413,17 @@ class DurableJobStore:
                     if record_bundle
                     else None
                 )
+                batch_id_val = (
+                    str(stored["batch_id"]) if stored.get("batch_id") is not None else None
+                )
                 encoded = self._encode(stored)
                 self._conn.execute(
                     """
                     INSERT INTO jobs (
                         job_id, idempotency_key, request_hash, output_key,
-                        output_path, state, terminal, record_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                        output_path, state, terminal, record_json, created_at, updated_at,
+                        batch_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
                     """,
                     (
                         str(stored["job_id"]),
@@ -400,6 +435,7 @@ class DurableJobStore:
                         encoded,
                         str(stored.get("created_at") or now),
                         now,
+                        batch_id_val,
                     ),
                 )
                 self._conn.execute("COMMIT")
@@ -425,6 +461,7 @@ class DurableJobStore:
         """Durably replace a snapshot while preserving its first terminal time."""
 
         encoded = self._encode(record)
+        batch_id_val = str(record["batch_id"]) if record.get("batch_id") is not None else None
         with self._lock:
             self._assert_open()
             try:
@@ -432,6 +469,7 @@ class DurableJobStore:
                     """
                     UPDATE jobs
                        SET state = ?, terminal = ?, record_json = ?, updated_at = ?,
+                           batch_id = COALESCE(?, batch_id),
                            terminal_at = CASE
                                WHEN ? THEN COALESCE(terminal_at, ?)
                                ELSE NULL
@@ -443,6 +481,7 @@ class DurableJobStore:
                         int(terminal),
                         encoded,
                         _now_iso(),
+                        batch_id_val,
                         int(terminal),
                         time.time(),
                         str(record["job_id"]),
@@ -803,6 +842,159 @@ class DurableJobStore:
                     ) from exc
                 raise JobStoreError(f"could not recover durable jobs: {exc}") from exc
         return loaded
+
+    def create_batch(
+        self,
+        batch_id: str,
+        total_items: int,
+        *,
+        options: dict[str, Any] | None = None,
+        state: str = "queued",
+    ) -> None:
+        """Atomically record a batch submission in the ledger."""
+        now = _now_iso()
+        options_json = self._encode(options) if options is not None else None
+        with self._lock:
+            self._assert_open()
+            try:
+                self._conn.execute(
+                    """
+                    INSERT INTO batches (
+                        batch_id, state, total_items, created_at, updated_at, options_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(batch_id) DO UPDATE SET
+                        updated_at = excluded.updated_at
+                    """,
+                    (batch_id, state, total_items, now, now, options_json),
+                )
+            except sqlite3.Error as exc:
+                msg = str(exc).lower()
+                if "disk is full" in msg or "database or disk is full" in msg:
+                    raise DiskFullError(f"durable job store disk is full: {exc}") from exc
+                if "readonly" in msg or "read-only" in msg:
+                    raise StorageReadOnlyError(
+                        f"durable job store storage volume is read-only: {exc}"
+                    ) from exc
+                raise JobStoreError(f"could not create batch {batch_id}: {exc}") from exc
+
+    def get_batch(self, batch_id: str) -> dict[str, Any] | None:
+        """Fetch batch metadata by batch_id."""
+        with self._lock:
+            self._assert_open()
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT batch_id, state, total_items, created_at, updated_at, options_json
+                      FROM batches WHERE batch_id = ?
+                    """,
+                    (batch_id,),
+                ).fetchone()
+            except sqlite3.Error as exc:
+                raise JobStoreError(f"could not query batch {batch_id}: {exc}") from exc
+            if row is None:
+                return None
+            options = None
+            if row["options_json"] is not None:
+                with contextlib.suppress(Exception):
+                    options = self._decode(str(row["options_json"]))
+            return {
+                "batch_id": str(row["batch_id"]),
+                "state": str(row["state"]),
+                "total_items": int(row["total_items"]),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "options": options,
+            }
+
+    def update_batch_state(self, batch_id: str, state: str) -> None:
+        """Update batch status."""
+        now = _now_iso()
+        with self._lock:
+            self._assert_open()
+            try:
+                self._conn.execute(
+                    """
+                    UPDATE batches
+                       SET state = ?, updated_at = ?
+                     WHERE batch_id = ?
+                    """,
+                    (state, now, batch_id),
+                )
+            except sqlite3.Error as exc:
+                raise JobStoreError(f"could not update batch {batch_id}: {exc}") from exc
+
+    def list_batches(self, limit: int = 50) -> list[dict[str, Any]]:
+        """List batches in reverse chronological order."""
+        with self._lock:
+            self._assert_open()
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT batch_id, state, total_items, created_at, updated_at, options_json
+                      FROM batches
+                     ORDER BY updated_at DESC
+                     LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise JobStoreError(f"could not list batches: {exc}") from exc
+            results: list[dict[str, Any]] = []
+            for row in rows:
+                options = None
+                if row["options_json"] is not None:
+                    with contextlib.suppress(Exception):
+                        options = self._decode(str(row["options_json"]))
+                results.append(
+                    {
+                        "batch_id": str(row["batch_id"]),
+                        "state": str(row["state"]),
+                        "total_items": int(row["total_items"]),
+                        "created_at": str(row["created_at"]),
+                        "updated_at": str(row["updated_at"]),
+                        "options": options,
+                    }
+                )
+            return results
+
+    def find_batch_jobs(self, batch_id: str) -> list[Reservation]:
+        """Fetch all durable jobs belonging to a batch."""
+        with self._lock:
+            self._assert_open()
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT record_json, terminal_at, history_visible
+                      FROM jobs
+                     WHERE batch_id = ?
+                     ORDER BY created_at ASC
+                    """,
+                    (batch_id,),
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise JobStoreError(f"could not query jobs for batch {batch_id}: {exc}") from exc
+            reservations: list[Reservation] = []
+            for row in rows:
+                try:
+                    record = self._decode(str(row["record_json"]))
+                except JobStoreError:
+                    record = {
+                        "job_id": "corrupted",
+                        "state": "failed",
+                        "stage": "failed",
+                        "message": "Corrupted durable batch job record",
+                    }
+                reservations.append(
+                    Reservation(
+                        record=record,
+                        reused=True,
+                        terminal_at_epoch=(
+                            float(row["terminal_at"]) if row["terminal_at"] is not None else None
+                        ),
+                        history_visible=bool(row["history_visible"]),
+                    )
+                )
+            return reservations
 
     def close(self) -> None:
         with self._lock:

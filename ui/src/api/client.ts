@@ -1,6 +1,7 @@
 import type {
   ApiError,
   AudioAnalysis,
+  BatchSummary,
   CapabilitiesResponseV1,
   CreateJobRequest,
   CreateJobResponse,
@@ -381,5 +382,50 @@ export class EngineClient {
   /** Credential-free URL for the job's v1 `EventSource` stream. */
   v1EventsUrl(jobId: string): string {
     return `${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/events`;
+  }
+
+  listBatches(limit = 50): Promise<{ schemaVersion: number; batches: BatchSummary[] }> {
+    return this.json<{ schemaVersion: number; batches: BatchSummary[] }>(
+      `/api/v1/batches?limit=${encodeURIComponent(limit)}`,
+    );
+  }
+
+  getBatch(batchId: string): Promise<BatchSummary> {
+    return this.json<BatchSummary>(`/api/v1/batches/${encodeURIComponent(batchId)}`);
+  }
+
+  pauseBatch(batchId: string): Promise<{ ok: boolean; batchId: string; state: string }> {
+    return this.json<{ ok: boolean; batchId: string; state: string }>(
+      `/api/v1/batches/${encodeURIComponent(batchId)}/pause`,
+      { method: 'POST' },
+    );
+  }
+
+  resumeBatch(batchId: string): Promise<{ ok: boolean; batchId: string; state: string }> {
+    return this.json<{ ok: boolean; batchId: string; state: string }>(
+      `/api/v1/batches/${encodeURIComponent(batchId)}/resume`,
+      { method: 'POST' },
+    );
+  }
+
+  cancelBatch(
+    batchId: string,
+    wait = false,
+  ): Promise<{ ok: boolean; batchId: string; state: string }> {
+    return this.json<{ ok: boolean; batchId: string; state: string }>(
+      `/api/v1/batches/${encodeURIComponent(batchId)}/cancel?wait=${wait ? 'true' : 'false'}`,
+      { method: 'POST' },
+    );
+  }
+
+  retryJob(jobId: string): Promise<Record<string, unknown>> {
+    return this.json<Record<string, unknown>>(
+      `/api/v1/jobs/${encodeURIComponent(jobId)}/retry`,
+      { method: 'POST' },
+    );
+  }
+
+  v1BatchEventsUrl(batchId: string): string {
+    return `${this.baseUrl}/api/v1/batches/${encodeURIComponent(batchId)}/events`;
   }
 }

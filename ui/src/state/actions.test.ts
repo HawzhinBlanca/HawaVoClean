@@ -165,8 +165,17 @@ interface FakeClient {
   cancelJob: ReturnType<typeof vi.fn>;
   peaks: ReturnType<typeof vi.fn>;
   verify: ReturnType<typeof vi.fn>;
+  createV1Jobs?: ReturnType<typeof vi.fn>;
+  listBatches?: ReturnType<typeof vi.fn>;
+  getBatch?: ReturnType<typeof vi.fn>;
+  pauseBatch?: ReturnType<typeof vi.fn>;
+  resumeBatch?: ReturnType<typeof vi.fn>;
+  cancelBatch?: ReturnType<typeof vi.fn>;
+  retryJob?: ReturnType<typeof vi.fn>;
+  cancelV1Job?: ReturnType<typeof vi.fn>;
   fileUrl: (p: string) => string;
   eventsUrl: (id: string) => string;
+  v1BatchEventsUrl?: (id: string) => string;
 }
 
 function makeClient(): FakeClient {
@@ -193,6 +202,7 @@ function makeClient(): FakeClient {
     verify: vi.fn(async (_path: string) => ({ status: 206, delivered: true, size: 1000 })),
     fileUrl: (p: string) => `http://127.0.0.1:8765/api/audio?path=${encodeURIComponent(p)}`,
     eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events`,
+    v1BatchEventsUrl: (id: string) => `http://127.0.0.1:8765/api/v1/batches/${id}/events`,
   };
 }
 
@@ -2412,3 +2422,236 @@ describe('the web-mode upload state machine', () => {
     expect(st().rejection?.kind).toBe('empty');
   });
 });
+
+describe('batch queue actions (True-10 D4.1)', () => {
+  function setupBatchClient(client: FakeClient) {
+    client.createV1Jobs = vi.fn(async () => ({
+      schemaVersion: 1,
+      batchId: 'b_test123',
+      execution: 'local',
+      jobs: [
+        { jobId: 'j1', outputPath: '/out/a.wav', reportPath: '/out/a.json' },
+        { jobId: 'j2', outputPath: '/out/b.wav', reportPath: '/out/b.json' },
+      ],
+    }));
+    client.getBatch = vi.fn(async (id: string) => ({
+      batch_id: id,
+      state: 'running',
+      total_items: 2,
+      completed_items: 0,
+      failed_items: 0,
+      cancelled_items: 0,
+      running_items: 1,
+      queued_items: 1,
+      progress: 0.25,
+      created_at: '2026-09-05T00:00:00Z',
+      updated_at: '2026-09-05T00:00:01Z',
+      jobs: [
+        {
+          job_id: 'j1',
+          seq: 1,
+          state: 'queued',
+          stage: 'queued',
+          progress: 0,
+          message: 'Queued',
+          input_path: '/path/to/a.wav',
+          output_path: '/out/a.wav',
+          report_path: '/out/a.json',
+          profile: 'production',
+          mode: 'natural',
+          created_at: '2026-09-05T00:00:00Z',
+          started_at: null,
+          finished_at: null,
+        },
+        {
+          job_id: 'j2',
+          seq: 2,
+          state: 'queued',
+          stage: 'queued',
+          progress: 0,
+          message: 'Queued',
+          input_path: '/path/to/b.wav',
+          output_path: '/out/b.wav',
+          report_path: '/out/b.json',
+          profile: 'production',
+          mode: 'natural',
+          created_at: '2026-09-05T00:00:00Z',
+          started_at: null,
+          finished_at: null,
+        },
+      ],
+    }));
+    client.pauseBatch = vi.fn(async (id: string) => ({ ok: true, batchId: id, state: 'paused' }));
+    client.resumeBatch = vi.fn(async (id: string) => ({ ok: true, batchId: id, state: 'running' }));
+    client.cancelBatch = vi.fn(async (id: string) => ({ ok: true, batchId: id, state: 'cancelled' }));
+    client.retryJob = vi.fn(async (id: string) => ({ ok: true, jobId: id }));
+    client.cancelV1Job = vi.fn(async (id: string) => ({ ok: true, jobId: id }));
+    client.v1BatchEventsUrl = (id: string) => `http://127.0.0.1:8765/api/v1/batches/${id}/events`;
+  }
+
+  it('submitBatch queues a multi-file batch request and sets store batch', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(20);
+
+    expect(client.createV1Jobs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source_ids: ['/path/to/a.wav', '/path/to/b.wav'],
+      }),
+    );
+    expect(st().batch).not.toBeNull();
+    expect(st().batch?.batch_id).toBe('b_test123');
+  });
+
+  it('pauseCurrentBatch calls client pause and patches batch state', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.pauseCurrentBatch();
+
+    expect(client.pauseBatch).toHaveBeenCalledWith('b_test123');
+    expect(st().batch?.state).toBe('paused');
+  });
+
+  it('resumeCurrentBatch calls client resume and patches batch state', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.pauseCurrentBatch();
+    await actions.resumeCurrentBatch();
+
+    expect(client.resumeBatch).toHaveBeenCalledWith('b_test123');
+    expect(st().batch?.state).toBe('running');
+  });
+
+  it('cancelCurrentBatch calls client cancelBatch', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.cancelCurrentBatch();
+
+    expect(client.cancelBatch).toHaveBeenCalledWith('b_test123', false);
+    expect(st().batch?.state).toBe('cancelled');
+  });
+
+  it('cancelBatchItem marks job cancelled', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.cancelBatchItem('j1');
+
+    expect(client.cancelV1Job).toHaveBeenCalledWith('j1');
+    const job = st().batch?.jobs.find((j) => j.job_id === 'j1');
+    expect(job?.state).toBe('cancelled');
+  });
+
+  it('retryBatchItem calls client retryJob and resets item state', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.retryBatchItem('j1');
+
+    expect(client.retryJob).toHaveBeenCalledWith('j1');
+    const job = st().batch?.jobs.find((j) => j.job_id === 'j1');
+    expect(job?.state).toBe('queued');
+  });
+
+  it('inspectBatchItem sets activeInspectJobId and loads decks without stopping batch', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+
+    const item = {
+      job_id: 'j1',
+      seq: 1,
+      state: 'done' as const,
+      stage: 'done',
+      progress: 1.0,
+      message: 'Done',
+      input_path: '/path/to/a.wav',
+      output_path: '/out/a.wav',
+      report_path: '/out/a.json',
+      profile: 'studio' as const,
+      mode: 'natural' as const,
+      created_at: '2026-09-05T00:00:00Z',
+      started_at: '2026-09-05T00:00:01Z',
+      finished_at: '2026-09-05T00:00:05Z',
+    };
+
+    await actions.inspectBatchItem(item);
+
+    expect(st().activeInspectJobId).toBe('j1');
+    expect(st().source?.name).toBe('a.wav');
+    expect(player.load).toHaveBeenCalledWith('original', client.fileUrl('/path/to/a.wav'));
+    expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/a.wav'));
+    expect(st().batch).not.toBeNull();
+  });
+
+  it('rehydrateBatchQueue restores active batch on reconnect', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    client.listBatches = vi.fn(async () => ({
+      schemaVersion: 1,
+      batches: [
+        {
+          batch_id: 'b_rehydrate',
+          state: 'running' as const,
+          total_items: 3,
+          completed_items: 1,
+          failed_items: 0,
+          cancelled_items: 0,
+          running_items: 1,
+          queued_items: 1,
+          progress: 0.33,
+          created_at: '2026-09-05T00:00:00Z',
+          updated_at: '2026-09-05T00:00:02Z',
+          jobs: [],
+        },
+      ],
+    }));
+
+    client.getBatch = vi.fn(async (id: string) => ({
+      batch_id: id,
+      state: 'running' as const,
+      total_items: 3,
+      completed_items: 1,
+      failed_items: 0,
+      cancelled_items: 0,
+      running_items: 1,
+      queued_items: 1,
+      progress: 0.33,
+      created_at: '2026-09-05T00:00:00Z',
+      updated_at: '2026-09-05T00:00:02Z',
+      jobs: [],
+    }));
+
+    await actions.rehydrateBatchQueue(client as any);
+
+    expect(st().batch?.batch_id).toBe('b_rehydrate');
+    expect(st().batch?.state).toBe('running');
+  });
+});
+

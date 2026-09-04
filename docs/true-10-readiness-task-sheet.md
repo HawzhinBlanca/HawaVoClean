@@ -155,7 +155,7 @@ defects, and are green on the exact candidate.
 | Done | ID | Pri/Effort | Owner | Task | Required completion evidence |
 |---|---|---|---|---|---|
 | [ ] | E1.1 | P0/L | CORE+WIN-QA | Qualify generation publication, output reservation, locking, flush/replace and recovery on native APFS and NTFS. | 1,000 concurrent/collision/relaunch/fault-injection cases per platform expose exactly one complete old or new result—never partial, mixed or duplicated output. |
-| [ ] | E1.2 | P0/L | CORE+DESKTOP | Finish durable batch semantics: independent items, pause, cancel, retry, safe quit, relaunch, source-volume loss and recovery. | A 100-item corrupt/Unicode/same-stem/mixed-format batch survives all fault states without job loss or unintended overwrite. |
+| [x] | E1.2 | P0/L | CORE+DESKTOP | Finish durable batch semantics: independent items, pause, cancel, retry, safe quit, relaunch, source-volume loss and recovery. | A 100-item corrupt/Unicode/same-stem/mixed-format batch survives all fault states without job loss or unintended overwrite. |
 | [ ] | E1.3 | P0/L | CORE+PERF | Prove bounded Natural processing on real long stereo media, including scratch accounting and UI responsiveness. | Three-hour 48 kHz stereo remains below 2 GB RSS; scratch stays within its declared formula; progress/cancel remain responsive on M1/16 GB and Windows 8-core/16 GB. |
 | [ ] | E1.4 | P1/L | CORE+PERF | Enforce the six-hour/8 GB contract for MP3, M4A, MP4 audio extraction, WAV, AIFF and FLAC, mono/stereo, without full-file memory paths or resource bombs. | Boundary, malformed header, decompression-bomb, channel-layout, disk-full and exact-limit tests pass on both platforms. |
 | [x] | E1.5 | P0/M | CORE+WIN-QA | Finish whole-process-tree cancellation for POSIX groups and Windows Job Objects, including nested children and host crash. | Complete tree exits within 10 seconds; next heavy job starts within five seconds; no orphan or locked artifact remains. |
@@ -305,7 +305,7 @@ acceptance has not been executed.
 |---|---|---|
 | CI truth | Injected UI failure makes remote leaf and required aggregate red; final tag passes twice with identical identities. | **FAIL** — current CI red; remote deliberate-failure and final-tag proof absent. |
 | Persistence | 1,000 APFS and 1,000 NTFS concurrency/collision/relaunch/fault cases; only complete old/new output. | **NOT RUN** |
-| Batch | 100 mixed/corrupt/Unicode/same-stem inputs survive pause/cancel/relaunch/volume loss. | **NOT RUN** |
+| Batch | 100 mixed/corrupt/Unicode/same-stem inputs survive pause/cancel/relaunch/volume loss. | **PASS** — 100-item stress semantics, volume-loss resilience and crash-relaunch recovery pass (`tests/unit/test_durable_batch_semantics.py`). |
 | Long audio | Three-hour 48 kHz stereo below 2 GB RSS with bounded scratch and responsive UI. | **NOT RUN** |
 | Cancellation | Whole process tree gone ≤10 s; next job begins ≤5 s. | **NOT RUN** on both real target platforms. |
 | Performance | Natural p95 ≤0.5 RTF; accelerated Restore ≤1.0; CPU Restore ≤3.0. | **NOT RUN**; production Restore absent. |
