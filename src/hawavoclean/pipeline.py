@@ -369,6 +369,7 @@ def run_pipeline(
     profiles_dir: str | Path = "profiles",
     clean_only: bool = False,
     original_input_path: Path | str | None = None,
+    allow_research_restore: bool = False,
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
@@ -395,6 +396,20 @@ def run_pipeline(
             load_speaker_profile(speaker_id, profiles_root=profiles_dir)
         except ProfileValidationError as exc:
             raise InvalidUserInputError(str(exc)) from exc
+
+        # R2.1: Quarantine current Restore behind an unmistakable research boundary.
+        # Production profiles follow capability status (blocked) and reject unqualified
+        # loose checkpoints/profiles unless research evaluation is explicitly enabled.
+        allow_research = (
+            allow_research_restore or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
+        )
+        if profile != "development" and not allow_research:
+            raise InvalidUserInputError(
+                f"Production restoration capability is BLOCKED for profile '{profile}': No qualified signed "
+                f"Sorani Restore pack is installed. Loose research checkpoints and profiles are quarantined "
+                f"behind research boundaries and cannot enter a production job or report (pass "
+                f"allow_research_restore=True or use profile='development' for research evaluation)."
+            )
     if cutoff not in ("auto", "manual"):
         raise InvalidUserInputError(f"Unknown cutoff mode: '{cutoff}' (expected auto|manual)")
     if cutoff == "manual" and cutoff_hz is None:
@@ -1260,6 +1275,8 @@ def _run_after_preflight(
                 "solver": "midpoint",
                 "steps": 4,
                 "guidance_scale": 0.0,
+                "research_quarantine": True,
+                "production_qualified": False,
             },
             segments=RestorationSegmentCounts(
                 restored=counts.get("restored", 0),

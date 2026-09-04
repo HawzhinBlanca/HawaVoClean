@@ -64,6 +64,7 @@ def test_cli_process_restore_mode(tmp_path: Path) -> None:
         "--cutoff-hz",
         "4000.0",
         "--overwrite",
+        "--allow-research-restore",
     ]
 
     with pytest.raises(SystemExit) as exc_info:
@@ -108,6 +109,7 @@ def test_cli_verify_restoration_report(tmp_path: Path, capsys: pytest.CaptureFix
         "--cutoff-hz",
         "6000.0",
         "--overwrite",
+        "--allow-research-restore",
     ]
     with pytest.raises(SystemExit) as exc_info:
         main()
@@ -160,6 +162,7 @@ def test_cli_batch_restore_mode(tmp_path: Path) -> None:
         "--speaker-id",
         "character_03",
         "--overwrite",
+        "--allow-research-restore",
     ]
 
     with pytest.raises(SystemExit) as exc_info:

@@ -162,6 +162,12 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
             print(f"[FAIL] {core_id}: core lock missing: {lock_file}")
             all_passed = False
 
+    # 6. Production capabilities status (Quarantine boundaries)
+    print(
+        "[OK] Production capabilities: Natural routes active (production, studio, lowband). "
+        "Restore and Smart Safe quarantined (BLOCKED) until qualified signed packs are installed."
+    )
+
     print("================================================================================")
     if all_passed:
         print("Doctor status: ALL CHECKS PASSED. Ready for processing.")
@@ -180,6 +186,10 @@ def cmd_restore_doctor(_args: argparse.Namespace) -> int:
     print("================================================================================")
     print("                HAWAVOCLEAN - SPECTRAL RESTORATION DOCTOR (v2.1)                ")
     print("================================================================================")
+    print(
+        "[BLOCKED] Production capability: Restore is NOT production qualified (blocked).\n"
+        "          Loose checkpoint and profiles are quarantined for research evaluation only."
+    )
 
     all_passed = True
 
@@ -300,7 +310,7 @@ def cmd_restore_doctor(_args: argparse.Namespace) -> int:
     if all_passed:
         print(
             "Restore-Doctor status: ALL RESTORATION CHECKS PASSED "
-            "(quarantined research prototype, not production qualified)."
+            "(RESEARCH-ONLY: quarantined prototype, not production qualified)."
         )
         return int(ExitCode.SUCCESS)
     print("Restore-Doctor status: PREFLIGHT FAILED. Address errors above.")
@@ -475,12 +485,30 @@ def cmd_process(args: argparse.Namespace) -> int:
 
     mode = getattr(args, "mode", "natural")
     passes = getattr(args, "passes", 1)
-    if mode == "restore" and passes != 1:
-        exit_with_code(
-            ExitCode.INVALID_USER_INPUT,
-            "Restore mode is single-pass only: --mode restore cannot be combined with "
-            "--passes. Re-run with --passes 1 (the default).",
-        )
+    allow_research_restore = (
+        bool(getattr(args, "allow_research_restore", False))
+        or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
+    )
+    if mode == "restore":
+        if passes != 1:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "Restore mode is single-pass only: --mode restore cannot be combined with "
+                "--passes. Re-run with --passes 1 (the default).",
+            )
+        if not getattr(args, "speaker_id", None):
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "Restore mode requires an explicit --speaker-id <ID>",
+            )
+        if args.profile != "development" and not allow_research_restore:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                f"Production restoration capability is BLOCKED for profile '{args.profile}': No qualified signed "
+                f"Sorani Restore pack is installed. Loose research checkpoints and profiles are quarantined "
+                f"behind research boundaries and cannot enter a production job or report (pass "
+                f"--allow-research-restore or use --profile development for research evaluation).",
+            )
     try:
         if passes == 1:
             # The default path: byte-identical to a run before --passes
@@ -499,6 +527,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
                 clean_only=clean_only,
                 original_input_path=getattr(args, "original_input_path", None),
+                allow_research_restore=allow_research_restore,
             )
         else:
             run_multipass(
@@ -698,6 +727,7 @@ def cmd_batch_worker(_args: argparse.Namespace) -> int:
                     cutoff_hz=req.get("cutoff_hz"),
                     profiles_dir=_resolve_profiles_dir(req.get("profiles_dir")),
                     clean_only=bool(req.get("clean_only", False)),
+                    allow_research_restore=bool(req.get("allow_research_restore", False)),
                 )
                 reply = {"ok": True}
             except HawaVoCleanError as e:
@@ -826,6 +856,7 @@ class _BatchChild:
         cutoff_hz: float | None = None,
         profiles_dir: str | Path | None = None,
         clean_only: bool = False,
+        allow_research_restore: bool = False,
     ) -> str:
         deadline = time.monotonic() + timeout_s
         try:
@@ -845,6 +876,7 @@ class _BatchChild:
                 "cutoff_hz": cutoff_hz,
                 "profiles_dir": str(_resolve_profiles_dir(profiles_dir)),
                 "clean_only": clean_only,
+                "allow_research_restore": allow_research_restore,
             }
             self._proc.stdin.write(json.dumps(payload) + "\n")
             self._proc.stdin.flush()
@@ -926,6 +958,7 @@ def _run_one_isolated(
     cutoff_hz: float | None = None,
     profiles_dir: str | Path | None = None,
     clean_only: bool = False,
+    allow_research_restore: bool = False,
 ) -> str:
     """Process one file in a child process under a hard deadline."""
     return _batch_child.run(
@@ -940,6 +973,7 @@ def _run_one_isolated(
         cutoff_hz=cutoff_hz,
         profiles_dir=_resolve_profiles_dir(profiles_dir),
         clean_only=clean_only,
+        allow_research_restore=allow_research_restore,
     )
 
 
@@ -992,11 +1026,24 @@ def cmd_batch(args: argparse.Namespace) -> int:
     mode = getattr(args, "mode", "natural")
     speaker_id = getattr(args, "speaker_id", None)
     clean_only = bool(getattr(args, "clean_only", False))
-    if mode == "restore" and not speaker_id:
-        exit_with_code(
-            ExitCode.INVALID_USER_INPUT,
-            "Restore mode requires an explicit --speaker-id <ID>",
-        )
+    allow_research_restore = (
+        bool(getattr(args, "allow_research_restore", False))
+        or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
+    )
+    if mode == "restore":
+        if not speaker_id:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "Restore mode requires an explicit --speaker-id <ID>",
+            )
+        if args.profile != "development" and not allow_research_restore:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                f"Production restoration capability is BLOCKED for profile '{args.profile}': No qualified signed "
+                f"Sorani Restore pack is installed. Loose research checkpoints and profiles are quarantined "
+                f"behind research boundaries and cannot enter a production job or report (pass "
+                f"--allow-research-restore or use --profile development for research evaluation).",
+            )
 
     results: list[tuple[str, str]] = []
     failed = 0
@@ -1021,6 +1068,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
                     cutoff_hz=getattr(args, "cutoff_hz", None),
                     profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
                     clean_only=clean_only,
+                    allow_research_restore=allow_research_restore,
                 )
             else:
                 status = _run_one_isolated(
@@ -1727,6 +1775,12 @@ def _main() -> None:
         default=None,
         help=argparse.SUPPRESS,
     )
+    p_proc.add_argument(
+        "--allow-research-restore",
+        action="store_true",
+        default=False,
+        help="Allow execution of quarantined research restoration models in non-development profiles",
+    )
     p_proc.set_defaults(func=cmd_process)
 
     # batch
@@ -1784,6 +1838,12 @@ def _main() -> None:
             "Path to speaker profiles directory "
             "(default: $HAWAVOCLEAN_PROFILES_DIR, else the installed profiles tree)"
         ),
+    )
+    p_batch.add_argument(
+        "--allow-research-restore",
+        action="store_true",
+        default=False,
+        help="Allow execution of quarantined research restoration models in non-development profiles",
     )
     p_batch.set_defaults(func=cmd_batch)
 
