@@ -1800,6 +1800,7 @@ describe('restore mode (contract addendum 2)', () => {
     const { actions, store, client } = await boot();
     armed(store);
     store.useStore.getState().setCapabilities(['character_01', 'character_02'], true);
+    store.useStore.getState().setReconstructionConsent(true);
     store.useStore.getState().setMode('restore');
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
@@ -1816,6 +1817,7 @@ describe('restore mode (contract addendum 2)', () => {
     armed(store);
     const st = store.useStore.getState();
     st.setCapabilities(['character_01', 'character_02'], true);
+    st.setReconstructionConsent(true);
     st.setMode('restore');
     st.setSpeakerId('character_02');
     st.setCutoffHz(7800);
@@ -1828,6 +1830,67 @@ describe('restore mode (contract addendum 2)', () => {
       speaker_id: 'character_02',
       cutoff_hz: 7800,
     });
+  });
+
+  it('refuses to start restore without generative reconstruction consent (True-10 D4.11)', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const st = store.useStore.getState();
+    st.setCapabilities(['character_01'], true);
+    st.setMode('restore');
+    st.setReconstructionConsent(false);
+    await actions.startJob();
+    expect(client.createJob).not.toHaveBeenCalled();
+    expect(store.useStore.getState().errorLabel).toBe('Consent required');
+  });
+
+  it('refuses to start a blocked route based on v1 capabilities (True-10 D4.11)', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const st = store.useStore.getState();
+    st.setCapabilitiesV1([
+      { capability_id: 'production', available: false, maturity: 'blocked', reason: 'Production route blocked by policy' },
+    ]);
+    st.setMode('natural');
+    st.setProfile('production');
+    await actions.startJob();
+    expect(client.createJob).not.toHaveBeenCalled();
+    expect(store.useStore.getState().error).toContain('Production route blocked by policy');
+  });
+
+  it('submits versioned ProcessingRequestV1 when client.createV1Jobs is supported (True-10 D4.11)', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const createV1JobsMock = vi.fn(async () => ({
+      schemaVersion: 1,
+      jobs: [
+        {
+          jobId: 'v1-job-123',
+          outputPath: '/out/a_clean.wav',
+          reportPath: '/out/a_clean.hawavoclean.json',
+        },
+      ],
+    }));
+    (client as any).createV1Jobs = createV1JobsMock;
+    const st = store.useStore.getState();
+    st.setSource({ path: '/a.wav', name: 'a.wav', origin: 'file', sourceId: 'src123456' });
+    st.setMode('smart_safe');
+
+    await actions.startJob();
+    expect(createV1JobsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schema_version: 1,
+        source_ids: ['src123456'],
+        strategy: {
+          kind: 'smart_safe',
+          restore_policy: 'disabled',
+          allow_generative_reconstruction: false,
+        },
+        execution_policy: 'offline_only',
+        conflict_policy: 'unique',
+      }),
+    );
+    expect(store.useStore.getState().job?.id).toBe('v1-job-123');
   });
 
   it('a natural submit sends none of the three — the engine forbids extras', async () => {

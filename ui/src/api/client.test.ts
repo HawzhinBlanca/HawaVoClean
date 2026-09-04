@@ -489,3 +489,98 @@ describe('verify', () => {
     expect(err.status).toBe(0);
   });
 });
+
+describe('v1 capabilities and jobs (True-10 D4.11)', () => {
+  it('fetches and normalizes /api/v1/capabilities', async () => {
+    const fetchFn = mockFetch(
+      res(
+        200,
+        JSON.stringify({
+          schemaVersion: 1,
+          capabilities: [
+            {
+              capabilityId: 'smart_safe',
+              available: true,
+              maturity: 'qualified',
+              providers: ['cpu'],
+            },
+            {
+              capabilityId: 'restore_source',
+              available: false,
+              maturity: 'blocked',
+              reason: 'No qualified model pack',
+            },
+          ],
+        }),
+      ),
+    );
+    const caps = await client().capabilities();
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/v1/capabilities`);
+    expect(caps.capabilities).toEqual([
+      {
+        capability_id: 'smart_safe',
+        available: true,
+        maturity: 'qualified',
+        reason: null,
+        manifest_sha256: null,
+        providers: ['cpu'],
+      },
+      {
+        capability_id: 'restore_source',
+        available: false,
+        maturity: 'blocked',
+        reason: 'No qualified model pack',
+        manifest_sha256: null,
+        providers: [],
+      },
+    ]);
+  });
+
+  it('posts /api/v1/jobs and normalizes response', async () => {
+    const fetchFn = mockFetch(
+      res(
+        202,
+        JSON.stringify({
+          schemaVersion: 1,
+          jobs: [
+            {
+              jobId: 'j123',
+              sourceId: 'src456',
+              outputPath: '/out/a.wav',
+              reportPath: '/out/a.json',
+            },
+          ],
+        }),
+      ),
+    );
+    const result = await client().createV1Jobs({
+      schema_version: 1,
+      source_ids: ['src456'],
+      strategy: {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+      },
+      execution_policy: 'offline_only',
+      conflict_policy: 'unique',
+      record_bundle: false,
+      idempotency_key: 'test-key',
+    });
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/v1/jobs`);
+    expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual(
+      expect.objectContaining({
+        schema_version: 1,
+        source_ids: ['src456'],
+        idempotency_key: 'test-key',
+      }),
+    );
+    expect(result.jobs).toEqual([
+      {
+        jobId: 'j123',
+        sourceId: 'src456',
+        outputPath: '/out/a.wav',
+        reportPath: '/out/a.json',
+      },
+    ]);
+  });
+});

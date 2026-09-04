@@ -3,7 +3,14 @@
 
 import { EngineClient, EngineError } from '../api/client';
 import { followJob, isTerminal } from '../api/sse';
-import type { AudioAnalysis, JobStatus, Profile } from '../api/types';
+import type {
+  AudioAnalysis,
+  JobStatus,
+  ManualRoute,
+  ProcessingRequestV1,
+  ProcessingStrategyV1,
+  Profile,
+} from '../api/types';
 import { reportTxtPath } from '../api/types';
 import { getPlayer, type DeckFault } from '../audio/player';
 import { getBridge } from '../bridge';
@@ -17,7 +24,9 @@ import {
   type UiFailure,
 } from './errors';
 import {
+  getRouteBlockedReason,
   getState,
+  isRouteBlocked,
   jobInFlight,
   useStore,
   type ArtifactState,
@@ -288,6 +297,18 @@ async function probeEngine(): Promise<void> {
     // up without a restart. A revision-1 engine sends neither field; that
     // reads as "no restore", which is exactly what such an engine can do.
     getState().setCapabilities(health.speakers ?? [], health.restore_available === true);
+
+    // True-10 D4.11: Probe versioned capabilities
+    if (typeof client.capabilities === 'function') {
+      try {
+        const caps = await client.capabilities(probeTimeout.signal);
+        if (caps && Array.isArray(caps.capabilities)) {
+          getState().setCapabilitiesV1(caps.capabilities);
+        }
+      } catch {
+        /* Graceful fallback for mock engines / older versions */
+      }
+    }
     if (!everConnected) {
       everConnected = true;
       getState().setStatus(`Engine ready · v${health.version}`);
@@ -1075,7 +1096,7 @@ async function uploadFile(file: File): Promise<void> {
   st.setStatus(`Uploading ${file.name}`);
   try {
     const client = requireClient();
-    const { path } = await client.uploadWithProgress(file, {
+    const res = await client.uploadWithProgress(file, {
       onProgress: (loaded, total) => {
         const cur = getState();
         if (!cur.upload) return;
@@ -1092,7 +1113,12 @@ async function uploadFile(file: File): Promise<void> {
     });
     cancelUploadHandle = null;
     getState().setUpload(null);
-    await loadSource({ path, name: file.name, origin: 'upload' });
+    await loadSource({
+      path: res.path,
+      name: file.name,
+      origin: 'upload',
+      ...(res.source_id ? { sourceId: res.source_id } : {}),
+    });
   } catch (e) {
     cancelUploadHandle = null;
     getState().setUpload(null);
@@ -1422,32 +1448,104 @@ export async function startJob(): Promise<void> {
     // and the older history row then shows its own cached report beside
     // download links that hand over the newer run's bytes.
     const output = uniqueOutputPath(st.source.path, profile);
-    // Contract addendum 2: the engine pins this request `extra="forbid"` and
-    // natural mode must stay byte-compatible with revision 1, so the three
-    // restore fields are attached only when a restore run is actually being
-    // asked for — never as null placeholders. The speaker check is belt and
-    // braces: the store keeps a speaker selected whenever restore is offered,
-    // and a restore submit without one would only earn the engine's 422.
-    const restore =
-      st.mode === 'restore' && st.speakerId
-        ? {
-            mode: 'restore' as const,
-            speaker_id: st.speakerId,
-            ...(st.cutoffHz !== null ? { cutoff_hz: st.cutoffHz } : {}),
-          }
-        : {};
-    const res = await client.createJob({
-      input_path: st.source.path,
-      profile,
-      overwrite: true,
-      ...(output ? { output_path: output } : {}),
-      ...restore,
-    });
+
+    // Fail-closed capability & reconstruction consent checks (True-10 D4.11)
+    let strategy: ProcessingStrategyV1;
+    if (st.mode === 'smart_safe') {
+      if (isRouteBlocked(st.capabilities, 'smart_safe')) {
+        const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
+        st.setStatus(`Smart Safe is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Smart Safe capability is blocked', 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+      };
+    } else if (st.mode === 'restore') {
+      const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
+      if (isRouteBlocked(st.capabilities, restoreCapId)) {
+        const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
+        st.setStatus(`Restore is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Restore capability is blocked', 'Capability blocked');
+        return;
+      }
+      if (!st.reconstructionConsent) {
+        st.setStatus('Restore requires explicit generative reconstruction consent');
+        st.setError('Acknowledge generative reconstruction consent to proceed with Restore', 'Consent required');
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: restoreCapId as ManualRoute,
+        speaker_profile_id: st.speakerId,
+        expert_cutoff_hz: st.cutoffHz,
+        allow_generative_reconstruction: true,
+      };
+    } else {
+      if (isRouteBlocked(st.capabilities, profile)) {
+        const reason = getRouteBlockedReason(st.capabilities, profile);
+        st.setStatus(`Route ${profile} is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || `Route ${profile} is blocked`, 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: profile as ManualRoute,
+        allow_generative_reconstruction: false,
+      };
+    }
+
+    const sourceId = st.source.sourceId || st.source.path;
+    const idempotencyKey = `v1-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    let jobItem: { jobId: string; outputPath: string; reportPath: string };
+
+    if (typeof client.createV1Jobs === 'function') {
+      const v1Req: ProcessingRequestV1 = {
+        schema_version: 1,
+        source_ids: [sourceId],
+        strategy,
+        execution_policy: 'offline_only',
+        conflict_policy: 'unique',
+        record_bundle: false,
+        idempotency_key: idempotencyKey,
+      };
+      const v1Res = await client.createV1Jobs(v1Req);
+      const item = v1Res.jobs[0];
+      if (!item) {
+        throw new EngineError(500, 'bad_response', 'The engine returned an empty job batch');
+      }
+      jobItem = { jobId: item.jobId, outputPath: item.outputPath, reportPath: item.reportPath };
+    } else {
+      // Contract addendum 2: the engine pins this request `extra="forbid"` and
+      // natural mode must stay byte-compatible with revision 1, so the three
+      // restore fields are attached only when a restore run is actually being
+      // asked for — never as null placeholders.
+      const restore =
+        st.mode === 'restore' && st.speakerId
+          ? {
+              mode: 'restore' as const,
+              speaker_id: st.speakerId,
+              ...(st.cutoffHz !== null ? { cutoff_hz: st.cutoffHz } : {}),
+            }
+          : {};
+      const res = await client.createJob({
+        input_path: st.source.path,
+        profile,
+        overwrite: true,
+        ...(output ? { output_path: output } : {}),
+        ...restore,
+      });
+      jobItem = { jobId: res.job_id, outputPath: res.output_path, reportPath: res.report_path };
+    }
+
     // Only now, with a job id in hand, is the previous run's result really
     // superseded. Doing this before `createJob` meant any refusal — a 4xx, a
     // dead socket, a path the engine will not take — destroyed a finished run
     // to start one that never began.
-    reconcileTries.delete(res.job_id);
+    reconcileTries.delete(jobItem.jobId);
     const cur = useStore.getState();
     cur.setError(null);
     cur.setCleaned(null, null);
@@ -1459,15 +1557,15 @@ export async function startJob(): Promise<void> {
     getPlayer().setActive('original');
     cur.setAbMode('original');
     const job = {
-      id: res.job_id,
-      outputPath: res.output_path,
-      reportPath: res.report_path,
+      id: jobItem.jobId,
+      outputPath: jobItem.outputPath,
+      reportPath: jobItem.reportPath,
       status: null,
       streamConnected: false,
     };
     useStore.getState().setJob(job);
     useStore.getState().setStatus('Job queued');
-    followFrom(client, res.job_id);
+    followFrom(client, jobItem.jobId);
   } catch (e) {
     probeSoon(e);
     failed(e, st.source.name, 'Could not start');

@@ -1,11 +1,15 @@
 import type {
   ApiError,
   AudioAnalysis,
+  CapabilitiesResponseV1,
   CreateJobRequest,
   CreateJobResponse,
+  CreateV1JobResponse,
   HealthResponse,
   JobStatus,
   PeaksWindow,
+  ProcessingRequestV1,
+  UploadResponse,
 } from './types';
 
 export interface Endpoint {
@@ -160,6 +164,40 @@ export class EngineClient {
     );
   }
 
+  async capabilities(signal?: AbortSignal): Promise<CapabilitiesResponseV1> {
+    const res = await this.json<any>('/api/v1/capabilities', { method: 'GET' }, signal);
+    const caps = (res.capabilities ?? []).map((c: any) => ({
+      capability_id: c.capability_id ?? c.capabilityId,
+      available: Boolean(c.available),
+      maturity: c.maturity,
+      reason: c.reason ?? null,
+      manifest_sha256: c.manifest_sha256 ?? c.manifestSha256 ?? null,
+      providers: c.providers ?? [],
+    }));
+    return {
+      schema_version: res.schema_version ?? res.schemaVersion ?? 1,
+      capabilities: caps,
+    };
+  }
+
+  async createV1Jobs(req: ProcessingRequestV1, signal?: AbortSignal): Promise<CreateV1JobResponse> {
+    const res = await this.json<any>(
+      '/api/v1/jobs',
+      { method: 'POST', body: JSON.stringify(req) },
+      signal,
+    );
+    const jobs = (res.jobs ?? []).map((j: any) => ({
+      jobId: j.jobId ?? j.job_id,
+      sourceId: j.sourceId ?? j.source_id,
+      outputPath: j.outputPath ?? j.output_path,
+      reportPath: j.reportPath ?? j.report_path,
+    }));
+    return {
+      schemaVersion: res.schemaVersion ?? res.schema_version ?? 1,
+      jobs,
+    };
+  }
+
   createJob(req: CreateJobRequest, signal?: AbortSignal): Promise<CreateJobResponse> {
     return this.json<CreateJobResponse>(
       '/api/jobs',
@@ -178,10 +216,10 @@ export class EngineClient {
     });
   }
 
-  async upload(file: File, signal?: AbortSignal): Promise<{ path: string }> {
+  async upload(file: File, signal?: AbortSignal): Promise<UploadResponse> {
     const form = new FormData();
     form.append('file', file, file.name);
-    return this.json<{ path: string }>('/api/upload', { method: 'POST', body: form }, signal);
+    return this.json<UploadResponse>('/api/upload', { method: 'POST', body: form }, signal);
   }
 
   /**
@@ -200,8 +238,8 @@ export class EngineClient {
       onProgress?: (loaded: number, total: number) => void;
       onCancelHandle?: (cancel: () => void) => void;
     } = {},
-  ): Promise<{ path: string }> {
-    return new Promise<{ path: string }>((resolve, reject) => {
+  ): Promise<UploadResponse> {
+    return new Promise<UploadResponse>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${this.baseUrl}/api/upload`, true);
       xhr.responseType = 'text';
@@ -230,7 +268,8 @@ export class EngineClient {
           // 100%, but the engine still has to write them out; hold the bar at
           // full until the response lands so the two never disagree.
           opts.onProgress?.(file.size, file.size);
-          resolve({ path: body.path });
+          const sourceId = typeof body.source_id === 'string' && body.source_id ? body.source_id : undefined;
+          resolve({ path: body.path, ...(sourceId ? { source_id: sourceId } : {}) });
           return;
         }
         const code = typeof body.error === 'string' ? body.error : `http_${xhr.status}`;

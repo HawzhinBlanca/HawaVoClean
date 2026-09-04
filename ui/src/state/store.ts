@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { EngineClient } from '../api/client';
 import type {
   AudioAnalysis,
+  CapabilityStatusV1,
   HawaVoCleanReport,
   JobMode,
   JobStatus,
@@ -62,7 +63,8 @@ export interface SourceInfo {
   path: string;
   name: string;
   origin: SourceOrigin;
-  mediaId?: string;
+  mediaId?: string | undefined;
+  sourceId?: string | undefined;
 }
 
 export interface JobInfo {
@@ -205,6 +207,15 @@ export interface AppState {
   speakers: string[];
   restoreAvailable: boolean;
   /**
+   * Versioned runtime capabilities from `GET /api/v1/capabilities` (True-10 D4.11).
+   * Governs truthful route qualification, blocked reasons, and runtime providers.
+   */
+  capabilities: CapabilityStatusV1[] | null;
+  /**
+   * Explicit user consent required for generative reconstruction (HawaRestore-KD).
+   */
+  reconstructionConsent: boolean;
+  /**
    * The next run's mode and its restore parameters. Like `profile` these are
    * a control setting, not a property of any one run: they survive a new
    * source and are read once at submit time. Invariant the control and
@@ -299,6 +310,8 @@ export interface AppState {
   setCleaned(a: AudioAnalysis | null, path: string | null): void;
   setProfile(p: Profile): void;
   setCapabilities(speakers: string[], restoreAvailable: boolean): void;
+  setCapabilitiesV1(capabilities: CapabilityStatusV1[]): void;
+  setReconstructionConsent(consent: boolean): void;
   setMode(m: JobMode): void;
   setSpeakerId(id: string | null): void;
   setCutoffHz(hz: number | null): void;
@@ -347,6 +360,8 @@ export const useStore = create<AppState>((set) => ({
   profile: 'production',
   speakers: [],
   restoreAvailable: false,
+  capabilities: null,
+  reconstructionConsent: false,
   mode: 'natural',
   speakerId: null,
   cutoffHz: null,
@@ -417,6 +432,20 @@ export const useStore = create<AppState>((set) => ({
           : (speakers[0] ?? null),
       mode: restoreAvailable ? s.mode : 'natural',
     })),
+  setCapabilitiesV1: (capabilities) =>
+    set((s) => {
+      const restoreCap = capabilities.find(
+        (c) => c.capability_id === 'restore_enrolled' || c.capability_id === 'restore_source',
+      );
+      const isRestoreBlocked = restoreCap
+        ? restoreCap.maturity === 'blocked' || !restoreCap.available
+        : false;
+      return {
+        capabilities,
+        mode: isRestoreBlocked && s.mode === 'restore' ? 'natural' : s.mode,
+      };
+    }),
+  setReconstructionConsent: (reconstructionConsent) => set({ reconstructionConsent }),
   setMode: (mode) => set({ mode }),
   setSpeakerId: (speakerId) => set({ speakerId }),
   setCutoffHz: (cutoffHz) => set({ cutoffHz }),
@@ -506,12 +535,36 @@ export const useStore = create<AppState>((set) => ({
       selectionRange: null,
       error: null,
       errorLabel: null,
+      reconstructionConsent: false,
       view: { start: 0, end: 0 },
       // The run list survives a new clip — it is the session's memory — but
       // nothing in it is on screen any more.
       currentRunId: null,
     }),
 }));
+
+export function isRouteBlocked(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): boolean {
+  if (!capabilities) return false;
+  const cap = capabilities.find((c) => c.capability_id === routeOrCapId);
+  if (!cap) return false;
+  return cap.maturity === 'blocked' || !cap.available;
+}
+
+export function getRouteBlockedReason(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): string | null {
+  if (!capabilities) return null;
+  const cap = capabilities.find((c) => c.capability_id === routeOrCapId);
+  if (!cap) return null;
+  if (cap.maturity === 'blocked' || !cap.available) {
+    return cap.reason ?? `Capability ${routeOrCapId} is blocked`;
+  }
+  return null;
+}
 
 // Keep the store's `view` in step with the imperative controller without
 // re-rendering on every wheel event: one trailing update per burst.

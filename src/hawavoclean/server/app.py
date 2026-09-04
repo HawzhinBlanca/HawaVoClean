@@ -939,7 +939,23 @@ def _lease_source_id(
             yield uploaded
             return
     with native_sources.lease_source(source_id) as native:
-        yield native
+        if native is not None:
+            yield native
+            return
+    registered = native_sources.resolve_registered_path(source_id)
+    if registered is not None:
+        yield registered
+        return
+    try:
+        candidate = Path(source_id)
+        if upload_store.authorizes(candidate):
+            opaque_id = upload_store.source_id(candidate)
+            with upload_store.lease_source(opaque_id) as leased:
+                yield leased
+                return
+    except Exception:
+        pass
+    yield None
 
 
 def _analyze_smart_source(

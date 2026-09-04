@@ -58,8 +58,97 @@ export interface PeaksWindow {
 
 export type Profile = 'studio' | 'lowband' | 'production';
 
-/** Per-job processing mode (docs/ui-contract.md, Addendum 2). */
-export type JobMode = 'natural' | 'restore';
+/** Per-job processing mode (docs/ui-contract.md, Addendum 2, True-10 D4.11). */
+export type JobMode = 'natural' | 'restore' | 'smart_safe';
+
+export type CapabilityMaturity = 'qualified' | 'experimental' | 'blocked';
+
+export interface CapabilityStatusV1 {
+  capability_id: string;
+  available: boolean;
+  maturity: CapabilityMaturity;
+  reason?: string | null;
+  manifest_sha256?: string | null;
+  providers?: string[];
+}
+
+export interface CapabilitiesResponseV1 {
+  schema_version: 1;
+  capabilities: CapabilityStatusV1[];
+}
+
+export type RestorePolicy = 'disabled' | 'source_allowed' | 'enrolled_only' | 'auto';
+
+export interface SmartSafeStrategyV1 {
+  kind: 'smart_safe';
+  restore_policy?: RestorePolicy;
+  restorePolicy?: RestorePolicy;
+  speaker_profile_id?: string | null;
+  speakerProfileId?: string | null;
+  allow_generative_reconstruction: boolean;
+  allowGenerativeReconstruction?: boolean;
+}
+
+export type ManualRoute =
+  | 'production'
+  | 'studio'
+  | 'lowband'
+  | 'lowband_then_production'
+  | 'restore_source'
+  | 'restore_enrolled';
+
+export interface ManualStrategyV1 {
+  kind: 'manual';
+  route: ManualRoute;
+  speaker_profile_id?: string | null | undefined;
+  speakerProfileId?: string | null | undefined;
+  expert_cutoff_hz?: number | null | undefined;
+  expertCutoffHz?: number | null | undefined;
+  allow_generative_reconstruction: boolean;
+  allowGenerativeReconstruction?: boolean | undefined;
+}
+
+export type ProcessingStrategyV1 = SmartSafeStrategyV1 | ManualStrategyV1;
+
+export interface ProcessingRequestV1 {
+  schema_version?: 1 | undefined;
+  schemaVersion?: 1 | undefined;
+  source_ids: string[];
+  sourceIds?: string[] | undefined;
+  strategy: ProcessingStrategyV1;
+  execution_policy?: 'offline_only' | 'prefer_offline' | 'cloud_allowed' | undefined;
+  executionPolicy?: 'offline_only' | 'prefer_offline' | 'cloud_allowed' | undefined;
+  cloud_consent_id?: string | null | undefined;
+  cloudConsentId?: string | null | undefined;
+  conflict_policy?: 'unique' | 'fail' | 'replace' | undefined;
+  conflictPolicy?: 'unique' | 'fail' | 'replace' | undefined;
+  record_bundle?: boolean | undefined;
+  recordBundle?: boolean | undefined;
+  idempotency_key?: string | undefined;
+  idempotencyKey?: string | undefined;
+}
+
+export interface CreateV1JobItem {
+  sourceId: string;
+  jobId: string;
+  outputPath: string;
+  reportPath: string;
+  recordBundle?: boolean;
+  bundlePath?: string;
+  bundle?: unknown;
+}
+
+export interface CreateV1JobResponse {
+  schemaVersion: 1;
+  batchId?: string;
+  execution?: string;
+  jobs: CreateV1JobItem[];
+}
+
+export interface UploadResponse {
+  path: string;
+  source_id?: string;
+}
 
 export interface CreateJobRequest {
   input_path: string;
@@ -285,6 +374,29 @@ export interface RestorationGuardR {
   speaker?: Record<string, unknown>;
 }
 
+export interface CandidateEvaluationRecord {
+  route: string;
+  score: number;
+  confidence: number;
+  cost?: number | undefined;
+  rank?: number | undefined;
+  selected?: boolean | undefined;
+  status: 'accepted' | 'rejected' | 'fallback' | string;
+  rejection_reason?: string | null | undefined;
+}
+
+export interface AcousticDetectionsRecord {
+  speech?: number;
+  music_risk?: number;
+  crosstalk?: number;
+  cutoff_hz?: number | null;
+  noise_floor_db?: number | null;
+  snr_db?: number | null;
+  rt60_s?: number | null;
+  clipping_fraction?: number;
+  coherence?: number;
+}
+
 export interface RestorationSection {
   mode: string;
   speaker_id: string | null;
@@ -295,6 +407,17 @@ export interface RestorationSection {
   segments?: RestorationSegments;
   guard_r?: RestorationGuardR;
   review_timecodes?: unknown[];
+  // Smart Safe decision details (True-10 D4.11 / I3.8)
+  selected_route?: string;
+  confidence?: number;
+  abstained?: boolean;
+  reason?: string;
+  decision_sha256?: string;
+  ranker_version?: string;
+  ranker_sha256?: string;
+  fallback_route?: string | null;
+  candidates?: CandidateEvaluationRecord[];
+  detections?: AcousticDetectionsRecord;
 }
 
 export interface HawaVoCleanReport {

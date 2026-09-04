@@ -189,3 +189,39 @@ def test_job_status_v1_and_artifact_branches(tmp_path: Path) -> None:
 
     with pytest.raises(PathPolicyError, match="must remain beside"):
         _session_output_path(in_file, "production", "/different/dir/out.wav")
+
+
+def test_lease_source_id_branches(tmp_path: Path) -> None:
+    from hawavoclean.server.app import _lease_source_id
+    from hawavoclean.server.retention import UploadStore
+    from hawavoclean.server.source_caps import NativeSourceRegistry
+
+    upload_root = tmp_path / "uploads"
+    upload_store = UploadStore(upload_root)
+    native_registry = NativeSourceRegistry()
+
+    # 1. Managed upload by opaque source_id
+    uploaded_file = upload_store.stage("test.wav")
+    uploaded_file.write_bytes(b"data")
+    opaque_upload_id = upload_store.source_id(uploaded_file)
+    with _lease_source_id(upload_store, native_registry, opaque_upload_id) as leased:
+        assert leased == uploaded_file.resolve()
+
+    # 2. Managed upload by authorized path string
+    with _lease_source_id(upload_store, native_registry, str(uploaded_file)) as leased:
+        assert leased == uploaded_file.resolve()
+
+    # 3. Native source by registered opaque source_id
+    native_file = tmp_path / "native.wav"
+    native_file.write_bytes(b"data")
+    native_cap = native_registry.register(str(native_file))
+    with _lease_source_id(upload_store, native_registry, native_cap.source_id) as leased:
+        assert leased == native_file.resolve()
+
+    # 4. Native source by raw registered path
+    with _lease_source_id(upload_store, native_registry, str(native_file)) as leased:
+        assert leased == native_file.resolve()
+
+    # 5. Unknown source
+    with _lease_source_id(upload_store, native_registry, "nonexistent_source_id") as leased:
+        assert leased is None

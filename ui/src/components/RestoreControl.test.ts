@@ -177,4 +177,40 @@ describe('RestoreControl', () => {
     expect(getState().cutoffHz).toBe(23999);
     expect(input.getAttribute('aria-invalid')).toBeNull();
   });
+
+  it('renders a blocked warning banner when capability is blocked (True-10 D4.11)', async () => {
+    getState().setCapabilities(['character_01'], true);
+    getState().setCapabilitiesV1([
+      {
+        capability_id: 'restore_enrolled',
+        available: false,
+        maturity: 'blocked',
+        reason: 'No qualified signed Sorani Restore pack is installed',
+      },
+    ]);
+    getState().setSpeakerId('character_01');
+    getState().setMode('restore');
+    await render();
+
+    const warning = host.querySelector('.rc-blocked-warning');
+    expect(warning).not.toBeNull();
+    expect(warning?.textContent).toContain('BLOCKED');
+    expect(warning?.textContent).toContain('No qualified signed Sorani Restore pack is installed');
+  });
+
+  it('toggles generative reconstruction consent in store (True-10 D4.11)', async () => {
+    getState().setCapabilities(['character_01'], true);
+    getState().setMode('restore');
+    expect(getState().reconstructionConsent).toBe(false);
+    await render();
+
+    const checkbox = host.querySelector('.rc-consent input[type="checkbox"]') as HTMLInputElement;
+    expect(checkbox).not.toBeNull();
+    expect(checkbox.checked).toBe(false);
+
+    await act(async () => {
+      checkbox.click();
+    });
+    expect(getState().reconstructionConsent).toBe(true);
+  });
 });
