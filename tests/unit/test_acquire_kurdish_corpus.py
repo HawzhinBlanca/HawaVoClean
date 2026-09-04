@@ -97,6 +97,7 @@ def test_acquire_corpus_mocked_end_to_end(
         enroll=True,
         profiles_dir=profiles_dir,
         min_enroll_duration_s=0.5,
+        min_enroll_sessions=1,
     )
 
     assert summary.total_clips == 1

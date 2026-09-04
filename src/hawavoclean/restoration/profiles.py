@@ -42,11 +42,18 @@ class SpeakerProfile:
     created_by_commit: str
     notes: str
     embedding_vector: np.ndarray | None = None  # Shape: (dim,), float32
+    variance_vector: np.ndarray | None = None  # Shape: (dim,), float32
+    profile_variance_path: str | None = None
+    profile_variance_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert profile to serializable dictionary."""
         d = asdict(self)
         d.pop("embedding_vector", None)
+        d.pop("variance_vector", None)
+        if self.profile_variance_path is None:
+            d.pop("profile_variance_path", None)
+            d.pop("profile_variance_sha256", None)
         return d
 
     def compute_hash(self) -> str:
@@ -168,6 +175,30 @@ def validate_speaker_profile(
         if embedding_vector is not None and np.linalg.norm(embedding_vector) < 1e-6:
             raise ProfileValidationError(f"Degenerate zero embedding in {embedding_path}")
 
+    # 5b. Profile variance vector and hash check (optional for backward compatibility)
+    profile_variance_path = data.get("profile_variance_path")
+    profile_variance_sha256 = data.get("profile_variance_sha256")
+    variance_vector: np.ndarray | None = None
+    if profile_variance_path is not None:
+        var_rel = Path(str(profile_variance_path))
+        var_path = base_dir / var_rel if not var_rel.is_absolute() else var_rel
+        if verify_files:
+            if not var_path.exists():
+                raise ProfileValidationError(f"Profile variance file missing: {var_path}")
+            actual_var_hash = hash_file(var_path)
+            expected_var_hash = str(profile_variance_sha256)
+            if profile_variance_sha256 and actual_var_hash != expected_var_hash:
+                raise ProfileValidationError(
+                    f"Variance hash mismatch for {var_path}: expected {expected_var_hash}, got {actual_var_hash}"
+                )
+        try:
+            if var_path.exists():
+                variance_vector = np.load(var_path).astype(np.float32)
+        except Exception as e:
+            raise ProfileValidationError(
+                f"Failed to load variance vector from {var_path}: {e}"
+            ) from e
+
     # 6. F0 statistics check
     f0_data = data["f0_statistics"]
     if not isinstance(f0_data, dict):
@@ -195,6 +226,9 @@ def validate_speaker_profile(
         created_by_commit=str(data["created_by_commit"]),
         notes=str(data.get("notes", "")),
         embedding_vector=embedding_vector,
+        variance_vector=variance_vector,
+        profile_variance_path=profile_variance_path,
+        profile_variance_sha256=profile_variance_sha256,
     )
 
 

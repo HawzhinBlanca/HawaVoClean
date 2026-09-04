@@ -158,6 +158,7 @@ def acquire_corpus(
     enroll: bool = False,
     profiles_dir: Path | None = None,
     min_enroll_duration_s: float = 10.0,
+    min_enroll_sessions: int = 3,
 ) -> AcquisitionSummary:
     """Download, convert, and optionally enroll Kurdish speakers."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +182,7 @@ def acquire_corpus(
                 consent_granted=True,
                 consent_note="Acquired from open Kurdish multi-speaker corpus (aranemini/central-kurdish-tts4all).",
                 min_duration_s=min_enroll_duration_s,
+                min_sessions=min_enroll_sessions,
                 verbose=False,
             )
             logger.info(f"Successfully enrolled profile: {target_profile}")
@@ -250,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
         default=10.0,
         help="Minimum required duration in seconds for enrollment (default: 10.0).",
     )
+    parser.add_argument(
+        "--min-sessions",
+        type=int,
+        default=3,
+        help="Minimum required distinct audio sessions for enrollment (default: 3).",
+    )
 
     args = parser.parse_args(argv)
 
@@ -261,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
             enroll=args.enroll,
             profiles_dir=args.profiles_dir if args.enroll else None,
             min_enroll_duration_s=args.min_duration_s,
+            min_enroll_sessions=args.min_sessions,
         )
         print("\n=== Acquisition Complete ===")
         print(f"Source: {summary.source_repo}")

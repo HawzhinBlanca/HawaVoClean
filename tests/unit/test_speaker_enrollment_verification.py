@@ -45,13 +45,38 @@ def test_enroll_speaker_refuses_without_consent(tmp_path: Path) -> None:
         )
 
 
+def test_enroll_speaker_refuses_insufficient_sessions(tmp_path: Path) -> None:
+    """enroll_speaker must raise ValueError if session count is < 3 (R2.8)."""
+    audio_dir = tmp_path / "audio_sessions"
+    audio_dir.mkdir()
+
+    # 2 files of 200s each = 400s total (> 300s), but only 2 sessions
+    spk1 = _generate_synthetic_speaker(150.0, seed=1, duration_s=200.0)
+    spk2 = _generate_synthetic_speaker(152.0, seed=2, duration_s=200.0)
+    sf.write(audio_dir / "sess1.wav", spk1, SR)
+    sf.write(audio_dir / "sess2.wav", spk2, SR)
+
+    with pytest.raises(ValueError, match="Insufficient audio sessions: 2 < 3 minimum required"):
+        enroll_speaker(
+            speaker_id="test_speaker",
+            display_name="Test Speaker",
+            audio_dir=audio_dir,
+            output_dir=tmp_path / "out_sess",
+            consent_granted=True,
+            min_duration_s=300.0,
+            min_sessions=3,
+        )
+
+
 def test_enroll_speaker_refuses_insufficient_duration(tmp_path: Path) -> None:
     """enroll_speaker must raise ValueError if total audio duration is < 300 seconds."""
     audio_dir = tmp_path / "audio"
     audio_dir.mkdir()
 
-    spk1 = _generate_synthetic_speaker(150.0, seed=1, duration_s=10.0)
-    sf.write(audio_dir / "sample1.wav", spk1, SR)
+    # 3 files of 10s each = 30s total (< 300s)
+    for i in range(3):
+        spk = _generate_synthetic_speaker(150.0 + i, seed=10 + i, duration_s=10.0)
+        sf.write(audio_dir / f"sample{i}.wav", spk, SR)
 
     with pytest.raises(ValueError, match="Insufficient total audio duration"):
         enroll_speaker(
@@ -125,6 +150,9 @@ def test_enroll_speaker_end_to_end_and_validation(tmp_path: Path) -> None:
     assert result.embedding_dim == 192
     assert (result.profile_dir / "profile.json").is_file()
     assert (result.profile_dir / "embedding" / "profile.npy").is_file()
+    assert (result.profile_dir / "embedding" / "variance.npy").is_file()
+    assert result.variance_path is not None
+    assert result.variance_path.is_file()
     assert (result.profile_dir / "consent" / "consent.json").is_file()
 
     # Validate the generated profile
@@ -134,3 +162,6 @@ def test_enroll_speaker_end_to_end_and_validation(tmp_path: Path) -> None:
     assert profile.embedding_vector is not None
     assert profile.embedding_vector.shape == (192,)
     assert 0.99 <= float(np.linalg.norm(profile.embedding_vector)) <= 1.01
+    assert profile.variance_vector is not None
+    assert profile.variance_vector.shape == (192,)
+    assert profile.profile_variance_path == "embedding/variance.npy"

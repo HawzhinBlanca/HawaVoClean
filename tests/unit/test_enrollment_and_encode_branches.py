@@ -144,6 +144,7 @@ def test_enroll_speaker_verbose_and_exceptions(tmp_path: Path) -> None:
             output_dir=out_dir,
             consent_granted=True,
             min_duration_s=1.0,
+            min_sessions=1,
             verbose=True,
         )
         assert res.speaker_id == "test_spk"
@@ -163,6 +164,7 @@ def test_enroll_speaker_verbose_and_exceptions(tmp_path: Path) -> None:
             output_dir=tmp_path / "out2",
             consent_granted=True,
             min_duration_s=1.0,
+            min_sessions=1,
         )
 
     # 3. No voiced frames detected -> ValueError
@@ -184,4 +186,5 @@ def test_enroll_speaker_verbose_and_exceptions(tmp_path: Path) -> None:
             output_dir=tmp_path / "out3",
             consent_granted=True,
             min_duration_s=1.0,
+            min_sessions=1,
         )

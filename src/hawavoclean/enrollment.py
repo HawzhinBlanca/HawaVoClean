@@ -38,6 +38,7 @@ class EnrollmentResult:
     f0_p95_hz: float
     embedding_dim: int
     profile_hash: str
+    variance_path: Path | None = None
 
 
 def _resample_to_48k(audio: np.ndarray, source_sr: int) -> np.ndarray:
@@ -87,6 +88,7 @@ def enroll_speaker(
     *,
     verbose: bool = True,
     min_duration_s: float = 300.0,
+    min_sessions: int = 3,
 ) -> EnrollmentResult:
     """Create a complete speaker profile from a directory of clean WAV files.
 
@@ -100,6 +102,7 @@ def enroll_speaker(
         commit_hash: Git commit hash for provenance.
         verbose: Print progress.
         min_duration_s: Minimum required total audio duration in seconds (default 300.0s = 5 min).
+        min_sessions: Minimum required distinct recording sessions/files (default 3, per R2.8).
     """
     if not consent_granted:
         raise ValueError(
@@ -115,6 +118,12 @@ def enroll_speaker(
     )
     if not audio_files:
         raise FileNotFoundError(f"No .wav/.flac files found in {audio_dir}")
+
+    # Enforce minimum sessions requirement (R2.8)
+    if len(audio_files) < min_sessions:
+        raise ValueError(
+            f"Insufficient audio sessions: {len(audio_files)} < {min_sessions} minimum required"
+        )
 
     # Validate speaker_id format
     if not speaker_id or not speaker_id.replace("_", "").isalnum():
@@ -202,6 +211,13 @@ def enroll_speaker(
         agg_embedding = agg_embedding / norm
     agg_embedding = agg_embedding.astype(np.float32)
 
+    # Multi-session variance vector across sessions (R2.8)
+    stacked_embs = np.stack([emb for emb, _ in all_embeddings], axis=0)
+    if len(all_embeddings) > 1:
+        variance_vector = np.var(stacked_embs, axis=0).astype(np.float32)
+    else:
+        variance_vector = np.zeros(stacked_embs.shape[1], dtype=np.float32)
+
     # Aggregate F0 statistics
     all_f0 = np.concatenate(all_voiced_f0)
     f0_median = float(np.median(all_f0))
@@ -225,10 +241,15 @@ def enroll_speaker(
     manifest_path = output_dir / "canonical" / "canonical.jsonl"
     manifest_path.write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
 
-    # Write embedding
+    # Write embedding centroid
     embedding_path = output_dir / "embedding" / "profile.npy"
     np.save(embedding_path, agg_embedding)
     embedding_hash = hash_file(embedding_path)
+
+    # Write embedding variance (R2.8)
+    variance_path = output_dir / "embedding" / "variance.npy"
+    np.save(variance_path, variance_vector)
+    variance_hash = hash_file(variance_path)
 
     # Write consent record
     consent_path = output_dir / "consent" / "consent.json"
@@ -266,6 +287,8 @@ def enroll_speaker(
         "canonical_audio_sha256": file_hashes,
         "profile_embedding_path": "embedding/profile.npy",
         "profile_embedding_sha256": embedding_hash,
+        "profile_variance_path": "embedding/variance.npy",
+        "profile_variance_sha256": variance_hash,
         "f0_statistics": {
             "median_hz": round(f0_median, 1),
             "p05_hz": round(f0_p05, 1),
@@ -289,6 +312,7 @@ def enroll_speaker(
         print(f"\n  ✅ Profile written to {output_dir}")
         print(f"  Profile hash: {profile_hash[:16]}...")
         print(f"  Embedding hash: {embedding_hash[:16]}...")
+        print(f"  Variance hash: {variance_hash[:16]}...")
 
     return EnrollmentResult(
         speaker_id=speaker_id,
@@ -300,4 +324,5 @@ def enroll_speaker(
         f0_p95_hz=f0_p95,
         embedding_dim=len(agg_embedding),
         profile_hash=profile_hash,
+        variance_path=variance_path,
     )

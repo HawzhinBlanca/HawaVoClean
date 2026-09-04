@@ -58,6 +58,7 @@ class RestorationGuard:
         cutoff_hz: float,
         speaker_embedding: np.ndarray | None = None,  # noqa: ARG002
         canonical_embedding: np.ndarray | None = None,
+        variance_vector: np.ndarray | None = None,
         speech_mask: np.ndarray | None = None,
         f0_statistics: dict[str, float] | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
@@ -185,9 +186,11 @@ class RestorationGuard:
                 harmonic_info,
             )
 
-        # 5. Speaker Identity Check (extract embedding from candidate audio vs canonical)
+        # 5. Speaker Identity Check (extract embedding from candidate audio vs canonical/source)
         speaker_sim = 1.0
+        var_departure: float | None = None
         if canonical_embedding is not None and canonical_embedding.size > 0:
+            # Enrolled Mode: verify against canonical profile embedding
             cand_embedding = self.speaker_extractor.extract(candidate_audio)
             norm_a = float(np.linalg.norm(canonical_embedding))
             norm_b = float(np.linalg.norm(cand_embedding))
@@ -196,14 +199,43 @@ class RestorationGuard:
             else:
                 speaker_sim = 0.0
 
-        speaker_info = {
+            if variance_vector is not None and variance_vector.size == canonical_embedding.size:
+                sq_diff = (cand_embedding - canonical_embedding) ** 2
+                var_departure = float(np.mean(sq_diff / (variance_vector + 1e-4)))
+
+            mode = "enrolled"
+            should_check = True
+        else:
+            # Source Mode: verify candidate against natural input audio speech embedding
+            source_embedding = self.speaker_extractor.extract(natural_audio)
+            norm_source = float(np.linalg.norm(source_embedding))
+            if norm_source > 1e-9:
+                cand_embedding = self.speaker_extractor.extract(candidate_audio)
+                norm_cand = float(np.linalg.norm(cand_embedding))
+                if norm_cand > 1e-9:
+                    speaker_sim = float(
+                        np.dot(source_embedding, cand_embedding) / (norm_source * norm_cand)
+                    )
+                else:
+                    speaker_sim = 0.0
+                should_check = True
+            else:
+                speaker_sim = 1.0
+                should_check = False
+            mode = "source"
+
+        speaker_info: dict[str, Any] = {
             "speaker_similarity": speaker_sim,
             "threshold": self.config.speaker_threshold,
+            "mode": mode,
         }
-        if speaker_sim < self.config.speaker_threshold and canonical_embedding is not None:
+        if var_departure is not None:
+            speaker_info["variance_departure"] = var_departure
+
+        if should_check and speaker_sim < self.config.speaker_threshold:
             return (
                 False,
-                f"Speaker similarity {speaker_sim:.3f} < {self.config.speaker_threshold}",
+                f"Speaker similarity {speaker_sim:.3f} < {self.config.speaker_threshold} ({mode} mode)",
                 speaker_info,
             )
 
@@ -238,6 +270,7 @@ class RestorationGuard:
         cutoff_hz: float,
         speaker_embedding: np.ndarray | None = None,
         canonical_embedding: np.ndarray | None = None,
+        variance_vector: np.ndarray | None = None,
         speech_mask: np.ndarray | None = None,
         f0_statistics: dict[str, float] | None = None,
     ) -> tuple[np.ndarray, GuardRResult]:
@@ -282,6 +315,7 @@ class RestorationGuard:
                 cutoff_hz=cutoff_hz,
                 speaker_embedding=speaker_embedding,
                 canonical_embedding=canonical_embedding,
+                variance_vector=variance_vector,
                 speech_mask=speech_mask,
                 f0_statistics=f0_statistics,
             )
