@@ -407,6 +407,7 @@ export interface RestorationSection {
   segments?: RestorationSegments;
   guard_r?: RestorationGuardR;
   review_timecodes?: unknown[];
+  post_mastering_verification?: Record<string, unknown>;
   // Smart Safe decision details (True-10 D4.11 / I3.8)
   selected_route?: string;
   confidence?: number;

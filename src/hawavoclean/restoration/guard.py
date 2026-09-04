@@ -34,6 +34,50 @@ class GuardRResult:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class PostMasteringSegmentEvidence:
+    """Evidence retained per reconstructed segment after final mastering."""
+
+    segment_index: int
+    start_sample: int
+    end_sample: int
+    start_time_s: float
+    end_time_s: float
+    action: str  # "verified", "fallback_reverted", "bypassed"
+    passes: bool
+    reason: str
+    rms_waveform_error: float
+    stft_relative_error: float
+    worst_band_energy_deviation_db: float
+    worst_band_center_hz: float
+    metrics: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert segment evidence to serializable dictionary."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PostMasteringVerificationResult:
+    """Summary of Guard R re-verification after provider quantization and final mastering."""
+
+    passes: bool
+    fallback_applied: bool
+    reason: str
+    reconstructed_segments_verified: int
+    segments_evidence: list[PostMasteringSegmentEvidence]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert verification result to serializable dictionary."""
+        return {
+            "passes": self.passes,
+            "fallback_applied": self.fallback_applied,
+            "reason": self.reason,
+            "reconstructed_segments_verified": self.reconstructed_segments_verified,
+            "segments_evidence": [seg.to_dict() for seg in self.segments_evidence],
+        }
+
+
 class RestorationGuard:
     """Restoration Guard R orchestrating multi-layer fidelity verification."""
 
@@ -354,3 +398,344 @@ class RestorationGuard:
             speaker=last_metrics.get("speaker", {}),
         )
         return natural_audio, result
+
+    def verify_post_mastering(
+        self,
+        *,
+        mastered_natural: np.ndarray,
+        mastered_restored: np.ndarray,
+        segment_records: list[Any],
+        starts: list[int],
+        seg_len: int,
+        cutoff_hz: float,
+        transition_hz: float = 500.0,
+        tolerance_rms: float = 1e-4,
+        tolerance_stft: float = 1e-3,
+        tolerance_third_octave_db: float = 0.25,
+        canonical_embedding: np.ndarray | None = None,
+        variance_vector: np.ndarray | None = None,
+        speech_mask: np.ndarray | None = None,
+        f0_statistics: dict[str, float] | None = None,
+    ) -> PostMasteringVerificationResult:
+        """Rerun Guard R checks after provider quantization and final mastering.
+
+        Compares the mastered restored audio against an equally mastered Natural
+        reference segment by segment. Reconstructed segments (restored or reduced)
+        must strictly satisfy signal integrity (RMS <= tolerance_rms, relative
+        STFT <= tolerance_stft, and 1/3-octave deviation <= tolerance_third_octave_db
+        outside the transition band) as well as Guard R structural and high-band
+        consistency.
+
+        Missing or failed evidence forces an explicit Natural fallback.
+        """
+        n_samples = mastered_natural.shape[-1]
+        reconstructed_indices = [
+            i
+            for i, rec in enumerate(segment_records)
+            if getattr(rec, "action", "") in ("restored", "reduced")
+            or getattr(rec, "applied_strength", 0.0) > 0.0
+        ]
+
+        if not reconstructed_indices:
+            return PostMasteringVerificationResult(
+                passes=True,
+                fallback_applied=False,
+                reason="No active reconstructed segments to verify; preserved Natural audio",
+                reconstructed_segments_verified=0,
+                segments_evidence=[],
+            )
+
+        evidence_list: list[PostMasteringSegmentEvidence] = []
+        all_passed = True
+        failure_reasons: list[str] = []
+
+        for index in reconstructed_indices:
+            if index >= len(starts):
+                all_passed = False
+                failure_reasons.append(f"Segment {index} start index missing from bounds")
+                continue
+
+            start = starts[index]
+            stop = min(start + seg_len, n_samples)
+            start_time = round(start / self.sample_rate, 3)
+            end_time = round(stop / self.sample_rate, 3)
+
+            nat_seg = mastered_natural[..., start:stop]
+            rest_seg = mastered_restored[..., start:stop]
+
+            # 1. Structural integrity
+            if rest_seg.size == 0 or np.any(np.isnan(rest_seg)) or np.any(np.isinf(rest_seg)):
+                all_passed = False
+                reason = f"Segment {index}: non-finite or empty post-mastered audio"
+                failure_reasons.append(reason)
+                evidence_list.append(
+                    PostMasteringSegmentEvidence(
+                        segment_index=index,
+                        start_sample=start,
+                        end_sample=stop,
+                        start_time_s=start_time,
+                        end_time_s=end_time,
+                        action="fallback_reverted",
+                        passes=False,
+                        reason=reason,
+                        rms_waveform_error=float("inf"),
+                        stft_relative_error=float("inf"),
+                        worst_band_energy_deviation_db=float("inf"),
+                        worst_band_center_hz=0.0,
+                        metrics={},
+                    )
+                )
+                continue
+
+            peak_amp = float(np.max(np.abs(rest_seg)))
+            if peak_amp > 1.05:
+                all_passed = False
+                reason = f"Segment {index}: clipping post-mastering (peak {peak_amp:.3f} > 1.05)"
+                failure_reasons.append(reason)
+                evidence_list.append(
+                    PostMasteringSegmentEvidence(
+                        segment_index=index,
+                        start_sample=start,
+                        end_sample=stop,
+                        start_time_s=start_time,
+                        end_time_s=end_time,
+                        action="fallback_reverted",
+                        passes=False,
+                        reason=reason,
+                        rms_waveform_error=float("inf"),
+                        stft_relative_error=float("inf"),
+                        worst_band_energy_deviation_db=float("inf"),
+                        worst_band_center_hz=0.0,
+                        metrics={"peak_amp": peak_amp},
+                    )
+                )
+                continue
+
+            # 2. Protected-band signal integrity
+            prot_verif = verify_protected_band_invariance(
+                original_audio=nat_seg,
+                restored_audio=rest_seg,
+                sample_rate=self.sample_rate,
+                cutoff_hz=cutoff_hz,
+                transition_hz=transition_hz,
+                tolerance_rms=tolerance_rms,
+                tolerance_stft=tolerance_stft,
+                max_third_octave_deviation_db=tolerance_third_octave_db,
+            )
+
+            seg_metrics: dict[str, Any] = {"protected_band": asdict(prot_verif)}
+
+            if not prot_verif.passes_invariance:
+                all_passed = False
+                violations: list[str] = []
+                if prot_verif.rms_waveform_error > tolerance_rms:
+                    violations.append(f"RMS {prot_verif.rms_waveform_error:.6f} > {tolerance_rms}")
+                if prot_verif.complex_stft_relative_error > tolerance_stft:
+                    violations.append(
+                        f"STFT {prot_verif.complex_stft_relative_error:.6f} > {tolerance_stft}"
+                    )
+                if prot_verif.worst_band_energy_deviation_db > tolerance_third_octave_db:
+                    violations.append(
+                        f"1/3-octave {prot_verif.worst_band_energy_deviation_db:.3f} dB > "
+                        f"{tolerance_third_octave_db} dB at {prot_verif.worst_band_center_hz:.0f} Hz"
+                    )
+                reason = f"Segment {index} signal integrity violation: " + "; ".join(violations)
+                failure_reasons.append(reason)
+                evidence_list.append(
+                    PostMasteringSegmentEvidence(
+                        segment_index=index,
+                        start_sample=start,
+                        end_sample=stop,
+                        start_time_s=start_time,
+                        end_time_s=end_time,
+                        action="fallback_reverted",
+                        passes=False,
+                        reason=reason,
+                        rms_waveform_error=prot_verif.rms_waveform_error,
+                        stft_relative_error=prot_verif.complex_stft_relative_error,
+                        worst_band_energy_deviation_db=prot_verif.worst_band_energy_deviation_db,
+                        worst_band_center_hz=prot_verif.worst_band_center_hz,
+                        metrics=seg_metrics,
+                    )
+                )
+                continue
+
+            # 3. High-band event consistency
+            hf_res = self.hf_event_detector.evaluate(
+                nat_seg,
+                rest_seg,
+                speech_mask=speech_mask,
+                cutoff_hz=cutoff_hz,
+            )
+            seg_metrics["highband_events"] = asdict(hf_res)
+            if not hf_res.passes_event_check:
+                all_passed = False
+                reason = f"Segment {index}: high-band event inconsistency post-mastering"
+                failure_reasons.append(reason)
+                evidence_list.append(
+                    PostMasteringSegmentEvidence(
+                        segment_index=index,
+                        start_sample=start,
+                        end_sample=stop,
+                        start_time_s=start_time,
+                        end_time_s=end_time,
+                        action="fallback_reverted",
+                        passes=False,
+                        reason=reason,
+                        rms_waveform_error=prot_verif.rms_waveform_error,
+                        stft_relative_error=prot_verif.complex_stft_relative_error,
+                        worst_band_energy_deviation_db=prot_verif.worst_band_energy_deviation_db,
+                        worst_band_center_hz=prot_verif.worst_band_center_hz,
+                        metrics=seg_metrics,
+                    )
+                )
+                continue
+
+            # 4. Harmonic pitch consistency
+            f0_nat = self.f0_extractor.extract(nat_seg)
+            f0_cand = self.f0_extractor.extract(rest_seg)
+            pitch_diff = 0.0
+            n_min = min(len(f0_nat.f0_hz), len(f0_cand.f0_hz))
+            if n_min > 0:
+                voiced = (f0_nat.vuv_mask[:n_min] > 0.5) & (f0_cand.vuv_mask[:n_min] > 0.5)
+                if np.any(voiced):
+                    pitch_diff = float(
+                        np.mean(
+                            np.abs(f0_nat.f0_hz[:n_min][voiced] - f0_cand.f0_hz[:n_min][voiced])
+                            / (f0_nat.f0_hz[:n_min][voiced] + 1e-6)
+                        )
+                    )
+            harmonic_info: dict[str, Any] = {
+                "pitch_divergence": pitch_diff,
+                "nat_median_f0": f0_nat.statistics.median_hz,
+                "cand_median_f0": f0_cand.statistics.median_hz,
+            }
+            if f0_statistics is not None:
+                harmonic_info["target_f0_stats"] = f0_statistics
+            seg_metrics["harmonic"] = harmonic_info
+            if pitch_diff > self.config.harmonic_threshold:
+                all_passed = False
+                reason = (
+                    f"Segment {index}: harmonic pitch divergence {pitch_diff:.3f} > "
+                    f"{self.config.harmonic_threshold}"
+                )
+                failure_reasons.append(reason)
+                evidence_list.append(
+                    PostMasteringSegmentEvidence(
+                        segment_index=index,
+                        start_sample=start,
+                        end_sample=stop,
+                        start_time_s=start_time,
+                        end_time_s=end_time,
+                        action="fallback_reverted",
+                        passes=False,
+                        reason=reason,
+                        rms_waveform_error=prot_verif.rms_waveform_error,
+                        stft_relative_error=prot_verif.complex_stft_relative_error,
+                        worst_band_energy_deviation_db=prot_verif.worst_band_energy_deviation_db,
+                        worst_band_center_hz=prot_verif.worst_band_center_hz,
+                        metrics=seg_metrics,
+                    )
+                )
+                continue
+
+            # 5. Speaker identity check
+            cand_embedding = self.speaker_extractor.extract(rest_seg)
+            speaker_sim = 1.0
+            var_departure: float | None = None
+            should_check_speaker = True
+            if canonical_embedding is not None and canonical_embedding.size > 0:
+                norm_a = float(np.linalg.norm(canonical_embedding))
+                norm_b = float(np.linalg.norm(cand_embedding))
+                if norm_a > 1e-9 and norm_b > 1e-9:
+                    speaker_sim = float(
+                        np.dot(canonical_embedding, cand_embedding) / (norm_a * norm_b)
+                    )
+                else:
+                    speaker_sim = 0.0
+
+                if variance_vector is not None and variance_vector.size == canonical_embedding.size:
+                    sq_diff = (cand_embedding - canonical_embedding) ** 2
+                    var_departure = float(np.mean(sq_diff / (variance_vector + 1e-4)))
+            else:
+                source_embedding = self.speaker_extractor.extract(nat_seg)
+                norm_source = float(np.linalg.norm(source_embedding))
+                norm_cand = float(np.linalg.norm(cand_embedding))
+                if norm_source > 1e-9 and norm_cand > 1e-9:
+                    speaker_sim = float(
+                        np.dot(source_embedding, cand_embedding) / (norm_source * norm_cand)
+                    )
+                else:
+                    speaker_sim = 1.0
+                    should_check_speaker = False
+
+            speaker_info: dict[str, Any] = {
+                "speaker_similarity": speaker_sim,
+                "threshold": self.config.speaker_threshold,
+            }
+            if var_departure is not None:
+                speaker_info["variance_departure"] = var_departure
+            seg_metrics["speaker"] = speaker_info
+
+            if should_check_speaker and speaker_sim < self.config.speaker_threshold:
+                all_passed = False
+                reason = (
+                    f"Segment {index}: speaker similarity {speaker_sim:.3f} < "
+                    f"{self.config.speaker_threshold}"
+                )
+                failure_reasons.append(reason)
+                evidence_list.append(
+                    PostMasteringSegmentEvidence(
+                        segment_index=index,
+                        start_sample=start,
+                        end_sample=stop,
+                        start_time_s=start_time,
+                        end_time_s=end_time,
+                        action="fallback_reverted",
+                        passes=False,
+                        reason=reason,
+                        rms_waveform_error=prot_verif.rms_waveform_error,
+                        stft_relative_error=prot_verif.complex_stft_relative_error,
+                        worst_band_energy_deviation_db=prot_verif.worst_band_energy_deviation_db,
+                        worst_band_center_hz=prot_verif.worst_band_center_hz,
+                        metrics=seg_metrics,
+                    )
+                )
+                continue
+
+            # Segment verified
+            evidence_list.append(
+                PostMasteringSegmentEvidence(
+                    segment_index=index,
+                    start_sample=start,
+                    end_sample=stop,
+                    start_time_s=start_time,
+                    end_time_s=end_time,
+                    action="verified",
+                    passes=True,
+                    reason="Passed post-mastering signal integrity and Guard R verification",
+                    rms_waveform_error=prot_verif.rms_waveform_error,
+                    stft_relative_error=prot_verif.complex_stft_relative_error,
+                    worst_band_energy_deviation_db=prot_verif.worst_band_energy_deviation_db,
+                    worst_band_center_hz=prot_verif.worst_band_center_hz,
+                    metrics=seg_metrics,
+                )
+            )
+
+        if not all_passed or not evidence_list:
+            return PostMasteringVerificationResult(
+                passes=False,
+                fallback_applied=True,
+                reason="Post-mastering verification failed; forced explicit Natural fallback: "
+                + "; ".join(failure_reasons or ["Missing verification evidence"]),
+                reconstructed_segments_verified=len(reconstructed_indices),
+                segments_evidence=evidence_list,
+            )
+
+        return PostMasteringVerificationResult(
+            passes=True,
+            fallback_applied=False,
+            reason=f"All {len(evidence_list)} reconstructed segments verified successfully post-mastering",
+            reconstructed_segments_verified=len(reconstructed_indices),
+            segments_evidence=evidence_list,
+        )

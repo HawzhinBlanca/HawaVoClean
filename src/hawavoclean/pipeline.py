@@ -397,10 +397,11 @@ def run_pipeline(
         # segmentation and the enhancement of every unit -- so a typo in
         # --speaker-id cost the user the entire enhancement pass before
         # admitting the id was never going to resolve.
-        try:
-            load_speaker_profile(speaker_id, profiles_root=profiles_dir)
-        except ProfileValidationError as exc:
-            raise InvalidUserInputError(str(exc)) from exc
+        if speaker_id not in ("source", "none"):
+            try:
+                load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+            except ProfileValidationError as exc:
+                raise InvalidUserInputError(str(exc)) from exc
 
         # R2.1: Quarantine current Restore behind an unmistakable research boundary.
         # Production profiles follow capability status (blocked) and reject unqualified
@@ -570,7 +571,12 @@ def _restore_in_segments(
     speaker_profile: Any,
     policy: RestorationPolicyManager,
     base_seed: int,
-) -> tuple["np.ndarray[Any, np.dtype[np.float32]]", list[SegmentRestorationDecision]]:
+) -> tuple[
+    "np.ndarray[Any, np.dtype[np.float32]]",
+    list[SegmentRestorationDecision],
+    list[int],
+    int,
+]:
     """Run the restoration policy over overlapping segments and stitch them.
 
     The bandwidth estimate is deliberately shared: a band limit is a property of
@@ -620,7 +626,7 @@ def _restore_in_segments(
             out[..., start:stop] = restored
         covered = stop
 
-    return out, records
+    return out, records, starts, seg_len
 
 
 def _run_after_preflight(
@@ -1218,7 +1224,11 @@ def _run_after_preflight(
         from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
 
         assert speaker_id is not None
-        speaker_profile = load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        speaker_profile = (
+            None
+            if speaker_id in ("source", "none")
+            else load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        )
 
         # Target sample rate for restored output is 48000 Hz
         target_sr = 48000
@@ -1253,7 +1263,7 @@ def _run_after_preflight(
         #
         # Segments overlap and are cross-faded, so neighbours that reach
         # different verdicts meet without a click at the seam.
-        restored_data, segment_records = _restore_in_segments(
+        restored_data, segment_records, seg_starts, seg_len = _restore_in_segments(
             natural_audio=current_data,
             sample_rate=target_sr,
             bandwidth_est=bw_est,
@@ -1285,42 +1295,6 @@ def _run_after_preflight(
             sample_rate=target_sr,
             channel_mode=channel_mode,
         )
-
-        rest_rep = RestorationReport(
-            mode="restore",
-            speaker_id=speaker_id,
-            profile_hash=speaker_profile.compute_hash(),
-            natural_output_hash=hash_bytes(assembled_data.tobytes()),
-            # ``cutoff_mode`` records whether the protected-band boundary was
-            # measured or asserted by the operator — the reader cannot tell them
-            # apart from the frequency alone.
-            bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
-            restorer={
-                "name": "hawarestore-kd",
-                "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
-                # Reported by the restorer itself, so the hash can only describe
-                # weights that were actually loaded into the network.
-                "weights_sha256": restorer.weights_sha256,
-                "checkpoint_path": str(restorer.checkpoint_path),
-                "device": restorer.device,
-                "seed_policy": "deterministic_job_id",
-                "solver": "midpoint",
-                "steps": 4,
-                "guidance_scale": 0.0,
-                "research_quarantine": True,
-                "production_qualified": False,
-            },
-            segments=RestorationSegmentCounts(
-                restored=counts.get("restored", 0),
-                reduced=counts.get("reduced", 0),
-                reverted=counts.get("reverted", 0),
-                bypassed=counts.get("bypassed", 0),
-                errors=counts.get("error", 0),
-            ),
-            guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
-            review_timecodes=review_segments,
-        )
-        restoration_report = rest_rep.to_dict()
 
     # 11. Loudness normalization and true-peak limiting
     premaster_loudness = (
@@ -1369,8 +1343,98 @@ def _run_after_preflight(
             f"beyond the static-gain headroom budget of "
             f"{config.loudness.max_limiter_reduction_db:.2f} dB — transient-heavy material."
         )
+
+    if mode == "restore":
+        # Master the Natural reference identically for post-mastering verification
+        nat_gained = current_data * gain_linear
+        nat_limited_res = apply_lookahead_limiter(
+            waveform=nat_gained,
+            sample_rate=target_sr,
+            ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+        )
+        mastered_natural = nat_limited_res.limited_waveform
+        mastered_restored = limited_res.limited_waveform
+
+        post_master_result = guard_r.verify_post_mastering(
+            mastered_natural=mastered_natural,
+            mastered_restored=mastered_restored,
+            segment_records=segment_records,
+            starts=seg_starts,
+            seg_len=seg_len,
+            cutoff_hz=float(bw_est.effective_cutoff_hz),
+            transition_hz=500.0,
+            tolerance_rms=1e-4,
+            tolerance_stft=1e-3,
+            tolerance_third_octave_db=0.25,
+            canonical_embedding=speaker_profile.embedding_vector if speaker_profile else None,
+            variance_vector=speaker_profile.variance_vector if speaker_profile else None,
+        )
+
+        if post_master_result.fallback_applied:
+            logger.warning(
+                f"Post-mastering Guard R failed ({post_master_result.reason}) — "
+                "reverting to mastered Natural audio."
+            )
+            final_mastered_data = mastered_natural
+            reconstructed_count = counts.get("restored", 0) + counts.get("reduced", 0)
+            rep_segments = RestorationSegmentCounts(
+                restored=0,
+                reduced=0,
+                reverted=counts.get("reverted", 0) + reconstructed_count,
+                bypassed=counts.get("bypassed", 0),
+                errors=counts.get("error", 0),
+            )
+            for ev in post_master_result.segments_evidence:
+                if not ev.passes:
+                    review_segments.append(
+                        {
+                            "segment_index": ev.segment_index,
+                            "start_time_s": ev.start_time_s,
+                            "action": "post_mastering_reverted",
+                            "verdict": "FAIL",
+                            "reason": ev.reason,
+                        }
+                    )
+        else:
+            final_mastered_data = mastered_restored
+            rep_segments = RestorationSegmentCounts(
+                restored=counts.get("restored", 0),
+                reduced=counts.get("reduced", 0),
+                reverted=counts.get("reverted", 0),
+                bypassed=counts.get("bypassed", 0),
+                errors=counts.get("error", 0),
+            )
+
+        rest_rep = RestorationReport(
+            mode="restore",
+            speaker_id=speaker_id,
+            profile_hash=speaker_profile.compute_hash() if speaker_profile else None,
+            natural_output_hash=hash_bytes(assembled_data.tobytes()),
+            bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
+            restorer={
+                "name": "hawarestore-kd",
+                "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
+                "weights_sha256": restorer.weights_sha256,
+                "checkpoint_path": str(restorer.checkpoint_path),
+                "device": restorer.device,
+                "seed_policy": "deterministic_job_id",
+                "solver": "midpoint",
+                "steps": 4,
+                "guidance_scale": 0.0,
+                "research_quarantine": True,
+                "production_qualified": False,
+            },
+            segments=rep_segments,
+            guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
+            review_timecodes=review_segments,
+            post_mastering_verification=post_master_result.to_dict(),
+        )
+        restoration_report = rest_rep.to_dict()
+    else:
+        final_mastered_data = limited_res.limited_waveform
+
     mastered_buffer = AudioBuffer(
-        data=limited_res.limited_waveform,
+        data=final_mastered_data,
         sample_rate=assembled_buffer.sample_rate,
         channel_mode=channel_mode,
     )

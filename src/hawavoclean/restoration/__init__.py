@@ -19,6 +19,8 @@ from hawavoclean.restoration.f0 import (
 )
 from hawavoclean.restoration.guard import (
     GuardRResult,
+    PostMasteringSegmentEvidence,
+    PostMasteringVerificationResult,
     RestorationGuard,
 )
 from hawavoclean.restoration.highband_events import (
@@ -89,6 +91,8 @@ __all__ = [
     "HawaRestoreKD",
     "HighBandEventDetector",
     "HighBandEventResult",
+    "PostMasteringSegmentEvidence",
+    "PostMasteringVerificationResult",
     "ProfileValidationError",
     "ProtectedBandVerification",
     "RestorationCandidate",
