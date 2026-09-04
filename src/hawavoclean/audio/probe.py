@@ -2,7 +2,6 @@
 
 import json
 import math
-import shutil
 import stat
 import subprocess
 import threading
@@ -21,6 +20,7 @@ from hawavoclean.errors import (
     PreflightError,
 )
 from hawavoclean.hashing import hash_file
+from hawavoclean.paths import ffmpeg_bin_path, ffprobe_bin_path
 from hawavoclean.process_supervisor import ProcessSupervisor
 
 
@@ -315,7 +315,7 @@ def probe_audio(
         )
 
     # Prefer ffprobe if installed
-    ffprobe_bin = shutil.which("ffprobe")
+    ffprobe_bin = ffprobe_bin_path()
     if ffprobe_bin:
         cmd = [
             ffprobe_bin,
@@ -442,7 +442,7 @@ def probe_audio(
         # rather than rejecting a perfectly decodable file.
         samples = _count_samples_by_decoding(
             file_path,
-            shutil.which("ffmpeg"),
+            ffmpeg_bin_path(),
             sample_rate,
             audio_stream_index,
             max_duration_s,

@@ -7,7 +7,6 @@ import json
 import math
 import os
 import queue
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -38,7 +37,12 @@ from hawavoclean.guard.calibration import load_calibration_artifact
 from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.logging import get_logger, setup_logging
 from hawavoclean.multipass import MAX_PASSES, run_multipass
-from hawavoclean.paths import models_dir, profile_config_path
+from hawavoclean.paths import (
+    ffmpeg_bin_path,
+    ffprobe_bin_path,
+    models_dir,
+    profile_config_path,
+)
 from hawavoclean.paths import profiles_root as paths_profiles_root
 from hawavoclean.pipeline import run_pipeline
 from hawavoclean.process_supervisor import ProcessSupervisor
@@ -95,8 +99,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     )
 
     # 2. FFmpeg and FFprobe binaries
-    ffmpeg_path = shutil.which("ffmpeg")
-    ffprobe_path = shutil.which("ffprobe")
+    ffmpeg_path = ffmpeg_bin_path()
+    ffprobe_path = ffprobe_bin_path()
     if ffmpeg_path:
         print(f"[OK] FFmpeg found: {ffmpeg_path}")
     else:

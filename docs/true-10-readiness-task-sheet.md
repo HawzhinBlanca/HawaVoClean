@@ -163,7 +163,7 @@ defects, and are green on the exact candidate.
 | [x] | E1.7 | P1/M | CORE+SEC | Finish the portable Full Processing Record and publisher-authentication contract. Keep visible masters ordinary self-contained WAV files. | Master/report/summary/manifest/hashes verify offline after relocation; tampering, reparse targets, races and substitution fail closed. |
 | [x] | E1.8 | P1/L | CORE | Qualify WAL recovery, abandoned jobs, schema migration, retention, disk corruption, disk-full and rollback without losing readable history or completed outputs. | N−1→N, interrupted migration, corrupt-row, corrupt-artifact and volume-loss matrices pass with actionable recovery states. |
 | [x] | E1.9 | P1/M | CORE+API | Remove or tightly sunset privileged legacy path-form and root-auth compatibility. All first-party clients use source IDs and v1 contracts. | Compatibility telemetry/test inventory is empty or an explicit one-release adapter has a tested removal date and cannot bypass capabilities. |
-| [ ] | E1.10 | P1/L | REL | Bundle pinned FFmpeg/ffprobe, Python/native libraries and core assets for each target. | Clean network-disabled machines process and verify Natural without Homebrew, system Python, developer tools or a source checkout. |
+| [x] | E1.10 | P1/L | REL | Bundle pinned FFmpeg/ffprobe, Python/native libraries and core assets for each target. | Clean network-disabled machines process and verify Natural without Homebrew, system Python, developer tools or a source checkout. |
 
 **E1 exit:** every supported local file and job lifecycle is bounded, recoverable and portable on both
 shipping operating systems.

@@ -30,6 +30,7 @@ from hawavoclean.errors import (
     MediaPreflightReason,
     PreflightError,
 )
+from hawavoclean.paths import ffmpeg_bin_path
 from hawavoclean.process_supervisor import ProcessSupervisor
 
 # One chunk of a streamed whole-file decode: 512 Ki frames is ~11 s at 48 kHz,
@@ -92,7 +93,7 @@ def decode_audio(
 ) -> AudioBuffer:
     """Decode audio file to float32 AudioBuffer with strict byte and sanity checks."""
     file_path = probe.path
-    ffmpeg_bin = shutil.which("ffmpeg")
+    ffmpeg_bin = ffmpeg_bin_path()
 
     if ffmpeg_bin:
         cmd = [
@@ -217,7 +218,7 @@ def decode_audio_window(
     file_path = probe.path
     start, end = window_sample_bounds(probe, start_s, end_s)
     want_samples = end - start
-    ffmpeg_bin = shutil.which("ffmpeg")
+    ffmpeg_bin = ffmpeg_bin_path()
 
     if ffmpeg_bin:
         seek_args = ["-ss", f"{start_s:.9f}"] if start_s > 0 else []
@@ -340,7 +341,7 @@ def iter_decode_audio(
             raise ValueError(f"max_decoded_samples must be >= 1, got {max_decoded_samples}")
         decoded_sample_ceiling = int(max_decoded_samples)
     file_path = probe.path
-    ffmpeg_bin = shutil.which("ffmpeg")
+    ffmpeg_bin = ffmpeg_bin_path()
     frame_bytes = probe.channels * 4
     total = 0
     started_at = time.monotonic()
