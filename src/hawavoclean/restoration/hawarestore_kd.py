@@ -23,7 +23,11 @@ from hawavoclean.errors import ModelProvenanceError
 from hawavoclean.hashing import hash_file
 from hawavoclean.logging import get_logger
 from hawavoclean.paths import restoration_checkpoint_path
-from hawavoclean.restoration.base import RestorationCandidate, Restorer
+from hawavoclean.restoration.base import (
+    RestorationCandidate,
+    RestorationRenderResult,
+    Restorer,
+)
 from hawavoclean.restoration.protected_band import (
     compute_transition_mask,
     merge_protected_spectrum,
@@ -404,6 +408,7 @@ class HawaRestoreKD(Restorer):
         spk_idx_t: torch.Tensor | None,
         proto_t: torch.Tensor | None,
         generator: torch.Generator,
+        solver_errors: list[str] | None = None,
     ) -> dict[float, np.ndarray]:
         """Restore one block, returning one waveform per active strength."""
         n_block = len(block)
@@ -434,6 +439,8 @@ class HawaRestoreKD(Restorer):
             logger.warning(
                 "ODE flow solver failed: %s; falling back to 0.0-strength Natural passthrough", exc
             )
+            if solver_errors is not None:
+                solver_errors.append(str(exc))
             x_rec = block[:n_block].copy()
             return {0.0: x_rec.astype(np.float32)}
 
@@ -469,7 +476,7 @@ class HawaRestoreKD(Restorer):
             out[s] = x_rec.astype(np.float32)
         return out
 
-    def restore(
+    def render(
         self,
         audio_48k: np.ndarray,
         sample_rate: int,  # noqa: ARG002
@@ -480,8 +487,8 @@ class HawaRestoreKD(Restorer):
         vuv_mask: np.ndarray | None = None,  # noqa: ARG002
         strengths: list[float] | None = None,
         seed: int = 42,
-    ) -> list[RestorationCandidate]:
-        """Generate restored candidate waveforms across candidate high-band strengths."""
+    ) -> RestorationRenderResult:
+        """Generate typed render result carrying telemetry and candidates."""
         if strengths is None:
             strengths = [1.0, 0.75, 0.5, 0.25, 0.0]
 
@@ -489,12 +496,21 @@ class HawaRestoreKD(Restorer):
         effective_cutoff_hz = float(np.clip(effective_cutoff_hz, 500.0, nyquist - 100.0))
 
         if audio_48k.size == 0:
-            return [
+            cands = [
                 RestorationCandidate(
                     strength=s, audio=audio_48k.copy(), cutoff_hz=effective_cutoff_hz
                 )
                 for s in strengths
             ]
+            return RestorationRenderResult(
+                success=False,
+                fallback_status="empty_input",
+                model_name="hawarestore-kd",
+                provider=self.device,
+                solver="midpoint",
+                candidates=cands,
+                error_message="Input audio is empty",
+            )
 
         is_multichannel = audio_48k.ndim == 2
         channels = audio_48k if is_multichannel else audio_48k[np.newaxis, :]
@@ -504,6 +520,7 @@ class HawaRestoreKD(Restorer):
         candidates: list[RestorationCandidate] = []
         restored_channels_by_strength: dict[float, list[np.ndarray]] = {s: [] for s in strengths}
         active_strengths_failed: set[float] = set()
+        solver_errors: list[str] = []
 
         spk_idx_t: torch.Tensor | None = None
         if speaker_id is not None and speaker_id in self.speaker_ids:
@@ -530,13 +547,16 @@ class HawaRestoreKD(Restorer):
 
         active_strengths = [s for s in strengths if s > 0.0]
 
+        short_input = False
         for ch_idx in range(n_channels):
             ch_audio = channels[ch_idx]
-            # Too short to analyse, or nothing to generate: pass the channel
-            # through rather than running the network for a discarded result.
+            # Too short to analyse, or nothing to generate: fail closed to 0.0 Natural.
+            # Never emit Natural as active-strength (s > 0.0) candidates! (R2.2)
             if len(ch_audio) < self.win_length or not active_strengths:
-                for s in strengths:
-                    restored_channels_by_strength[s].append(ch_audio)
+                short_input = len(ch_audio) < self.win_length
+                restored_channels_by_strength[0.0].append(ch_audio)
+                for s in active_strengths:
+                    active_strengths_failed.add(s)
                 continue
 
             blocks = self._block_positions(n_samples)
@@ -558,6 +578,7 @@ class HawaRestoreKD(Restorer):
                     spk_idx_t=spk_idx_t,
                     proto_t=proto_t,
                     generator=gen,
+                    solver_errors=solver_errors,
                 )
 
                 for s in active_strengths:
@@ -613,4 +634,58 @@ class HawaRestoreKD(Restorer):
                 )
             )
 
-        return candidates
+        has_active = any(c.strength > 0.0 for c in candidates)
+        if has_active:
+            success = True
+            fallback_status = "none"
+            error_msg: str | None = None
+        else:
+            success = False
+            if solver_errors:
+                fallback_status = "solver_failure"
+                error_msg = "; ".join(solver_errors)
+            elif short_input:
+                fallback_status = "input_too_short"
+                error_msg = f"Audio length ({n_samples} samples) is less than analysis window ({self.win_length} samples)"
+            elif not active_strengths:
+                fallback_status = "no_active_strengths"
+                error_msg = None
+            else:
+                fallback_status = "generation_failed"
+                error_msg = "All active candidate strengths failed"
+
+        return RestorationRenderResult(
+            success=success,
+            fallback_status=fallback_status,
+            model_name="hawarestore-kd",
+            provider=self.device,
+            solver="midpoint",
+            candidates=candidates,
+            error_message=error_msg,
+        )
+
+    def restore(
+        self,
+        audio_48k: np.ndarray,
+        sample_rate: int,
+        effective_cutoff_hz: float,
+        speaker_id: str | None = None,
+        speaker_embedding: np.ndarray | None = None,
+        f0_trajectory: np.ndarray | None = None,
+        vuv_mask: np.ndarray | None = None,
+        strengths: list[float] | None = None,
+        seed: int = 42,
+    ) -> list[RestorationCandidate]:
+        """Generate restored candidate waveforms across candidate high-band strengths."""
+        render_res = self.render(
+            audio_48k=audio_48k,
+            sample_rate=sample_rate,
+            effective_cutoff_hz=effective_cutoff_hz,
+            speaker_id=speaker_id,
+            speaker_embedding=speaker_embedding,
+            f0_trajectory=f0_trajectory,
+            vuv_mask=vuv_mask,
+            strengths=strengths,
+            seed=seed,
+        )
+        return render_res.candidates

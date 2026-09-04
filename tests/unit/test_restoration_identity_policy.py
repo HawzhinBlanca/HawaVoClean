@@ -13,7 +13,10 @@ Verifies:
 import numpy as np
 
 from hawavoclean.restoration.bandwidth import BandwidthEstimate, BandwidthEvidence
-from hawavoclean.restoration.base import RestorationCandidate
+from hawavoclean.restoration.base import (
+    RestorationCandidate,
+    RestorationRenderResult,
+)
 from hawavoclean.restoration.config import RestorationConfig
 from hawavoclean.restoration.guard import RestorationGuard
 from hawavoclean.restoration.policy import RestorationPolicyManager
@@ -26,17 +29,19 @@ from hawavoclean.restoration.speaker_embed import SpeakerEmbeddingExtractor
 SR = 48000
 
 
-def _generate_synthetic_speaker(f0: float, seed: int = 42, duration_s: float = 1.0) -> np.ndarray:
-    """Synthesize distinct voice signal with formant structure."""
+def _generate_synthetic_speaker(
+    f0_hz: float, seed: int = 42, duration_s: float = 1.0
+) -> np.ndarray:
+    """Generate harmonic voice-like synthetic audio with a given F0."""
     t = np.linspace(0, duration_s, int(SR * duration_s), endpoint=False, dtype=np.float32)
-    phase = 2.0 * np.pi * f0 * t
+    sig = np.zeros_like(t)
     rng = np.random.default_rng(seed)
-    sig = (
-        0.4 * np.sin(phase)
-        + 0.25 * np.sin(2 * phase)
-        + 0.15 * np.sin(3 * phase)
-        + 0.05 * rng.standard_normal(len(t))
-    ).astype(np.float32)
+    for harmonic in range(1, 12):
+        freq = f0_hz * harmonic
+        if freq < SR / 2:
+            phase = rng.uniform(0, 2 * np.pi)
+            weight = 1.0 / (harmonic**0.8)
+            sig += (weight * np.sin(2 * np.pi * freq * t + phase)).astype(np.float32)
     max_amp = float(np.max(np.abs(sig)))
     scaled = sig / (max_amp + 1e-6) * 0.7
     return np.asarray(scaled, dtype=np.float32)
@@ -72,6 +77,39 @@ class SpyRestorer:
             RestorationCandidate(strength=1.0, audio=audio_48k, cutoff_hz=effective_cutoff_hz),
             RestorationCandidate(strength=0.0, audio=audio_48k, cutoff_hz=effective_cutoff_hz),
         ]
+
+    def render(
+        self,
+        audio_48k: np.ndarray,
+        sample_rate: int,
+        effective_cutoff_hz: float,
+        speaker_id: str | None = None,
+        speaker_embedding: np.ndarray | None = None,
+        f0_trajectory: np.ndarray | None = None,
+        vuv_mask: np.ndarray | None = None,
+        strengths: list[float] | None = None,
+        seed: int = 42,
+    ) -> RestorationRenderResult:
+        cands = self.restore(
+            audio_48k=audio_48k,
+            sample_rate=sample_rate,
+            effective_cutoff_hz=effective_cutoff_hz,
+            speaker_id=speaker_id,
+            speaker_embedding=speaker_embedding,
+            f0_trajectory=f0_trajectory,
+            vuv_mask=vuv_mask,
+            strengths=strengths,
+            seed=seed,
+        )
+        has_active = any(c.strength > 0.0 for c in cands)
+        return RestorationRenderResult(
+            success=has_active,
+            fallback_status="none" if has_active else "no_active_candidates",
+            model_name="spy-restorer",
+            provider="cpu",
+            solver="mock",
+            candidates=cands,
+        )
 
 
 def _bandwidth_estimate(cutoff_hz: float = 4000.0) -> BandwidthEstimate:
