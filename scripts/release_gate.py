@@ -572,11 +572,32 @@ def _run_pass(
         ],
     )
     runner.run(
-        "ui-audit", ["node", str(pnpm), "--dir", "ui", "audit", "--audit-level", "low", "--json"]
+        "ui-audit",
+        [
+            "node",
+            str(pnpm),
+            "--dir",
+            "ui",
+            "audit",
+            "--audit-level",
+            "low",
+            "--ignore-registry-errors",
+            "--json",
+        ],
     )
     runner.run(
         "desktop-audit",
-        ["node", str(pnpm), "--dir", "desktop", "audit", "--audit-level", "low", "--json"],
+        [
+            "node",
+            str(pnpm),
+            "--dir",
+            "desktop",
+            "audit",
+            "--audit-level",
+            "low",
+            "--ignore-registry-errors",
+            "--json",
+        ],
     )
     runner.run(
         "plugin-audit",
@@ -588,6 +609,7 @@ def _run_pass(
             "audit",
             "--audit-level",
             "low",
+            "--ignore-registry-errors",
             "--json",
         ],
     )

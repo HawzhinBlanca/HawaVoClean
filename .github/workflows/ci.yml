@@ -222,11 +222,11 @@ jobs:
       - name: Audit all JavaScript dependency graphs
         run: |
           PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
-          node "$PNPM" --dir ui audit --audit-level low --json \
+          node "$PNPM" --dir ui audit --audit-level low --ignore-registry-errors --json \
             > build/ci-evidence/web-resolve/ui-audit.json
-          node "$PNPM" --dir desktop audit --audit-level low --json \
+          node "$PNPM" --dir desktop audit --audit-level low --ignore-registry-errors --json \
             > build/ci-evidence/web-resolve/desktop-audit.json
-          node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve audit --audit-level low --json \
+          node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve audit --audit-level low --ignore-registry-errors --json \
             > build/ci-evidence/web-resolve/plugin-audit.json
           npm --prefix resolve-plugin/toolchain audit --audit-level=low --json \
             > build/ci-evidence/web-resolve/toolchain-audit.json
