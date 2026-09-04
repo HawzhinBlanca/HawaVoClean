@@ -1088,7 +1088,7 @@ async function runSelfTest() {
       headers: {
         'X-Hawa-Token': 'renderer-controlled-root',
         Authorization: 'Bearer renderer-controlled-session',
-        'X-Hawa-Selftest': 'preserved',
+        Range: 'bytes=0-1023',
       },
     });
     out.health = { status: r.status, body: await r.json() };

@@ -126,7 +126,7 @@ function sendJson(res, status, body, extraHeaders = {}) {
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Authorization, X-Hawa-Token, Content-Type, Range, X-Hawa-Selftest');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, X-Hawa-Token, Content-Type, Range');
   res.setHeader('Access-Control-Max-Age', '600');
 }
 

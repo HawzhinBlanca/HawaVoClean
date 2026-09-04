@@ -29,7 +29,7 @@ while kill -0 "$PID" 2>/dev/null; do
 done
 wait "$PID" 2>/dev/null || true
 
-RESULT="$(grep '^HAWA_SELFTEST_RESULT ' "$LOG" | head -1 | sed 's/^HAWA_SELFTEST_RESULT //')"
+RESULT="$( (grep '^HAWA_SELFTEST_RESULT ' "$LOG" || true) | head -1 | sed 's/^HAWA_SELFTEST_RESULT //')"
 [ -n "$RESULT" ] || { echo "staged shell emitted no success result" >&2; sed 's/^/  | /' "$LOG" >&2; exit 1; }
 ENGINE_PID="$(node - "$RESULT" <<'JS'
 const value = JSON.parse(process.argv[2]);
