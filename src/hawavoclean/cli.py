@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -49,7 +50,10 @@ from hawavoclean.publication import (
 )
 from hawavoclean.record_bundle import (
     ProcessingRecord,
+    RecordTrustedKey,
+    RecordTrustStore,
     create_processing_record,
+    sign_processing_record,
     verify_processing_record,
 )
 from hawavoclean.report.writer import load_json_report
@@ -1216,9 +1220,10 @@ def _processing_record_payload(
         "report_sha256": record.report_sha256,
         "summary_sha256": record.summary_sha256,
         "total_uncompressed_bytes": record.total_uncompressed_bytes,
-        # The v1 archive proves internal consistency, not who produced it.
         "internal_hashes_verified": True,
         "authenticated_publisher": record.authenticated_publisher,
+        "key_id": record.key_id,
+        "signature_sha256": record.signature_sha256,
     }
 
 
@@ -1239,19 +1244,127 @@ def _emit_processing_record_result(
         )
         return
 
-    action = "CREATED" if operation == "create" else "VERIFIED"
+    action_map = {"create": "CREATED", "verify": "VERIFIED", "sign": "SIGNED"}
+    action = action_map.get(operation, operation.upper())
     print("================================================================================")
     print(f"FULL PROCESSING RECORD {action}: {record.path}")
     print(f"  Archive SHA-256:        {record.archive_sha256}")
     print(f"  Content SHA-256:        {record.content_sha256}")
     print(f"  Uncompressed bytes:     {record.total_uncompressed_bytes:,}")
     print("  Internal hashes:        VERIFIED")
-    print("  Publisher authentication: ABSENT (integrity-only archive, not a signature)")
+    if record.authenticated_publisher:
+        print(f"  Publisher authentication: VERIFIED (key_id: {record.key_id})")
+    elif record.key_id is not None:
+        print(f"  Publisher authentication: UNVERIFIED (signed by key_id: {record.key_id})")
+    else:
+        print("  Publisher authentication: ABSENT (integrity-only archive, not a signature)")
     print("================================================================================")
+
+
+def _parse_private_key(value: str) -> bytes:
+    p = Path(value)
+    if p.is_file():
+        raw = p.read_bytes()
+        if len(raw) == 32:
+            return raw
+        try:
+            text = raw.decode("utf-8").strip()
+            decoded = bytes.fromhex(text)
+            if len(decoded) == 32:
+                return decoded
+        except Exception:
+            pass
+        raise PublicationError(
+            f"Private key file {value} must contain 32 raw bytes or 64 hex characters"
+        )
+    try:
+        decoded = bytes.fromhex(value.strip())
+        if len(decoded) == 32:
+            return decoded
+    except Exception:
+        pass
+    raise PublicationError(
+        "Private key must be a 64-character hex string or path to a 32-byte private key file"
+    )
+
+
+def _parse_trusted_key_item(spec: str) -> list[RecordTrustedKey]:
+    spec = spec.strip()
+    spec_path = Path(spec)
+    if spec_path.is_file():
+        try:
+            content = spec_path.read_text(encoding="utf-8")
+            data = json.loads(content)
+        except Exception:
+            data = None
+        if isinstance(data, list):
+            keys: list[RecordTrustedKey] = []
+            for item in data:
+                if isinstance(item, dict):
+                    keys.append(
+                        RecordTrustedKey.from_hex(
+                            key_id=str(item["key_id"]),
+                            public_key_hex=str(item["public_key_hex"]),
+                            revoked=bool(item.get("revoked", False)),
+                        )
+                    )
+            return keys
+        elif isinstance(data, dict) and "keys" in data and isinstance(data["keys"], list):
+            keys = []
+            for item in data["keys"]:
+                if isinstance(item, dict):
+                    keys.append(
+                        RecordTrustedKey.from_hex(
+                            key_id=str(item["key_id"]),
+                            public_key_hex=str(item["public_key_hex"]),
+                            revoked=bool(item.get("revoked", False)),
+                        )
+                    )
+            return keys
+
+    revoked = False
+    if spec.startswith("revoked:"):
+        revoked = True
+        spec = spec[len("revoked:") :]
+
+    if ":" not in spec:
+        raise PublicationError(
+            f"Invalid trusted key specification {spec!r}: expected '[revoked:]KEY_ID:HEX_OR_FILE'"
+        )
+    key_id, material = spec.split(":", 1)
+    material_path = Path(material)
+    if material_path.is_file():
+        raw = material_path.read_bytes()
+        if len(raw) == 32:
+            return [RecordTrustedKey(key_id=key_id, public_key_bytes=raw, revoked=revoked)]
+        try:
+            text = raw.decode("utf-8").strip()
+            return [RecordTrustedKey.from_hex(key_id=key_id, public_key_hex=text, revoked=revoked)]
+        except Exception as exc:
+            raise PublicationError(f"Invalid public key in file {material}: {exc}") from exc
+    return [RecordTrustedKey.from_hex(key_id=key_id, public_key_hex=material, revoked=revoked)]
+
+
+def _parse_trust_store(specs: Sequence[str] | None) -> RecordTrustStore | None:
+    if not specs:
+        return None
+    keys: list[RecordTrustedKey] = []
+    for spec in specs:
+        keys.extend(_parse_trusted_key_item(spec))
+    return RecordTrustStore(keys)
 
 
 def cmd_record_create(args: argparse.Namespace) -> int:
     """Create and atomically publish a portable Full Processing Record ZIP."""
+
+    has_key_id = getattr(args, "signing_key_id", None) is not None
+    has_private_key = getattr(args, "signing_private_key", None) is not None
+    if has_key_id != has_private_key:
+        raise PublicationError(
+            "Both --signing-key-id and --signing-private-key must be provided to sign a record"
+        )
+    private_key = _parse_private_key(args.signing_private_key) if has_private_key else None
+    trust_store = _parse_trust_store(getattr(args, "trusted_keys", None))
 
     try:
         record = create_processing_record(
@@ -1260,6 +1373,9 @@ def cmd_record_create(args: argparse.Namespace) -> int:
             summary_path=args.summary,
             destination=args.output,
             overwrite=bool(args.overwrite),
+            signing_key_id=args.signing_key_id,
+            signing_private_key=private_key,
+            trust_store=trust_store,
         )
     except HawaVoCleanError:
         raise
@@ -1277,8 +1393,13 @@ def cmd_record_create(args: argparse.Namespace) -> int:
 def cmd_record_verify(args: argparse.Namespace) -> int:
     """Verify the closed archive, internal hashes, and report/master binding."""
 
+    trust_store = _parse_trust_store(getattr(args, "trusted_keys", None))
     try:
-        record = verify_processing_record(args.record)
+        record = verify_processing_record(
+            args.record,
+            trust_store=trust_store,
+            require_authenticated=bool(getattr(args, "require_authenticated", False)),
+        )
     except HawaVoCleanError:
         raise
     except (OSError, ValueError) as error:
@@ -1287,6 +1408,33 @@ def cmd_record_verify(args: argparse.Namespace) -> int:
         record,
         event="processing_record_verified",
         operation="verify",
+        json_output=bool(args.record_json),
+    )
+    return int(ExitCode.SUCCESS)
+
+
+def cmd_record_sign(args: argparse.Namespace) -> int:
+    """Sign an existing Full Processing Record with an Ed25519 publisher key."""
+
+    private_key = _parse_private_key(args.private_key)
+    trust_store = _parse_trust_store(getattr(args, "trusted_keys", None))
+    try:
+        record = sign_processing_record(
+            archive_path=args.record,
+            key_id=args.key_id,
+            private_key=private_key,
+            destination=args.output,
+            overwrite=bool(args.overwrite),
+            trust_store=trust_store,
+        )
+    except HawaVoCleanError:
+        raise
+    except (OSError, ValueError) as error:
+        raise PublicationError(f"Cannot sign Full Processing Record: {error}") from error
+    _emit_processing_record_result(
+        record,
+        event="processing_record_signed",
+        operation="sign",
         json_output=bool(args.record_json),
     )
     return int(ExitCode.SUCCESS)
@@ -1906,6 +2054,20 @@ def _main() -> None:
         help="Atomically replace an existing destination (default: fail safely)",
     )
     p_record_create.add_argument(
+        "--signing-key-id",
+        help="Optional Ed25519 key ID to authenticate this record at creation",
+    )
+    p_record_create.add_argument(
+        "--signing-private-key",
+        help="Private key (hex string or path to 32-byte key file) matching --signing-key-id",
+    )
+    p_record_create.add_argument(
+        "--trusted-key",
+        dest="trusted_keys",
+        action="append",
+        help="Optional trusted public key spec ('[revoked:]KEY_ID:HEX_OR_FILE' or path to JSON trust store)",
+    )
+    p_record_create.add_argument(
         "--json",
         dest="record_json",
         action="store_true",
@@ -1918,12 +2080,57 @@ def _main() -> None:
     )
     p_record_verify.add_argument("record", help="Path to a Full Processing Record .zip")
     p_record_verify.add_argument(
+        "--trusted-key",
+        dest="trusted_keys",
+        action="append",
+        help="Trusted public key spec ('[revoked:]KEY_ID:HEX_OR_FILE' or path to JSON trust store)",
+    )
+    p_record_verify.add_argument(
+        "--require-authenticated",
+        action="store_true",
+        help="Require that the record has a valid signature from a trusted non-revoked key",
+    )
+    p_record_verify.add_argument(
         "--json",
         dest="record_json",
         action="store_true",
         help="Emit exactly one machine-readable JSON result on stdout",
     )
     p_record_verify.set_defaults(func=cmd_record_verify)
+
+    p_record_sign = p_record_sub.add_parser(
+        "sign", help="Sign an existing Full Processing Record with an Ed25519 publisher key"
+    )
+    p_record_sign.add_argument("record", help="Path to an existing Full Processing Record .zip")
+    p_record_sign.add_argument(
+        "--key-id", required=True, help="Ed25519 key identifier for publisher signature"
+    )
+    p_record_sign.add_argument(
+        "--private-key",
+        required=True,
+        help="Private key (hex string or path to 32-byte key file)",
+    )
+    p_record_sign.add_argument(
+        "--output", "-o", help="Optional new destination .zip (default: sign in place)"
+    )
+    p_record_sign.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite destination if different from input archive",
+    )
+    p_record_sign.add_argument(
+        "--trusted-key",
+        dest="trusted_keys",
+        action="append",
+        help="Optional trusted public key spec to verify signature upon signing",
+    )
+    p_record_sign.add_argument(
+        "--json",
+        dest="record_json",
+        action="store_true",
+        help="Emit exactly one machine-readable JSON result on stdout",
+    )
+    p_record_sign.set_defaults(func=cmd_record_sign)
 
     # audit-models
     p_audit = subparsers.add_parser(

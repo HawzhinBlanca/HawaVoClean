@@ -180,7 +180,7 @@ class SmartAnalysisResponseV1(ContractModel):
 
 
 class ProcessingRecordEvidenceV1(ContractModel):
-    """Verification evidence for the portable integrity-only ZIP."""
+    """Verification evidence for the portable Full Processing Record ZIP."""
 
     path: str
     archive_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -191,6 +191,8 @@ class ProcessingRecordEvidenceV1(ContractModel):
     total_uncompressed_bytes: int = Field(ge=1)
     internal_hashes_verified: Literal[True]
     authenticated_publisher: bool
+    key_id: str | None = None
+    signature_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class JobStatusResponseV1(ContractModel):

@@ -75,7 +75,7 @@ DEFAULT_MAX_TERMINAL_JOBS = 256
 DEFAULT_TERMINAL_JOB_TTL_S = 24 * 60 * 60.0
 _ARTIFACT_EVIDENCE_SCHEMA = 1
 _SHA256_LENGTH = 64
-_BUNDLE_EVIDENCE_KEYS = frozenset(
+_BASE_BUNDLE_EVIDENCE_KEYS = frozenset(
     {
         "path",
         "archive_sha256",
@@ -88,6 +88,8 @@ _BUNDLE_EVIDENCE_KEYS = frozenset(
         "authenticated_publisher",
     }
 )
+_ALL_BUNDLE_EVIDENCE_KEYS = _BASE_BUNDLE_EVIDENCE_KEYS | {"key_id", "signature_sha256"}
+_BUNDLE_EVIDENCE_KEYS = _BASE_BUNDLE_EVIDENCE_KEYS
 
 
 class QueueFullError(RuntimeError):
@@ -354,7 +356,7 @@ def default_command(record: JobRecord) -> list[str]:
 def _bundle_evidence(record: ProcessingRecord) -> dict[str, Any]:
     """Closed durable evidence shape returned by status endpoints."""
 
-    return {
+    evidence: dict[str, Any] = {
         "path": str(record.path),
         "archive_sha256": record.archive_sha256,
         "content_sha256": record.content_sha256,
@@ -365,6 +367,11 @@ def _bundle_evidence(record: ProcessingRecord) -> dict[str, Any]:
         "internal_hashes_verified": True,
         "authenticated_publisher": record.authenticated_publisher,
     }
+    if record.key_id is not None:
+        evidence["key_id"] = record.key_id
+    if record.signature_sha256 is not None:
+        evidence["signature_sha256"] = record.signature_sha256
+    return evidence
 
 
 def queue_position(queued: int, a_job_is_running: bool) -> int:
@@ -492,7 +499,10 @@ class JobManager:
     def _closed_bundle_evidence(record: JobRecord, evidence: dict[str, Any]) -> dict[str, Any]:
         """Validate the exact durable identity retained for one record ZIP."""
 
-        if record.bundle_path is None or set(evidence) != _BUNDLE_EVIDENCE_KEYS:
+        keys = set(evidence)
+        if record.bundle_path is None or not (
+            _BASE_BUNDLE_EVIDENCE_KEYS <= keys <= _ALL_BUNDLE_EVIDENCE_KEYS
+        ):
             raise JobStoreError("record-bundle job lacks closed durable evidence")
         expected_path = record.bundle_path.expanduser().absolute()
         if Path(str(evidence.get("path"))).expanduser().absolute() != expected_path:
@@ -518,11 +528,26 @@ class JobManager:
             evidence.get("authenticated_publisher"), bool
         ):
             raise JobStoreError("Processing Record verification evidence is invalid")
+        if "key_id" in evidence:
+            key_id = evidence["key_id"]
+            if not isinstance(key_id, str) or not key_id:
+                raise JobStoreError("Processing Record key_id evidence is invalid")
+        if "signature_sha256" in evidence:
+            sig_digest = evidence["signature_sha256"]
+            if (
+                not isinstance(sig_digest, str)
+                or len(sig_digest) != _SHA256_LENGTH
+                or any(character not in "0123456789abcdef" for character in sig_digest)
+            ):
+                raise JobStoreError("Processing Record signature_sha256 evidence is invalid")
         return dict(evidence)
 
     @staticmethod
     def _bundle_matches_evidence(verified: ProcessingRecord, evidence: dict[str, Any]) -> bool:
-        return _bundle_evidence(verified) == evidence
+        verified_evidence = _bundle_evidence(verified)
+        if set(evidence) == _BASE_BUNDLE_EVIDENCE_KEYS:
+            return {k: verified_evidence.get(k) for k in _BASE_BUNDLE_EVIDENCE_KEYS} == evidence
+        return verified_evidence == evidence
 
     def _bundle_artifact_paths(
         self, record: JobRecord, evidence: dict[str, Any]
