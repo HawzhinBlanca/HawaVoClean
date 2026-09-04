@@ -421,8 +421,9 @@ def probe_audio(
             codec_name = info.subtype
             bit_depth = None
         except Exception as e:
-            raise PreflightError(
-                f"Neither ffprobe nor soundfile could read {file_path}: {e}"
+            raise MediaPreflightError(
+                MediaPreflightReason.PROBE_FAILED,
+                f"Neither ffprobe nor soundfile could read {file_path}: {e}",
             ) from e
 
     if sample_rate <= 0 or channels <= 0:
