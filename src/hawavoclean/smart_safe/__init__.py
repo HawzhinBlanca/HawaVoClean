@@ -22,6 +22,15 @@ from hawavoclean.smart_safe.decision import (
     eligible_routes,
     stabilize_region_routes,
 )
+from hawavoclean.smart_safe.preview import (
+    CandidatePreview,
+    SmartSafePreviewEngine,
+    abstain_to_least_intervention,
+    compute_evidence_sha256,
+    extract_preview_slice,
+    verify_candidate_evidence_integrity,
+    verify_post_master_invariants,
+)
 
 __all__ = [
     "ROUTES",
@@ -29,17 +38,24 @@ __all__ = [
     "AnalyzerConfig",
     "CandidateEvidence",
     "CandidateOutcome",
+    "CandidatePreview",
     "DEFAULT_ANALYZER_CONFIG",
     "ProbabilityEstimate",
     "RegionRecommendation",
-    "StreamingAcousticAnalyzer",
-    "StreamingAcousticReport",
     "SmartSafeDecision",
     "SmartSafePolicy",
+    "SmartSafePreviewEngine",
     "SmartSafeRanker",
+    "StreamingAcousticAnalyzer",
+    "StreamingAcousticReport",
     "UnqualifiedRankerError",
+    "abstain_to_least_intervention",
     "analyze_audio_stream",
+    "compute_evidence_sha256",
     "decide_smart_safe",
     "eligible_routes",
+    "extract_preview_slice",
     "stabilize_region_routes",
+    "verify_candidate_evidence_integrity",
+    "verify_post_master_invariants",
 ]
