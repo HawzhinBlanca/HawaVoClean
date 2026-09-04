@@ -194,6 +194,129 @@ class SmartSafePreviewEngine:
         self._hf_detector = HighBandEventDetector(sample_rate=sample_rate)
         self._speaker_extractor = SpeakerEmbeddingExtractor(sample_rate=sample_rate)
 
+    def render_route_audio(
+        self,
+        route: Route,
+        audio: np.ndarray,
+        sample_rate: int,
+        *,
+        speaker_profile: SpeakerProfile | None = None,
+        speaker_profile_id: str | None = None,
+        allow_research_restore: bool | None = None,
+    ) -> tuple[np.ndarray, str | None]:
+        """Render audio for a specific route, returning (waveform, error_reason)."""
+        if route not in ROUTES:
+            raise ValueError(f"unknown route: {route!r}")
+
+        allow_restore = (
+            self.allow_research_restore
+            if allow_research_restore is None
+            else allow_research_restore
+        )
+
+        if audio.ndim == 2:
+            rendered_channels = []
+            channel_err: str | None = None
+            for ch in range(audio.shape[0]):
+                ch_wave, ch_err = self.render_route_audio(
+                    route,
+                    audio[ch],
+                    sample_rate,
+                    speaker_profile=speaker_profile,
+                    speaker_profile_id=speaker_profile_id,
+                    allow_research_restore=allow_research_restore,
+                )
+                if ch_err is not None:
+                    channel_err = ch_err
+                rendered_channels.append(ch_wave)
+            return np.stack(rendered_channels, axis=0), channel_err
+
+        cand_audio: np.ndarray
+        route_error_reason: str | None = None
+
+        if route == "preserve":
+            cand_audio = audio.copy()
+        elif route == "production":
+            enhancer = WienerSpectralEnhancer()
+            cand_audio = enhancer.enhance(audio, sample_rate).waveform
+        elif route == "studio":
+            try:
+                core = StudioVoiceCore()
+                cand_audio = core.enhance(audio, sample_rate).waveform
+            except Exception as e:
+                cand_audio = audio.copy()
+                route_error_reason = f"studio core error: {e}"
+        elif route == "lowband":
+            try:
+                core_lb = StudioLowBandCore()
+                cand_audio = core_lb.enhance(audio, sample_rate).waveform
+            except Exception as e:
+                cand_audio = audio.copy()
+                route_error_reason = f"lowband core error: {e}"
+        elif route == "lowband_then_production":
+            try:
+                core_lb = StudioLowBandCore()
+                lb_wave = core_lb.enhance(audio, sample_rate).waveform
+                enhancer = WienerSpectralEnhancer()
+                cand_audio = enhancer.enhance(lb_wave, sample_rate).waveform
+            except Exception as e:
+                cand_audio = audio.copy()
+                route_error_reason = f"lowband+production error: {e}"
+        elif route == "restore_source":
+            if not allow_restore:
+                cand_audio = audio.copy()
+                route_error_reason = "research restoration is quarantined"
+            else:
+                try:
+                    restorer = HawaRestoreKD(sample_rate=sample_rate)
+                    res = restorer.render(
+                        audio,
+                        sample_rate,
+                        effective_cutoff_hz=self.cutoff_hz,
+                        strengths=[1.0],
+                    )
+                    if res.success and res.candidates:
+                        rest_wave = res.candidates[0].audio
+                        enhancer = WienerSpectralEnhancer()
+                        cand_audio = enhancer.enhance(rest_wave, sample_rate).waveform
+                    else:
+                        cand_audio = audio.copy()
+                        route_error_reason = "hawarestore-kd failed to render candidates"
+                except Exception as e:
+                    cand_audio = audio.copy()
+                    route_error_reason = f"restore_source error: {e}"
+        elif route == "restore_enrolled":
+            if not allow_restore:
+                cand_audio = audio.copy()
+                route_error_reason = "research restoration is quarantined"
+            else:
+                try:
+                    speaker_emb = speaker_profile.embedding_vector if speaker_profile else None
+                    restorer = HawaRestoreKD(sample_rate=sample_rate)
+                    res = restorer.render(
+                        audio,
+                        sample_rate,
+                        effective_cutoff_hz=self.cutoff_hz,
+                        speaker_id=speaker_profile_id,
+                        speaker_embedding=speaker_emb,
+                        strengths=[1.0],
+                    )
+                    if res.success and res.candidates:
+                        rest_wave = res.candidates[0].audio
+                        enhancer = WienerSpectralEnhancer()
+                        cand_audio = enhancer.enhance(rest_wave, sample_rate).waveform
+                    else:
+                        cand_audio = audio.copy()
+                        route_error_reason = "hawarestore-kd failed to render enrolled candidates"
+                except Exception as e:
+                    cand_audio = audio.copy()
+                    route_error_reason = f"restore_enrolled error: {e}"
+        else:
+            cand_audio = audio.copy()
+
+        cand_audio = np.ascontiguousarray(cand_audio, dtype=np.float32)
+        return cand_audio, route_error_reason
+
     def generate_preview(
         self,
         route: Route,
@@ -215,88 +338,13 @@ class SmartSafePreviewEngine:
             target_sample_rate=self.sample_rate,
         )
 
-        cand_audio: np.ndarray
-        route_error_reason: str | None = None
-
-        if route == "preserve":
-            cand_audio = ref_preview.copy()
-        elif route == "production":
-            enhancer = WienerSpectralEnhancer()
-            cand_audio = enhancer.enhance(ref_preview, self.sample_rate).waveform
-        elif route == "studio":
-            try:
-                core = StudioVoiceCore()
-                cand_audio = core.enhance(ref_preview, self.sample_rate).waveform
-            except Exception as e:
-                cand_audio = ref_preview.copy()
-                route_error_reason = f"studio core error: {e}"
-        elif route == "lowband":
-            try:
-                core_lb = StudioLowBandCore()
-                cand_audio = core_lb.enhance(ref_preview, self.sample_rate).waveform
-            except Exception as e:
-                cand_audio = ref_preview.copy()
-                route_error_reason = f"lowband core error: {e}"
-        elif route == "lowband_then_production":
-            try:
-                core_lb = StudioLowBandCore()
-                lb_wave = core_lb.enhance(ref_preview, self.sample_rate).waveform
-                enhancer = WienerSpectralEnhancer()
-                cand_audio = enhancer.enhance(lb_wave, self.sample_rate).waveform
-            except Exception as e:
-                cand_audio = ref_preview.copy()
-                route_error_reason = f"lowband+production error: {e}"
-        elif route == "restore_source":
-            if not self.allow_research_restore:
-                cand_audio = ref_preview.copy()
-                route_error_reason = "research restoration is quarantined"
-            else:
-                try:
-                    restorer = HawaRestoreKD(sample_rate=self.sample_rate)
-                    res = restorer.render(
-                        ref_preview,
-                        self.sample_rate,
-                        effective_cutoff_hz=self.cutoff_hz,
-                        strengths=[1.0],
-                    )
-                    if res.success and res.candidates:
-                        rest_wave = res.candidates[0].audio
-                        enhancer = WienerSpectralEnhancer()
-                        cand_audio = enhancer.enhance(rest_wave, self.sample_rate).waveform
-                    else:
-                        cand_audio = ref_preview.copy()
-                        route_error_reason = "hawarestore-kd failed to render candidates"
-                except Exception as e:
-                    cand_audio = ref_preview.copy()
-                    route_error_reason = f"restore_source error: {e}"
-        elif route == "restore_enrolled":
-            if not self.allow_research_restore:
-                cand_audio = ref_preview.copy()
-                route_error_reason = "research restoration is quarantined"
-            else:
-                try:
-                    speaker_emb = speaker_profile.embedding_vector if speaker_profile else None
-                    restorer = HawaRestoreKD(sample_rate=self.sample_rate)
-                    res = restorer.render(
-                        ref_preview,
-                        self.sample_rate,
-                        effective_cutoff_hz=self.cutoff_hz,
-                        speaker_id=speaker_profile_id,
-                        speaker_embedding=speaker_emb,
-                        strengths=[1.0],
-                    )
-                    if res.success and res.candidates:
-                        rest_wave = res.candidates[0].audio
-                        enhancer = WienerSpectralEnhancer()
-                        cand_audio = enhancer.enhance(rest_wave, self.sample_rate).waveform
-                    else:
-                        cand_audio = ref_preview.copy()
-                        route_error_reason = "hawarestore-kd failed to render enrolled candidates"
-                except Exception as e:
-                    cand_audio = ref_preview.copy()
-                    route_error_reason = f"restore_enrolled error: {e}"
-        else:
-            cand_audio = ref_preview.copy()
+        cand_audio, route_error_reason = self.render_route_audio(
+            route,
+            ref_preview,
+            self.sample_rate,
+            speaker_profile=speaker_profile,
+            speaker_profile_id=speaker_profile_id,
+        )
 
         cand_audio = np.ascontiguousarray(cand_audio, dtype=np.float32)
         audio_sha256 = hashlib.sha256(cand_audio.tobytes()).hexdigest()
@@ -461,11 +509,19 @@ class SmartSafePreviewEngine:
         restore_policy: RestorePolicy = "disabled",
         speaker_profile: SpeakerProfile | None = None,
         speaker_profile_id: str | None = None,
-        ranker: SmartSafeRanker,
+        ranker: SmartSafeRanker | None = None,
         policy: SmartSafePolicy = DEFAULT_POLICY,
         require_qualified_ranker: bool = False,
     ) -> tuple[SmartSafeDecision, dict[Route, CandidatePreview]]:
         """Generate all previews internally and decide the optimal safe route."""
+        effective_ranker = ranker
+        if effective_ranker is None:
+            effective_ranker = SmartSafeRanker(
+                version="smart-safe-baseline-v1",
+                artifact_sha256=hashlib.sha256(b"smart-safe-baseline-v1").hexdigest(),
+                signed=False,
+                qualified=False,
+            )
         previews = self.generate_all_previews(
             audio,
             sample_rate,
@@ -481,7 +537,7 @@ class SmartSafePreviewEngine:
             candidates,
             restore_policy=restore_policy,
             speaker_profile_id=speaker_profile_id,
-            ranker=ranker,
+            ranker=effective_ranker,
             policy=policy,
             require_qualified_ranker=require_qualified_ranker,
         )

@@ -334,6 +334,13 @@ def default_command(record: JobRecord) -> list[str]:
         cmd += ["--profiles-dir", str(profiles_root())]
         if record.cutoff_hz is not None:
             cmd += ["--cutoff-hz", str(record.cutoff_hz)]
+    elif record.mode == "smart_safe":
+        cmd += ["--mode", "smart_safe"]
+        if record.speaker_id is not None:
+            cmd += ["--speaker-id", str(record.speaker_id)]
+            cmd += ["--profiles-dir", str(profiles_root())]
+        if record.cutoff_hz is not None:
+            cmd += ["--cutoff-hz", str(record.cutoff_hz)]
     if record.overwrite:
         cmd.append("--overwrite")
     if record.record_bundle:

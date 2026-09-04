@@ -489,13 +489,13 @@ def cmd_process(args: argparse.Namespace) -> int:
         bool(getattr(args, "allow_research_restore", False))
         or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
     )
+    if mode in ("restore", "smart_safe") and passes != 1:
+        exit_with_code(
+            ExitCode.INVALID_USER_INPUT,
+            f"{mode.capitalize()} mode is single-pass only: --mode {mode} cannot be combined with "
+            "--passes. Re-run with --passes 1 (the default).",
+        )
     if mode == "restore":
-        if passes != 1:
-            exit_with_code(
-                ExitCode.INVALID_USER_INPUT,
-                "Restore mode is single-pass only: --mode restore cannot be combined with "
-                "--passes. Re-run with --passes 1 (the default).",
-            )
         if not getattr(args, "speaker_id", None):
             exit_with_code(
                 ExitCode.INVALID_USER_INPUT,
@@ -1707,9 +1707,9 @@ def _main() -> None:
     p_proc.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
     p_proc.add_argument(
         "--mode",
-        choices=["natural", "restore"],
+        choices=["natural", "restore", "smart_safe"],
         default="natural",
-        help="Processing mode: natural (default) or restore (opt-in)",
+        help="Processing mode: natural (default), restore, or smart_safe",
     )
     p_proc.add_argument(
         "--speaker-id",
@@ -1812,9 +1812,9 @@ def _main() -> None:
     )
     p_batch.add_argument(
         "--mode",
-        choices=["natural", "restore"],
+        choices=["natural", "restore", "smart_safe"],
         default="natural",
-        help="Processing mode: natural (default) or restore (opt-in)",
+        help="Processing mode: natural (default), restore, or smart_safe",
     )
     p_batch.add_argument(
         "--speaker-id",

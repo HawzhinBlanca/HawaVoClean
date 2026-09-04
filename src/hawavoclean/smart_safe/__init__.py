@@ -31,6 +31,11 @@ from hawavoclean.smart_safe.preview import (
     verify_candidate_evidence_integrity,
     verify_post_master_invariants,
 )
+from hawavoclean.smart_safe.region import (
+    RegionalAssemblyResult,
+    filter_region_routes_for_acoustics,
+    render_and_stitch_regions,
+)
 
 __all__ = [
     "ROUTES",
@@ -42,6 +47,7 @@ __all__ = [
     "DEFAULT_ANALYZER_CONFIG",
     "ProbabilityEstimate",
     "RegionRecommendation",
+    "RegionalAssemblyResult",
     "SmartSafeDecision",
     "SmartSafePolicy",
     "SmartSafePreviewEngine",
@@ -55,6 +61,8 @@ __all__ = [
     "decide_smart_safe",
     "eligible_routes",
     "extract_preview_slice",
+    "filter_region_routes_for_acoustics",
+    "render_and_stitch_regions",
     "stabilize_region_routes",
     "verify_candidate_evidence_integrity",
     "verify_post_master_invariants",

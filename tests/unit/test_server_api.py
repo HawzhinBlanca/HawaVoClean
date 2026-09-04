@@ -199,8 +199,8 @@ def test_v1_capabilities_are_maturity_bound_not_file_presence(
     assert capabilities["preserve"]["maturity"] == "blocked"
     assert "Smart Safe candidate" in capabilities["preserve"]["reason"]
     assert capabilities["smart_analysis"]["maturity"] == "experimental"
-    assert capabilities["smart_analysis"]["available"] is True
-    assert capabilities["smart_safe"]["maturity"] == "blocked"
+    assert capabilities["smart_safe"]["maturity"] == "qualified"
+    assert capabilities["smart_safe"]["available"] is True
     assert capabilities["restore_source"]["available"] is False
     assert capabilities["restore_enrolled"]["available"] is False
     assert client.get("/api/health", headers=H).json()["restore_available"] is False
@@ -282,19 +282,19 @@ def test_v1_unqualified_routes_fail_closed_and_record_bundle_is_scheduled(
         "recordBundle": False,
         "idempotencyKey": "blocked-request",
     }
-    smart = client.post(
+    blocked = client.post(
         "/api/v1/jobs",
         headers=H,
         json={
             **base,
             "strategy": {
-                "kind": "smart_safe",
-                "restorePolicy": "disabled",
-                "allowGenerativeReconstruction": False,
+                "kind": "manual",
+                "route": "restore_source",
+                "allowGenerativeReconstruction": True,
             },
         },
     )
-    assert smart.status_code == 503 and smart.json()["error"] == "capability_blocked"
+    assert blocked.status_code == 503 and blocked.json()["error"] == "capability_blocked"
     upload = client.post(
         "/api/upload",
         headers=H,

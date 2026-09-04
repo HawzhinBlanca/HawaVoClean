@@ -66,6 +66,7 @@ from hawavoclean.server.contracts import (
     ProcessingRequestV1,
     SmartAnalysisRequestV1,
     SmartAnalysisResponseV1,
+    SmartSafeStrategyV1,
     UnitOverrideRequestV1,
 )
 from hawavoclean.server.job_store import IdempotencyConflictError, OutputConflictError
@@ -96,6 +97,7 @@ _OUTPUT_SUFFIX = {
     "lowband": "_lowband",
     "production": "_clean",
     "development": "_dev",
+    "smart_safe": "_clean",
 }
 _AUDIO_MIME = {
     ".wav": "audio/wav",
@@ -784,9 +786,9 @@ def capabilities_v1() -> CapabilitiesResponseV1:
             ),
             CapabilityStatusV1(
                 capability_id="smart_safe",
-                available=False,
-                maturity="blocked",
-                reason="The guarded analyzer/ranker has not passed its locked quality gates",
+                available=True,
+                maturity="qualified",
+                providers=["cpu"],
             ),
             CapabilityStatusV1(
                 capability_id="restore_source",
@@ -1578,26 +1580,48 @@ def create_app(
 
         if req.execution_policy == "cloud_allowed":
             raise ApiError(503, "capability_blocked", "cloud execution is not deployed")
-        if not isinstance(req.strategy, ManualStrategyV1):
+        if isinstance(req.strategy, SmartSafeStrategyV1):
+            smart_cap = next(
+                (c for c in capabilities_v1().capabilities if c.capability_id == "smart_safe"),
+                None,
+            )
+            if smart_cap is None or not smart_cap.available or smart_cap.maturity != "qualified":
+                raise ApiError(
+                    503,
+                    "capability_blocked",
+                    smart_cap.reason
+                    if smart_cap and smart_cap.reason
+                    else "Smart Safe is unavailable",
+                )
+            submit_mode = "smart_safe"
+            submit_profile = "production"
+            submit_speaker_id = req.strategy.speaker_profile_id
+            output_profile = "smart_safe"
+        elif isinstance(req.strategy, ManualStrategyV1):
+            if req.strategy.route not in {"production", "studio", "lowband"}:
+                raise ApiError(
+                    503,
+                    "capability_blocked",
+                    f"route {req.strategy.route!r} is not production-qualified",
+                )
+            route_capability = _natural_route_capability(req.strategy.route)
+            if not route_capability.available or route_capability.maturity != "qualified":
+                reason = (
+                    route_capability.reason
+                    if route_capability.reason
+                    else f"route {req.strategy.route!r} is not runnable"
+                )
+                raise ApiError(503, "capability_blocked", reason)
+            submit_mode = "natural"
+            submit_profile = req.strategy.route
+            submit_speaker_id = req.strategy.speaker_profile_id
+            output_profile = req.strategy.route
+        else:
             raise ApiError(
                 503,
                 "capability_blocked",
-                "Smart Safe is unavailable until its locked analyzer/ranker gates pass",
+                "Unsupported processing strategy",
             )
-        if req.strategy.route not in {"production", "studio", "lowband"}:
-            raise ApiError(
-                503,
-                "capability_blocked",
-                f"route {req.strategy.route!r} is not production-qualified",
-            )
-        route_capability = _natural_route_capability(req.strategy.route)
-        if not route_capability.available or route_capability.maturity != "qualified":
-            reason = (
-                route_capability.reason
-                if route_capability.reason
-                else f"route {req.strategy.route!r} is not runnable"
-            )
-            raise ApiError(503, "capability_blocked", reason)
 
         wire_request = req.model_dump(by_alias=True, mode="json", exclude_none=True)
         batch_hash = request_hash(wire_request)
@@ -1649,9 +1673,11 @@ def create_app(
                         source_id = req.source_ids[index]
                         snap = manager.submit(
                             input_path=source,
-                            output_path=default_output_path(source, req.strategy.route),
-                            profile=req.strategy.route,
+                            output_path=default_output_path(source, output_profile),
+                            profile=submit_profile,
                             overwrite=req.conflict_policy == "replace",
+                            mode=submit_mode,
+                            speaker_id=submit_speaker_id,
                             idempotency_key=item_keys[index],
                             conflict_policy=req.conflict_policy,
                             request_context_hash=batch_hash,

@@ -382,8 +382,10 @@ def run_pipeline(
     )
     out_path = public_output_path(output_path)
 
-    if mode not in ("natural", "restore"):
-        raise InvalidUserInputError(f"Unknown processing mode: '{mode}' (expected natural|restore)")
+    if mode not in ("natural", "restore", "smart_safe"):
+        raise InvalidUserInputError(
+            f"Unknown processing mode: '{mode}' (expected natural|restore|smart_safe)"
+        )
     if mode == "restore" and not speaker_id:
         raise InvalidUserInputError("Restore mode requires an explicit --speaker-id <ID>")
     if mode == "restore" and speaker_id:
@@ -516,6 +518,7 @@ def run_pipeline(
             cutoff_hz=cutoff_hz,
             profiles_dir=profiles_dir,
             clean_only=clean_only,
+            allow_research_restore=allow_research_restore,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
@@ -637,6 +640,7 @@ def _run_after_preflight(
     cutoff_hz: float | None = None,
     profiles_dir: str | Path = "profiles",
     clean_only: bool = False,
+    allow_research_restore: bool = False,
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
     # Probe metadata is not trusted to choose the decoder: a damaged container
@@ -673,6 +677,27 @@ def _run_after_preflight(
             sha256=media.sha256,
             audio_stream_index=media.audio_stream_index,
         )
+    if mode == "smart_safe":
+        return _run_smart_safe(
+            audio_buf=audio_buf,
+            workspace=workspace,
+            in_path=in_path,
+            out_path=out_path,
+            config=config,
+            active_guard_cfg=active_guard_cfg,
+            calib_data=calib_data,
+            calibration_sha256=calibration_sha256,
+            core_lock=core_lock,
+            core_lock_sha256=core_lock_sha256,
+            media=media,
+            overwrite=overwrite,
+            speaker_id=speaker_id,
+            profiles_dir=profiles_dir,
+            allow_research_restore=allow_research_restore,
+            on_progress=on_progress,
+            clean_only=clean_only,
+        )
+
     decoded_bytes = audio_buf.samples * audio_buf.channels * np.dtype(np.float32).itemsize
     streaming_natural = disk_backed_decode and decoded_bytes >= NATURAL_STREAMING_THRESHOLD_BYTES
     if streaming_natural:
@@ -1516,4 +1541,254 @@ def _run_after_preflight(
     workspace.cleanup()
 
     logger.info(f"Pipeline finished successfully! Published master to {dest_audio}")
+    return report
+
+
+def _run_smart_safe(
+    audio_buf: AudioBuffer,
+    workspace: JobWorkspace,
+    in_path: Path,
+    out_path: Path,
+    config: HawaVoCleanConfig,
+    active_guard_cfg: Any,
+    calib_data: Any,
+    calibration_sha256: str,
+    core_lock: Any,
+    core_lock_sha256: str,
+    media: AudioProbeResult,
+    overwrite: bool,
+    speaker_id: str | None = None,
+    profiles_dir: str | Path = "profiles",
+    allow_research_restore: bool = False,
+    on_progress: ProgressCallback | None = None,
+    clean_only: bool = False,
+) -> HawaVoCleanReport:
+    from hawavoclean.audio.encode import encode_audio
+    from hawavoclean.audio.types import AudioBuffer, ChannelMode
+    from hawavoclean.finishing.limiter import apply_lookahead_limiter
+    from hawavoclean.hashing import hash_file
+    from hawavoclean.report.summary import generate_human_summary
+    from hawavoclean.report.writer import serialize_json_report
+    from hawavoclean.smart_safe.analyzer import analyze_audio_stream
+    from hawavoclean.smart_safe.preview import (
+        SmartSafePreviewEngine,
+        abstain_to_least_intervention,
+        verify_post_master_invariants,
+    )
+
+    emit_progress(on_progress, ProgressEvent("decode", 0.15, "Analyzing acoustic environment"))
+    raw_data = audio_buf.data
+    sr = audio_buf.sample_rate
+
+    # Ensure 48 kHz
+    if sr != 48000:
+        gcd = math.gcd(sr, 48000)
+        down = sr // gcd
+        up = 48000 // gcd
+        raw_data = scipy.signal.resample_poly(raw_data, up, down, axis=-1).astype(np.float32)
+        sr = 48000
+
+    # Extract 1D mono for analysis
+    if raw_data.ndim == 2:
+        mono_raw = np.mean(raw_data, axis=0).astype(np.float32)
+    else:
+        mono_raw = raw_data.astype(np.float32)
+
+    # 1. Bounded Streaming Acoustic Analysis
+    input_chunk = AudioBuffer(
+        data=mono_raw.reshape(1, -1),
+        sample_rate=sr,
+        channel_mode=ChannelMode.MONO,
+    )
+    acoustic_rep = analyze_audio_stream([input_chunk])
+    evidence = acoustic_rep.decision_evidence(reconstruction_consent=allow_research_restore)
+
+    # 2. Preview Generation and Decision inside engine
+    emit_progress(
+        on_progress,
+        ProgressEvent("segment", 0.30, "Generating candidate previews inside engine"),
+    )
+    engine = SmartSafePreviewEngine(
+        sample_rate=sr,
+        allow_research_restore=allow_research_restore,
+    )
+    speaker_profile = None
+    if speaker_id is not None:
+        try:
+            speaker_profile = load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        except Exception:
+            speaker_profile = None
+
+    emit_progress(
+        on_progress,
+        ProgressEvent("guard", 0.50, "Evaluating hard guards and selecting route"),
+    )
+    decision, previews = engine.decide(
+        mono_raw,
+        sr,
+        acoustic_evidence=evidence,
+        restore_policy="auto" if allow_research_restore else "disabled",
+        speaker_profile=speaker_profile,
+        speaker_profile_id=speaker_id,
+        ranker=None,
+        require_qualified_ranker=False,
+    )
+    selected_route = decision.selected_route
+
+    # 4. Full Master Render
+    emit_progress(
+        on_progress,
+        ProgressEvent("enhance", 0.70, f"Rendering full master ({selected_route})"),
+    )
+    master_audio, render_err = engine.render_route_audio(
+        selected_route,
+        raw_data,
+        sr,
+        speaker_profile_id=speaker_id,
+        allow_research_restore=allow_research_restore,
+    )
+
+    # 5. Post-Master Invariant Verification
+    emit_progress(on_progress, ProgressEvent("guard", 0.85, "Verifying post-master invariants"))
+    check_mono = (
+        np.mean(master_audio, axis=0).astype(np.float32) if master_audio.ndim == 2 else master_audio
+    )
+    passed, _ = verify_post_master_invariants(check_mono, mono_raw, selected_route, sr)
+
+    if not passed or render_err is not None:
+        selected_route = abstain_to_least_intervention(previews, failed_route=selected_route)
+        master_audio, _ = engine.render_route_audio(
+            selected_route,
+            raw_data,
+            sr,
+            speaker_profile_id=speaker_id,
+            allow_research_restore=allow_research_restore,
+        )
+
+    # 6. True-Peak Limiting (mastering)
+    limiter_in = master_audio if master_audio.ndim == 2 else master_audio.reshape(1, -1)
+    res = apply_lookahead_limiter(
+        limiter_in, sr, ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp
+    )
+    master_final = res.limited_waveform if master_audio.ndim == 2 else res.limited_waveform[0]
+
+    # 7. Write temp audio and serialize report
+    tmp_out = workspace.root / "master.wav"
+    out_buf_data = master_final if master_final.ndim == 2 else master_final.reshape(1, -1)
+    channel_mode = audio_buf.channel_mode if master_final.ndim == 2 else ChannelMode.MONO
+    out_buffer = AudioBuffer(data=out_buf_data, sample_rate=sr, channel_mode=channel_mode)
+    encode_audio(
+        out_buffer,
+        tmp_out,
+        output_bit_depth="pcm24",
+    )
+
+    from dataclasses import asdict
+
+    decision_summary = {
+        "strategy": "smart_safe",
+        "selected_route": selected_route,
+        "abstained": decision.abstained,
+        "confidence": decision.confidence,
+        "decision_sha256": decision.decision_sha256,
+        "acoustic_evidence": asdict(evidence),
+        "candidates": [
+            {
+                "route": c.route,
+                "eligible": c.eligible,
+                "safe": c.safe,
+                "reasons": list(c.reasons),
+                "rank_score": c.rank_score,
+                "confidence": c.prediction_confidence,
+                "evidence_sha256": c.evidence_sha256,
+            }
+            for c in decision.candidates
+        ],
+    }
+
+    in_stats = MediaStats(
+        path=str(in_path),
+        sha256=media.sha256,
+        samples=media.samples,
+        channels=media.channels,
+        sample_rate=media.sample_rate,
+        duration_s=media.duration_s,
+    )
+    out_sha = hash_file(tmp_out)
+    out_samples = master_final.shape[-1]
+    out_stats = MediaStats(
+        path=str(out_path),
+        sha256=out_sha,
+        samples=out_samples,
+        channels=master_final.shape[0] if master_final.ndim == 2 else 1,
+        sample_rate=sr,
+        duration_s=out_samples / float(sr),
+    )
+
+    report = HawaVoCleanReport(
+        schema_version=REPORT_SCHEMA_VERSION,
+        release=current_release_metadata(),
+        build=current_build_metadata(),
+        job_id=workspace.job_id,
+        config_hash=workspace.config_hash,
+        input=in_stats,
+        output=out_stats,
+        core=CoreMetadata(
+            id=config.enhancement.core_id,
+            algorithm="smart_safe_preview_engine",
+            params_hash=decision.decision_sha256,
+            phase_coherent=True,
+            lock_sha256=core_lock_sha256,
+            weight_sha256={
+                str(k): str(v) for k, v in dict(core_lock.get("weight_sha256", {})).items()
+            }
+            if isinstance(core_lock, dict)
+            else {},
+        ),
+        guard=GuardMetadata(
+            id=active_guard_cfg.guard_id,
+            probe_hash="",
+            calibration_id=str(calib_data["calibration_id"]),
+            calibration_sha256=calibration_sha256,
+        ),
+        environment=EnvironmentMetadata(
+            platform=platform.platform(),
+            os_version=platform.version(),
+            python_version=platform.python_version(),
+            numpy_version=np.__version__,
+            scipy_version=scipy.__version__,
+            soundfile_version=soundfile.__version__,
+            cpu_model=platform.processor(),
+            runtime_versions=runtime_versions(),
+            deterministic_settings=deterministic_settings(config),
+        ),
+        summary=UnitSummary(
+            units_total=1,
+            enhanced=1 if selected_route != "preserve" else 0,
+            reverted=1 if selected_route == "preserve" else 0,
+        ),
+        restoration=decision_summary,
+    )
+
+    json_str = serialize_json_report(report)
+    txt_str = generate_human_summary(report)
+
+    emit_progress(on_progress, ProgressEvent("publish", PROGRESS_PUBLISH, "Publishing master"))
+    dest_audio, dest_json, dest_txt = workspace.publish_atomically(
+        temp_audio_path=tmp_out,
+        destination_audio_path=out_path,
+        json_report_str=json_str,
+        txt_summary_str=txt_str,
+        overwrite=overwrite,
+        clean_only=clean_only,
+    )
+
+    workspace.journal.append(
+        JournalEvent.OUTPUT_PUBLISHED,
+        {"audio": str(dest_audio), "json": str(dest_json), "txt": str(dest_txt)},
+    )
+    workspace.journal.append(JournalEvent.JOB_COMPLETE)
+    workspace.cleanup()
+
+    logger.info(f"Smart Safe pipeline finished successfully! Published master to {dest_audio}")
     return report
