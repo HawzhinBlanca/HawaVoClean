@@ -41,6 +41,18 @@ class JobStoreError(RuntimeError):
     """The durable ledger could not uphold its contract."""
 
 
+class DiskFullError(JobStoreError):
+    """The storage disk or quota is exhausted."""
+
+
+class StorageReadOnlyError(JobStoreError):
+    """The underlying storage volume is read-only or permission-denied."""
+
+
+class CorruptLedgerRowError(JobStoreError):
+    """A row in the durable ledger contains unparseable or corrupted data."""
+
+
 class IdempotencyConflictError(JobStoreError):
     """One idempotency key was reused for a different request."""
 
@@ -183,62 +195,71 @@ class DurableJobStore:
 
     def _migrate(self) -> None:
         with self._lock:
-            version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            try:
+                version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+            except (sqlite3.Error, ValueError, TypeError) as exc:
+                raise JobStoreError(f"could not read job store schema version: {exc}") from exc
             if version > SCHEMA_VERSION:
                 raise JobStoreError(
                     f"job store schema {version} is newer than supported {SCHEMA_VERSION}"
                 )
-            if version == 0:
-                self._conn.executescript(
-                    """
-                    BEGIN IMMEDIATE;
-                    CREATE TABLE jobs (
-                        job_id TEXT PRIMARY KEY,
-                        idempotency_key TEXT UNIQUE,
-                        request_hash TEXT NOT NULL,
-                        output_key TEXT NOT NULL,
-                        output_path TEXT NOT NULL,
-                        state TEXT NOT NULL,
-                        terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
-                        record_json TEXT NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        terminal_at REAL,
-                        history_visible INTEGER NOT NULL DEFAULT 1
-                            CHECK (history_visible IN (0, 1))
-                    );
-                    CREATE UNIQUE INDEX active_output_lease
-                        ON jobs(output_key) WHERE terminal = 0;
-                    CREATE INDEX jobs_updated_at ON jobs(updated_at DESC);
-                    CREATE INDEX visible_terminal_retention
-                        ON jobs(history_visible, terminal, terminal_at DESC, created_at DESC);
-                    PRAGMA user_version = 2;
-                    COMMIT;
-                    """
-                )
-                version = 2
-            if version == 1:
-                # Version 1 stored only ``updated_at``.  It is the best
-                # available approximation for already-terminal rows and is
-                # deliberately migrated once; later restarts never refresh it.
-                self._conn.executescript(
-                    """
-                    BEGIN IMMEDIATE;
-                    ALTER TABLE jobs ADD COLUMN terminal_at REAL;
-                    ALTER TABLE jobs ADD COLUMN history_visible INTEGER NOT NULL DEFAULT 1
-                        CHECK (history_visible IN (0, 1));
-                    UPDATE jobs
-                       SET terminal_at = COALESCE(
-                           CAST(strftime('%s', updated_at) AS REAL),
-                           CAST(strftime('%s', 'now') AS REAL)
-                       )
-                     WHERE terminal = 1;
-                    CREATE INDEX visible_terminal_retention
-                        ON jobs(history_visible, terminal, terminal_at DESC, created_at DESC);
-                    PRAGMA user_version = 2;
-                    COMMIT;
-                    """
-                )
+            try:
+                if version == 0:
+                    self._conn.executescript(
+                        """
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE jobs (
+                            job_id TEXT PRIMARY KEY,
+                            idempotency_key TEXT UNIQUE,
+                            request_hash TEXT NOT NULL,
+                            output_key TEXT NOT NULL,
+                            output_path TEXT NOT NULL,
+                            state TEXT NOT NULL,
+                            terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+                            record_json TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            terminal_at REAL,
+                            history_visible INTEGER NOT NULL DEFAULT 1
+                                CHECK (history_visible IN (0, 1))
+                        );
+                        CREATE UNIQUE INDEX active_output_lease
+                            ON jobs(output_key) WHERE terminal = 0;
+                        CREATE INDEX jobs_updated_at ON jobs(updated_at DESC);
+                        CREATE INDEX visible_terminal_retention
+                            ON jobs(history_visible, terminal, terminal_at DESC, created_at DESC);
+                        PRAGMA user_version = 2;
+                        COMMIT;
+                        """
+                    )
+                    version = 2
+                if version == 1:
+                    # Version 1 stored only ``updated_at``.  It is the best
+                    # available approximation for already-terminal rows and is
+                    # deliberately migrated once; later restarts never refresh it.
+                    self._conn.executescript(
+                        """
+                        BEGIN IMMEDIATE;
+                        ALTER TABLE jobs ADD COLUMN terminal_at REAL;
+                        ALTER TABLE jobs ADD COLUMN history_visible INTEGER NOT NULL DEFAULT 1
+                            CHECK (history_visible IN (0, 1));
+                        UPDATE jobs
+                           SET terminal_at = COALESCE(
+                               CAST(strftime('%s', updated_at) AS REAL),
+                               CAST(strftime('%s', 'now') AS REAL)
+                           )
+                         WHERE terminal = 1;
+                        CREATE INDEX visible_terminal_retention
+                            ON jobs(history_visible, terminal, terminal_at DESC, created_at DESC);
+                        PRAGMA user_version = 2;
+                        COMMIT;
+                        """
+                    )
+                    version = 2
+            except (sqlite3.Error, OSError) as exc:
+                with contextlib.suppress(sqlite3.Error):
+                    self._conn.execute("ROLLBACK")
+                raise JobStoreError(f"job store schema migration failed: {exc}") from exc
 
     def _assert_open(self) -> None:
         if self._closed:
@@ -391,6 +412,13 @@ class DurableJobStore:
                     self._conn.execute("ROLLBACK")
                 if isinstance(exc, JobStoreError):
                     raise
+                msg = str(exc).lower()
+                if "disk is full" in msg or "database or disk is full" in msg:
+                    raise DiskFullError(f"durable job store disk is full: {exc}") from exc
+                if "readonly" in msg or "read-only" in msg:
+                    raise StorageReadOnlyError(
+                        f"durable job store storage volume is read-only: {exc}"
+                    ) from exc
                 raise JobStoreError(f"could not reserve durable job: {exc}") from exc
 
     def update(self, record: dict[str, Any], *, terminal: bool) -> None:
@@ -421,6 +449,13 @@ class DurableJobStore:
                     ),
                 )
             except sqlite3.Error as exc:
+                msg = str(exc).lower()
+                if "disk is full" in msg or "database or disk is full" in msg:
+                    raise DiskFullError(f"durable job store disk is full: {exc}") from exc
+                if "readonly" in msg or "read-only" in msg:
+                    raise StorageReadOnlyError(
+                        f"durable job store storage volume is read-only: {exc}"
+                    ) from exc
                 raise JobStoreError(f"could not update durable job: {exc}") from exc
             if cursor.rowcount != 1:
                 raise JobStoreError(f"durable job is missing: {record.get('job_id')}")
@@ -471,7 +506,20 @@ class DurableJobStore:
             if row["idempotency_key"] is None:
                 self._conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
                 continue
-            compact = self._compact_idempotency_receipt(self._decode(str(row["record_json"])))
+            try:
+                decoded = self._decode(str(row["record_json"]))
+            except JobStoreError:
+                decoded = {
+                    "job_id": job_id,
+                    "state": "failed",
+                    "stage": "failed",
+                    "message": "Corrupted durable job record receipt",
+                    "error": {
+                        "code": "CORRUPT_LEDGER_ROW",
+                        "message": "Durable job record JSON was corrupted; receipt pruned",
+                    },
+                }
+            compact = self._compact_idempotency_receipt(decoded)
             self._conn.execute(
                 """
                 UPDATE jobs
@@ -513,8 +561,20 @@ class DurableJobStore:
                 raise IdempotencyConflictError(
                     "idempotency key is already bound to a different request"
                 )
+            try:
+                record = self._decode(str(row["record_json"]))
+            except JobStoreError:
+                record = {
+                    "state": "failed",
+                    "stage": "failed",
+                    "message": "Corrupted durable idempotency record",
+                    "error": {
+                        "code": "CORRUPT_LEDGER_ROW",
+                        "message": "Durable job record JSON was corrupted",
+                    },
+                }
             return Reservation(
-                record=self._decode(str(row["record_json"])),
+                record=record,
                 reused=True,
                 terminal_at_epoch=(
                     float(row["terminal_at"]) if row["terminal_at"] is not None else None
@@ -539,8 +599,21 @@ class DurableJobStore:
                 raise JobStoreError(f"could not look up durable job resource: {exc}") from exc
             if row is None:
                 return None
+            try:
+                record = self._decode(str(row["record_json"]))
+            except JobStoreError:
+                record = {
+                    "job_id": job_id,
+                    "state": "failed",
+                    "stage": "failed",
+                    "message": "Corrupted durable job record",
+                    "error": {
+                        "code": "CORRUPT_LEDGER_ROW",
+                        "message": "Durable job record JSON was corrupted",
+                    },
+                }
             return Reservation(
-                record=self._decode(str(row["record_json"])),
+                record=record,
                 reused=True,
                 terminal_at_epoch=(
                     float(row["terminal_at"]) if row["terminal_at"] is not None else None
@@ -617,7 +690,18 @@ class DurableJobStore:
                 )
                 while rows := cursor.fetchmany(_PRUNE_PAGE_SIZE):
                     for row in rows:
-                        record = self._decode(str(row["record_json"]))
+                        job_id_str = str(row["job_id"])
+                        try:
+                            record = self._decode(str(row["record_json"]))
+                        except JobStoreError:
+                            record = {
+                                "job_id": job_id_str,
+                                "state": "interrupted",
+                                "stage": "interrupted",
+                                "message": "Corrupted non-terminal job record quarantined and interrupted",
+                                "created_at": now_iso,
+                                "seq": 1,
+                            }
                         record["state"] = "interrupted"
                         record["stage"] = "interrupted"
                         record["message"] = "Interrupted by an engine restart; safe to retry"
@@ -638,7 +722,7 @@ class DurableJobStore:
                                 self._encode(record),
                                 now_iso,
                                 terminal_now,
-                                str(row["job_id"]),
+                                job_id_str,
                             ),
                         )
 
@@ -680,22 +764,43 @@ class DurableJobStore:
                     placeholders = ",".join("?" for _ in keep_ids)
                     rows = self._conn.execute(
                         f"""
-                        SELECT record_json, terminal_at, history_visible
+                        SELECT job_id, record_json, terminal_at, history_visible
                           FROM jobs WHERE job_id IN ({placeholders})
                          ORDER BY terminal_at, created_at, job_id
                         """,
                         tuple(keep_ids),
                     ).fetchall()
-                    loaded = [
-                        self._attach_row_metadata(self._decode(str(row["record_json"])), row)
-                        for row in rows
-                    ]
+                    loaded = []
+                    for row in rows:
+                        try:
+                            record = self._decode(str(row["record_json"]))
+                        except JobStoreError:
+                            record = {
+                                "job_id": str(row["job_id"]),
+                                "state": "failed",
+                                "stage": "failed",
+                                "message": "Corrupted durable job record; quarantined",
+                                "error": {
+                                    "code": "CORRUPT_LEDGER_ROW",
+                                    "message": "Durable job record JSON was corrupted; quarantined",
+                                },
+                                "created_at": now_iso,
+                                "finished_at": now_iso,
+                            }
+                        loaded.append(self._attach_row_metadata(record, row))
                 self._conn.execute("COMMIT")
-            except (sqlite3.Error, JobStoreError) as exc:
+            except (sqlite3.Error, JobStoreError, OSError) as exc:
                 with contextlib.suppress(sqlite3.Error):
                     self._conn.execute("ROLLBACK")
                 if isinstance(exc, JobStoreError):
                     raise
+                msg = str(exc).lower()
+                if "disk is full" in msg or "database or disk is full" in msg:
+                    raise DiskFullError(f"durable job store disk is full: {exc}") from exc
+                if "readonly" in msg or "read-only" in msg:
+                    raise StorageReadOnlyError(
+                        f"durable job store storage volume is read-only: {exc}"
+                    ) from exc
                 raise JobStoreError(f"could not recover durable jobs: {exc}") from exc
         return loaded
 
@@ -709,11 +814,14 @@ class DurableJobStore:
 
 __all__ = [
     "ConflictPolicy",
+    "CorruptLedgerRowError",
+    "DiskFullError",
     "DurableJobStore",
     "IdempotencyConflictError",
     "JobStoreError",
     "OutputConflictError",
     "Reservation",
+    "StorageReadOnlyError",
     "canonical_request_hash",
     "output_key",
     "processing_record_path",
