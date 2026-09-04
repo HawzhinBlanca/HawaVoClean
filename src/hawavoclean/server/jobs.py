@@ -69,7 +69,7 @@ logger = get_logger("server.jobs")
 JobState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled", "interrupted"})
 STDERR_TAIL_LINES = 50
-DEFAULT_KILL_GRACE_S = 5.0
+DEFAULT_KILL_GRACE_S = 3.0
 DEFAULT_MAX_ACTIVE_JOBS = 8
 DEFAULT_MAX_TERMINAL_JOBS = 256
 DEFAULT_TERMINAL_JOB_TTL_S = 24 * 60 * 60.0
@@ -1172,9 +1172,13 @@ class JobManager:
         with self._lock:
             self._terminal_callbacks.append(callback)
 
-    def cancel(self, job_id: str) -> bool:
+    def cancel(self, job_id: str, *, wait: bool = False, timeout_s: float | None = None) -> bool:
         """Cancel a queued or running job. Returns False for an unknown id;
-        True otherwise (including the no-op on an already finished job)."""
+        True otherwise (including the no-op on an already finished job).
+
+        When ``wait=True``, synchronously awaits termination and terminal
+        state transition, releasing all output reservations before return.
+        """
         with self._locked():
             self._prune_locked()
             record = self._jobs.get(job_id)
@@ -1190,7 +1194,19 @@ class JobManager:
                 return True
             supervisor = record.supervisor
         if supervisor is not None:
-            self._terminate(supervisor)
+            if wait:
+                supervisor.terminate_tree(self._kill_grace_s)
+            else:
+                self._terminate(supervisor)
+        if wait:
+            deadline = time.monotonic() + (
+                timeout_s if timeout_s is not None else (self._kill_grace_s + 5.0)
+            )
+            while time.monotonic() < deadline:
+                with self._lock:
+                    if record.state in TERMINAL_STATES:
+                        return True
+                time.sleep(0.02)
         return True
 
     def subscribe(self, job_id: str) -> asyncio.Queue[dict[str, Any]] | None:

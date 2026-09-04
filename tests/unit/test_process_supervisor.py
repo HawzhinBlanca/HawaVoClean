@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
@@ -20,6 +21,8 @@ from hawavoclean.process_supervisor import (
     ProcessSupervisorError,
 )
 from hawavoclean.server.jobs import TERMINAL_STATES, JobManager
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _pid_is_live(pid: int) -> bool:
@@ -482,3 +485,547 @@ def test_process_supervisor_branches_and_edge_cases() -> None:
     sup3.kill_tree()
     assert proc3.killed is True
     sup3.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group qualification")
+def test_nested_process_tree_cancellation_within_ten_seconds(tmp_path: Path) -> None:
+    """Qualify 4-tier stubborn descendant tree cancellation exits within 10 seconds.
+
+    Hierarchy: Leader -> Child -> Grandchild -> Great-Grandchild.
+    All 3 descendant tiers ignore SIGTERM and attempt to keep running indefinitely.
+    ProcessSupervisor.terminate_tree must eliminate the complete tree in <= 10s.
+    """
+    child_pid_file = tmp_path / "child.pid"
+    grandchild_pid_file = tmp_path / "grandchild.pid"
+    great_grandchild_pid_file = tmp_path / "great_grandchild.pid"
+
+    # Multi-tier script where each descendant ignores SIGTERM and spawns the next tier
+    leader_script = "\n".join(
+        [
+            "import os, pathlib, signal, subprocess, sys, time",
+            "child_code = '''",
+            "import os, pathlib, signal, subprocess, sys, time",
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            'grandchild_code = \\"\\"\\"',
+            "import os, pathlib, signal, subprocess, sys, time",
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            'great_code = \\"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)\\"',
+            "great = subprocess.Popen([sys.executable, '-c', great_code])",
+            f"pathlib.Path({str(great_grandchild_pid_file)!r}).write_text(str(great.pid))",
+            "time.sleep(120)",
+            '\\"\\"\\"',
+            "gc = subprocess.Popen([sys.executable, '-c', grandchild_code])",
+            f"pathlib.Path({str(grandchild_pid_file)!r}).write_text(str(gc.pid))",
+            "time.sleep(120)",
+            "'''",
+            "c = subprocess.Popen([sys.executable, '-c', child_code])",
+            f"pathlib.Path({str(child_pid_file)!r}).write_text(str(c.pid))",
+            "print('ready', flush=True)",
+            "time.sleep(120)",
+        ]
+    )
+
+    supervisor = ProcessSupervisor.spawn(
+        [sys.executable, "-c", leader_script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    proc = supervisor.process
+    child_pid: int | None = None
+    grandchild_pid: int | None = None
+    great_grandchild_pid: int | None = None
+
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().strip()
+        assert line == "ready"
+
+        # Wait up to 5s for all 3 descendant tiers to initialize and write PIDs
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if (
+                child_pid_file.exists()
+                and grandchild_pid_file.exists()
+                and great_grandchild_pid_file.exists()
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("Nested child hierarchy failed to initialize PIDs")
+
+        child_pid = int(child_pid_file.read_text().strip())
+        grandchild_pid = int(grandchild_pid_file.read_text().strip())
+        great_grandchild_pid = int(great_grandchild_pid_file.read_text().strip())
+
+        # Verify all 4 tiers are alive and share the leader's process group
+        for p in (proc.pid, child_pid, grandchild_pid, great_grandchild_pid):
+            assert _pid_is_live(p)
+            assert os.getpgid(p) == proc.pid
+
+        # Terminate the complete tree and verify timing <= 10 seconds
+        t0 = time.monotonic()
+        supervisor.terminate_tree(grace_s=0.25)
+        assert proc.wait(timeout=5.0) != 0
+
+        poll_deadline = time.monotonic() + 8.0
+        while time.monotonic() < poll_deadline:
+            if not any(
+                _pid_is_live(p) for p in (proc.pid, child_pid, grandchild_pid, great_grandchild_pid)
+            ):
+                break
+            time.sleep(0.05)
+
+        elapsed = time.monotonic() - t0
+        assert elapsed <= 10.0, f"Process tree termination took {elapsed:.2f}s (> 10s)"
+
+        # Verify absolutely no orphan remains across any tier
+        assert not _pid_is_live(proc.pid), "Leader survived termination"
+        assert not _pid_is_live(child_pid), "Child survived termination"
+        assert not _pid_is_live(grandchild_pid), "Grandchild survived termination"
+        assert not _pid_is_live(great_grandchild_pid), "Great-grandchild survived termination"
+    finally:
+        supervisor.close(kill_remaining=True)
+        for cleanup_pid in (proc.pid, child_pid, grandchild_pid, great_grandchild_pid):
+            if cleanup_pid is not None and _pid_is_live(cleanup_pid):
+                with contextlib.suppress(OSError):
+                    os.kill(cleanup_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group qualification")
+def test_job_manager_cancels_heavy_job_and_starts_next_within_five_seconds(
+    tmp_path: Path,
+) -> None:
+    """Qualify cancel + next heavy job starts within 5 seconds without lock collision.
+
+    Required completion evidence: Complete tree exits within 10s; next heavy job
+    starts within five seconds; no orphan or locked artifact remains.
+    """
+    import soundfile as sf
+
+    marker = tmp_path / "heavy_grandchild.pid"
+    out_path = tmp_path / "master.wav"
+
+    # Simulated heavy job 1: spawns stubborn grandchild and sleeps
+    heavy_job_1_code = "\n".join(
+        [
+            "import json, pathlib, signal, subprocess, sys, time",
+            "gc = subprocess.Popen([sys.executable, '-c', "
+            "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'])",
+            f"pathlib.Path({str(marker)!r}).write_text(str(gc.pid))",
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+            "print(json.dumps({'event':'progress','stage':'enhance','progress':0.25}), flush=True)",
+            "time.sleep(120)",
+        ]
+    )
+
+    # Simulated heavy job 2: writes output WAV and completes with report
+    heavy_job_2_code = "\n".join(
+        [
+            "import json, pathlib, sys, time",
+            "import numpy as np, soundfile as sf",
+            f"out_file = pathlib.Path({str(out_path)!r})",
+            "sf.write(str(out_file), np.zeros((4800, 1), dtype=np.float32), 48000)",
+            "rep = out_file.parent / f'{out_file.stem}.hawavoclean.json'",
+            "rep.write_text(json.dumps({'schema': 1, 'decision': 'pass', 'audio_sha256': '0'*64}))",
+            "print(json.dumps({'event':'progress','stage':'enhance','progress':0.5}), flush=True)",
+            "print(json.dumps({'event':'done','report_path':str(rep)}), flush=True)",
+        ]
+    )
+
+    commands = {
+        "job1": [sys.executable, "-c", heavy_job_1_code],
+        "job2": [sys.executable, "-c", heavy_job_2_code],
+    }
+
+    manager = JobManager(
+        command_factory=lambda record: commands[record.profile],
+        kill_grace_s=0.3,
+    )
+
+    grandchild_pid: int | None = None
+    try:
+        # 1. Submit heavy job 1
+        j1 = manager.submit(
+            input_path=tmp_path / "in1.wav",
+            output_path=out_path,
+            profile="job1",
+            overwrite=True,
+        )
+        j1_id = j1["job_id"]
+
+        # Wait until job 1 is running and its stubborn grandchild is confirmed alive
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            st = manager.get_status(j1_id)
+            if st is not None and st["stage"] == "enhance" and marker.exists():
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("Heavy job 1 failed to reach enhance stage")
+
+        grandchild_pid = int(marker.read_text().strip())
+        assert _pid_is_live(grandchild_pid), "Heavy job 1 grandchild not alive"
+
+        # 2. Cancel Job 1 and start stopwatch T0
+        t0 = time.monotonic()
+        cancelled_ok = manager.cancel(j1_id, wait=True, timeout_s=4.0)
+        assert cancelled_ok is True
+
+        # 3. Immediately submit heavy job 2 targeting the EXACT SAME output path
+        j2 = manager.submit(
+            input_path=tmp_path / "in2.wav",
+            output_path=out_path,
+            profile="job2",
+            overwrite=True,
+        )
+        j2_id = j2["job_id"]
+
+        # 4. Wait for Job 2 to transition to running stage and record T1
+        run_deadline = time.monotonic() + 5.0
+        while time.monotonic() < run_deadline:
+            st = manager.get_status(j2_id)
+            if st is not None and st["state"] in ("running", "done"):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("Heavy job 2 did not start within 5 seconds")
+
+        t1 = time.monotonic()
+        turnaround_time = t1 - t0
+        assert turnaround_time <= 5.0, f"Next heavy job took {turnaround_time:.2f}s to start (> 5s)"
+
+        # 5. Wait for Job 2 to finish completely
+        done_deadline = time.monotonic() + 5.0
+        while time.monotonic() < done_deadline:
+            st = manager.get_status(j2_id)
+            if st is not None and st["state"] in TERMINAL_STATES:
+                break
+            time.sleep(0.02)
+        assert st is not None and st["state"] == "done"
+
+        # 6. Verify Job 1 reached cancelled and no orphan process remains
+        st1 = manager.get_status(j1_id)
+        assert st1 is not None and st1["state"] == "cancelled"
+        assert not _pid_is_live(grandchild_pid), "Grandchild from Job 1 was orphaned!"
+
+        # 7. Verify no locked artifact remains: output is valid and readable
+        assert out_path.exists()
+        data, sr = sf.read(str(out_path))
+        assert sr == 48000
+        assert len(data) == 4800
+    finally:
+        manager.shutdown(grace_s=0.2)
+        if grandchild_pid is not None and _pid_is_live(grandchild_pid):
+            with contextlib.suppress(OSError):
+                os.kill(grandchild_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX watchdog qualification")
+def test_host_crash_terminates_complete_nested_tree_via_watchdog(tmp_path: Path) -> None:
+    """Qualify host crash (SIGKILL of parent) cleans up complete multi-tier child tree.
+
+    Simulates abrupt host crash (kernel OOM / panic / SIGKILL):
+    - Host process spawns child with HAWAVOCLEAN_PARENT_PID.
+    - Child arms install_parent_death_watchdog and spawns grandchild and great-grandchild.
+    - Host is SIGKILLed.
+    - Watchdog detects host death and unwinds; zero orphan processes remain.
+    """
+    child_marker = tmp_path / "watchdog_child.pid"
+    grandchild_marker = tmp_path / "watchdog_grandchild.pid"
+    great_marker = tmp_path / "watchdog_great.pid"
+    ready_marker = tmp_path / "host_ready.txt"
+
+    src_dir = str(REPO / "src")
+
+    great_script = tmp_path / "great.py"
+    great_script.write_text(
+        "\n".join(
+            [
+                "import os, pathlib, sys, time",
+                f"sys.path.insert(0, {src_dir!r})",
+                "from hawavoclean.watchdog import parent_is_alive",
+                "parent_pid = os.getppid()",
+                f"pathlib.Path({str(great_marker)!r}).write_text(str(os.getpid()))",
+                "while parent_is_alive(parent_pid):",
+                "    time.sleep(0.05)",
+                "sys.exit(0)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    grandchild_script = tmp_path / "grandchild.py"
+    grandchild_script.write_text(
+        "\n".join(
+            [
+                "import os, pathlib, subprocess, sys, time",
+                f"sys.path.insert(0, {src_dir!r})",
+                "from hawavoclean.watchdog import parent_is_alive",
+                "ppid = os.getppid()",
+                f"great = subprocess.Popen([sys.executable, {str(great_script)!r}])",
+                f"pathlib.Path({str(grandchild_marker)!r}).write_text(str(os.getpid()))",
+                "try:",
+                "    while parent_is_alive(ppid):",
+                "        time.sleep(0.05)",
+                "finally:",
+                "    great.kill()",
+                "    great.wait()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    child_script = tmp_path / "child.py"
+    child_script.write_text(
+        "\n".join(
+            [
+                "import os, pathlib, signal, subprocess, sys, time",
+                f"sys.path.insert(0, {src_dir!r})",
+                "from hawavoclean.watchdog import install_parent_death_watchdog",
+                "def _term_handler(sig, frame):",
+                "    raise KeyboardInterrupt",
+                "signal.signal(signal.SIGTERM, _term_handler)",
+                "install_parent_death_watchdog(poll_interval_s=0.05, grace_s=0.2)",
+                f"pathlib.Path({str(child_marker)!r}).write_text(str(os.getpid()))",
+                f"gc = subprocess.Popen([sys.executable, {str(grandchild_script)!r}])",
+                "try:",
+                "    time.sleep(120)",
+                "finally:",
+                "    gc.kill()",
+                "    gc.wait()",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    host_script = tmp_path / "host.py"
+    host_script.write_text(
+        "\n".join(
+            [
+                "import os, pathlib, subprocess, sys, time",
+                f"sys.path.insert(0, {src_dir!r})",
+                "host_pid = os.getpid()",
+                "env = dict(os.environ)",
+                "env['HAWAVOCLEAN_PARENT_PID'] = str(host_pid)",
+                f"env['PYTHONPATH'] = {src_dir!r}",
+                f"child = subprocess.Popen([sys.executable, {str(child_script)!r}], env=env)",
+                f"pathlib.Path({str(ready_marker)!r}).write_text(str(host_pid))",
+                "time.sleep(120)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    host_proc = subprocess.Popen(
+        [sys.executable, str(host_script)],
+        cwd=REPO,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    child_pid: int | None = None
+    grandchild_pid: int | None = None
+    great_pid: int | None = None
+
+    try:
+        # Wait until all 4 processes (host, child, grandchild, great) are running
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if (
+                ready_marker.exists()
+                and child_marker.exists()
+                and grandchild_marker.exists()
+                and great_marker.exists()
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("Host hierarchy failed to initialize PIDs")
+
+        host_pid = host_proc.pid
+        child_pid = int(child_marker.read_text().strip())
+        grandchild_pid = int(grandchild_marker.read_text().strip())
+        great_pid = int(great_marker.read_text().strip())
+
+        for p in (host_pid, child_pid, grandchild_pid, great_pid):
+            assert _pid_is_live(p)
+
+        # Abrupt host crash: SIGKILL the host (no atexit, no finally, no cleanup)
+        os.kill(host_pid, signal.SIGKILL)
+        host_proc.wait(timeout=5.0)
+        assert not _pid_is_live(host_pid)
+
+        # The watchdog in the child must notice within seconds and terminate
+        watchdog_deadline = time.monotonic() + 10.0
+        while time.monotonic() < watchdog_deadline:
+            if not any(_pid_is_live(p) for p in (child_pid, grandchild_pid, great_pid)):
+                break
+            time.sleep(0.05)
+
+        assert not _pid_is_live(child_pid), "Child survived host crash"
+        assert not _pid_is_live(grandchild_pid), "Grandchild survived host crash"
+        assert not _pid_is_live(great_pid), "Great-grandchild survived host crash"
+    finally:
+        if host_proc.poll() is None:
+            host_proc.kill()
+            host_proc.wait(timeout=2.0)
+        for cleanup_pid in (child_pid, grandchild_pid, great_pid):
+            if cleanup_pid is not None and _pid_is_live(cleanup_pid):
+                with contextlib.suppress(OSError):
+                    os.kill(cleanup_pid, signal.SIGKILL)
+
+
+def test_windows_job_object_nested_children_and_crash_contract() -> None:
+    """Qualify Windows Job Object semantics for nested trees and host crash.
+
+    Simulates:
+    1. Multi-tier hierarchy containment (Leader, Child, Grandchild) inside Job Object.
+    2. JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE termination when host handle closes abruptly.
+    3. Multi-thread Toolhelp snapshot enumeration and initial thread resumption.
+    4. Immediate terminate_job capability across all nested members.
+    """
+    import ctypes
+
+    class _MultiProcessMockKernel32:
+        def __init__(self) -> None:
+            self.job_limits: dict[int, int] = {}
+            self.job_processes: dict[int, set[int]] = {}
+            self.closed_handles: list[int] = []
+            self.terminated_jobs: list[tuple[int, int]] = []
+            self.resumed_threads: list[int] = []
+            self.threads: list[tuple[int, int]] = []  # (thread_id, process_id)
+            self._next_handle = 1000
+            self._thread_idx = 0
+
+            def _create_job(*_a: Any) -> int:
+                self._next_handle += 1
+                h = self._next_handle
+                self.job_processes[h] = set()
+                return h
+
+            def _set_info(job: int, _cls: int, ptr: Any, _sz: int) -> int:
+                info = ptr._obj if hasattr(ptr, "_obj") else ptr
+                self.job_limits[job] = int(info.BasicLimitInformation.LimitFlags)
+                return 1
+
+            def _open_proc(_acc: int, _inh: int, pid: int) -> int:
+                return pid + 50000
+
+            def _assign(job: int, proc_handle: int) -> int:
+                pid = proc_handle - 50000
+                self.job_processes.setdefault(job, set()).add(pid)
+                return 1
+
+            def _snap(_flags: int, _pid: int) -> int:
+                return 88888
+
+            def _tnext(_s: int, ptr: Any) -> int:
+                if self._thread_idx >= len(self.threads):
+                    return 0
+                tid, pid = self.threads[self._thread_idx]
+                self._thread_idx += 1
+                entry = ptr._obj if hasattr(ptr, "_obj") else ptr
+                entry.th32ThreadID = tid
+                entry.th32OwnerProcessID = pid
+                return 1
+
+            def _tfirst(_s: int, ptr: Any) -> int:
+                if not self.threads:
+                    return 0
+                self._thread_idx = 0
+                return _tnext(_s, ptr)
+
+            def _openthread(_acc: int, _inh: int, tid: int) -> int:
+                return tid + 70000
+
+            def _resume(h: int) -> int:
+                tid = h - 70000
+                self.resumed_threads.append(tid)
+                return 1
+
+            def _term_job(job: int, code: int) -> int:
+                self.terminated_jobs.append((job, code))
+                self.job_processes[job] = set()
+                return 1
+
+            def _close_handle(handle: int) -> int:
+                self.closed_handles.append(handle)
+                if handle in self.job_limits:
+                    limit = self.job_limits[handle]
+                    if limit & 0x0000_2000:
+                        self.job_processes[handle] = set()
+                return 1
+
+            self.CreateJobObjectW = _create_job
+            self.SetInformationJobObject = _set_info
+            self.OpenProcess = _open_proc
+            self.AssignProcessToJobObject = _assign
+            self.CreateToolhelp32Snapshot = _snap
+            self.Thread32First = _tfirst
+            self.Thread32Next = _tnext
+            self.OpenThread = _openthread
+            self.ResumeThread = _resume
+            self.TerminateJobObject = _term_job
+            self.CloseHandle = _close_handle
+            self.GetLastError = lambda: 0
+
+    mock_k32 = _MultiProcessMockKernel32()
+
+    class _MockWinDLL:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(mock_k32, name)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            setattr(mock_k32, name, value)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setitem(vars(ctypes), "WinDLL", _MockWinDLL)
+
+    try:
+        from hawavoclean.process_supervisor import _NativeWindowsJobApi
+
+        api = _NativeWindowsJobApi()
+
+        # 1. Create Job Object with KILL_ON_JOB_CLOSE
+        job = api.create_kill_on_close_job()
+        assert job in mock_k32.job_limits
+        assert mock_k32.job_limits[job] == 0x0000_2000
+
+        # 2. Assign Leader, Child, and Grandchild (nested tree)
+        leader_pid = 20001
+        child_pid = 20002
+        grandchild_pid = 20003
+        api.assign_process(job, leader_pid)
+        api.assign_process(job, child_pid)
+        api.assign_process(job, grandchild_pid)
+        assert mock_k32.job_processes[job] == {leader_pid, child_pid, grandchild_pid}
+
+        # 3. Test multi-thread Toolhelp snapshot: snapshot contains threads from other
+        # processes and threads from child; verify resume_process picks the exact match.
+        mock_k32.threads = [
+            (901, 99999),  # Other process
+            (902, 88888),  # Other process
+            (903, leader_pid),  # Target leader process initial thread
+        ]
+        api.resume_process(leader_pid)
+        assert mock_k32.resumed_threads == [903]
+
+        # 4. Terminate Job Object terminates all nested members
+        api.terminate_job(job, 1)
+        assert mock_k32.terminated_jobs == [(job, 1)]
+        assert len(mock_k32.job_processes[job]) == 0
+
+        # 5. Emulate host crash: create job, assign nested processes, close handle abruptly.
+        job2 = api.create_kill_on_close_job()
+        api.assign_process(job2, 30001)
+        api.assign_process(job2, 30002)
+        assert len(mock_k32.job_processes[job2]) == 2
+        # Host crashes -> OS closes Job Object handle -> KILL_ON_JOB_CLOSE fires
+        api.close_handle(job2)
+        assert len(mock_k32.job_processes[job2]) == 0
+    finally:
+        monkeypatch.undo()

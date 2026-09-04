@@ -383,6 +383,9 @@ class ProcessSupervisor:
         if self._platform == "posix":
             with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
                 os.killpg(self.process.pid, signal.SIGKILL)
+            if self.process.poll() is None:
+                with contextlib.suppress(OSError):
+                    self.process.kill()
             return
 
         job_terminated = False
