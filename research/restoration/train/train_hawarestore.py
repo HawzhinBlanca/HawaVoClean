@@ -24,9 +24,10 @@ Run from the repository root as a module::
 
 import argparse
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import soundfile as sf
@@ -36,6 +37,12 @@ from scipy import signal
 from torch.utils.data import DataLoader, Dataset
 
 from hawavoclean.hashing import hash_bytes, hash_file
+from hawavoclean.restoration.checkpoint import (
+    compute_code_provenance,
+    compute_dependency_provenance,
+    load_safe_checkpoint,
+    save_safe_checkpoint,
+)
 from hawavoclean.restoration.hawarestore_kd import HawaRestoreKDNet
 from hawavoclean.restoration.speaker_embed import SpeakerEmbeddingExtractor
 from research.restoration.simulation.degradation import DegradationSimulator
@@ -405,6 +412,7 @@ def _run_epoch(
     optimizer: torch.optim.Optimizer | None,
     device: str,
     n_fft: int,
+    max_steps: int | None = None,
 ) -> dict[str, float]:
     """One pass over ``loader``; trains when ``optimizer`` is given, else evaluates.
 
@@ -493,6 +501,9 @@ def _run_epoch(
                 flush=True,
             )
 
+        if max_steps is not None and n_batches >= max_steps:
+            break
+
     return {key: value / max(1, n_batches) for key, value in sums.items()}
 
 
@@ -500,6 +511,43 @@ def _term_losses(metrics: dict[str, float]) -> dict[str, float]:
     """Map HawaRestoreLoss metric keys to checkpoint-facing term names."""
     key_map = dict(zip(ACTIVE_LOSS_TERMS, REQUIRED_METRIC_KEYS, strict=True))
     return {term: metrics[key] for term, key in key_map.items()}
+
+
+def _serialize_rng_state() -> dict[str, Any]:
+    """Capture PyTorch and NumPy RNG states using weights_only-safe types."""
+    np_s = np.random.get_state()
+    return {
+        "torch": torch.get_rng_state(),
+        "numpy": {
+            "algo": str(np_s[0]),
+            "keys": torch.from_numpy(np_s[1].copy()),
+            "pos": int(np_s[2]),
+            "has_gauss": int(np_s[3]),
+            "cached_gauss": float(np_s[4]),
+        },
+    }
+
+
+def _restore_rng_state(rng_s: dict[str, Any]) -> None:
+    """Restore PyTorch and NumPy RNG states safely."""
+    if "torch" in rng_s and isinstance(rng_s["torch"], torch.Tensor):
+        torch.set_rng_state(rng_s["torch"])
+    if "numpy" in rng_s and isinstance(rng_s["numpy"], dict):
+        np_dict = rng_s["numpy"]
+        keys = np_dict.get("keys")
+        if isinstance(keys, torch.Tensor):
+            keys_arr = keys.numpy()
+        else:
+            keys_arr = np.array(keys, dtype=np.uint32)
+        np.random.set_state(
+            (
+                str(np_dict["algo"]),
+                keys_arr,
+                int(np_dict["pos"]),
+                int(np_dict["has_gauss"]),
+                float(np_dict["cached_gauss"]),
+            )
+        )
 
 
 def train_model(
@@ -519,6 +567,10 @@ def train_model(
     overwrite: bool = False,
     profiles_dir: Path | str | None = None,
     num_workers: int = 4,
+    resume_path: Path | str | None = None,
+    max_seconds: float | None = None,
+    max_steps_per_epoch: int | None = None,
+    save_safetensors: bool = False,
 ) -> Path:
     """Train HawaRestoreKDNet with speaker-disjoint splits and the full composite loss.
 
@@ -526,6 +578,12 @@ def train_model(
     returns the checkpoint path. Refuses to overwrite an existing checkpoint
     unless ``overwrite=True``; promoting a candidate into
     ``models/hawarestore-kd/`` is a deliberate, user-gated step.
+
+    Features:
+    - Locked best model saving: records the weights with lowest validation loss.
+    - Resumable training: restores optimizer, epoch, and RNG states via ``resume_path``.
+    - Safe checkpoint contract: loaded with ``weights_only=True``, saves provenance hashes.
+    - Bounded execution: stops cleanly when ``max_seconds`` or ``max_steps_per_epoch`` is met.
     """
     if synthetic == (data_dir is not None):
         raise ValueError("Choose exactly one data mode: --data-dir <real WAVs> or --synthetic.")
@@ -594,7 +652,12 @@ def train_model(
         persistent_workers=(num_workers > 0),
     )
 
+    # Seed RNGs deterministically for reproducibility
     torch.manual_seed(split_seed)
+    np.random.seed(split_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(split_seed)
+
     config = {
         "in_channels": 2,
         "out_channels": 2,
@@ -610,23 +673,107 @@ def train_model(
     loss_fn = HawaRestoreLoss().to(device)
     spk_embed = DifferentiableSpeakerEmbed().to(device)
 
+    start_epoch = 1
+    best_epoch = 1
+    best_val_loss = float("inf")
+    best_model_state_dict: dict[str, torch.Tensor] = {}
+    best_train_metrics: dict[str, float] = {}
+    best_val_metrics: dict[str, float] = {}
+
+    if resume_path is not None:
+        print(f"Resuming HawaRestore-KD training from checkpoint: {resume_path}")
+        resume_dict = load_safe_checkpoint(resume_path, map_location=device)
+        model.load_state_dict(resume_dict["model_state_dict"])
+        if (
+            "optimizer_state_dict" in resume_dict
+            and resume_dict["optimizer_state_dict"] is not None
+        ):
+            optimizer.load_state_dict(resume_dict["optimizer_state_dict"])
+        start_epoch = int(resume_dict.get("epoch", 0)) + 1
+        best_epoch = int(resume_dict.get("best_epoch", 1))
+        best_val_loss = float(resume_dict.get("best_val_loss", float("inf")))
+        if "best_model_state_dict" in resume_dict and isinstance(
+            resume_dict["best_model_state_dict"], dict
+        ):
+            best_model_state_dict = {
+                k: v.detach().cpu().clone()
+                for k, v in resume_dict["best_model_state_dict"].items()
+                if isinstance(v, torch.Tensor)
+            }
+        if "best_train_metrics" in resume_dict and isinstance(
+            resume_dict["best_train_metrics"], dict
+        ):
+            best_train_metrics = dict(resume_dict["best_train_metrics"])
+        if "best_val_metrics" in resume_dict and isinstance(resume_dict["best_val_metrics"], dict):
+            best_val_metrics = dict(resume_dict["best_val_metrics"])
+        if "rng_state" in resume_dict and isinstance(resume_dict["rng_state"], dict):
+            _restore_rng_state(resume_dict["rng_state"])
+
     train_metrics: dict[str, float] = {}
     val_metrics: dict[str, float] = {}
-    for epoch in range(1, epochs + 1):
+    epoch_history: list[dict[str, Any]] = []
+    time_start = time.monotonic()
+
+    for epoch in range(start_epoch, epochs + 1):
         train_metrics = _run_epoch(
-            model, train_loader, loss_fn, spk_embed, optimizer, device, n_fft
+            model,
+            train_loader,
+            loss_fn,
+            spk_embed,
+            optimizer,
+            device,
+            n_fft,
+            max_steps=max_steps_per_epoch,
         )
-        val_metrics = _run_epoch(model, val_loader, loss_fn, spk_embed, None, device, n_fft)
+        val_metrics = _run_epoch(
+            model,
+            val_loader,
+            loss_fn,
+            spk_embed,
+            None,
+            device,
+            n_fft,
+            max_steps=max_steps_per_epoch,
+        )
         train_str = " ".join(f"{k}={v:.4f}" for k, v in sorted(train_metrics.items()))
         val_str = " ".join(f"{k}={v:.4f}" for k, v in sorted(val_metrics.items()))
         print(f"Epoch {epoch}/{epochs} - train: {train_str} | val: {val_str}", flush=True)
 
-    torch.save(
-        {
+        epoch_history.append(
+            {
+                "epoch": epoch,
+                "train": _term_losses(train_metrics),
+                "val": _term_losses(val_metrics),
+            }
+        )
+
+        current_val_loss = val_metrics["loss_total"]
+        if current_val_loss < best_val_loss or not best_model_state_dict:
+            best_val_loss = current_val_loss
+            best_epoch = epoch
+            best_model_state_dict = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
+            best_train_metrics = dict(train_metrics)
+            best_val_metrics = dict(val_metrics)
+            print(
+                f"  --> Locked new best validation loss: {best_val_loss:.4f} at epoch {epoch}",
+                flush=True,
+            )
+
+        # Save resumable checkpoint each epoch
+        last_ckpt_path = out_path / "hawarestore_kd_last.pt"
+        last_payload = {
             "model_state_dict": model.state_dict(),
-            "config": config,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": epoch,
             "epochs": epochs,
-            "final_loss": train_metrics["loss_total"],
+            "best_epoch": best_epoch,
+            "best_val_loss": best_val_loss,
+            "best_model_state_dict": best_model_state_dict,
+            "best_train_metrics": best_train_metrics,
+            "best_val_metrics": best_val_metrics,
+            "config": config,
             "data_mode": data_mode,
             "n_train": len(train_items),
             "n_val": len(val_items),
@@ -641,15 +788,56 @@ def train_model(
                 "envelope": loss_fn.lambda_envelope,
                 "speaker": loss_fn.lambda_speaker,
             },
-            "final_losses": {
-                "train": _term_losses(train_metrics),
-                "val": _term_losses(val_metrics),
-            },
+            "rng_state": _serialize_rng_state(),
+        }
+        save_safe_checkpoint(last_payload, last_ckpt_path, save_safetensors=False)
+
+        # Bounded execution check
+        if max_seconds is not None:
+            elapsed = time.monotonic() - time_start
+            if elapsed >= max_seconds:
+                print(
+                    f"Bounded training time ceiling reached ({elapsed:.1f}s >= {max_seconds}s). "
+                    f"Halting at epoch {epoch}.",
+                    flush=True,
+                )
+                break
+
+    # Save final best-model checkpoint (locked best model, not incidental final)
+    final_payload = {
+        "model_state_dict": best_model_state_dict if best_model_state_dict else model.state_dict(),
+        "config": config,
+        "epochs": epochs,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "final_loss": best_train_metrics.get("loss_total", train_metrics.get("loss_total", 0.0)),
+        "data_mode": data_mode,
+        "n_train": len(train_items),
+        "n_val": len(val_items),
+        "split_seed": split_seed,
+        "train_speakers": train_speakers,
+        "val_speakers": val_speakers,
+        "manifest_hashes": manifest_hashes,
+        "active_loss_terms": list(ACTIVE_LOSS_TERMS),
+        "loss_weights": {
+            "flow": loss_fn.lambda_flow,
+            "stft": loss_fn.lambda_stft,
+            "envelope": loss_fn.lambda_envelope,
+            "speaker": loss_fn.lambda_speaker,
         },
-        ckpt_path,
-    )
+        "final_losses": {
+            "train": _term_losses(best_train_metrics if best_train_metrics else train_metrics),
+            "val": _term_losses(best_val_metrics if best_val_metrics else val_metrics),
+        },
+        "epoch_history": epoch_history,
+        "code_hash": compute_code_provenance(),
+        "dependency_versions": compute_dependency_provenance(),
+    }
+    save_safe_checkpoint(final_payload, ckpt_path, save_safetensors=save_safetensors)
     ckpt_hash = hash_file(ckpt_path)
-    print(f"Saved trained checkpoint: {ckpt_path} (SHA-256: {ckpt_hash})")
+    print(
+        f"Saved trained best checkpoint: {ckpt_path} (SHA-256: {ckpt_hash}, best_epoch: {best_epoch})"
+    )
     return ckpt_path
 
 
@@ -696,6 +884,29 @@ def main() -> None:
         default=4,
         help="Number of DataLoader worker subprocesses for parallel audio loading.",
     )
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Path to an existing checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="Maximum training runtime ceiling in seconds.",
+    )
+    parser.add_argument(
+        "--max-steps-per-epoch",
+        type=int,
+        default=None,
+        help="Maximum number of mini-batches to process per epoch.",
+    )
+    parser.add_argument(
+        "--save-safetensors",
+        action="store_true",
+        help="Export a companion HuggingFace safetensors file and metadata JSON.",
+    )
     args = parser.parse_args()
     train_model(
         epochs=args.epochs,
@@ -714,6 +925,10 @@ def main() -> None:
         overwrite=args.overwrite,
         profiles_dir=args.profiles_dir,
         num_workers=args.num_workers,
+        resume_path=args.resume,
+        max_seconds=args.max_seconds,
+        max_steps_per_epoch=args.max_steps_per_epoch,
+        save_safetensors=args.save_safetensors,
     )
 
 

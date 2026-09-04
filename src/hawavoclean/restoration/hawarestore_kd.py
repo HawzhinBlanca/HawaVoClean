@@ -28,6 +28,7 @@ from hawavoclean.restoration.base import (
     RestorationRenderResult,
     Restorer,
 )
+from hawavoclean.restoration.checkpoint import load_safe_checkpoint
 from hawavoclean.restoration.protected_band import (
     compute_transition_mask,
     merge_protected_spectrum,
@@ -239,11 +240,7 @@ class HawaRestoreKD(Restorer):
                 "on untrained weights; set HAWAVOCLEAN_RESTORATION_CHECKPOINT or install the model."
             )
         try:
-            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
-            if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
-                raise ModelProvenanceError(
-                    f"HawaRestore-KD checkpoint {ckpt_path} has no 'model_state_dict' entry."
-                )
+            ckpt = load_safe_checkpoint(ckpt_path, map_location=self.device)
 
             # Dynamic config from checkpoint (real-data trained) or legacy defaults.
             net_config = ckpt.get("config", {})

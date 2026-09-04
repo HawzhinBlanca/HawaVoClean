@@ -38,7 +38,7 @@ def synthetic_run(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         split_seed=7,
         device="cpu",
     )
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     return {"ckpt_path": ckpt_path, "ckpt": ckpt, "out_dir": out_dir}
 
 
@@ -92,6 +92,9 @@ def test_checkpoint_reloads_with_metadata(synthetic_run: dict[str, Any]) -> None
     assert set(ckpt["loss_weights"]) == {"flow", "stft", "envelope", "speaker"}
     assert math.isfinite(ckpt["final_loss"])
     assert set(ckpt["manifest_hashes"]) >= {"train", "development"}
+    assert ckpt["best_epoch"] == 1
+    assert "code_hash" in ckpt and len(ckpt["code_hash"]) > 0
+    assert "dependency_versions" in ckpt and "torch" in ckpt["dependency_versions"]
 
     net = HawaRestoreKDNet(**ckpt["config"])
     net.load_state_dict(ckpt["model_state_dict"])
@@ -150,7 +153,7 @@ def test_real_data_mode_trains_from_wav_files(tmp_path: Path) -> None:
         split_seed=3,
         device="cpu",
     )
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     assert ckpt["data_mode"] == "real"
     assert ckpt["n_train"] >= 1
     assert ckpt["n_val"] >= 1
