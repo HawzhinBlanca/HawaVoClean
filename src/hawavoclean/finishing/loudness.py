@@ -9,6 +9,7 @@ import pyloudnorm as pyln
 import scipy.signal
 
 from hawavoclean.finishing.truepeak import true_peak_linear
+from hawavoclean.runtime import evict_memmap_pages
 
 LOUDNESS_BLOCK_SIZE_S = 0.4
 LOUDNESS_BLOCK_OVERLAP = 0.75
@@ -276,5 +277,7 @@ def measure_loudness_and_peaks_streaming(
     meter = StreamingLoudnessMeter(sample_rate, int(waveform.shape[0]))
     samples = int(waveform.shape[1])
     for start in range(0, samples, chunk_samples):
-        meter.push(waveform[:, start : min(samples, start + chunk_samples)])
+        end = min(samples, start + chunk_samples)
+        meter.push(waveform[:, start:end])
+        evict_memmap_pages(waveform, start, end)
     return meter.finish(true_peak_linear(waveform, factor=4))

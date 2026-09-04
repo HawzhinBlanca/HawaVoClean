@@ -7,6 +7,8 @@ from typing import Any
 
 import numpy as np
 
+from hawavoclean.runtime import evict_memmap_pages
+
 HASH_ITERATOR_CHUNK_BYTES = 1 << 20
 
 
@@ -32,8 +34,20 @@ def hash_numpy(arr: np.ndarray[Any, Any]) -> str:
     value = np.asarray(arr)
     digest = hashlib.sha256()
     if value.flags.c_contiguous:
-        digest.update(memoryview(value).cast("B"))
+        mv = memoryview(value).cast("B")
+        total = len(mv)
+        chunk_bytes = 16 * 1024 * 1024
+        for offset in range(0, total, chunk_bytes):
+            end = min(total, offset + chunk_bytes)
+            digest.update(mv[offset:end])
+            if isinstance(arr, np.memmap):
+                evict_memmap_pages(
+                    arr,
+                    offset // max(int(value.dtype.itemsize), 1),
+                    end // max(int(value.dtype.itemsize), 1),
+                )
         return digest.hexdigest()
+
     chunk_elements = max(HASH_ITERATOR_CHUNK_BYTES // max(int(value.dtype.itemsize), 1), 1)
     with np.nditer(
         value,

@@ -51,6 +51,9 @@ import os
 import sys
 from ctypes import Structure, byref, c_size_t, c_ulong
 from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
 
 from hawavoclean.errors import ConfigError, WorkerOOMError
 
@@ -272,6 +275,54 @@ def process_peak_rss_bytes() -> int:
 
     peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     return peak if sys.platform == "darwin" else peak * 1024
+
+
+def evict_memmap_pages(
+    array: np.ndarray[Any, Any],
+    start_sample: int = 0,
+    end_sample: int | None = None,
+) -> None:
+    """Evict physical page frames for a processed slice of a memory-mapped array.
+
+    Keeps the resident set size bounded below process thresholds during long-audio
+    streaming passes. Invalidates page table entries back to the OS page cache.
+    No-op if the array is not backed by an mmap or on unsupported platforms.
+    """
+    if not isinstance(array, np.memmap):
+        return
+    if sys.platform == "win32":
+        return
+
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        if not hasattr(libc, "msync"):
+            return
+        libc.msync.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+        libc.msync.restype = ctypes.c_int
+        ms_invalidate = 2
+
+        pagesize = os.sysconf("SC_PAGESIZE") if hasattr(os, "sysconf") else 4096
+        buf_ptr = int(array.__array_interface__["data"][0])
+        itemsize = int(array.dtype.itemsize)
+        channels = int(array.shape[0]) if array.ndim > 1 else 1
+        samples = int(array.shape[-1])
+
+        actual_end = samples if end_sample is None else min(samples, max(start_sample, end_sample))
+        if actual_end <= start_sample:
+            return
+
+        slice_len = actual_end - start_sample
+        for ch in range(channels):
+            addr = buf_ptr + (ch * samples + start_sample) * itemsize
+            size = slice_len * itemsize
+            page_addr = addr & ~(pagesize - 1)
+            page_size = ((addr + size + pagesize - 1) & ~(pagesize - 1)) - page_addr
+            libc.msync(ctypes.c_void_p(page_addr), ctypes.c_size_t(page_size), ms_invalidate)
+    except Exception:
+        pass
 
 
 def memory_budget_mb() -> int | None:

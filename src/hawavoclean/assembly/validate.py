@@ -4,6 +4,7 @@ import numpy as np
 
 from hawavoclean.audio.types import AudioBuffer
 from hawavoclean.errors import OutputValidationError
+from hawavoclean.runtime import evict_memmap_pages
 from hawavoclean.segmentation.types import SpeechUnit
 
 VALIDATION_CHUNK_SAMPLES = 1 << 20
@@ -40,8 +41,10 @@ def validate_assembled_timeline(
 
     # 4. All samples finite
     for start in range(0, samples, VALIDATION_CHUNK_SAMPLES):
-        if not np.all(np.isfinite(data[:, start : start + VALIDATION_CHUNK_SAMPLES])):
+        end = min(samples, start + VALIDATION_CHUNK_SAMPLES)
+        if not np.all(np.isfinite(data[:, start:end])):
             raise OutputValidationError("Assembled output audio contains NaN or Infinite values.")
+        evict_memmap_pages(data, start, end)
 
     # 5 & 6. Timeline coverage and duplication checks
     # Group units by channel and check coverage

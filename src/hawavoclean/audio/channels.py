@@ -6,6 +6,7 @@ import numpy as np
 
 from hawavoclean.audio.types import AudioBuffer, ChannelMode
 from hawavoclean.errors import AmbiguousStereoError, InvalidUserInputError
+from hawavoclean.runtime import evict_memmap_pages
 
 CHANNEL_ANALYSIS_CHUNK_SAMPLES = 1 << 20
 
@@ -117,6 +118,7 @@ def classify_channels_bounded(
         dot += float(np.dot(ch0, ch1))
         norm0_sq += float(np.dot(ch0, ch0))
         norm1_sq += float(np.dot(ch1, ch1))
+        evict_memmap_pages(buffer.data, start, stop)
 
     if max_diff < 1e-5:
         return ChannelMode.DUAL_MONO_SAME

@@ -10,6 +10,7 @@ import soundfile as sf
 
 from hawavoclean.audio.types import AudioBuffer
 from hawavoclean.errors import OutputValidationError
+from hawavoclean.runtime import evict_memmap_pages
 
 WAV_CLASSIC_LIMIT_BYTES = (1 << 32) - 1
 WAV_HEADER_RESERVE_BYTES = 1 << 20
@@ -239,7 +240,9 @@ def encode_audio_streaming(
                     else:
                         interleaved[:, channel] = source
                 destination.write(interleaved)
+                evict_memmap_pages(data, start, stop)
         _finalize_deterministic_wav(dest_path)
+
     except OutputValidationError:
         dest_path.unlink(missing_ok=True)
         raise

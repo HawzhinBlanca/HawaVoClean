@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from hawavoclean.runtime import evict_memmap_pages
 from hawavoclean.segmentation.types import SpeechUnit
 
 
@@ -54,6 +55,7 @@ def assemble_channel_timeline_into(
         return
 
     timeline.fill(0.0)
+    evict_memmap_pages(timeline)
     crossfade_samples = int(round(sample_rate * (crossfade_ms / 1000.0)))
 
     for i, (unit, wave) in enumerate(zip(units, unit_waveforms, strict=True)):

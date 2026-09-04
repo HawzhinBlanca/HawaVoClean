@@ -86,7 +86,10 @@ from hawavoclean.policy.continuity import (
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from hawavoclean.progress import (
     PROGRESS_DECODE,
+    PROGRESS_FINISH_ASSEMBLY,
+    PROGRESS_FINISH_ENCODE,
     PROGRESS_FINISH_END,
+    PROGRESS_FINISH_LIMITER,
     PROGRESS_FINISH_START,
     PROGRESS_PREFLIGHT,
     PROGRESS_PUBLISH,
@@ -1144,6 +1147,10 @@ def _run_after_preflight(
         _release_audio_memmap(audio_buf.data, disk_mappings)
 
     # 10. Assembly
+    emit_progress(
+        on_progress,
+        ProgressEvent("finish", PROGRESS_FINISH_ASSEMBLY, "Assembling timeline"),
+    )
     assembled_data: np.ndarray[Any, np.dtype[np.float32]]
     if streaming_natural:
         assembled_data = _create_audio_memmap(
@@ -1336,6 +1343,10 @@ def _run_after_preflight(
     )
 
     gain_linear = 10.0 ** (static_gain_db / 20.0)
+    emit_progress(
+        on_progress,
+        ProgressEvent("finish", PROGRESS_FINISH_LIMITER, "Applying lookahead limiter"),
+    )
     if streaming_natural:
         limited_res = apply_lookahead_limiter_to_memmap(
             waveform=assembled_buffer.data,
@@ -1378,6 +1389,10 @@ def _run_after_preflight(
     )
 
     # 12. Encode master into the workspace
+    emit_progress(
+        on_progress,
+        ProgressEvent("finish", PROGRESS_FINISH_ENCODE, "Encoding master audio"),
+    )
     tmp_out = workspace.root / "candidate-output.wav.tmp"
     if streaming_natural:
         encode_audio_streaming(

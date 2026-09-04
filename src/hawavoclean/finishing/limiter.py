@@ -24,6 +24,7 @@ from hawavoclean.finishing.truepeak import (
     oversampled_peak_envelope_window,
     true_peak_linear,
 )
+from hawavoclean.runtime import evict_memmap_pages
 
 LIMITER_STREAM_CHUNK_SAMPLES = 1 << 20
 
@@ -363,6 +364,8 @@ def apply_lookahead_limiter_to_memmap(
                 min_gain = min(min_gain, float(np.min(smooth)))
             gained = np.multiply(waveform[:, start:end], input_gain, dtype=np.float32)
             limited[:, start:end] = np.multiply(gained, smooth, dtype=np.float32)
+            evict_memmap_pages(waveform, start, end)
+            evict_memmap_pages(limited, start, end)
         limited.flush()
 
         peak = true_peak_linear(limited, factor=8)
@@ -372,7 +375,9 @@ def apply_lookahead_limiter_to_memmap(
             for start in range(0, samples, chunk_samples):
                 end = min(samples, start + chunk_samples)
                 np.multiply(limited[:, start:end], trim, out=limited[:, start:end])
+                evict_memmap_pages(limited, start, end)
             limited.flush()
+
             min_gain *= float(trim)
             peak = true_peak_linear(limited, factor=8)
         if peak > ceiling_linear:
