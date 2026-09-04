@@ -13,6 +13,8 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -139,6 +141,11 @@ def _safe_relative(value: str, label: str) -> Path:
 def _verify_engine(engine: Path, source_revision: str) -> dict[str, Any]:
     if engine.is_symlink() or not engine.is_dir():
         raise DesktopProofError("desktop engine payload is not a real directory")
+    placeholder = engine / "README.txt"
+    if placeholder.exists():
+        raise DesktopProofError(
+            "archive validation failed: placeholder engine resource detected (README.txt)"
+        )
     launcher = engine / "hawavoclean-engine"
     manifest_path = engine / "ENGINE-MANIFEST.json"
     checksum_path = engine / "ENGINE-SHA256SUMS"
@@ -265,14 +272,19 @@ def validate_app(app: Path, source_revision: str, *, engine_mode: str) -> dict[s
     ui_index = resources / "ui" / "index.html"
     provenance_path = resources / PROVENANCE_NAME
     info_path = contents / "Info.plist"
+    icon_path = resources / "icon.icns"
     for path, label in (
         (executable, "desktop app executable"),
         (app_asar, "desktop app ASAR"),
         (ui_index, "desktop UI entrypoint"),
         (provenance_path, "desktop package provenance"),
         (info_path, "desktop Info.plist"),
+        (icon_path, "desktop branded icon"),
     ):
         _require_regular(path, label, executable=path == executable)
+
+    if icon_path.stat().st_size < 10000:
+        raise DesktopProofError("desktop branded icon is too small or corrupt")
 
     try:
         with info_path.open("rb") as stream:
@@ -288,6 +300,13 @@ def validate_app(app: Path, source_revision: str, *, engine_mode: str) -> dict[s
         or info.get("CFBundleExecutable") != "HawaVoClean"
     ):
         raise DesktopProofError("desktop Info.plist differs from the product contract")
+    icon_file = info.get("CFBundleIconFile")
+    if icon_file == "electron.icns":
+        raise DesktopProofError("desktop Info.plist retains stock/ad-hoc electron.icns identity")
+    if icon_file not in ("icon.icns", "icon"):
+        raise DesktopProofError(
+            f"desktop Info.plist does not declare branded CFBundleIconFile: {icon_file!r}"
+        )
     asar_integrity = info.get("ElectronAsarIntegrity")
     if not isinstance(asar_integrity, dict):
         raise DesktopProofError("desktop Info.plist omits Electron ASAR integrity")
@@ -319,6 +338,10 @@ def validate_app(app: Path, source_revision: str, *, engine_mode: str) -> dict[s
         raise DesktopProofError("desktop package provenance differs from the proof contract")
 
     engine_root = resources / "engine"
+    if (engine_root / "README.txt").exists() and engine_mode == "full":
+        raise DesktopProofError(
+            "archive validation failed: placeholder engine resource detected (README.txt)"
+        )
     if engine_mode == "full":
         engine = _verify_engine(engine_root, source_revision)
         if provenance.get("engine_manifest_sha256") != engine["manifest_sha256"]:
@@ -370,6 +393,89 @@ def validate_app(app: Path, source_revision: str, *, engine_mode: str) -> dict[s
     }
 
 
+def validate_archive(
+    target: Path,
+    source_revision: str,
+    *,
+    engine_mode: str = "full",
+) -> dict[str, Any]:
+    """Validate a .dmg, .zip, or .app directory package against the True-10 sealed contract."""
+    target = target.resolve()
+    if not target.exists():
+        raise DesktopProofError(f"archive target does not exist: {target}")
+
+    if target.is_file():
+        if target.suffix == ".zip":
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                try:
+                    with zipfile.ZipFile(target) as zf:
+                        for info in zf.infolist():
+                            extracted = temp_path / info.filename
+                            mode = info.external_attr >> 16
+                            if mode & 0o170000 == 0o120000:
+                                link_target = zf.read(info).decode("utf-8")
+                                extracted.parent.mkdir(parents=True, exist_ok=True)
+                                if extracted.is_symlink() or extracted.exists():
+                                    extracted.unlink()
+                                extracted.symlink_to(link_target)
+                            else:
+                                zf.extract(info, temp_path)
+                                if mode:
+                                    os.chmod(extracted, mode)
+                except (OSError, zipfile.BadZipFile) as exc:
+                    raise DesktopProofError(f"cannot extract ZIP archive: {exc}") from exc
+                apps = list(temp_path.glob("**/HawaVoClean.app"))
+                if not apps:
+                    raise DesktopProofError("ZIP archive does not contain HawaVoClean.app")
+                return validate_app(apps[0], source_revision, engine_mode=engine_mode)
+        elif target.suffix == ".dmg":
+            if sys.platform != "darwin":
+                raise DesktopProofError("DMG archive validation requires a macOS host")
+            with tempfile.TemporaryDirectory() as mount_dir:
+                mount_path = Path(mount_dir)
+                attach_cmd = [
+                    "hdiutil",
+                    "attach",
+                    "-nobrowse",
+                    "-readonly",
+                    "-noverify",
+                    os.fspath(target),
+                    "-mountpoint",
+                    os.fspath(mount_path),
+                ]
+                proc = subprocess.run(attach_cmd, capture_output=True, text=True, check=False)
+                if proc.returncode != 0:
+                    raise DesktopProofError(f"hdiutil attach failed: {proc.stderr or proc.stdout}")
+                try:
+                    apps = list(mount_path.glob("**/HawaVoClean.app"))
+                    if not apps:
+                        raise DesktopProofError("DMG archive does not contain HawaVoClean.app")
+                    return validate_app(apps[0], source_revision, engine_mode=engine_mode)
+                finally:
+                    eject = subprocess.run(
+                        ["diskutil", "eject", os.fspath(mount_path)],
+                        capture_output=True,
+                        check=False,
+                    )
+                    if eject.returncode != 0:
+                        subprocess.run(
+                            ["hdiutil", "detach", os.fspath(mount_path), "-force"],
+                            capture_output=True,
+                            check=False,
+                        )
+        else:
+            raise DesktopProofError(f"unsupported archive format: {target.suffix}")
+    elif target.is_dir():
+        if target.name == "HawaVoClean.app":
+            return validate_app(target, source_revision, engine_mode=engine_mode)
+        apps = list(target.glob("**/HawaVoClean.app"))
+        if not apps:
+            raise DesktopProofError(f"directory does not contain HawaVoClean.app: {target}")
+        return validate_app(apps[0], source_revision, engine_mode=engine_mode)
+    raise DesktopProofError(f"unsupported archive target: {target}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
@@ -380,7 +486,7 @@ def main() -> int:
     parser.add_argument("--output-json", type=Path)
     args = parser.parse_args()
     try:
-        result = validate_app(
+        result = validate_archive(
             args.app,
             args.source_sha,
             engine_mode="full" if args.require_engine else "shell-only",

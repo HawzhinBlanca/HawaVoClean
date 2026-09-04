@@ -37,6 +37,24 @@ module.exports = async function beforePack(context) {
   if ((platform === 'darwin' && arch !== 'arm64') || (platform === 'win32' && arch !== 'x64')) {
     throw new Error(`Unsupported release target: ${platform}-${arch}.`);
   }
+  const buildDir = path.join(desktopRoot, 'build');
+  const brandedMaster = path.join(buildDir, 'icon.png');
+  const brandedRuntime = path.join(desktopRoot, 'resources', 'branding', 'icon.png');
+  if (!fs.existsSync(brandedMaster) || !fs.existsSync(brandedRuntime)) {
+    throw new Error('Branded visual identity master assets are missing.');
+  }
+  if (platform === 'darwin') {
+    const macIcon = path.join(buildDir, 'icon.icns');
+    if (!fs.existsSync(macIcon) || fs.statSync(macIcon).size < 10000) {
+      throw new Error(`Branded macOS icon is missing or invalid: ${macIcon}`);
+    }
+  } else if (platform === 'win32') {
+    const winIcon = path.join(buildDir, 'icon.ico');
+    if (!fs.existsSync(winIcon) || fs.statSync(winIcon).size < 5000) {
+      throw new Error(`Branded Windows icon is missing or invalid: ${winIcon}`);
+    }
+  }
+
   const engineMode = process.env.HAWAVOCLEAN_DESKTOP_ENGINE_MODE || 'full';
   if (!['full', 'shell-only'].includes(engineMode)) {
     throw new Error(`Unsupported desktop proof engine mode: ${engineMode}.`);
@@ -49,20 +67,35 @@ module.exports = async function beforePack(context) {
     : path.join(desktopRoot, 'resources', 'engine', `${platform}-${arch}`);
   const executable = platform === 'win32' ? 'hawavoclean-engine.exe' : 'hawavoclean-engine';
   const enginePath = path.join(engineRoot, executable);
-  if (engineMode === 'full' && (!fs.existsSync(enginePath) || !fs.statSync(enginePath).isFile())) {
-    throw new Error(`Release engine is missing: ${enginePath}`);
+
+  // Archive validation: unconditionally reject placeholder engine resources
+  const placeholder = path.join(engineRoot, 'README.txt');
+  if (engineMode === 'full' && fs.existsSync(placeholder)) {
+    throw new Error(`Archive validation rejected placeholder engine resource: ${placeholder}`);
+  }
+
+  if (engineMode === 'full') {
+    if (!fs.existsSync(enginePath) || !fs.statSync(enginePath).isFile()) {
+      throw new Error(`Release engine launcher is missing: ${enginePath}`);
+    }
+    if (platform === 'darwin') {
+      fs.accessSync(enginePath, fs.constants.X_OK);
+    }
+
+    const { validateEnginePayload } = require('./stage-engine.cjs');
+    try {
+      validateEnginePayload(engineRoot, platform);
+    } catch (err) {
+      throw new Error(`Archive validation failed for engine payload: ${err.message}`);
+    }
   }
   if (engineMode === 'shell-only') {
-    const placeholder = path.join(engineRoot, 'README.txt');
     if (!fs.existsSync(placeholder) || !fs.statSync(placeholder).isFile()) {
       throw new Error(`Shell-only proof placeholder is missing: ${placeholder}`);
     }
     if (fs.existsSync(enginePath)) {
       throw new Error('A shell-only proof must not be mistaken for a full engine package.');
     }
-  }
-  if (platform === 'darwin' && engineMode === 'full') {
-    fs.accessSync(enginePath, fs.constants.X_OK);
   }
   if (!releaseBuild) return;
   if (platform === 'darwin') {

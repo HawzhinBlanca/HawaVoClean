@@ -67,6 +67,21 @@ app.setName(APP_TITLE);
 app.setAppUserModelId('com.hawavoclean.desktop');
 
 const repositoryRoot = path.resolve(__dirname, '..', '..');
+const brandingRoot = app.isPackaged
+  ? path.join(process.resourcesPath, 'branding')
+  : path.join(__dirname, '..', 'build');
+const brandedIconPath = path.join(brandingRoot, 'icon.png');
+
+if (fs.existsSync(brandedIconPath)) {
+  app.setAboutPanelOptions({
+    applicationName: APP_TITLE,
+    applicationVersion: app.getVersion(),
+    copyright: 'Copyright © Hawzhin',
+    version: app.getVersion(),
+    iconPath: brandedIconPath,
+  });
+}
+
 const uiRoot = app.isPackaged ? path.join(process.resourcesPath, 'ui') : path.join(repositoryRoot, 'ui', 'dist');
 const broker = new EngineBroker({
   packaged: app.isPackaged,
@@ -316,6 +331,7 @@ function createWindow(): BrowserWindow {
     minWidth: 960,
     minHeight: 640,
     title: APP_TITLE,
+    ...(fs.existsSync(brandedIconPath) ? { icon: brandedIconPath } : {}),
     backgroundColor: '#0e1013',
     show: false,
     autoHideMenuBar: process.platform !== 'darwin',

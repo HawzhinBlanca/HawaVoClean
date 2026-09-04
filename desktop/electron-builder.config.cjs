@@ -29,8 +29,10 @@ module.exports = {
         : 'development-unbound',
   },
   directories: {
+    buildResources: 'build',
     output: outputDirectory,
   },
+  icon: 'build/icon.png',
   files: [
     'dist/**/*',
     'package.json',
@@ -41,6 +43,11 @@ module.exports = {
     {
       from: '../ui/dist',
       to: 'ui',
+      filter: ['**/*'],
+    },
+    {
+      from: 'resources/branding',
+      to: 'branding',
       filter: ['**/*'],
     },
     {
@@ -59,6 +66,7 @@ module.exports = {
   beforePack: './scripts/before-pack.cjs',
   afterPack: './scripts/after-pack.cjs',
   mac: {
+    icon: 'build/icon.icns',
     target: [
       { target: 'dmg', arch: ['arm64'] },
       { target: 'zip', arch: ['arm64'] },
@@ -76,6 +84,7 @@ module.exports = {
     writeUpdateInfo: true,
   },
   win: {
+    icon: 'build/icon.ico',
     target: [{ target: 'nsis', arch: ['x64'] }],
     requestedExecutionLevel: 'asInvoker',
     signAndEditExecutable: true,

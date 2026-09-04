@@ -324,6 +324,36 @@ export function parseDevelopmentCommand(raw: string | undefined): readonly strin
   return value;
 }
 
+export function verifyBundledEngineIntegrity(
+  engineDir: string,
+  platform: NodeJS.Platform,
+): { valid: boolean; manifestSha256: string | null; error?: string } {
+  const executable = platform === 'win32' ? 'hawavoclean-engine.exe' : 'hawavoclean-engine';
+  const launcher = path.join(engineDir, executable);
+  const placeholder = path.join(engineDir, 'README.txt');
+  if (fs.existsSync(placeholder)) {
+    return {
+      valid: false,
+      manifestSha256: null,
+      error: `Archive validation rejected placeholder engine resource: ${placeholder}`,
+    };
+  }
+  if (!fs.existsSync(launcher)) {
+    return { valid: false, manifestSha256: null, error: `Engine executable missing: ${launcher}` };
+  }
+  const manifestPath = path.join(engineDir, 'ENGINE-MANIFEST.json');
+  const checksumsPath = path.join(engineDir, 'ENGINE-SHA256SUMS');
+  if (!fs.existsSync(manifestPath) || !fs.existsSync(checksumsPath)) {
+    return { valid: false, manifestSha256: null, error: 'Engine manifest or checksum inventory missing' };
+  }
+  try {
+    const manifestDigest = crypto.createHash('sha256').update(fs.readFileSync(manifestPath)).digest('hex');
+    return { valid: true, manifestSha256: manifestDigest };
+  } catch (err) {
+    return { valid: false, manifestSha256: null, error: String(err) };
+  }
+}
+
 export function resolveEngineSpec(paths: EnginePaths, override: string | undefined): EngineSpec {
   if (paths.packaged) {
     return {
@@ -464,6 +494,13 @@ export class EngineBroker {
     let spec: EngineSpec;
     try {
       spec = resolveEngineSpec(this.#paths, process.env.HAWAVOCLEAN_DESKTOP_ENGINE_COMMAND);
+      if (this.#paths.packaged) {
+        const engineDir = path.dirname(spec.executable);
+        const integrity = verifyBundledEngineIntegrity(engineDir, this.#paths.platform);
+        if (!integrity.valid) {
+          throw new Error(`Bundled engine integrity verification failed: ${integrity.error}`);
+        }
+      }
       if (path.isAbsolute(spec.executable) && !fs.existsSync(spec.executable)) {
         throw new Error(`Engine executable is missing: ${spec.executable}`);
       }
@@ -487,6 +524,8 @@ export class EngineBroker {
       env: {
         ...process.env,
         PYTHONUNBUFFERED: '1',
+        PYTHONDONTWRITEBYTECODE: '1',
+        PYTHONNOUSERSITE: '1',
         // The broker must tear itself down even when Electron is hard-killed
         // and no before-quit/finally handler can run.  This is a private
         // direct-parent contract consumed by hawavoclean.watchdog.

@@ -28,7 +28,12 @@ ui/node_modules/
 ui/dist/
 desktop/node_modules/
 desktop/dist/
-desktop/build/
+!desktop/build/
+desktop/build/*
+!desktop/build/icon.*
+!desktop/build/icons/
+!desktop/build/icons/*
+!desktop/build/entitlements.*
 resolve-plugin/com.hawavoclean.resolve/node_modules/
 resolve-plugin/com.hawavoclean.resolve/engine.json
 resolve-plugin/toolchain/node_modules/

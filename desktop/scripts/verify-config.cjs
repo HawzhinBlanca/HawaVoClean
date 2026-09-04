@@ -27,6 +27,16 @@ assert.deepEqual(config.win.target, [{ target: 'nsis', arch: ['x64'] }]);
 assert.deepEqual(config.win.signExts, ['.exe', '.dll']);
 assert.equal(config.nsis.deleteAppDataOnUninstall, false);
 assert.equal(config.publish, null);
+assert.equal(config.directories.buildResources, 'build');
+assert.equal(config.icon, 'build/icon.png');
+assert.equal(config.mac.icon, 'build/icon.icns');
+assert.equal(config.win.icon, 'build/icon.ico');
+assert.ok(fs.existsSync(path.join(root, 'build', 'icon.icns')), 'branded mac icon must exist');
+assert.ok(fs.statSync(path.join(root, 'build', 'icon.icns')).size > 10000, 'branded mac icon must be valid');
+assert.ok(fs.existsSync(path.join(root, 'build', 'icon.ico')), 'branded win icon must exist');
+assert.ok(fs.statSync(path.join(root, 'build', 'icon.ico')).size > 5000, 'branded win icon must be valid');
+assert.ok(fs.existsSync(path.join(root, 'build', 'icon.png')), 'branded master icon must exist');
+assert.ok(fs.existsSync(path.join(root, 'resources', 'branding', 'icon.png')), 'branded runtime icon must exist');
 assert.ok(fs.existsSync(path.join(root, '..', 'ui', 'dist', 'index.html')), 'existing UI bundle must be built');
 
 console.log('desktop config valid');

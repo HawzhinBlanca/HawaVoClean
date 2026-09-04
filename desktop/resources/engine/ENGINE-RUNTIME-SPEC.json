@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "specification": "HawaVoClean Checksum-Complete Desktop Runtime Engine Payload Specification",
+  "schema_version": 1,
+  "product": "hawavoclean",
+  "product_version": "3.3.0",
+  "targets": {
+    "darwin-arm64": {
+      "platform": "darwin",
+      "arch": "arm64",
+      "executable": "hawavoclean-engine",
+      "executable_mode": "0755",
+      "required_manifests": [
+        "ENGINE-MANIFEST.json",
+        "ENGINE-SHA256SUMS",
+        "ENGINE-SYMLINKS"
+      ]
+    },
+    "win32-x64": {
+      "platform": "win32",
+      "arch": "x64",
+      "executable": "hawavoclean-engine.exe",
+      "executable_mode": "0755",
+      "required_manifests": [
+        "ENGINE-MANIFEST.json",
+        "ENGINE-SHA256SUMS",
+        "ENGINE-SYMLINKS"
+      ]
+    }
+  },
+  "archive_validation_rules": {
+    "reject_placeholders": true,
+    "forbidden_placeholder_patterns": [
+      "README.txt",
+      "*.placeholder",
+      "Development placeholder*"
+    ],
+    "reject_missing_files": true,
+    "require_exhaustive_checksums": true,
+    "strict_checksum_match": true,
+    "reject_unlisted_files": true
+  },
+  "post_install_invariance": {
+    "bytecode_caching_disabled": true,
+    "python_flags": ["-I", "-B"],
+    "environment": {
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONNOUSERSITE": "1"
+    },
+    "state_isolation": {
+      "state_dir": "app.getPath('userData')",
+      "work_dir": "path.join(app.getPath('temp'), 'HawaVoClean', 'work')"
+    },
+    "guarantee": "All engine files and checksums remain byte-identical before, during, and after application execution."
+  }
+}

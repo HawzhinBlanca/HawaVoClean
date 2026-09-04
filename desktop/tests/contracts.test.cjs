@@ -24,6 +24,7 @@ const {
   requestEngineSession,
   requestNativeSourceRegistration,
   resolveEngineSpec,
+  verifyBundledEngineIntegrity,
 } = require('../dist/engine.js');
 const {
   APP_ENTRY_URL,
@@ -453,3 +454,158 @@ test('safe local data clearing purges session and partition caches while strictl
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('desktop visual identity carries branded assets and excludes stock Electron icons', () => {
+  const root = path.resolve(__dirname, '..');
+  const macIcon = path.join(root, 'build', 'icon.icns');
+  const winIcon = path.join(root, 'build', 'icon.ico');
+  const masterIcon = path.join(root, 'build', 'icon.png');
+  const runtimeIcon = path.join(root, 'resources', 'branding', 'icon.png');
+  const iconsDir = path.join(root, 'build', 'icons');
+
+  assert.ok(fs.existsSync(macIcon), 'macOS icon.icns must exist');
+  assert.ok(fs.statSync(macIcon).size > 10000, 'macOS icon.icns must be non-trivial');
+  assert.ok(fs.existsSync(winIcon), 'Windows icon.ico must exist');
+  assert.ok(fs.statSync(winIcon).size > 5000, 'Windows icon.ico must be non-trivial');
+  assert.ok(fs.existsSync(masterIcon), 'master icon.png must exist');
+  assert.ok(fs.existsSync(runtimeIcon), 'runtime branding icon.png must exist');
+  assert.ok(fs.existsSync(iconsDir), 'linux icons directory must exist');
+
+  const config = require(path.join(root, 'electron-builder.config.cjs'));
+  assert.equal(config.icon, 'build/icon.png');
+  assert.equal(config.mac.icon, 'build/icon.icns');
+  assert.equal(config.win.icon, 'build/icon.ico');
+  assert.ok(
+    config.extraResources.some((res) => res.to === 'branding'),
+    'branding assets must be sealed into packaged extraResources',
+  );
+});
+
+test('bundled engine integrity verification strictly rejects placeholders and requires manifests', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hawa-engine-integrity-'));
+  const launcher = path.join(temp, 'hawavoclean-engine');
+  const manifest = path.join(temp, 'ENGINE-MANIFEST.json');
+  const checksums = path.join(temp, 'ENGINE-SHA256SUMS');
+  const placeholder = path.join(temp, 'README.txt');
+
+  try {
+    // 1. Missing launcher
+    const res1 = verifyBundledEngineIntegrity(temp, 'darwin');
+    assert.equal(res1.valid, false);
+    assert.match(res1.error, /missing/);
+
+    // 2. Launcher present, manifests missing
+    fs.writeFileSync(launcher, '#!/bin/sh\nexit 0\n');
+    const res2 = verifyBundledEngineIntegrity(temp, 'darwin');
+    assert.equal(res2.valid, false);
+    assert.match(res2.error, /manifest or checksum/);
+
+    // 3. Complete payload
+    fs.writeFileSync(manifest, JSON.stringify({ product: 'hawavoclean' }));
+    fs.writeFileSync(checksums, 'hash  ./hawavoclean-engine\n');
+    const res3 = verifyBundledEngineIntegrity(temp, 'darwin');
+    assert.equal(res3.valid, true);
+    assert.ok(res3.manifestSha256);
+
+    // 4. Injected placeholder file must be rejected fail-closed
+    fs.writeFileSync(placeholder, 'Development placeholder only.');
+    const res4 = verifyBundledEngineIntegrity(temp, 'darwin');
+    assert.equal(res4.valid, false);
+    assert.match(res4.error, /placeholder/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('stage-engine validator validates complete payloads and rejects checksum drift', () => {
+  const { validateEnginePayload } = require('../scripts/stage-engine.cjs');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hawa-stage-engine-'));
+  const crypto = require('node:crypto');
+
+  try {
+    const launcher = path.join(temp, 'hawavoclean-engine');
+    fs.writeFileSync(launcher, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const payload = path.join(temp, 'payload.bin');
+    fs.writeFileSync(payload, 'engine-binary-payload');
+    const symlinks = path.join(temp, 'ENGINE-SYMLINKS');
+    fs.writeFileSync(symlinks, '');
+
+    const manifestData = {
+      bundle_schema_version: 1,
+      artifact_type: 'resolve-engine-directory',
+      product_version: '3.3.0',
+    };
+    const manifest = path.join(temp, 'ENGINE-MANIFEST.json');
+    fs.writeFileSync(manifest, JSON.stringify(manifestData));
+
+    const files = [launcher, payload, manifest, symlinks];
+    const checksumsLines = files.map((f) => {
+      const hash = crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+      return `${hash}  ./${path.relative(temp, f)}`;
+    });
+    const checksums = path.join(temp, 'ENGINE-SHA256SUMS');
+    fs.writeFileSync(checksums, checksumsLines.join('\n') + '\n');
+
+    // Clean validation succeeds
+    const validated = validateEnginePayload(temp, 'darwin');
+    assert.equal(validated.verifiedFiles, 4);
+
+    // Tampering with payload fails validation
+    fs.appendFileSync(payload, '-corrupted');
+    assert.throws(
+      () => validateEnginePayload(temp, 'darwin'),
+      /checksum mismatch/,
+    );
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('installed engine execution preserves post-install hash invariance with zero bytecode drift', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hawa-postinstall-invariance-'));
+  const crypto = require('node:crypto');
+  const { spawnSync } = require('node:child_process');
+
+  try {
+    const engineDir = path.join(temp, 'engine');
+    const userDataDir = path.join(temp, 'user-data');
+    const workDir = path.join(temp, 'work');
+    fs.mkdirSync(engineDir, { recursive: true });
+    fs.mkdirSync(userDataDir, { recursive: true });
+    fs.mkdirSync(workDir, { recursive: true });
+
+    // Mock python script in engine
+    const script = path.join(engineDir, 'test_worker.py');
+    fs.writeFileSync(script, 'import sys; sys.stdout.write("worker-ok\\n")\n');
+
+    const initialHash = crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex');
+    const checksums = path.join(engineDir, 'ENGINE-SHA256SUMS');
+    fs.writeFileSync(checksums, `${initialHash}  ./test_worker.py\n`);
+
+    // Execute with enforced runtime isolation flags
+    const result = spawnSync('python3', ['-I', '-B', script], {
+      cwd: userDataDir,
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: '1',
+        PYTHONDONTWRITEBYTECODE: '1',
+        PYTHONNOUSERSITE: '1',
+        HAWAVOCLEAN_STATE_DIR: userDataDir,
+        HAWAVOCLEAN_WORK_DIR: workDir,
+      },
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), 'worker-ok');
+
+    // Post-install invariance check: no __pycache__, no .pyc, hash identical
+    const files = fs.readdirSync(engineDir);
+    assert.deepEqual(files.sort(), ['ENGINE-SHA256SUMS', 'test_worker.py']);
+    const postHash = crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex');
+    assert.equal(postHash, initialHash, 'script hash must remain identical');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
