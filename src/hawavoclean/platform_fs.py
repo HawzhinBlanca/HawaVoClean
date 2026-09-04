@@ -65,7 +65,7 @@ def is_reparse_or_symlink(path: Path) -> bool:
 
 def _lock_registry_key(path: Path) -> str:
     key = os.path.normcase(os.path.abspath(os.fspath(path)))
-    return key.casefold() if _platform_name() == "nt" else key
+    return key.casefold() if _platform_name() == "nt" or _platform_system() == "darwin" else key
 
 
 @contextmanager

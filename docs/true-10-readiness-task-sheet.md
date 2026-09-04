@@ -154,7 +154,7 @@ defects, and are green on the exact candidate.
 
 | Done | ID | Pri/Effort | Owner | Task | Required completion evidence |
 |---|---|---|---|---|---|
-| [ ] | E1.1 | P0/L | CORE+WIN-QA | Qualify generation publication, output reservation, locking, flush/replace and recovery on native APFS and NTFS. | 1,000 concurrent/collision/relaunch/fault-injection cases per platform expose exactly one complete old or new result—never partial, mixed or duplicated output. |
+| [x] | E1.1 | P0/L | CORE+WIN-QA | Qualify generation publication, output reservation, locking, flush/replace and recovery on native APFS and NTFS. | 1,000 concurrent/collision/relaunch/fault-injection cases per platform expose exactly one complete old or new result—never partial, mixed or duplicated output. |
 | [x] | E1.2 | P0/L | CORE+DESKTOP | Finish durable batch semantics: independent items, pause, cancel, retry, safe quit, relaunch, source-volume loss and recovery. | A 100-item corrupt/Unicode/same-stem/mixed-format batch survives all fault states without job loss or unintended overwrite. |
 | [ ] | E1.3 | P0/L | CORE+PERF | Prove bounded Natural processing on real long stereo media, including scratch accounting and UI responsiveness. | Three-hour 48 kHz stereo remains below 2 GB RSS; scratch stays within its declared formula; progress/cancel remain responsive on M1/16 GB and Windows 8-core/16 GB. |
 | [ ] | E1.4 | P1/L | CORE+PERF | Enforce the six-hour/8 GB contract for MP3, M4A, MP4 audio extraction, WAV, AIFF and FLAC, mono/stereo, without full-file memory paths or resource bombs. | Boundary, malformed header, decompression-bomb, channel-layout, disk-full and exact-limit tests pass on both platforms. |
