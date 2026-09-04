@@ -146,7 +146,29 @@ MAX_ACTIVE_SESSIONS = 256
 TRUSTED_APP_ORIGINS = frozenset({"hawa://app"})
 _CORS_METHODS = frozenset({"GET", "HEAD", "POST", "OPTIONS"})
 _CORS_HEADERS = frozenset({"authorization", "content-type", "range", "x-hawa-token"})
-_CORS_EXPOSE = "Accept-Ranges, Content-Length, Content-Range, X-Hawa-Request-ID"
+_CORS_EXPOSE = (
+    "Accept-Ranges, Content-Length, Content-Range, X-Hawa-Request-ID, "
+    "Deprecation, Sunset, Link, X-Hawa-Sunset-Date, X-Hawa-Sunset-Release"
+)
+
+LEGACY_SUNSET_DATE = "Thu, 01 Oct 2026 00:00:00 GMT"
+LEGACY_REMOVAL_RELEASE = "v1.0.0"
+LEGACY_SUNSET_ISO_DATE = "2026-10-01"
+
+
+def _legacy_successor(path: str) -> str | None:
+    """Return the v1 successor path for a legacy route, or None if not legacy."""
+    if path == "/api/jobs" or path == "/api/jobs/":
+        return "/api/v1/jobs"
+    if path.startswith("/api/jobs/"):
+        suffix = path[len("/api/jobs") :]
+        return f"/api/v1/jobs{suffix}"
+    if path == "/api/analyze":
+        return "/api/v1/analyze"
+    if path == "/api/audio" or path.startswith("/api/audio/"):
+        return "/api/v1/jobs"
+    return None
+
 
 _HTTP_CODES = {
     400: "bad_request",
@@ -547,6 +569,36 @@ class LocalSecurityMiddleware:
                         )
                     if not any(name.lower() == b"pragma" for name, _ in new_headers):
                         new_headers.append((b"pragma", b"no-cache"))
+                    successor = _legacy_successor(path)
+                    if successor is not None:
+                        if method != "OPTIONS":
+                            app_obj = scope.get("app")
+                            if app_obj is not None:
+                                telemetry = getattr(app_obj.state, "legacy_telemetry", None)
+                                if isinstance(telemetry, dict):
+                                    telemetry["total_invocations"] = (
+                                        int(telemetry.get("total_invocations", 0)) + 1
+                                    )
+                                    routes = telemetry.setdefault("routes", {})
+                                    routes[path] = int(routes.get(path, 0)) + 1
+                                    auth_kinds = telemetry.setdefault("auth_kinds", {})
+                                    current_auth = str(
+                                        scope.get("state", {}).get("auth_kind", "none")
+                                    )
+                                    auth_kinds[current_auth] = (
+                                        int(auth_kinds.get(current_auth, 0)) + 1
+                                    )
+                        new_headers.append((b"deprecation", b"true"))
+                        new_headers.append((b"sunset", LEGACY_SUNSET_DATE.encode("ascii")))
+                        new_headers.append(
+                            (b"link", f'<{successor}>; rel="successor-version"'.encode("ascii"))
+                        )
+                        new_headers.append(
+                            (b"x-hawa-sunset-date", LEGACY_SUNSET_ISO_DATE.encode("ascii"))
+                        )
+                        new_headers.append(
+                            (b"x-hawa-sunset-release", LEGACY_REMOVAL_RELEASE.encode("ascii"))
+                        )
                     mutable = new_headers
                 message["headers"] = mutable
             await send(message)
@@ -1294,6 +1346,14 @@ def create_app(
     app.state.sessions = sessions
     app.state.native_sources = native_sources
     app.state.analysis_slots = asyncio.Semaphore(max_concurrent_analyses)
+    app.state.legacy_telemetry = {
+        "total_invocations": 0,
+        "routes": {},
+        "auth_kinds": {},
+        "sunset_date": LEGACY_SUNSET_ISO_DATE,
+        "sunset_http_date": LEGACY_SUNSET_DATE,
+        "removal_release": LEGACY_REMOVAL_RELEASE,
+    }
 
     def _resolve_read_path(request: Request, raw: str) -> Path:
         """Apply the renderer capability boundary to one legacy path read."""
@@ -1476,6 +1536,43 @@ def create_app(
                 "durable": manager.durable,
                 "persistence_ok": manager.persistence_error is None,
                 "persistence_error": manager.persistence_error,
+            },
+            "legacy_sunset": {
+                "sunset_date": LEGACY_SUNSET_ISO_DATE,
+                "sunset_http_date": LEGACY_SUNSET_DATE,
+                "removal_release": LEGACY_REMOVAL_RELEASE,
+                "total_invocations": int(
+                    getattr(app.state, "legacy_telemetry", {}).get("total_invocations", 0)
+                ),
+            },
+        }
+
+    @app.get("/api/v1/telemetry/legacy")
+    async def legacy_telemetry(_request: Request) -> dict[str, Any]:
+        telemetry = getattr(app.state, "legacy_telemetry", {})
+        return {
+            "schema_version": 1,
+            "sunset_date": LEGACY_SUNSET_ISO_DATE,
+            "sunset_http_date": LEGACY_SUNSET_DATE,
+            "removal_release": LEGACY_REMOVAL_RELEASE,
+            "total_invocations": int(telemetry.get("total_invocations", 0)),
+            "routes": dict(telemetry.get("routes", {})),
+            "auth_kinds": dict(telemetry.get("auth_kinds", {})),
+            "legacy_endpoints": [
+                "/api/jobs",
+                "/api/jobs/{job_id}",
+                "/api/jobs/{job_id}/cancel",
+                "/api/jobs/{job_id}/events",
+                "/api/analyze",
+                "/api/audio",
+            ],
+            "v1_successors": {
+                "/api/jobs": "/api/v1/jobs",
+                "/api/jobs/{job_id}": "/api/v1/jobs/{job_id}",
+                "/api/jobs/{job_id}/cancel": "/api/v1/jobs/{job_id}/cancel",
+                "/api/jobs/{job_id}/events": "/api/v1/jobs/{job_id}/events",
+                "/api/analyze": "/api/v1/analyze",
+                "/api/audio": "/api/v1/jobs/{job_id}/artifacts/master",
             },
         }
 
@@ -1877,6 +1974,7 @@ def create_app(
             raise ApiError(404, "not_found", f"unknown job: {job_id}")
         return snap
 
+    @app.get("/api/v1/jobs/{job_id}/events")
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: str) -> StreamingResponse:
         if manager.get_status(job_id) is None:

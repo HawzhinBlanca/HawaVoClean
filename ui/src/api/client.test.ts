@@ -583,4 +583,20 @@ describe('v1 capabilities and jobs (True-10 D4.11)', () => {
       },
     ]);
   });
+
+  it('supports v1 job retrieval, cancellation, and events url', async () => {
+    const fetchFn = mockFetch(res(200, '{"job_id":"j123","state":"running"}'));
+    const status = await client().getV1Job('j123');
+    expect(fetchFn).toHaveBeenCalledWith(`${BASE}/api/v1/jobs/j123`, expect.objectContaining({ method: 'GET' }));
+    expect(status.state).toBe('running');
+
+    fetchFn.mockResolvedValueOnce(res(200, '{"ok":true}'));
+    const cancelRes = await client().cancelV1Job('j123');
+    expect(fetchFn).toHaveBeenCalledWith(`${BASE}/api/v1/jobs/j123/cancel`, expect.objectContaining({ method: 'POST' }));
+    expect(cancelRes.ok).toBe(true);
+
+    const url = new URL(client().v1EventsUrl('job/with space'));
+    expect(url.pathname).toBe('/api/v1/jobs/job%2Fwith%20space/events');
+    expect(url.search).toBe('');
+  });
 });

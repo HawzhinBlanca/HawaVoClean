@@ -198,6 +198,7 @@ export class EngineClient {
     };
   }
 
+  /** @deprecated Use createV1Jobs (/api/v1/jobs) with source IDs. Scheduled for removal 2026-10-01 (v1.0.0). */
   createJob(req: CreateJobRequest, signal?: AbortSignal): Promise<CreateJobResponse> {
     return this.json<CreateJobResponse>(
       '/api/jobs',
@@ -206,12 +207,24 @@ export class EngineClient {
     );
   }
 
+  /** @deprecated Use getV1Job (/api/v1/jobs/{jobId}). Scheduled for removal 2026-10-01 (v1.0.0). */
   getJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
     return this.json<JobStatus>(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, signal);
   }
 
+  getV1Job(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+    return this.json<JobStatus>(`/api/v1/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, signal);
+  }
+
+  /** @deprecated Use cancelV1Job (/api/v1/jobs/{jobId}/cancel). Scheduled for removal 2026-10-01 (v1.0.0). */
   cancelJob(jobId: string): Promise<{ ok: boolean }> {
     return this.json<{ ok: boolean }>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  cancelV1Job(jobId: string): Promise<{ ok: boolean }> {
+    return this.json<{ ok: boolean }>(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: 'POST',
     });
   }
@@ -360,8 +373,13 @@ export class EngineClient {
     return `${this.baseUrl}/api/audio?${q.toString()}`;
   }
 
-  /** Credential-free URL for the job's `EventSource` stream. */
+  /** @deprecated Use v1EventsUrl (/api/v1/jobs/{jobId}/events). Scheduled for removal 2026-10-01 (v1.0.0). */
   eventsUrl(jobId: string): string {
     return `${this.baseUrl}/api/jobs/${encodeURIComponent(jobId)}/events`;
+  }
+
+  /** Credential-free URL for the job's v1 `EventSource` stream. */
+  v1EventsUrl(jobId: string): string {
+    return `${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/events`;
   }
 }

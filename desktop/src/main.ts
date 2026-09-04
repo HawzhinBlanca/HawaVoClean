@@ -247,7 +247,8 @@ function registerIpc(): void {
   ipcMain.handle(IPC.registerDroppedFile, async (event, value: unknown) => {
     requireTrustedIpcSender(event);
     const filePath = requireSupportedMediaPath(value, 'registerDroppedFile');
-    return (await broker.registerNativeSource(filePath)).path;
+    const registered = await broker.registerNativeSource(filePath);
+    return { sourceId: registered.sourceId, path: registered.path };
   });
 
   ipcMain.handle(IPC.pickFolder, async (event) => {

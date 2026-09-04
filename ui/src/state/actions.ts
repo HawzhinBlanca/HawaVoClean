@@ -422,7 +422,9 @@ async function resumeAfterReconnect(client: EngineClient): Promise<void> {
     const resumeTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
     let status;
     try {
-      status = await client.getJob(job.id, resumeTimeout.signal);
+      status = typeof client.getV1Job === 'function'
+        ? await client.getV1Job(job.id, resumeTimeout.signal)
+        : await client.getJob(job.id, resumeTimeout.signal);
     } finally {
       resumeTimeout.done();
     }
@@ -1056,7 +1058,7 @@ export async function ingestFile(file: File): Promise<void> {
   // A host without the registration bridge is not allowed to turn a raw
   // renderer path into authority; it takes the same managed-upload fallback
   // as a failed registration.
-  let local: string | null = null;
+  let local: { sourceId: string; path: string } | string | null = null;
   try {
     local = bridge.files.registerDroppedFile
       ? await bridge.files.registerDroppedFile(file)
@@ -1065,7 +1067,11 @@ export async function ingestFile(file: File): Promise<void> {
     local = null;
   }
   if (local) {
-    await loadSource({ path: local, name: file.name, origin: 'drop' });
+    if (typeof local === 'object' && local !== null) {
+      await loadSource({ path: local.path, name: file.name, origin: 'drop', sourceId: local.sourceId });
+    } else {
+      await loadSource({ path: local, name: file.name, origin: 'drop' });
+    }
     return;
   }
   await uploadFile(file);
@@ -1298,8 +1304,10 @@ function followFrom(client: EngineClient, jobId: string): void {
       if (cur.job && cur.job.id === jobId) {
         cur.patchJob({ streamConnected: false });
         if (!cur.job.status || !isTerminal(cur.job.status.state)) {
-          void client
-            .getJob(jobId)
+          const fetchStatus = typeof client.getV1Job === 'function'
+            ? client.getV1Job(jobId)
+            : client.getJob(jobId);
+          void fetchStatus
             .then(onJobStatus)
             .catch((e: unknown) => {
               // This `.catch` used to be `() => undefined`. If the stream ended
@@ -1588,7 +1596,12 @@ export async function cancelJob(): Promise<void> {
   }
   try {
     st.setStatus('Cancelling');
-    await requireClient().cancelJob(st.job.id);
+    const c = requireClient();
+    if (typeof c.cancelV1Job === 'function') {
+      await c.cancelV1Job(st.job.id);
+    } else {
+      await c.cancelJob(st.job.id);
+    }
   } catch (e) {
     probeSoon(e);
     reportFailure(classifyFailure(e, st.source?.name), 'Cancel failed');

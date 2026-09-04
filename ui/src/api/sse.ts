@@ -66,8 +66,10 @@ export function followJob(
     retryTimer = window.setTimeout(() => {
       retryTimer = null;
       // Poll once so a job that finished while we were offline still resolves.
-      client
-        .getJob(jobId)
+      const fetchStatus = typeof client.getV1Job === 'function'
+        ? client.getV1Job(jobId)
+        : client.getJob(jobId);
+      fetchStatus
         .then((st) => {
           if (closed || finished) return;
           handlers.onStatus(st);
@@ -89,7 +91,8 @@ export function followJob(
   const connect = (): void => {
     if (closed || finished) return;
     cleanup();
-    es = new EventSource(client.eventsUrl(jobId));
+    const url = typeof client.v1EventsUrl === 'function' ? client.v1EventsUrl(jobId) : client.eventsUrl(jobId);
+    es = new EventSource(url);
     es.onopen = () => {
       attempt = 0;
       handlers.onConnectionChange?.(true);

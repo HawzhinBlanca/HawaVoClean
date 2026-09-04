@@ -9,7 +9,7 @@ export interface HawaBridge {
   engine: { getEndpoint(): Promise<{ baseUrl: string }> };
   files: {
     pickAudio(): Promise<string | null>;            // native open dialog → absolute path
-    registerDroppedFile?(file: File): Promise<string | null>; // main registers before returning
+    registerDroppedFile?(file: File): Promise<{ sourceId: string; path: string } | string | null>; // main registers before returning
     pathForFile(file: File): string | null;         // legacy shape; hardened shells return null
     revealInFinder(path: string): Promise<void>;
   };

@@ -844,7 +844,7 @@ const server = createServer(async (req, res) => {
       schedule();
       return json(res, 202, { job_id: job.id, output_path, report_path });
     }
-    const jm = /^\/api\/jobs\/([^/]+)(\/events|\/cancel)?$/.exec(p);
+    const jm = /^\/api\/(?:v1\/)?jobs\/([^/]+)(\/events|\/cancel)?$/.exec(p);
     if (jm) {
       const job = jobs.get(jm[1]);
       if (!job) return err(res, 404, 'not_found', `Unknown job ${jm[1]}`);

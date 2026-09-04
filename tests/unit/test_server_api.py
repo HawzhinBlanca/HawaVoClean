@@ -152,6 +152,12 @@ def test_token_by_header_and_short_lived_session(client: TestClient) -> None:
             "persistence_ok": True,
             "persistence_error": None,
         },
+        "legacy_sunset": {
+            "sunset_date": "2026-10-01",
+            "sunset_http_date": "Thu, 01 Oct 2026 00:00:00 GMT",
+            "removal_release": "v1.0.0",
+            "total_invocations": 0,
+        },
     }
     assert isinstance(body["engine_pid"], int)
 

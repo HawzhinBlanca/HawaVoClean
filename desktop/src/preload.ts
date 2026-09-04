@@ -47,11 +47,11 @@ const bridge = Object.freeze({
     pickAudioFiles: () => invoke<readonly string[]>(IPC.pickAudioFiles),
     pickFolder: () => invoke<string | null>(IPC.pickFolder),
     chooseExportPath: (request: ExportRequest) => invoke<string | null>(IPC.chooseExportPath, request),
-    async registerDroppedFile(file: File): Promise<string | null> {
+    async registerDroppedFile(file: File): Promise<{ sourceId: string; path: string } | null> {
       try {
         const value = webUtils.getPathForFile(file);
         if (typeof value !== 'string' || value.length === 0) return null;
-        return await invoke<string>(IPC.registerDroppedFile, value);
+        return await invoke<{ sourceId: string; path: string }>(IPC.registerDroppedFile, value);
       } catch {
         return null;
       }
