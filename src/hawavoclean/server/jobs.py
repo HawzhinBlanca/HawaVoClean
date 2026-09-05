@@ -847,48 +847,6 @@ class JobManager:
         policy: ConflictPolicy = conflict_policy or ("replace" if overwrite else "fail")
         if policy not in {"unique", "fail", "replace"}:
             raise ValueError(f"unsupported conflict policy: {policy}")
-        effective_overwrite = policy == "replace"
-        report_path = output_path.parent / f"{output_path.stem}.hawavoclean.json"
-        bundle_path = (
-            output_path.parent / f"{output_path.stem}.hawavoclean.zip" if record_bundle else None
-        )
-        request_payload = {
-            "input_path": str(input_path),
-            "output_path": str(output_path),
-            "profile": profile,
-            "mode": mode,
-            "speaker_id": speaker_id,
-            "cutoff_hz": cutoff_hz,
-            "conflict_policy": policy,
-            "request_context_hash": request_context_hash,
-            "record_bundle": record_bundle,
-        }
-        request_hash = canonical_request_hash(request_payload)
-
-        with self._wake:
-            if self._closed:
-                raise RuntimeError("job manager is shut down")
-            self._prune_locked()
-            if idempotency_key is not None and idempotency_key in self._idempotency:
-                existing = self._jobs.get(self._idempotency[idempotency_key])
-                if existing is not None:
-                    if existing.request_hash != request_hash:
-                        raise IdempotencyConflictError(
-                            "idempotency key is already bound to a different request"
-                        )
-                    return existing.snapshot()
-            if self._store is not None and idempotency_key is not None:
-                durable_retry = self._store.find_idempotent(
-                    idempotency_key, request_hash=request_hash
-                )
-                if durable_retry is not None:
-                    return self._snapshot_durable_retry_locked(durable_retry)
-            active = sum(r.state not in TERMINAL_STATES for r in self._jobs.values())
-            if active >= self._max_active_jobs:
-                raise QueueFullError(
-                    f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
-                )
-
         pinned: PinnedSource | None = None
         if input_path.exists() and input_path.is_file():
             pinned = PinnedSource.create(
@@ -903,6 +861,54 @@ class JobManager:
             )
 
         try:
+            effective_overwrite = policy == "replace"
+            report_path = output_path.parent / f"{output_path.stem}.hawavoclean.json"
+            bundle_path = (
+                output_path.parent / f"{output_path.stem}.hawavoclean.zip" if record_bundle else None
+            )
+            request_payload = {
+                "input_path": str(input_path),
+                "output_path": str(output_path),
+                "profile": profile,
+                "mode": mode,
+                "speaker_id": speaker_id,
+                "cutoff_hz": cutoff_hz,
+                "conflict_policy": policy,
+                "request_context_hash": request_context_hash,
+                "record_bundle": record_bundle,
+                "source_sha256": pinned.sha256 if pinned is not None else None,
+                "source_size_bytes": pinned.size_bytes if pinned is not None else None,
+            }
+            request_hash = canonical_request_hash(request_payload)
+
+            with self._wake:
+                if self._closed:
+                    raise RuntimeError("job manager is shut down")
+                self._prune_locked()
+                if idempotency_key is not None and idempotency_key in self._idempotency:
+                    existing = self._jobs.get(self._idempotency[idempotency_key])
+                    if existing is not None:
+                        if existing.request_hash != request_hash:
+                            raise IdempotencyConflictError(
+                                "idempotency key is already bound to a different request"
+                            )
+                        if pinned is not None:
+                            pinned.cleanup_unadopted()
+                        return existing.snapshot()
+                if self._store is not None and idempotency_key is not None:
+                    durable_retry = self._store.find_idempotent(
+                        idempotency_key, request_hash=request_hash
+                    )
+                    if durable_retry is not None:
+                        if pinned is not None:
+                            pinned.cleanup_unadopted()
+                        return self._snapshot_durable_retry_locked(durable_retry)
+                active = sum(r.state not in TERMINAL_STATES for r in self._jobs.values())
+                if active >= self._max_active_jobs:
+                    raise QueueFullError(
+                        f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
+                    )
+
             record = JobRecord(
                 job_id=f"j_{uuid.uuid4().hex[:16]}",
                 input_path=input_path,
@@ -942,6 +948,8 @@ class JobManager:
                     )
                     record = JobRecord.from_storage(reservation.record)
                     if reservation.reused:
+                        if pinned is not None:
+                            pinned.cleanup_unadopted()
                         return self._snapshot_durable_retry_locked(reservation)
                 else:
                     record = self._reserve_in_memory(record)

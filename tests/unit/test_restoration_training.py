@@ -46,7 +46,7 @@ def test_all_composite_loss_terms_active_and_finite(synthetic_run: dict[str, Any
     """Flow, STFT, envelope, and speaker terms must all be live with finite values."""
     ckpt = synthetic_run["ckpt"]
     assert ckpt["active_loss_terms"] == list(ACTIVE_LOSS_TERMS)
-    assert set(ACTIVE_LOSS_TERMS) == {"flow", "stft", "envelope", "speaker", "total"}
+    assert set(ACTIVE_LOSS_TERMS) == {"flow", "stft", "envelope", "speaker", "harmonic", "total"}
 
     for split in ("train", "val"):
         term_losses = ckpt["final_losses"][split]
@@ -89,7 +89,7 @@ def test_checkpoint_reloads_with_metadata(synthetic_run: dict[str, Any]) -> None
     assert ckpt["n_train"] >= 1
     assert ckpt["n_val"] >= 1
     assert ckpt["n_train"] + ckpt["n_val"] == 4
-    assert set(ckpt["loss_weights"]) == {"flow", "stft", "envelope", "speaker"}
+    assert set(ckpt["loss_weights"]) == {"flow", "stft", "envelope", "speaker", "harmonic"}
     assert math.isfinite(ckpt["final_loss"])
     assert set(ckpt["manifest_hashes"]) >= {"train", "development"}
     assert ckpt["best_epoch"] == 1

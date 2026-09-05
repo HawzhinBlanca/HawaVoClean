@@ -116,7 +116,11 @@ def test_resolve_native_selected_path_and_registry_branches(
     reg_new = registry.register(str(source))
     assert reg_new.path == source.resolve()
 
-    # _identity returns None when file is missing during register
-    monkeypatch.setattr(registry, "_identity", lambda _p: None)
-    with pytest.raises(PathPolicyError, match="not a regular file"):
-        registry.register(str(source))
+    # Failing open during register raises PathPolicyError
+    def failing_open(_p: Path) -> int:
+        raise OSError("Permission denied")
+
+    monkeypatch.setattr("hawavoclean.server.source_caps._open_nofollow_descriptor", failing_open)
+    fail_source = _source("fail_open.wav")
+    with pytest.raises(PathPolicyError, match="cannot be opened safely"):
+        registry.register(str(fail_source))

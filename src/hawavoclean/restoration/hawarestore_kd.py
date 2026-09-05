@@ -105,6 +105,7 @@ class HawaRestoreKDNet(nn.Module):
         cond_dim: int = 256,
         n_fft: int = 1024,
         use_f0_cond: bool = True,
+        **kwargs: Any,
     ) -> None:
         super().__init__()
         self.n_fft = n_fft
@@ -271,9 +272,14 @@ class HawaRestoreKD(Restorer):
             net_config = ckpt.get("config", {})
             num_speakers = int(net_config.get("num_speakers", 10))
             ckpt_n_fft = int(net_config.get("n_fft", n_fft))
-            self.n_fft = ckpt_n_fft
-            self.win_length = int(net_config.get("win_length", self.win_length))
-            self.hop_length = int(net_config.get("hop_length", self.hop_length))
+            if "win_length" in net_config:
+                self.win_length = int(net_config["win_length"])
+                self.n_fft = ckpt_n_fft
+                self.hop_length = int(net_config.get("hop_length", self.win_length // 4))
+            else:
+                self.n_fft = n_fft
+                self.win_length = win_length
+                self.hop_length = hop_length
             self.chunk_seconds = float(net_config.get("chunk_seconds", self.chunk_seconds))
             self.chunk_overlap_seconds = float(
                 net_config.get("chunk_overlap_seconds", self.chunk_overlap_seconds)
@@ -518,7 +524,7 @@ class HawaRestoreKD(Restorer):
             x_rec = block[:n_block].copy()
             return {0.0: x_rec.astype(np.float32)}
 
-        freqs = np.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate)
+        freqs = np.fft.rfftfreq(self.win_length, d=1.0 / self.sample_rate)
         cutoff_bin = max(1, int(np.argmin(np.abs(freqs - effective_cutoff_hz))))
 
         # Acoustic envelope matching and energy gating
