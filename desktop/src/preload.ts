@@ -70,6 +70,8 @@ const bridge = Object.freeze({
   }),
   diagnostics: Object.freeze({
     getState: () => invoke(IPC.diagnosticsState),
+    setOptIn: (optIn: boolean) => invoke(IPC.diagnosticsState, { action: 'setOptIn', optIn }),
+    exportPayload: () => invoke(IPC.diagnosticsState, { action: 'export' }),
   }),
   updates: Object.freeze({
     getState: () => invoke(IPC.updateState),

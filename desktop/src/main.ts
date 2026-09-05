@@ -26,6 +26,7 @@ import {
   type UpdateState,
 } from './contracts.js';
 import { EngineBroker } from './engine.js';
+import { DiagnosticsManager, type RedactedDiagnosticReport } from './diagnostics.js';
 import { packagedProofSelfTestAllowed } from './proof.js';
 import {
   APP_ENTRY_URL,
@@ -91,6 +92,7 @@ const broker = new EngineBroker({
   temp: app.getPath('temp'),
   platform: process.platform,
 });
+const diagnosticsManager = new DiagnosticsManager();
 
 let mainWindow: BrowserWindow | null = null;
 let quitState: 'running' | 'stopping' | 'done' = 'running';
@@ -297,10 +299,28 @@ function registerIpc(): void {
     });
   });
 
-  ipcMain.handle(IPC.diagnosticsState, (event): DiagnosticsState => {
-    requireTrustedIpcSender(event);
-    return Object.freeze({ status: 'unavailable', reason: 'not_implemented' });
-  });
+  ipcMain.handle(
+    IPC.diagnosticsState,
+    (event, payload?: unknown): DiagnosticsState | RedactedDiagnosticReport => {
+      requireTrustedIpcSender(event);
+      if (payload && typeof payload === 'object' && 'action' in payload) {
+        const action = (payload as { action: string; optIn?: boolean }).action;
+        if (action === 'setOptIn') {
+          return diagnosticsManager.setOptIn(Boolean((payload as { optIn?: boolean }).optIn));
+        }
+        if (action === 'export') {
+          return diagnosticsManager.generateReport({
+            appName: app.name,
+            appVersion: app.getVersion(),
+            packaged: app.isPackaged,
+            engineStatus: broker.origin ? 'running' : 'stopped',
+            enginePid: broker.pid,
+          });
+        }
+      }
+      return diagnosticsManager.getState();
+    },
+  );
 
   ipcMain.handle(IPC.updateState, (event): UpdateState => {
     requireTrustedIpcSender(event);

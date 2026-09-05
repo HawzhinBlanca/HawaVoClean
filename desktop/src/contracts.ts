@@ -46,8 +46,12 @@ export type AppInfo = Readonly<{
 }>;
 
 export type DiagnosticsState = Readonly<{
-  status: 'unavailable';
-  reason: 'not_implemented';
+  status: 'ready' | 'disabled' | 'enabled' | 'unavailable';
+  optIn: boolean;
+  canExport: boolean;
+  reason?: string | undefined;
+  pendingErrorCount?: number | undefined;
+  telemetryEgress?: 'none' | undefined;
 }>;
 
 export type UpdateState = Readonly<{

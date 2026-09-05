@@ -483,6 +483,10 @@ export class EngineBroker {
     return [...this.#stderrTail];
   }
 
+  get pid(): number | null {
+    return this.#child?.pid ?? null;
+  }
+
   start(): void {
     if (this.#readyPromise !== null) return;
     this.#readyPromise = new Promise<EngineEndpoint>((resolve, reject) => {
