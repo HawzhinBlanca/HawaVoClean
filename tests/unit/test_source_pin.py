@@ -48,7 +48,7 @@ def test_pin_fails_closed_when_open_source_is_rewritten_during_copy(
         block = real_read(descriptor, count)
         if block and not changed:
             changed = True
-            source.write_bytes(b"b" * 4096)
+            source.write_bytes(b"b" * 8192)
         return block
 
     monkeypatch.setattr("hawavoclean.source_pin.SOURCE_COPY_CHUNK_BYTES", 128)

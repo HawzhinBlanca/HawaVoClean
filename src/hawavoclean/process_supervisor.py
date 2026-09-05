@@ -357,8 +357,9 @@ class ProcessSupervisor:
         if self._platform == "posix":
             # start_new_session makes pgid == child pid.  Using that known id
             # still reaches surviving descendants after the leader exits.
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                os.killpg(self.process.pid, signal.SIGTERM)
+            if hasattr(os, "killpg"):
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    os.killpg(self.process.pid, signal.SIGTERM)
             return
 
         try:
@@ -381,8 +382,9 @@ class ProcessSupervisor:
             job_handle = self._windows_job_handle
 
         if self._platform == "posix":
-            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                os.killpg(self.process.pid, signal.SIGKILL)
+            if hasattr(os, "killpg"):
+                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                    os.killpg(self.process.pid, signal.SIGKILL)
             if self.process.poll() is None:
                 with contextlib.suppress(OSError):
                     self.process.kill()

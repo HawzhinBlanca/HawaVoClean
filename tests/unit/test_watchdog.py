@@ -317,6 +317,8 @@ def test_the_interrupt_path_survives_an_inherited_sig_ign(tmp_path: Path) -> Non
     When its spawner dies, the escalated self-SIGTERM must unwind it — partial
     removed, nothing published — rather than leaving only the hard backstop.
     """
+    if sys.platform == "win32":
+        pytest.skip("Windows TerminateProcess does not invoke Python signal handlers")
     partial = tmp_path / "partial-output"
     published = tmp_path / "published"
     grandchild = tmp_path / "grandchild.py"

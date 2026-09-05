@@ -6,9 +6,17 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.skipif(
+        sys.platform == "win32", reason="Resolve bash installer is macOS/Linux only"
+    ),
+]
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTIVATE = ROOT / "resolve-plugin" / "activate.sh"

@@ -187,8 +187,9 @@ def test_job_status_v1_and_artifact_branches(tmp_path: Path) -> None:
     with pytest.raises(PathPolicyError, match="output path must be absolute"):
         _session_output_path(in_file, "production", "relative/out.wav")
 
+    different_out = str(Path(Path.cwd().anchor) / "different" / "dir" / "out.wav")
     with pytest.raises(PathPolicyError, match="must remain beside"):
-        _session_output_path(in_file, "production", "/different/dir/out.wav")
+        _session_output_path(in_file, "production", different_out)
 
 
 def test_lease_source_id_branches(tmp_path: Path) -> None:

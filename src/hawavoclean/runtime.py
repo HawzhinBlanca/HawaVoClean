@@ -298,6 +298,15 @@ def evict_memmap_pages(
     if not isinstance(array, np.memmap):
         return
     if sys.platform == "win32":
+        try:
+            import ctypes
+
+            windll = getattr(ctypes, "windll", None)
+            if windll is not None:
+                process = windll.kernel32.GetCurrentProcess()
+                windll.psapi.EmptyWorkingSet(process)
+        except Exception:
+            pass
         return
 
     try:

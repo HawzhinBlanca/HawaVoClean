@@ -12,7 +12,7 @@ PLUGIN = ROOT / "resolve-plugin" / "com.hawavoclean.resolve"
 
 
 def test_browser_window_enables_every_required_isolation_control() -> None:
-    main = (PLUGIN / "main.js").read_text()
+    main = (PLUGIN / "main.js").read_text(encoding="utf-8")
 
     for setting in (
         "sandbox: true",
@@ -33,8 +33,8 @@ def test_browser_window_enables_every_required_isolation_control() -> None:
 
 
 def test_permissions_network_and_ipc_fail_closed() -> None:
-    main = (PLUGIN / "main.js").read_text()
-    auth = (PLUGIN / "session-auth.js").read_text()
+    main = (PLUGIN / "main.js").read_text(encoding="utf-8")
+    auth = (PLUGIN / "session-auth.js").read_text(encoding="utf-8")
 
     assert "setPermissionRequestHandler" in main
     assert "session.fromPartition(SESSION_PARTITION)" in main
@@ -64,7 +64,7 @@ def test_permissions_network_and_ipc_fail_closed() -> None:
 
 
 def test_preload_exposes_only_the_declared_narrow_bridge() -> None:
-    preload = (PLUGIN / "preload.js").read_text()
+    preload = (PLUGIN / "preload.js").read_text(encoding="utf-8")
 
     assert "contextBridge.exposeInMainWorld('hawa', bridge)" in preload
     assert "ipcRenderer.sendSync('hawa:host')" in preload
@@ -85,7 +85,7 @@ def test_preload_exposes_only_the_declared_narrow_bridge() -> None:
 
 
 def test_ui_csp_allows_only_local_assets_loopback_engine_and_declared_workers() -> None:
-    html = (ROOT / "ui" / "index.html").read_text()
+    html = (ROOT / "ui" / "index.html").read_text(encoding="utf-8")
 
     assert 'http-equiv="Content-Security-Policy"' in html
     for directive in (
@@ -104,9 +104,9 @@ def test_ui_csp_allows_only_local_assets_loopback_engine_and_declared_workers() 
 
 
 def test_runtime_version_is_captured_without_conflating_resolve_and_standalone() -> None:
-    main = (PLUGIN / "main.js").read_text()
-    readme = (ROOT / "resolve-plugin" / "README.md").read_text()
-    risk = (ROOT / "docs" / "resolve-runtime-risk.md").read_text()
+    main = (PLUGIN / "main.js").read_text(encoding="utf-8")
+    readme = (ROOT / "resolve-plugin" / "README.md").read_text(encoding="utf-8")
+    risk = (ROOT / "docs" / "resolve-runtime-risk.md").read_text(encoding="utf-8")
 
     assert "process.versions.electron" in main
     assert "process.versions.chrome" in main

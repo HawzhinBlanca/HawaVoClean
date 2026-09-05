@@ -226,7 +226,7 @@ def normalize_saved_image(source: Path, output: Path, *, epoch: int) -> None:
                     outgoing.addfile(info)
                 else:
                     raise CandidateError(f"unsupported Docker archive member: {member.name}")
-        with temp.open("rb") as stream:
+        with temp.open("r+b") as stream:
             os.fsync(stream.fileno())
         os.replace(temp, output)
     except BaseException:

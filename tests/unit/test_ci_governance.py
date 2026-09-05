@@ -183,7 +183,7 @@ def test_workflow_tee_pipelines_are_executable_fail_closed(tmp_path: Path) -> No
             "-c",
             'set -Eeuo pipefail\nfalse | tee "$1"',
             "ci-pipefail-proof",
-            str(log),
+            str(log.as_posix()),
         ],
         check=False,
         capture_output=True,

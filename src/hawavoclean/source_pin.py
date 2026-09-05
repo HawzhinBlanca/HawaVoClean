@@ -207,6 +207,7 @@ class PinnedSource:
             path_after = _Fingerprint.from_stat(path_after_info)
             if (
                 opened_after != opened
+                or path_after != opened
                 or not opened.same_file(path_after)
                 or _is_redirect(path_after_info)
             ):

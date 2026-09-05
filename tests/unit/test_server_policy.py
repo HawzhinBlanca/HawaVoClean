@@ -42,7 +42,7 @@ def test_outside_roots_is_403(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         str(Path(anchor) / "etc" / "passwd"),
         anchor,
         str(Path(anchor) / "usr" / "bin" / "python3"),
-        str(tmp_path / "outside.wav"),
+        str(Path(anchor) / "outside_all_roots" / "file.wav"),
     ):
         with pytest.raises(PathPolicyError) as exc:
             resolve_client_path(bad)

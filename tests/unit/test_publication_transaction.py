@@ -336,6 +336,8 @@ def test_legacy_triplet_migrates_without_destroying_prior_bytes(tmp_path: Path) 
 def test_legacy_symlink_bundle_migrates_to_regular_pointer_and_exports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Windows NTFS symlinks require elevated administrator privileges")
     old = b"old"
     _publish(tmp_path, old)
     paths = publication_paths(tmp_path / "out.wav")
@@ -434,6 +436,8 @@ def test_symlinked_lock_file_is_rejected_without_touching_target(tmp_path: Path)
 
 
 def test_nonregular_publication_lock_is_rejected(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("Named pipes (mkfifo) unsupported on Windows")
     paths = publication_paths(tmp_path / "out.wav")
     os.mkfifo(paths.lock)
     with pytest.raises(PublicationError, match="not a regular file"):

@@ -62,7 +62,8 @@ def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
         status, body = _get(f"{base}/api/health", token=None)
         assert status == 401 and body["error"] == "unauthorized"
         status, body = _get(f"{base}/api/health")
-        assert status == 200 and body["ok"] is True and body["engine_pid"] == proc.pid
+        expected_pid = proc.pid if sys.platform != "win32" else ready["pid"]
+        assert status == 200 and body["ok"] is True and body["engine_pid"] == expected_pid
         # Loopback only: the port is not reachable on a non-loopback interface
         # (socket bound to 127.0.0.1 specifically).
         hostname_ip = None

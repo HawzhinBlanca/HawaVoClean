@@ -395,7 +395,8 @@ def test_analyze_synthetic_wav(client: TestClient, work: Path) -> None:
 
 
 def test_analyze_path_policy_and_missing(client: TestClient, work: Path) -> None:
-    r = client.post("/api/analyze", headers=H, json={"path": "/etc/passwd"})
+    bad_passwd = str(Path(Path.cwd().anchor) / "etc" / "passwd")
+    r = client.post("/api/analyze", headers=H, json={"path": bad_passwd})
     assert r.status_code == 403 and r.json()["error"] == "forbidden"
     r = client.post("/api/analyze", headers=H, json={"path": "relative.wav"})
     assert r.status_code == 400 and r.json()["error"] == "bad_request"
@@ -628,16 +629,18 @@ def test_job_request_validation(client: TestClient, work: Path) -> None:
     assert r.status_code == 400 and r.json()["error"] == "bad_request"
     r = client.post("/api/jobs", headers=H, json={"profile": "studio"})
     assert r.status_code == 400
-    r = client.post("/api/jobs", headers=H, json={"input_path": "/etc/hosts", "profile": "studio"})
+    bad_hosts = str(Path(Path.cwd().anchor) / "etc" / "hosts")
+    r = client.post("/api/jobs", headers=H, json={"input_path": bad_hosts, "profile": "studio"})
     assert r.status_code == 403
     r = client.post(
         "/api/jobs", headers=H, json={"input_path": str(work / "nope.wav"), "profile": "studio"}
     )
     assert r.status_code == 404
+    bad_tmp = str(Path(Path.cwd().anchor) / "tmp" / "x.wav")
     r = client.post(
         "/api/jobs",
         headers=H,
-        json={"input_path": str(src), "profile": "studio", "output_path": "/tmp/x.wav"},
+        json={"input_path": str(src), "profile": "studio", "output_path": bad_tmp},
     )
     assert r.status_code == 403
     r = client.post(
@@ -865,7 +868,8 @@ def test_audio_range_requests(client: TestClient, work: Path) -> None:
     assert r.status_code == 206 and r.content == b""
     assert r.headers["content-range"] == f"bytes 0-9/{size}"
 
-    r = client.get("/api/audio", params={"path": "/etc/hosts"}, headers=H)
+    bad_hosts = str(Path(Path.cwd().anchor) / "etc" / "hosts")
+    r = client.get("/api/audio", params={"path": bad_hosts}, headers=H)
     assert r.status_code == 403
     r = client.get("/api/audio", params={"path": str(work / "missing.wav")}, headers=H)
     assert r.status_code == 404

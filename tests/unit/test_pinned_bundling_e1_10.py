@@ -8,7 +8,9 @@ system Python, developer tools or a source checkout.
 
 from __future__ import annotations
 
+import os
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -77,7 +79,12 @@ def test_natural_pipeline_operates_with_pinned_binaries_in_clean_env(
     monkeypatch.setenv("HAWAVOCLEAN_FFMPEG_PATH", system_ffmpeg)
     monkeypatch.setenv("HAWAVOCLEAN_FFPROBE_PATH", system_ffprobe)
     # Strip PATH to standard system utilities only (no Homebrew / opt / custom)
-    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    if sys.platform == "win32":
+        sys_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+        git_bin = str(Path(shutil.which("git") or "").parent)
+        monkeypatch.setenv("PATH", f"{sys_root}\\system32;{sys_root};{git_bin}")
+    else:
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
     # Confirm resolution points to the pinned paths despite stripped PATH
     res_ffmpeg = ffmpeg_bin_path()

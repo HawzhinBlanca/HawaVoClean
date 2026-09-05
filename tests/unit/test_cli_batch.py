@@ -138,6 +138,8 @@ def test_batch_real_deadline_kills_a_genuinely_hung_child(tmp_path: Path) -> Non
 
     import hawavoclean.cli as c
 
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("Named pipes (mkfifo) unsupported on Windows")
     fifo = tmp_path / "never.wav"
     os.mkfifo(fifo)  # reading it blocks until a writer appears (never)
     t0 = time.perf_counter()
