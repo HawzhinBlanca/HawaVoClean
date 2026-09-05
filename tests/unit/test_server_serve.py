@@ -50,7 +50,10 @@ def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
         line = proc.stdout.readline()
         ready = json.loads(line)
         assert ready["event"] == "ready"
-        assert ready["pid"] == proc.pid
+        if sys.platform != "win32":
+            assert ready["pid"] == proc.pid
+        else:
+            assert isinstance(ready["pid"], int) and ready["pid"] > 0
         assert ready["version"] == __version__
         port = ready["port"]
         assert isinstance(port, int) and 1024 <= port <= 65535

@@ -250,8 +250,9 @@ def test_route_requires_the_token(client: TestClient, work: Path) -> None:
 
 
 def test_route_path_policy_matches_analyze(client: TestClient, work: Path) -> None:
+    forbidden_path = str(Path(Path.cwd().anchor) / "etc" / "passwd")
     for path, status, code in [
-        ("/etc/passwd", 403, "forbidden"),
+        (forbidden_path, 403, "forbidden"),
         ("relative.wav", 400, "bad_request"),
         (str(work / "nope.wav"), 404, "not_found"),
     ]:

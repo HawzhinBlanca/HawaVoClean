@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,13 +45,18 @@ def test_replacing_or_redirecting_selected_path_revokes_authority() -> None:
     registered = registry.register(str(source))
 
     replacement = _source("replacement.wav", b"different inode")
+    if sys.platform == "win32":
+        registry.close()
     replacement.replace(source)
     assert registry.resolve_source(registered.source_id) is None
     assert not registry.authorizes(source)
 
     target = _source("target.wav", b"target")
     source.unlink()
-    os.symlink(target.name, source)
+    try:
+        os.symlink(target.name, source)
+    except OSError:
+        pytest.skip("Symlink creation requires privilege on this filesystem")
     assert not registry.authorizes(source.resolve())
 
 
@@ -114,6 +120,8 @@ def test_resolve_native_selected_path_and_registry_branches(
     source.write_bytes(b"modified bytes")
     # Replace file to change inode
     temp_new = _source("temp_new.wav", b"new content")
+    if sys.platform == "win32":
+        registry.close()
     os.replace(temp_new, source)
     reg_new = registry.register(str(source))
     assert reg_new.path == source.resolve()

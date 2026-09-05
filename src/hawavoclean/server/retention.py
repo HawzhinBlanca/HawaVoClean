@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hawavoclean.platform_fs import flush_directory
+
 DEFAULT_UPLOAD_TTL_S = 24 * 60 * 60.0
 DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
 DEFAULT_MIN_FREE_BYTES = 512 * 1024 * 1024
@@ -196,11 +198,7 @@ class UploadStore:
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(marker_temp, marker_path)
-                directory_fd = os.open(directory, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+                flush_directory(directory)
             except BaseException:
                 with contextlib.suppress(OSError):
                     marker_temp.unlink(missing_ok=True)

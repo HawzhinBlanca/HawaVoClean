@@ -15,6 +15,7 @@ pins the decisions that surround them, in-process:
   child can publish inside the backstop grace.
 """
 
+import contextlib
 import logging
 import os
 import signal
@@ -238,7 +239,7 @@ def _wait_gone(pid: int, timeout_s: float) -> float:
     while time.monotonic() - t0 < timeout_s:
         try:
             os.kill(pid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, OSError):
             return time.monotonic() - t0
         time.sleep(0.02)
     return time.monotonic() - t0
@@ -295,10 +296,11 @@ def test_a_child_whose_real_spawner_dies_is_gone_without_publishing(tmp_path: Pa
     waited = _wait_gone(child_pid, timeout_s=30.0)
     try:
         os.kill(child_pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OSError):
         pass
     else:  # pragma: no cover - only on a broken watchdog
-        os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        with contextlib.suppress(OSError):
+            os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         pytest.fail(f"the orphan was still running {waited:.1f}s after its spawner died")
     assert not marker.exists(), "the orphan ran on to finish its work"
 
@@ -379,10 +381,11 @@ def test_the_interrupt_path_survives_an_inherited_sig_ign(tmp_path: Path) -> Non
     waited = _wait_gone(child_pid, timeout_s=30.0)
     try:
         os.kill(child_pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OSError):
         pass
     else:  # pragma: no cover - only on a broken watchdog
-        os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        with contextlib.suppress(OSError):
+            os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         pytest.fail(
             f"with SIGINT ignored, the orphan was still running {waited:.1f}s "
             f"after its spawner died"
