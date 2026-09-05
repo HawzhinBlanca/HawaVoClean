@@ -77,6 +77,7 @@ function BatchItemRow({
                 aria-valuenow={pct}
                 aria-valuemin={0}
                 aria-valuemax={100}
+                aria-label={`${item.seq}. ${name} progress: ${pct}%`}
               >
                 <div className="batch-item-progress-fill" style={{ width: `${pct}%` }} />
               </div>
