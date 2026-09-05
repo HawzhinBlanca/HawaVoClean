@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -322,14 +324,17 @@ def test_queued_source_mutation_does_not_affect_render(tmp_path: Path) -> None:
         # Mutate the source immediately after submission
         input_wav.write_bytes(b"corrupted garbage bytes that cannot decode as wav")
 
-        # Wait for job completion
-        for _ in range(50):
-            job_snap = manager.get_status(job_id)
-            if job_snap is not None and job_snap["state"] in {"done", "failed"}:
+        # Wait for job completion with bounded deadline for virtualized CI runners
+        deadline = time.monotonic() + (
+            120.0 if "CI" in os.environ or sys.platform == "win32" else 30.0
+        )
+        final_snap = None
+        while time.monotonic() < deadline:
+            final_snap = manager.get_status(job_id)
+            if final_snap is not None and final_snap["state"] in {"done", "failed"}:
                 break
             time.sleep(0.1)
 
-        final_snap = manager.get_status(job_id)
         assert final_snap is not None
         assert final_snap["state"] == "done"
         assert output_wav.exists()

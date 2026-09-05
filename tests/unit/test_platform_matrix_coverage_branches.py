@@ -1226,3 +1226,390 @@ def test_checkpoint_validation_extended_branches(tmp_path: Path) -> None:
         match="Failed to load safetensors|Corrupted metadata",
     ):
         load_safe_checkpoint(safe_file)
+
+
+# ---------------------------------------------------------------------------
+# CLI, platform_fs, probe, and publication additional branch tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_cli_private_key_and_trust_store_parsers(tmp_path: Path) -> None:
+    """Exercise private key file/hex parsing and trust store spec variations."""
+    import json
+
+    from hawavoclean.cli import (
+        _parse_private_key,
+        _parse_trust_store,
+        _parse_trusted_key_item,
+    )
+    from hawavoclean.errors import PublicationError
+
+    # 1. _parse_private_key from 32-byte raw file
+    k32_file = tmp_path / "priv_raw.key"
+    k32_bytes = b"X" * 32
+    k32_file.write_bytes(k32_bytes)
+    assert _parse_private_key(str(k32_file)) == k32_bytes
+
+    # 2. _parse_private_key from 64-hex file
+    k_hex_file = tmp_path / "priv_hex.key"
+    k_hex_file.write_text("aa" * 32, encoding="utf-8")
+    assert _parse_private_key(str(k_hex_file)) == bytes.fromhex("aa" * 32)
+
+    # 3. _parse_private_key invalid file content
+    bad_file = tmp_path / "bad.key"
+    bad_file.write_text("short invalid hex", encoding="utf-8")
+    with pytest.raises(PublicationError, match="must contain 32 raw bytes"):
+        _parse_private_key(str(bad_file))
+
+    # 4. _parse_private_key direct hex string
+    assert _parse_private_key("bb" * 32) == bytes.fromhex("bb" * 32)
+
+    # 5. _parse_private_key invalid hex string
+    with pytest.raises(PublicationError, match="Private key must be a 64-character hex"):
+        _parse_private_key("not-valid-hex")
+
+    # 6. _parse_trusted_key_item from json list file
+    list_file = tmp_path / "keys_list.json"
+    list_file.write_text(
+        json.dumps([{"key_id": "k1", "public_key_hex": "11" * 32, "revoked": False}]),
+        encoding="utf-8",
+    )
+    keys = _parse_trusted_key_item(str(list_file))
+    assert len(keys) == 1
+    assert keys[0].key_id == "k1"
+
+    # 7. _parse_trusted_key_item from json dict file with 'keys'
+    dict_file = tmp_path / "keys_dict.json"
+    dict_file.write_text(
+        json.dumps({"keys": [{"key_id": "k2", "public_key_hex": "22" * 32, "revoked": True}]}),
+        encoding="utf-8",
+    )
+    keys2 = _parse_trusted_key_item(str(dict_file))
+    assert len(keys2) == 1
+    assert keys2[0].key_id == "k2"
+    assert keys2[0].revoked is True
+
+    # 8. _parse_trusted_key_item with revoked prefix and raw key file
+    pub_raw = tmp_path / "pub_raw.key"
+    pub_raw.write_bytes(b"Y" * 32)
+    keys3 = _parse_trusted_key_item(f"revoked:k3:{pub_raw}")
+    assert len(keys3) == 1
+    assert keys3[0].revoked is True
+    assert keys3[0].public_key_bytes == b"Y" * 32
+
+    # 9. _parse_trusted_key_item with hex key file
+    pub_hex_file = tmp_path / "pub_hex.key"
+    pub_hex_file.write_text("33" * 32, encoding="utf-8")
+    keys4 = _parse_trusted_key_item(f"k4:{pub_hex_file}")
+    assert len(keys4) == 1
+    assert keys4[0].public_key_bytes == bytes.fromhex("33" * 32)
+
+    # 10. _parse_trusted_key_item invalid spec without colon
+    with pytest.raises(PublicationError, match="Invalid trusted key specification"):
+        _parse_trusted_key_item("invalid_spec_no_colon")
+
+    # 11. _parse_trust_store None/empty
+    assert _parse_trust_store(None) is None
+    assert _parse_trust_store([]) is None
+    store = _parse_trust_store([f"k5:{'44' * 32}"])
+    assert store is not None
+    assert len(store._keys) == 1
+
+
+@pytest.mark.unit
+def test_cli_persistent_worker_helpers(tmp_path: Path) -> None:
+    """Exercise _BatchChild.stderr_tail and queue EOF handling."""
+    import queue
+    import time
+
+    from hawavoclean.cli import _BatchChild
+
+    worker = _BatchChild.__new__(_BatchChild)
+    worker._stderr_path = None
+    assert worker.stderr_tail() == "no output"
+
+    worker._stderr_path = tmp_path / "nonexistent.stderr"
+    assert worker.stderr_tail() == "no output"
+
+    stderr_f = tmp_path / "worker.stderr"
+    stderr_f.write_text("\n\n  \n", encoding="utf-8")
+    worker._stderr_path = stderr_f
+    assert worker.stderr_tail() == "no output"
+
+    stderr_f.write_text("line 1\nline 2: process crashed unexpectedly\n", encoding="utf-8")
+    assert "process crashed unexpectedly" in worker.stderr_tail()
+
+    worker._lines = queue.Queue()
+    worker._lines.put(None)
+    with pytest.raises(EOFError, match="batch worker exited"):
+        worker._await_line(deadline=time.monotonic() + 10.0)
+
+
+@pytest.mark.unit
+def test_platform_fs_lease_and_rename_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise lease idempotency, directory flush equality, and try_lock exception branches."""
+    from hawavoclean.platform_fs import (
+        ExclusiveFileLease,
+        _flush_rename_directories,
+        _try_lock_descriptor,
+    )
+
+    # 1. ExclusiveFileLease double-release idempotency
+    dummy_file = tmp_path / "dummy_lease.lock"
+    dummy_file.write_bytes(b"\0")
+    fd = os.open(dummy_file, os.O_RDWR)
+    lease = ExclusiveFileLease(path=dummy_file, _descriptor=fd, _registry_key=str(dummy_file))
+    lease.release()
+    assert lease._released is True
+    # Second release must be safe no-op
+    lease.release()
+    assert lease._released is True
+
+    # 2. _flush_rename_directories: same parent vs different parent
+    dir1 = tmp_path / "dir1"
+    dir2 = tmp_path / "dir2"
+    dir1.mkdir()
+    dir2.mkdir()
+    f1 = dir1 / "file1.txt"
+    f2 = dir1 / "file2.txt"
+    f3 = dir2 / "file3.txt"
+    f1.write_text("a", encoding="utf-8")
+    f2.write_text("b", encoding="utf-8")
+    f3.write_text("c", encoding="utf-8")
+
+    _flush_rename_directories(f1, f2)  # same parent
+    _flush_rename_directories(f1, f3)  # different parent
+
+    # 3. _try_lock_descriptor re-raises unexpected OSError
+    if sys.platform != "win32":
+        import fcntl
+
+        def _bad_flock(_descriptor: int, _operation: int) -> None:
+            raise OSError(errno.EBADF, "Bad file descriptor")
+
+        monkeypatch.setattr(fcntl, "flock", _bad_flock)
+        with pytest.raises(OSError) as exc_info:
+            _try_lock_descriptor(99999)
+        assert exc_info.value.errno == errno.EBADF
+
+
+@pytest.mark.unit
+def test_audio_probe_ffprobe_json_and_sf_subtypes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise ffprobe stream/format validation edge branches and bit depth logic."""
+    import json
+    import subprocess
+
+    import soundfile as sf
+
+    import hawavoclean.audio.probe as probe_mod
+    from hawavoclean.audio.probe import MAX_STREAM_RECORDS, probe_audio
+    from hawavoclean.errors import MediaPreflightError, MediaPreflightReason
+
+    wav_file = tmp_path / "probe_test.wav"
+    sig = np.zeros(16000, dtype=np.float32)
+    sf.write(str(wav_file), sig, 16000, format="WAV", subtype="PCM_16")
+
+    def mock_run_bounded(
+        streams: Any, fmt: Any = None, returncode: int = 0
+    ) -> subprocess.CompletedProcess[bytes]:
+        if fmt is None:
+            fmt = {"format_name": "wav", "duration": "1.0"}
+        data = {"streams": streams, "format": fmt}
+        raw = json.dumps(data).encode("utf-8")
+        return subprocess.CompletedProcess(
+            args=["ffprobe"], returncode=returncode, stdout=raw, stderr=b""
+        )
+
+    # 1. Non-list streams
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded("not-a-list")
+    )
+    with pytest.raises(MediaPreflightError) as exc1:
+        probe_audio(wav_file)
+    assert exc1.value.reason == MediaPreflightReason.MALFORMED_METADATA
+
+    # 2. Too many streams (RESOURCE_BOMB)
+    too_many = [{"codec_type": "audio", "sample_rate": "16000", "channels": "1"}] * (
+        MAX_STREAM_RECORDS + 1
+    )
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded(too_many)
+    )
+    with pytest.raises(MediaPreflightError) as exc2:
+        probe_audio(wav_file)
+    assert exc2.value.reason == MediaPreflightReason.RESOURCE_BOMB
+
+    # 3. Malformed stream record (non-dict)
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded(["not-dict"])
+    )
+    with pytest.raises(MediaPreflightError) as exc3:
+        probe_audio(wav_file)
+    assert exc3.value.reason == MediaPreflightReason.MALFORMED_METADATA
+
+    # 4. No audio stream present
+    video_only = [{"codec_type": "video", "index": 0}]
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded(video_only)
+    )
+    with pytest.raises(MediaPreflightError) as exc4:
+        probe_audio(wav_file)
+    assert exc4.value.reason == MediaPreflightReason.NO_AUDIO_STREAM
+
+    # 5. Non-dict format
+    valid_stream = [
+        {
+            "codec_type": "audio",
+            "index": 0,
+            "sample_rate": "16000",
+            "channels": 1,
+            "codec_name": "pcm_s16le",
+            "duration": "1.0",
+        }
+    ]
+    data_bad_fmt = json.dumps({"streams": valid_stream, "format": "not-a-dict"}).encode("utf-8")
+    monkeypatch.setattr(
+        probe_mod,
+        "_run_bounded_capture",
+        lambda *_a, **_kw: subprocess.CompletedProcess(["ffprobe"], 0, data_bad_fmt, b""),
+    )
+    with pytest.raises(MediaPreflightError) as exc5:
+        probe_audio(wav_file)
+    assert exc5.value.reason == MediaPreflightReason.MALFORMED_METADATA
+
+    # 6. Bit depth extraction variations
+    s_raw = [
+        {
+            "codec_type": "audio",
+            "index": 0,
+            "sample_rate": "16000",
+            "channels": 1,
+            "codec_name": "pcm_s24le",
+            "bits_per_raw_sample": "24",
+            "duration": "1.0",
+        }
+    ]
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded(s_raw)
+    )
+    p1 = probe_audio(wav_file)
+    assert p1.bit_depth == 24
+
+    s_samp = [
+        {
+            "codec_type": "audio",
+            "index": 0,
+            "sample_rate": "16000",
+            "channels": 1,
+            "codec_name": "pcm_s16le",
+            "bits_per_sample": "16",
+            "duration": "1.0",
+        }
+    ]
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded(s_samp)
+    )
+    p2 = probe_audio(wav_file)
+    assert p2.bit_depth == 16
+
+    s_f32 = [
+        {
+            "codec_type": "audio",
+            "index": 0,
+            "sample_rate": "16000",
+            "channels": 1,
+            "codec_name": "pcm_f32le",
+            "duration": "1.0",
+        }
+    ]
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded(s_f32)
+    )
+    p3 = probe_audio(wav_file)
+    assert p3.bit_depth == 32
+
+    # 7. max_channels violation
+    s_6ch = [
+        {
+            "codec_type": "audio",
+            "index": 0,
+            "sample_rate": "16000",
+            "channels": 6,
+            "codec_name": "pcm_s16le",
+            "duration": "1.0",
+        }
+    ]
+    monkeypatch.setattr(
+        probe_mod, "_run_bounded_capture", lambda *_a, **_kw: mock_run_bounded(s_6ch)
+    )
+    with pytest.raises(MediaPreflightError) as exc6:
+        probe_audio(wav_file, max_channels=2)
+    assert exc6.value.reason == MediaPreflightReason.UNSUPPORTED_CHANNEL_LAYOUT
+
+
+@pytest.mark.unit
+def test_publication_verification_and_migration_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise publication verification and legacy migration safety checks."""
+    import hawavoclean.publication as pub_mod
+    from hawavoclean.errors import PublicationError
+    from hawavoclean.publication import (
+        _complete_legacy_migration,
+        _verify_public,
+        publication_paths,
+    )
+
+    audio_out = tmp_path / "pub_test.wav"
+    paths = publication_paths(audio_out)
+
+    # 1. _complete_legacy_migration with incomplete legacy output triplet raises PublicationError
+    audio_out.write_bytes(b"dummy audio")
+    with pytest.raises(PublicationError, match="Incomplete legacy output triplet"):
+        _complete_legacy_migration(paths)
+
+    # 2. _verify_public: pointer changed during verification
+    paths.bundle.mkdir(parents=True, exist_ok=True)
+    paths.generations.mkdir(parents=True, exist_ok=True)
+    gen_dir = paths.generations / "gen1"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    (gen_dir / "audio.wav").write_bytes(b"dummy")
+    (gen_dir / "report.json").write_bytes(b"{}")
+    (gen_dir / "summary.txt").write_bytes(b"summary")
+    monkeypatch.setattr(pub_mod, "_read_current_id", lambda _p: "gen2")
+    with pytest.raises(PublicationError, match="pointer changed during verification"):
+        _verify_public(paths, "gen1")
+
+
+@pytest.mark.unit
+def test_cli_doctor_and_core_locks_mismatch_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exercise doctor lock params_hash mismatch branch."""
+    import argparse
+
+    from hawavoclean import paths as paths_mod
+    from hawavoclean.cli import cmd_doctor
+    from hawavoclean.enhancement.factory import CORE_REGISTRY
+
+    fake_models = tmp_path / "models"
+    fake_models.mkdir(parents=True, exist_ok=True)
+    real_calib = paths_mod.models_dir() / "guard-calibration.json"
+    if real_calib.exists():
+        (fake_models / "guard-calibration.json").write_bytes(real_calib.read_bytes())
+    monkeypatch.setattr("hawavoclean.cli.models_dir", lambda: fake_models)
+
+    first_core = next(iter(CORE_REGISTRY.values()))
+    lock_file = fake_models / first_core.lock_filename
+    lock_file.write_bytes(b'params_hash = "wrong_hash"\n')
+
+    args = argparse.Namespace(check_gpu=False, quick=True, verbose=False)
+    code = cmd_doctor(args)
+    assert code != 0
+    captured = capsys.readouterr().out
+    assert "lock params_hash does not match implementation" in captured
