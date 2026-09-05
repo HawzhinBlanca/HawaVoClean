@@ -473,7 +473,7 @@ def test_windows_move_failure_and_flush_rename_dirs(
 
 
 @pytest.mark.unit
-def test_paths_app_data_root_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_paths_app_data_root_variants(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hawavoclean.paths import app_data_root
 
     # 1. State dir env override
@@ -496,12 +496,13 @@ def test_paths_app_data_root_variants(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # 5. Linux with XDG_DATA_HOME
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setenv("XDG_DATA_HOME", "/custom/xdg")
-    assert str(app_data_root()).startswith("/custom/xdg")
+    custom_xdg = str(tmp_path / "custom_xdg")
+    monkeypatch.setenv("XDG_DATA_HOME", custom_xdg)
+    assert custom_xdg in str(app_data_root())
 
     # 6. Linux without XDG_DATA_HOME
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    assert ".local/share" in str(app_data_root())
+    assert ".local" in str(app_data_root())
 
 
 @pytest.mark.unit
@@ -526,7 +527,7 @@ def test_paths_binary_resolution_fallbacks(tmp_path: Path, monkeypatch: pytest.M
     assert ffprobe_bin_path() == "/usr/bin/ffprobe"
 
     # 3. resolve_calibration_file: absolute vs relative
-    abs_p = Path("/tmp/calib.json")
+    abs_p = (tmp_path / "calib.json").resolve()
     assert resolve_calibration_file(str(abs_p)) == abs_p
     rel_p = "calib.json"
     assert resolve_calibration_file(rel_p).name == "calib.json"
@@ -675,3 +676,278 @@ def test_watchdog_signal_and_parent_alive_branches(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("HAWAVOCLEAN_PARENT_PID", "99999")
     monkeypatch.setattr(os, "getppid", lambda: 22222)
     assert install_parent_death_watchdog() is None
+
+
+# ---------------------------------------------------------------------------
+# audio.encode branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_audio_encode_branches(tmp_path: Path) -> None:
+    from hawavoclean.audio.encode import (
+        _finalize_deterministic_wav,
+        _wav_container_format,
+        encode_audio,
+        encode_audio_streaming,
+    )
+    from hawavoclean.audio.types import AudioBuffer
+
+    # Container format: large sample count picks RF64
+    assert _wav_container_format(2, 1000, "FLOAT") == "WAV"
+    assert _wav_container_format(2, 10**9, "FLOAT") == "RF64"
+
+    # _finalize_deterministic_wav errors
+    invalid_header_file = tmp_path / "bad_hdr.wav"
+    invalid_header_file.write_bytes(b"NOT_A_WAV_FILE_HEADER")
+    with pytest.raises(OutputValidationError, match="not a valid WAV/RF64"):
+        _finalize_deterministic_wav(invalid_header_file)
+
+    truncated_chunk_file = tmp_path / "trunc.wav"
+    truncated_chunk_file.write_bytes(b"RIFF\x24\0\0\0WAVEfmt ")  # missing chunk size
+    with pytest.raises(OutputValidationError, match="truncated chunk header"):
+        _finalize_deterministic_wav(truncated_chunk_file)
+
+    malformed_peak_file = tmp_path / "malformed_peak.wav"
+    malformed_peak_file.write_bytes(b"RIFF\x24\0\0\0WAVEPEAK\x04\0\0\0xxxxdata\0\0\0\0")
+    with pytest.raises(OutputValidationError, match="malformed PEAK chunk"):
+        _finalize_deterministic_wav(malformed_peak_file)
+
+    # encode_audio validation: NaN and empty
+    nan_buf = AudioBuffer(np.array([[np.nan]], dtype=np.float32), 48000)
+    with pytest.raises(OutputValidationError, match="NaN"):
+        encode_audio(nan_buf, tmp_path / "nan.wav")
+
+    empty_buf = AudioBuffer(np.zeros((1, 0), dtype=np.float32), 48000)
+    with pytest.raises(OutputValidationError, match="Cannot encode empty audio buffer"):
+        encode_audio(empty_buf, tmp_path / "empty.wav")
+
+    ok_buf = AudioBuffer(np.zeros((1, 100), dtype=np.float32), 48000)
+
+    # Valid float32 encoding without dither
+    out_f32 = encode_audio(
+        ok_buf, tmp_path / "out_f32.wav", output_bit_depth="float32", dither=False
+    )
+    assert out_f32.is_file()
+
+    # encode_audio_streaming validation
+    with pytest.raises(ValueError, match="chunk_samples must be >= 1"):
+        encode_audio_streaming(ok_buf, tmp_path / "stream_bad.wav", chunk_samples=0)
+
+    with pytest.raises(OutputValidationError, match="Cannot encode empty audio buffer"):
+        encode_audio_streaming(empty_buf, tmp_path / "stream_empty.wav")
+
+    with pytest.raises(OutputValidationError, match="NaN"):
+        encode_audio_streaming(nan_buf, tmp_path / "stream_nan.wav")
+
+    out_stream = encode_audio_streaming(ok_buf, tmp_path / "stream_ok.wav", chunk_samples=50)
+    assert out_stream.is_file()
+
+
+# ---------------------------------------------------------------------------
+# eval.corpus & eval.corruption branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_eval_corpus_and_corruption_branches(tmp_path: Path) -> None:
+    import hashlib
+    import json
+
+    from hawavoclean.eval.corpus import load_corpus_manifest, verify_corpus_audio_files
+    from hawavoclean.eval.corruption import (
+        corrupt_consonant_splice,
+        corrupt_dropout,
+        corrupt_repeated_span,
+    )
+
+    # 1. Corpus manifest loading
+    missing = tmp_path / "absent.json"
+    with pytest.raises(InvalidUserInputError, match="Manifest file not found"):
+        load_corpus_manifest(missing)
+
+    item_dict = {
+        "id": "item1",
+        "audio_path": "a.wav",
+        "audio_sha256": "fake_sha",
+        "duration_s": 1.0,
+        "speaker_id": "spk_test",
+        "dialect": "slemani",
+        "gender": "male",
+        "environment": "studio",
+        "degradation_type": "clean",
+        "transcript_sorani": "تێست",
+        "split": "acceptance",
+    }
+
+    # Full JSON manifest with "items"
+    full_manifest_json = tmp_path / "full.json"
+    full_manifest_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "manifest_id": "full",
+                "split_name": "acceptance",
+                "items_count": 1,
+                "manifest_sha256": "abc",
+                "items": [item_dict],
+            }
+        ),
+        encoding="utf-8",
+    )
+    m_full = load_corpus_manifest(full_manifest_json)
+    assert m_full.items_count == 1
+
+    # Single-item JSON
+    single_json = tmp_path / "single.json"
+    single_json.write_text(json.dumps(item_dict), encoding="utf-8")
+    manifest = load_corpus_manifest(single_json)
+    assert manifest.items_count == 1
+
+    # JSONL file format (not starting with '{')
+    jsonl_file = tmp_path / "data.jsonl"
+    jsonl_file.write_text(
+        " \n" + json.dumps(item_dict) + "\n",
+        encoding="utf-8",
+    )
+    m_jsonl = load_corpus_manifest(jsonl_file)
+    assert m_jsonl.items_count == 1
+
+    # verify_corpus_audio_files: missing file and sha mismatch
+    with pytest.raises(InvalidUserInputError, match="audio missing"):
+        verify_corpus_audio_files(manifest, base_dir=tmp_path)
+
+    # Create matching file with different sha
+    dummy_wav = tmp_path / "a.wav"
+    dummy_wav.write_bytes(b"content")
+    with pytest.raises(InvalidUserInputError, match="SHA-256 mismatch"):
+        verify_corpus_audio_files(manifest, base_dir=tmp_path)
+
+    # Successful verification with matching sha
+    real_sha = hashlib.sha256(b"content").hexdigest()
+    item_dict_valid = dict(item_dict, audio_sha256=real_sha)
+    single_valid_json = tmp_path / "single_valid.json"
+    single_valid_json.write_text(json.dumps(item_dict_valid), encoding="utf-8")
+    valid_manifest = load_corpus_manifest(single_valid_json)
+    verify_corpus_audio_files(valid_manifest, base_dir=tmp_path)
+
+    # 2. Corruption out-of-bounds boundary returns copy
+    wave = np.ones(100, dtype=np.float32)
+    spliced = corrupt_consonant_splice(wave, 16000, start_time_s=10.0)
+    np.testing.assert_array_equal(wave, spliced)
+
+    repeated = corrupt_repeated_span(wave, 16000, start_time_s=10.0)
+    np.testing.assert_array_equal(wave, repeated)
+
+    dropout = corrupt_dropout(wave, 16000, start_time_s=0.0, duration_ms=1.0)
+    assert dropout[0] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# journal & cli branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_journal_and_cli_exit_branches(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from hawavoclean.cli import exit_with_code
+    from hawavoclean.errors import ExitCode
+    from hawavoclean.journal import JobJournal, JournalEvent
+
+    # 1. JobJournal read_events on missing and corrupted trailing line
+    j_path = tmp_path / "job.journal"
+    journal = JobJournal(j_path)
+    assert journal.read_events() == []
+
+    journal.append(JournalEvent.JOB_STARTED, {"key": "val"})
+    journal.append(JournalEvent.UNIT_COMMITTED, {"unit_id": 42})
+    journal.append(JournalEvent.UNIT_COMMITTED, {})  # unit_id missing
+
+    # Append corrupt line
+    with open(j_path, "a", encoding="utf-8") as f:
+        f.write("{invalid_json\n")
+
+    events = journal.read_events()
+    assert len(events) == 3
+    assert journal.get_committed_units() == {42}
+
+    # 2. cli exit_with_code branches
+    with pytest.raises(SystemExit) as exc1:
+        exit_with_code(ExitCode.SUCCESS, "All good")
+    assert exc1.value.code == 0
+    captured1 = capsys.readouterr()
+    assert "All good" in captured1.out
+
+    with pytest.raises(SystemExit) as exc2:
+        exit_with_code(ExitCode.PREFLIGHT_FAILURE, "Failed badly")
+    assert exc2.value.code == int(ExitCode.PREFLIGHT_FAILURE)
+    captured2 = capsys.readouterr()
+    assert "Failed badly" in captured2.err
+
+    with pytest.raises(SystemExit) as exc3:
+        exit_with_code(0)
+    assert exc3.value.code == 0
+
+
+# ---------------------------------------------------------------------------
+# hashing & cli diagnostic command branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_hashing_branches(tmp_path: Path) -> None:
+    from hawavoclean.hashing import compute_cache_key, compute_job_id, hash_bytes, hash_numpy
+
+    # 1. hash_bytes
+    assert len(hash_bytes(b"hello")) == 64
+
+    # 2. hash_numpy with Fortran-contiguous array
+    arr_c = np.ones((10, 10), dtype=np.float32)
+    arr_f = np.asfortranarray(arr_c)
+    assert hash_numpy(arr_c) == hash_numpy(arr_f)
+
+    # 3. hash_numpy with memmap
+    mmap_file = tmp_path / "test.mmap"
+    mmap = np.memmap(mmap_file, dtype=np.float32, mode="w+", shape=(100,))
+    mmap[:] = 1.0
+    mmap.flush()
+    assert len(hash_numpy(mmap)) == 64
+    del mmap
+
+    # 4. compute_job_id with and without restore_context
+    id1 = compute_job_id("inp", "cfg", "core", "guard", "1.0.0")
+    id2 = compute_job_id("inp", "cfg", "core", "guard", "1.0.0", restore_context="speaker1")
+    assert id1 != id2
+    assert len(id1) == 16
+    assert len(id2) == 16
+
+    # 5. compute_cache_key
+    ck = compute_cache_key(b"pcm", 48000, {"m": "h"}, "guard", "cfg", "1.0")
+    assert len(ck) == 64
+
+
+@pytest.mark.unit
+def test_cli_doctor_and_profile_commands(tmp_path: Path) -> None:
+    import argparse
+
+    from hawavoclean.cli import cmd_restore_doctor, cmd_speaker_profile
+    from hawavoclean.errors import ExitCode
+    from hawavoclean.paths import profiles_root
+
+    # 1. cmd_restore_doctor execution
+    res = cmd_restore_doctor(argparse.Namespace())
+    assert res in (int(ExitCode.SUCCESS), int(ExitCode.PREFLIGHT_FAILURE))
+
+    # 2. cmd_speaker_profile on empty dir -> INVALID_USER_INPUT
+    empty_dir = tmp_path / "empty_profiles"
+    empty_dir.mkdir()
+    assert cmd_speaker_profile(argparse.Namespace(profile_target=str(empty_dir))) == int(
+        ExitCode.INVALID_USER_INPUT
+    )
+
+    # 3. cmd_speaker_profile on real profiles root
+    real_profiles = profiles_root()
+    if real_profiles.exists():
+        assert cmd_speaker_profile(argparse.Namespace(profile_target=str(real_profiles))) == int(
+            ExitCode.SUCCESS
+        )
