@@ -538,7 +538,11 @@ test('stage-engine validator validates complete payloads and rejects checksum dr
     const manifest = path.join(temp, 'ENGINE-MANIFEST.json');
     fs.writeFileSync(manifest, JSON.stringify(manifestData));
 
-    const files = [launcher, payload, manifest, symlinks];
+    const payloadWithSpaces = path.join(temp, 'data', 'Transparent Busy.ani');
+    fs.mkdirSync(path.dirname(payloadWithSpaces), { recursive: true });
+    fs.writeFileSync(payloadWithSpaces, 'animation-data');
+
+    const files = [launcher, payload, payloadWithSpaces, manifest, symlinks];
     const checksumsLines = files.map((f) => {
       const hash = crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
       return `${hash}  ./${path.relative(temp, f)}`;
@@ -548,7 +552,7 @@ test('stage-engine validator validates complete payloads and rejects checksum dr
 
     // Clean validation succeeds
     const validated = validateEnginePayload(temp, 'darwin');
-    assert.equal(validated.verifiedFiles, 4);
+    assert.equal(validated.verifiedFiles, 5);
 
     // Tampering with payload fails validation
     fs.appendFileSync(payload, '-corrupted');

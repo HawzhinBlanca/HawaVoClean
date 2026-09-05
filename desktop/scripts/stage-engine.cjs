@@ -66,10 +66,16 @@ function validateEnginePayload(engineDir, platform) {
   const lines = fs.readFileSync(checksumsPath, 'utf8').split('\n').filter(Boolean);
   const checkedFiles = new Set();
   for (const line of lines) {
-    const parts = line.split(/\s+/);
-    if (parts.length < 2) continue;
-    const expectedHash = parts[0].toLowerCase();
-    const relativePath = parts[1].replace(/^\.\//, '');
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const spaceIndex = trimmed.indexOf(' ');
+    if (spaceIndex !== 64) continue;
+    const expectedHash = trimmed.slice(0, 64).toLowerCase();
+    let relativePath = trimmed.slice(64).trim();
+    if (relativePath.startsWith('*')) {
+      relativePath = relativePath.slice(1).trim();
+    }
+    relativePath = relativePath.replace(/^\.\//, '');
     const fullPath = path.join(engineDir, relativePath);
     if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
       throw new Error(`Engine payload file missing from checksum inventory: ${relativePath}`);
