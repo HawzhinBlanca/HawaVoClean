@@ -19,6 +19,8 @@ from hawavoclean.restoration.f0 import (
 )
 from hawavoclean.restoration.guard import (
     GuardRResult,
+    PostMasteringSegmentEvidence,
+    PostMasteringVerificationResult,
     RestorationGuard,
 )
 from hawavoclean.restoration.highband_events import (
@@ -57,6 +59,10 @@ from hawavoclean.restoration.report import (
 _TORCH_BACKED: dict[str, str] = {
     "HawaRestoreKD": "hawavoclean.restoration.hawarestore_kd",
     "UniverSRBaseline": "hawavoclean.restoration.universr_upstream",
+    "compute_code_provenance": "hawavoclean.restoration.checkpoint",
+    "compute_dependency_provenance": "hawavoclean.restoration.checkpoint",
+    "load_safe_checkpoint": "hawavoclean.restoration.checkpoint",
+    "save_safe_checkpoint": "hawavoclean.restoration.checkpoint",
 }
 
 
@@ -89,6 +95,8 @@ __all__ = [
     "HawaRestoreKD",
     "HighBandEventDetector",
     "HighBandEventResult",
+    "PostMasteringSegmentEvidence",
+    "PostMasteringVerificationResult",
     "ProfileValidationError",
     "ProtectedBandVerification",
     "RestorationCandidate",
@@ -103,9 +111,13 @@ __all__ = [
     "SpeakerF0Stats",
     "SpeakerProfile",
     "UniverSRBaseline",
+    "compute_code_provenance",
+    "compute_dependency_provenance",
     "compute_transition_mask",
+    "load_safe_checkpoint",
     "load_speaker_profile",
     "merge_protected_spectrum",
+    "save_safe_checkpoint",
     "validate_speaker_profile",
     "verify_protected_band_invariance",
 ]

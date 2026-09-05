@@ -55,7 +55,7 @@ def client(work: Path) -> Iterator[TestClient]:
     assert work.is_dir()  # the allowed-root override is active for every client test
     manager = JobManager()
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         yield c
     manager.shutdown()
 
@@ -245,12 +245,14 @@ def test_route_requires_the_token(client: TestClient, work: Path) -> None:
     body = {"path": str(wav), "start_s": 0.0, "end_s": 1.0}
     assert client.post("/api/peaks", json=body).status_code == 401
     assert client.post("/api/peaks", headers={"X-Hawa-Token": "no"}, json=body).status_code == 401
-    assert client.post(f"/api/peaks?token={TOKEN}", json=body).status_code == 200
+    assert client.post(f"/api/peaks?token={TOKEN}", json=body).status_code == 400
+    assert client.post("/api/peaks", headers=H, json=body).status_code == 200
 
 
 def test_route_path_policy_matches_analyze(client: TestClient, work: Path) -> None:
+    forbidden_path = str(Path(Path.cwd().anchor) / "etc" / "passwd")
     for path, status, code in [
-        ("/etc/passwd", 403, "forbidden"),
+        (forbidden_path, 403, "forbidden"),
         ("relative.wav", 400, "bad_request"),
         (str(work / "nope.wav"), 404, "not_found"),
     ]:
@@ -313,13 +315,13 @@ def test_route_reports_a_corrupt_file_without_crashing(client: TestClient, work:
 # ------------------------------------------------------- memory proof (E3/E1)
 
 _MEM_SCRIPT = r"""
-import resource, sys, time
+import sys, time
 from pathlib import Path
+from hawavoclean.runtime import process_peak_rss_bytes
 from hawavoclean.server.analysis import compute_peaks_window
 
 def rss_mb():
-    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return r / 1e6 if sys.platform == "darwin" else r / 1e3
+    return process_peak_rss_bytes() / 1e6
 
 path = Path(sys.argv[1])
 start, end, buckets = float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
@@ -415,7 +417,7 @@ def test_serving_windows_from_a_long_file_stays_interactive(work: Path) -> None:
     manager = JobManager()
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
     timings = []
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         for start in (0.0, 60.0, 150.0, 275.0):
             t0 = time.perf_counter()
             r = c.post(

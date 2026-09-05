@@ -542,15 +542,24 @@ def test_speaker_embed_short_and_silent_inputs_yield_zero_vector() -> None:
 
 def test_speaker_embed_is_unit_norm_and_mixdown_matches_mono() -> None:
     """Real audio yields a unit-norm 192-dim vector; dual-mono equals the mono result."""
-    mono = (_tone(220.0, 0.3, amp=0.4) + _tone(1800.0, 0.3, amp=0.2)).astype(np.float32)
+    t = np.linspace(0, 0.3, int(SR * 0.3), endpoint=False, dtype=np.float32)
+    # Speech-like signal with fundamental, formants, pitch modulation, and dynamic noise
+    f0_mod = 180.0 + 30.0 * np.sin(2.0 * np.pi * 5.0 * t)
+    phase = 2.0 * np.pi * np.cumsum(f0_mod) / SR
+    speech = (
+        0.4 * np.sin(phase)
+        + 0.3 * np.sin(2 * phase)
+        + 0.2 * np.sin(3 * phase)
+        + 0.1 * np.random.default_rng(42).standard_normal(len(t))
+    ).astype(np.float32)
     extractor = SpeakerEmbeddingExtractor(sample_rate=SR)
 
-    emb = extractor.extract(mono)
+    emb = extractor.extract(speech)
     assert emb.shape == (192,)
     assert emb.dtype == np.float32
     assert float(np.linalg.norm(emb)) == pytest.approx(1.0, abs=1e-5)
 
-    stereo = np.stack([mono, mono], axis=0)
+    stereo = np.stack([speech, speech], axis=0)
     np.testing.assert_array_equal(extractor.extract(stereo), emb)
 
 
@@ -632,10 +641,10 @@ def test_hawarestore_unknown_speaker_and_bad_embedding_are_ignored(
         assert np.all(np.isfinite(cond_cand.audio))
 
 
-def test_hawarestore_ode_failure_falls_back_to_dsp_extrapolation(
+def test_hawarestore_ode_failure_falls_back_to_natural_passthrough(
     restorer: HawaRestoreKD, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A crashing ODE solver must degrade to tiled DSP extrapolation, not fail the job."""
+    """A crashing ODE solver must degrade to Natural audio passthrough, not fabricate fake DSP."""
 
     def _boom(*_args: object, **_kwargs: object) -> torch.Tensor:
         raise RuntimeError("simulated ODE solver failure")
@@ -647,18 +656,18 @@ def test_hawarestore_ode_failure_falls_back_to_dsp_extrapolation(
         sig, sample_rate=SR, effective_cutoff_hz=4000.0, strengths=[1.0, 0.0], seed=3
     )
 
-    restored = next(c.audio for c in cands if c.strength == 1.0)
+    assert not any(c.strength > 0.0 for c in cands)
     passthrough = next(c.audio for c in cands if c.strength == 0.0)
 
     np.testing.assert_array_equal(passthrough, sig)
-    assert restored.shape == sig.shape
-    assert np.all(np.isfinite(restored))
+    assert passthrough.shape == sig.shape
+    assert np.all(np.isfinite(passthrough))
 
-    sos = signal.butter(6, 6000.0, btype="highpass", fs=SR, output="sos")
-    hf_in = float(np.sqrt(np.mean(signal.sosfiltfilt(sos, sig) ** 2)))
-    hf_out = float(np.sqrt(np.mean(signal.sosfiltfilt(sos, restored) ** 2)))
-    assert hf_out > 1e-4
-    assert hf_out > 50.0 * hf_in
+    guard = RestorationGuard(sample_rate=SR)
+    sel, res = guard.select_best_candidate(sig, cands, cutoff_hz=4000.0)
+    assert sel is sig
+    assert res.verdict == "NO_RESTORE"
+    assert res.accepted_strength == 0.0
 
 
 def test_highband_does_not_reject_a_recording_for_its_own_transients() -> None:
@@ -683,3 +692,33 @@ def test_highband_does_not_reject_a_recording_for_its_own_transients() -> None:
     assert res.impulse_discontinuity_ratio < 10.0, (
         "the recording's own transient was scored as damage the restoration did"
     )
+
+
+def test_hawarestore_speaker_conditioning_and_nan_handling(restorer: HawaRestoreKD) -> None:
+    sig = (_tone(440.0, 0.2, amp=0.4) + _tone(3800.0, 0.2, amp=0.25)).astype(np.float32)
+
+    # 1. Known speaker id and 192-dim embedding
+    spk_id = restorer.speaker_ids[0] if restorer.speaker_ids else None
+    spk_embed = np.ones(192, dtype=np.float32) / np.sqrt(192)
+    cands = restorer.restore(
+        sig,
+        sample_rate=SR,
+        effective_cutoff_hz=4000.0,
+        speaker_id=spk_id,
+        speaker_embedding=spk_embed,
+        strengths=[1.0],  # only 1.0, to trigger auto-append 0.0
+        seed=42,
+    )
+    assert any(c.strength == 0.0 for c in cands)
+
+    # 2. Multi-channel audio handling (stereo)
+    stereo_sig = np.stack([sig, sig], axis=0)
+    cands_stereo = restorer.restore(
+        stereo_sig,
+        sample_rate=SR,
+        effective_cutoff_hz=4000.0,
+        strengths=[0.0, 1.0],
+        seed=42,
+    )
+    assert len(cands_stereo) >= 1
+    assert cands_stereo[0].audio.shape == (2, len(sig))

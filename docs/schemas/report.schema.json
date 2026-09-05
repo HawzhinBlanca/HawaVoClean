@@ -340,6 +340,30 @@
           "title": "Separation Db",
           "type": "number"
         },
+        "cumulative_drift_db": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cumulative Drift Db"
+        },
+        "cumulative_consonant_retention": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cumulative Consonant Retention"
+        },
         "integrated_lufs": {
           "anyOf": [
             {
@@ -576,6 +600,18 @@
           "default": "",
           "title": "Decision Reason",
           "type": "string"
+        },
+        "manual_override": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manual Override"
         },
         "runtime_ms": {
           "default": 0.0,

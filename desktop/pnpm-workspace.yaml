@@ -1,0 +1,11 @@
+# Keep the desktop toolchain isolated from any workspace discovered above the
+# repository. The renderer remains the existing ../ui package and is consumed
+# only through its production dist/ output.
+packages: []
+
+# Electron's binary download is the only install script this package needs.
+# electron-winstaller's legacy hook is not used by electron-builder's NSIS
+# target and is explicitly denied so a frozen install stays noninteractive.
+allowBuilds:
+  electron: true
+  electron-winstaller: false

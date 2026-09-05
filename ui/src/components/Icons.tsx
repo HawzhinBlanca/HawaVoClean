@@ -130,3 +130,12 @@ export function IconBolt({ size, ...rest }: P) {
     </svg>
   );
 }
+
+export function IconRetry({ size, ...rest }: P) {
+  return (
+    <svg {...base(size, rest)}>
+      <path d="M2.5 8a5.5 5.5 0 1 0 1.2-3.4M2.5 3v3h3" />
+    </svg>
+  );
+}
+

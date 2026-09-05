@@ -15,7 +15,6 @@ bytes carried as surrogate escapes — is legal in a filename and is passed
 through to the ordinary 403/404 answers.
 """
 
-import os
 from pathlib import Path
 
 from hawavoclean.paths import work_root
@@ -62,7 +61,7 @@ def refuse_unusable_filename_text(raw: str, *, what: str = "path") -> None:
     if nul >= 0:
         raise PathPolicyError(400, "bad_request", f"{what} contains a NUL byte at position {nul}")
     try:
-        os.fsencode(raw)
+        raw.encode("utf-8", "surrogateescape")
     except (UnicodeEncodeError, ValueError) as e:
         detail = getattr(e, "reason", None) or str(e)
         raise PathPolicyError(

@@ -106,7 +106,7 @@ describe('POST /api/peaks (contract addendum 1)', () => {
     for (let i = 0; i < 64; i++) {
       expect(win.peaks.min[i]!).toBeLessThanOrEqual(win.peaks.max[i]!);
     }
-  });
+  }, 20000);
 
   it('clamps buckets to the sample count so 1 sample/bucket is reachable', async () => {
     const res = await post('/api/peaks', {

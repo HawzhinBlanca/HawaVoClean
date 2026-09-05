@@ -1,73 +1,69 @@
 # Publication Transaction State Machine
 
-This is the executable recovery contract for ADR 0005. `current` is the only authority. A journal,
-generation directory or public alias without a valid `current` pointer is recovery material, not a
-published output.
+This is the executable recovery contract for ADR 0009. The regular `current` JSON record is the only
+authority. A journal, generation directory or visible WAV/JSON/TXT file without a valid pointer is
+recovery material or a convenience export, not proof of a completed publication.
 
 ## Invariants
 
-1. `current` is absent or is a relative symlink of the form `generations/<64 lowercase hex>`.
-2. A target generation is accepted only after its manifest, sizes, artifact SHA-256 values and the
-   report's claimed WAV SHA-256 all verify.
-3. Every public alias has one owned relative target through the shared `current` pointer. No alias
-   names a generation directly.
-4. A pre-commit failure leaves the previous generation authoritative. A post-commit failure is
-   completed forward only when the new generation verifies; otherwise the caller receives failure.
-5. Recovery never removes or rewrites the previous generation.
-6. The per-output advisory lock serializes publishers and recovery. Readers resolve `current` once
-   under that lock and retain paths inside the selected immutable generation.
+1. `current` is absent or canonical JSON naming exactly one 64-lowercase-hex generation ID.
+2. A generation is accepted only after its manifest, sizes, artifact SHA-256 values and the report's
+   claimed WAV SHA-256 all verify.
+3. The visible WAV/JSON/TXT paths are ordinary regular files. They may be repaired only when their
+   bytes still match a known generation; unexpected links, devices or user-edited bytes fail closed.
+4. A pre-pointer failure leaves the previous generation authoritative. Once the pointer commits, a
+   recoverable failure completes forward only from the verified new generation.
+5. Recovery never rewrites an immutable generation or removes the previous one as part of correctness.
+6. The per-output lock serializes publication/recovery. First-party readers resolve one immutable
+   generation under that lock; job readers additionally bind audio/report/summary hashes.
 
 ## Durable states
 
-| State | Durable filesystem facts | Authority visible to readers | Recovery transition |
+| State | Durable filesystem facts | Authority | Recovery |
 |---|---|---|---|
-| S0 empty | No `current`; public names absent | None | Initialize owned bundle, then prepare S1–S5 |
-| S1 bundle | Owned bundle and `generations/` directory durable | None, or the pre-existing legacy triplet | Validate ownership; continue preparation |
-| S2 partial staging | One or more temporary generation artifacts may exist | Prior generation, legacy triplet, or none | Remove/ignore staging; retry from candidate |
-| S3 staged generation | WAV, JSON, TXT and manifest are file-fsynced; staging directory fsynced | Prior generation, legacy triplet, or none | Verify; rename generation or discard invalid staging |
-| S4 generation renamed | Content-addressed generation name exists; parent-directory fsync may not have completed | Prior generation, legacy triplet, or none | If present and valid, reuse; otherwise recreate |
-| S5 generation durable | Generation rename and `generations/` directory fsync completed | Prior generation, legacy triplet, or none | Write prepared journal; repair/create owned aliases |
-| S6 prepared | Prepared journal may name old/new generation; owned aliases exist | Prior generation if `current` exists; otherwise none because aliases dangle uniformly | Ignore journal for authority; repair aliases; continue |
-| S7 pointer replaced | `current` atomically names new generation; bundle-directory fsync may not have completed | Exactly old or new after crash; never a mixed triplet | Re-read `current`; verify selected generation; retry/finish forward |
-| S8 pointer durable | `current` replacement and bundle-directory fsync completed | New complete generation | Finish committed journal and verification; a recoverable interruption returns success only after both finish |
-| S9 committed | Committed journal durable and public aliases verified against manifest | New complete generation | Idempotently verify/reuse |
+| S0 empty | No valid bundle/pointer | None | Initialize the owned bundle |
+| S1 bundle | Owner record and `generations/` are durable | Prior pointer, legacy triplet, or none | Validate ownership; prepare candidate |
+| S2 staging | Temporary generation files may exist | Prior pointer or none | Ignore/remove staging and retry |
+| S3 generation durable | WAV/JSON/TXT/manifest are flushed; content-derived directory committed with true no-replace | Prior pointer or none | Verify/reuse the generation |
+| S4 prepared | Journal names old/new generation | Prior pointer or none | Journal is not authority; continue |
+| S5 pointer replaced | `current` names the new generation; parent flush may be pending | Old or new after a crash, never a partially authored generation | Re-read, verify and finish the observed authority forward |
+| S6 pointer durable | Pointer replacement and bundle flush completed | New immutable generation | Refresh regular exports and committed journal |
+| S7 exports refreshing | Zero to three visible files may reflect the new generation | New immutable generation | Repair remaining known exports; never trust a mixed triplet |
+| S8 committed | Journal and all convenience exports verify | New immutable generation | Idempotently verify/reuse |
 
-The S7 old-or-new outcome is deliberate: a process kill or power loss between atomic rename and the
-directory durability barrier may preserve either directory entry. Both outcomes are safe because the
-old generation was retained and the new generation was already fully durable before the rename.
+The old-or-new outcome around S5 is deliberate. The old generation remains available and the new one
+was fully durable before the single authority transition. The three regular convenience exports are
+not claimed to transition atomically.
 
 ## Legacy migration
 
 | State | Public view | Recovery |
 |---|---|---|
-| L0 complete flat triplet | Three regular files containing one matching generation | Copy, fsync and verify all three into a content-addressed generation |
-| L1 legacy generation durable | Original regular triplet remains unchanged | Point `current` at legacy generation |
-| L2 alias conversion in progress | Each converted alias and each remaining regular file reads the same legacy bytes | Resume conversion after hash comparison; refuse any differing file |
-| L3 migrated | All public aliases traverse `current` to the legacy generation | Prepare and commit requested overwrite normally |
-| LX incomplete/mismatched | One or two regular files, unexpected symlink, or bytes that differ from committed manifest | Fail closed for manual recovery; never overwrite |
+| L0 complete flat triplet | Three matching regular files | Copy, flush and verify into a legacy generation |
+| L1 legacy generation durable | Original files unchanged | Commit the regular pointer to that generation |
+| L2 ADR-0005 symlink bundle | Complete owned symlinks through one valid legacy pointer | Verify, migrate pointer format, then materialize regular exports |
+| L3 migrated | Regular exports match the pointed generation | Publish normally |
+| LX incomplete/ambiguous | Missing/mismatched files, unexpected link/reparse point, unsafe owner or bad manifest | Fail closed for manual recovery |
 
 ## Failure and interruption matrix
 
-`tests/unit/test_publication_transaction.py` owns the contract:
+`tests/unit/test_publication_transaction.py` owns this contract:
 
-- It discovers every call made during overwrite to the copy wrapper, write wrapper, directory fsync,
-  `rename`, `replace`, symlink creation and staging cleanup. It injects a failure immediately before
-  and after every discovered call. Every case must leave either the old byte-identical generation or
-  the complete new generation, then pass an idempotent retry.
-- It separately injects a partial file write followed by permission loss.
-- It sends real `SIGINT`, `SIGTERM` and `SIGKILL` subprocess interruptions at generation-files-durable,
-  generation-committed, each first-publish alias replacement, before-pointer, pointer-replaced and
-  pointer-durable checkpoints.
+- It discovers copy, write, directory-flush, no-replace, replace and cleanup primitives and injects a
+  failure before/after each operation.
+- It sends real `SIGINT`, `SIGTERM` and `SIGKILL` at generation/pointer/export checkpoints.
 - It exercises first publish, overwrite, legacy migration, repeated recovery, identical content,
-  disk full, cancellation, post-commit recovery failure, concurrent publishers, stable readers and
-  malicious/unexpected symlinks.
-- The same suite must pass on macOS/APFS and Linux/overlayfs using a read-only source mount.
-- Mutation M9 changes the authoritative overwrite pointer back to the prior generation. Its declared
-  owning test must fail, proving the pointer-ordering assertion is live.
+  disk full, cancellation, concurrent publishers, stable immutable readers, malicious links and
+  user-edited exports.
+- It proves job-bound lookup ignores mixed visible files and rejects same-audio/different-sidecar
+  ambiguity unless all retained digests select exactly one generation.
+- Local seams cover APFS/POSIX and Win32 primitives; native APFS/NTFS fault and power-loss runs remain
+  release evidence.
 
 ## Reader rule
 
-A consumer that needs more than one artifact must call `resolve_committed_publication()` once and use
-the returned immutable paths. Resolving public WAV and JSON aliases independently across an overwrite
-is prohibited because those two opens could intentionally observe different complete generations.
-
+A consumer needing a coherent master/report/summary set calls `resolve_committed_publication()` once
+and uses the returned immutable paths. A durable job calls
+`resolve_immutable_publication_generation()` with its retained artifact hashes. Independently opening
+the three visible convenience paths across an overwrite is prohibited. For portable external
+archival, use and verify the Full Processing Record ZIP.

@@ -108,7 +108,7 @@ def client(work: Path) -> Iterator[TestClient]:
     assert work.is_dir()
     manager = JobManager()
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         yield c
     manager.shutdown()
 
@@ -387,13 +387,18 @@ def test_analyze_of_a_corrupt_file_is_an_error_not_a_crash(client: TestClient, w
 # ------------------------------------------------------------ 6. memory proof
 
 _MEM_SCRIPT = r"""
-import json, resource, sys, time
+import json, sys, time
 from pathlib import Path
 from hawavoclean.server.analysis import analyze_audio
 
 def rss_mb():
-    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return r / 1e6 if sys.platform == "darwin" else r / 1e3
+    try:
+        import resource
+        r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return r / 1e6 if sys.platform == "darwin" else r / 1e3
+    except ImportError:
+        from hawavoclean.runtime import process_peak_rss_bytes
+        return process_peak_rss_bytes() / 1e6
 
 path = Path(sys.argv[1])
 baseline = rss_mb()

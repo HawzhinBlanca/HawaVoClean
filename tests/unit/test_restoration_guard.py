@@ -1,6 +1,7 @@
 """Unit tests for Guard R (restoration safety guard)."""
 
 import numpy as np
+import pytest
 import scipy.signal as signal
 
 from hawavoclean.restoration.base import RestorationCandidate
@@ -128,3 +129,51 @@ def test_guard_r_revert_is_reported_as_fail_not_pass() -> None:
     # The evidence must describe a rejected candidate, not an empty dict.
     assert res.protected_band or res.highband_events
     np.testing.assert_array_equal(sel_audio, nat_audio)
+
+
+def test_guard_r_source_mode_speaker_divergence_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In Source Mode (canonical_embedding=None), candidate departing from natural speech voice must reject."""
+    sr = 48000
+    duration_s = 0.5
+    t = np.linspace(0, duration_s, int(sr * duration_s), endpoint=False, dtype=np.float32)
+    audio = (0.5 * np.sin(2 * np.pi * 300 * t)).astype(np.float32)
+
+    guard = RestorationGuard(sample_rate=sr)
+
+    # 1. Matching candidate passes all layers including source mode speaker verification
+    passes_same, reason_same, metrics_same = guard.evaluate_candidate(
+        natural_audio=audio,
+        candidate_audio=audio,
+        cutoff_hz=4000.0,
+        canonical_embedding=None,
+    )
+    assert passes_same
+    assert metrics_same["speaker"]["mode"] == "source"
+    assert metrics_same["speaker"]["speaker_similarity"] >= 0.99
+
+    # 2. When candidate extractor yields divergent speaker embedding:
+    emb_divergent = np.zeros(192, dtype=np.float32)
+    emb_divergent[0] = 1.0
+
+    def mock_extract(a: np.ndarray) -> np.ndarray:
+        if a is audio:
+            e = np.zeros(192, dtype=np.float32)
+            e[1] = 1.0  # orthogonal to emb_divergent
+            return e
+        return emb_divergent
+
+    monkeypatch.setattr(guard.speaker_extractor, "extract", mock_extract)
+
+    passes_diff, reason_diff, metrics_diff = guard.evaluate_candidate(
+        natural_audio=audio,
+        candidate_audio=audio.copy(),
+        cutoff_hz=4000.0,
+        canonical_embedding=None,
+    )
+    assert not passes_diff
+    assert "Speaker similarity" in reason_diff
+    assert "(source mode)" in reason_diff
+    assert metrics_diff["mode"] == "source"
+    assert metrics_diff["speaker_similarity"] < guard.config.speaker_threshold

@@ -173,6 +173,12 @@ class PassRecord(ReportBaseModel):
     reverted: int = 0
     chosen_strengths: list[float] = Field(default_factory=list)
     separation_db: float
+    #: B2 · Log-spectral distance from the ORIGINAL source (dB). Tracks how
+    #: far each successive pass drifts from the recording. None for pass 1.
+    cumulative_drift_db: float | None = None
+    #: Ratio of candidate consonant energy (2 kHz - 8 kHz) to the original source.
+    #: Tracks speech articulation preservation across multiple passes.
+    cumulative_consonant_retention: float | None = None
     integrated_lufs: float | None = None
     discarded: bool = False
     discard_reason: str | None = None
@@ -200,6 +206,9 @@ class UnitDecisionRecord(ReportBaseModel):
     finish_actions: list[str] = Field(default_factory=list)
     final_decision: str
     decision_reason: str = ""
+    #: If not None, the user manually overrode the guard's automatic decision.
+    #: Recorded in the audit trail so the override is transparent, never silent.
+    manual_override: str | None = None
     runtime_ms: float = 0.0
 
 

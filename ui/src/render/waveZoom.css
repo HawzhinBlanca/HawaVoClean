@@ -387,3 +387,17 @@
     display: none;
   }
 }
+
+/* --------------------------------------------------- D2: selection overlay */
+.wave-sel-overlay {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(57, 208, 255, 0.12);
+  border-left: 1px solid rgba(57, 208, 255, 0.5);
+  border-right: 1px solid rgba(57, 208, 255, 0.5);
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.15s ease;
+}
+

@@ -9,6 +9,8 @@ import {
   importToResolve,
   replaceInResolve,
   revealOutput,
+  saveCleanedMaster,
+  saveProcessingRecord,
 } from '../state/actions';
 import { useStore } from '../state/store';
 import { IconCheck, IconImport, IconReplace, IconReveal } from './Icons';
@@ -192,6 +194,32 @@ export function Actions() {
           </button>
         </>
       ) : null}
+      <button
+        className="btn small"
+        type="button"
+        aria-disabled={!masterServed || undefined}
+        onClick={() => {
+          if (!masterServed) return;
+          void saveCleanedMaster();
+        }}
+        title={masterServed ? 'Save or export the cleaned master audio file (.wav)' : cleanedPath ? goneNote : missingNote}
+      >
+        <IconImport size={14} />
+        <span>Save Master</span>
+      </button>
+      <button
+        className="btn small"
+        type="button"
+        aria-disabled={!masterServed || undefined}
+        onClick={() => {
+          if (!masterServed) return;
+          void saveProcessingRecord();
+        }}
+        title={masterServed ? 'Save complete processing record archive (.zip) with master audio and verification report' : cleanedPath ? goneNote : missingNote}
+      >
+        <IconImport size={14} />
+        <span>Save Record</span>
+      </button>
       <button
         className="btn small"
         type="button"

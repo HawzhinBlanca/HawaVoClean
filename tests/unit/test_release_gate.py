@@ -57,6 +57,8 @@ def test_compare_runs_can_require_actual_distributable_asset_repetition() -> Non
 
 
 def test_artifact_identity_is_path_independent_and_mode_sensitive(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Windows NTFS does not support POSIX permission bits")
     first = tmp_path / "first"
     second = tmp_path / "second"
     first.mkdir()

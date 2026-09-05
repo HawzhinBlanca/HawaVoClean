@@ -201,8 +201,12 @@ def runtime_versions() -> dict[str, str]:
         result["libsndfile"] = str(soundfile.__libsndfile_version__)
     except (ImportError, AttributeError):
         result["libsndfile"] = "unavailable"
-    result["ffmpeg"] = _command_version("ffmpeg")
-    result["ffprobe"] = _command_version("ffprobe")
+    from hawavoclean.paths import ffmpeg_bin_path, ffprobe_bin_path
+
+    ff_bin = ffmpeg_bin_path()
+    result["ffmpeg"] = _command_version(ff_bin) if ff_bin else "unavailable (not found)"
+    fp_bin = ffprobe_bin_path()
+    result["ffprobe"] = _command_version(fp_bin) if fp_bin else "unavailable (not found)"
     return dict(sorted(result.items()))
 
 

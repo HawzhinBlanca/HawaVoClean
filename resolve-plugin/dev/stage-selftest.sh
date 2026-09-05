@@ -29,14 +29,15 @@ while kill -0 "$PID" 2>/dev/null; do
 done
 wait "$PID" 2>/dev/null || true
 
-RESULT="$(grep '^HAWA_SELFTEST_RESULT ' "$LOG" | head -1 | sed 's/^HAWA_SELFTEST_RESULT //')"
+RESULT="$( (grep '^HAWA_SELFTEST_RESULT ' "$LOG" || true) | head -1 | sed 's/^HAWA_SELFTEST_RESULT //')"
 [ -n "$RESULT" ] || { echo "staged shell emitted no success result" >&2; sed 's/^/  | /' "$LOG" >&2; exit 1; }
 ENGINE_PID="$(node - "$RESULT" <<'JS'
 const value = JSON.parse(process.argv[2]);
 if (!value.hasBridge) throw new Error('preload bridge missing');
 if (value.host !== 'electron') throw new Error(`unexpected standalone host ${value.host}`);
+if (Object.keys(value.endpoint ?? {}).join(',') !== 'baseUrl' || value.endpointHasCredential !== false) throw new Error('renderer endpoint exposed credential material');
 if (value.health?.status !== 200 || value.health?.body?.ok !== true) throw new Error('authenticated health check failed');
-if (value.unauthStatus !== 401) throw new Error('unauthenticated health check did not fail');
+if (value.sessionBootstrapBlocked !== true) throw new Error('renderer could reach session bootstrap');
 if (value.runtime?.electron !== '43.4.1') throw new Error(`unexpected Electron runtime ${value.runtime?.electron}`);
 for (const probe of ['inlineScriptBlocked', 'remoteFetchBlocked', 'popupBlocked', 'geolocationDenied', 'pathTraversalBlocked', 'serviceWorkerBlocked', 'blobWorkerRan']) {
   if (value.security?.[probe] !== true) throw new Error(`security probe failed: ${probe}`);

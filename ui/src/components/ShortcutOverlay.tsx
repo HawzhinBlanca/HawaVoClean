@@ -78,6 +78,16 @@ const GROUPS: Group[] = [
       { keys: [['Drag', 'ruler']], what: 'Pan the visible window' },
       { keys: [['Double', 'click']], what: 'Fit the whole clip' },
       { keys: [['Click', 'segment']], what: 'Select that unit and seek to it' },
+      { keys: [['Shift', 'Drag']], what: 'Select a time range' },
+    ],
+  },
+  {
+    title: 'Selection',
+    rows: [
+      { keys: [['I']], what: 'Set selection in-point', when: 'display focused' },
+      { keys: [['O']], what: 'Set selection out-point', when: 'display focused' },
+      { keys: [['L']], what: 'Loop-play the selection' },
+      { keys: [['Esc']], what: 'Clear the selection', when: 'display focused' },
     ],
   },
 ];

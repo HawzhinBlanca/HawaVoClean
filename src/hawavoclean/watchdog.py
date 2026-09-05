@@ -38,6 +38,7 @@ Two topology lessons are folded in:
 import logging
 import os
 import signal
+import sys
 import threading
 
 logger = logging.getLogger(__name__)
@@ -71,12 +72,59 @@ def _pid_exists(pid: int) -> bool:
         return False
     except PermissionError:  # pragma: no cover - alive, just not ours to signal
         return True
+    except OSError as exc:
+        # On Windows, os.kill(dead_pid, 0) raises OSError with WinError 87 (ERROR_INVALID_PARAMETER)
+        if getattr(exc, "winerror", None) == 87:
+            return False
+        raise
     return True
+
+
+def _windows_get_parent_pid(pid: int) -> int | None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return None
+        kernel32 = windll.kernel32
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if snapshot == wintypes.HANDLE(-1).value or snapshot == -1:
+            return None
+        try:
+            entry = PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+            if kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                while True:
+                    if entry.th32ProcessID == pid:
+                        return int(entry.th32ParentProcessID)
+                    if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                        break
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        pass
+    return None
 
 
 def parent_is_alive(parent_pid: int) -> bool:
     """Whether the process that spawned us is still there."""
-    if os.getppid() != parent_pid:
+    if sys.platform != "win32" and os.getppid() != parent_pid:
         return False  # reparented: our parent is gone, whoever holds that pid now
     return _pid_exists(parent_pid)
 
@@ -92,7 +140,7 @@ def _self_interrupt_signal() -> signal.Signals:
     unwind. Checked at fire time, from the watchdog thread —
     ``signal.getsignal`` is thread-safe where ``signal.signal`` is not.
     """
-    if signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
+    if sys.platform == "win32" or signal.getsignal(signal.SIGINT) is signal.SIG_IGN:
         return signal.SIGTERM
     return signal.SIGINT
 
@@ -126,13 +174,17 @@ def install_parent_death_watchdog(
         return None
 
     ppid = os.getppid()
-    if ppid != parent_pid:
+    is_valid_parent = (ppid == parent_pid) or (
+        sys.platform == "win32" and _windows_get_parent_pid(ppid) == parent_pid
+    )
+    if not is_valid_parent:
         # The declarer is not our parent. One real exception: our spawner
         # declared itself and then died in the window before this ran — that
-        # child is already hanging off init and the declared pid is gone, and
+        # child is already hanging off init (or parent died on Windows) and the declared pid is gone, and
         # it must still tear itself down or the arming gap is a free pass to
         # finish and publish. Everything else is a stale or leaked variable.
-        if not (ppid == 1 and not _pid_exists(parent_pid)):
+        is_spawner_death = sys.platform != "win32" and ppid == 1 and not _pid_exists(parent_pid)
+        if not is_spawner_death:
             logger.warning(
                 "Ignoring %s=%d: not set by this process's parent (ppid %d). "
                 "The variable is a private spawner contract; a stale or "

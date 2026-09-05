@@ -22,6 +22,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { setLocale } from '../state/i18n';
 import { useStore, getState } from '../state/store';
 import { Header } from './Header';
 
@@ -37,6 +38,7 @@ let host: HTMLElement;
 let root: Root;
 
 beforeEach(() => {
+  setLocale('en');
   useStore.setState(pristine, true);
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -48,6 +50,7 @@ afterEach(async () => {
     root.unmount();
   });
   host.remove();
+  setLocale('en');
 });
 
 async function render(): Promise<void> {
@@ -81,5 +84,43 @@ describe('Header wordmark version', () => {
     await render();
     expect(host.querySelector('.wordmark .ver')?.textContent).toBe(`v${__UI_VERSION__}`);
     expect(host.querySelector('.engine .ver')?.textContent).toBe('v9.9.9');
+  });
+});
+
+describe('Header i18n and language toggle', () => {
+  it('renders language toggle button and switches between EN and Kurdish', async () => {
+    await render();
+    const btn = host.querySelector<HTMLButtonElement>('.lang-toggle');
+    expect(btn).not.toBeNull();
+    expect(btn?.textContent).toBe('کوردی');
+    expect(document.documentElement.dir).toBe('ltr');
+
+    // Click language toggle
+    await act(async () => {
+      btn?.click();
+    });
+
+    expect(btn?.textContent).toBe('English');
+    expect(document.documentElement.dir).toBe('rtl');
+    expect(document.documentElement.lang).toBe('ckb');
+
+    // HeaderNow should render Kurdish label
+    const nowState = host.querySelector<HTMLElement>('.hn-state');
+    expect(nowState?.textContent).toBe('هیچ کلیپێک نییە');
+  });
+
+  it('renders engine status in Kurdish when locale is ckb', async () => {
+    await act(async () => {
+      getState().setEngine('ready', null, '3.3.0');
+    });
+    await render();
+
+    const btn = host.querySelector<HTMLButtonElement>('.lang-toggle');
+    await act(async () => {
+      btn?.click();
+    });
+
+    const engineTxt = host.querySelector<HTMLElement>('.engine .txt .in');
+    expect(engineTxt?.textContent).toBe('بزوێنەر ئامادەیە');
   });
 });

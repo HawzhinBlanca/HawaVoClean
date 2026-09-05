@@ -6,13 +6,14 @@ removed on success and survives only a genuine crash, for forensics.
 """
 
 import hashlib
+import math
 import os
 import platform
 import time
-import tomllib
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import scipy
@@ -20,14 +21,18 @@ import soundfile
 
 from hawavoclean import __version__
 from hawavoclean.alignment.delay import estimate_gcc_phat_delay
-from hawavoclean.assembly.stitch import assemble_channel_timeline
+from hawavoclean.assembly.stitch import assemble_channel_timeline, assemble_channel_timeline_into
 from hawavoclean.assembly.validate import validate_assembled_timeline
-from hawavoclean.audio.channels import classify_channels, handle_channel_layout
-from hawavoclean.audio.decode import decode_audio
-from hawavoclean.audio.encode import encode_audio
+from hawavoclean.audio.channels import (
+    classify_channels,
+    classify_channels_bounded,
+    handle_channel_layout,
+)
+from hawavoclean.audio.decode import decode_audio, decode_audio_to_memmap
+from hawavoclean.audio.encode import encode_audio, encode_audio_streaming
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.audio.types import AudioBuffer, AudioProbeResult
-from hawavoclean.config import HawaVoCleanConfig, load_config
+from hawavoclean.config import HawaVoCleanConfig
 from hawavoclean.enhancement.factory import resolve_core
 from hawavoclean.enhancement.validate import validate_enhancer_output
 from hawavoclean.enhancement.worker import (
@@ -41,10 +46,10 @@ from hawavoclean.enhancement.worker import (
     release_pool,
 )
 from hawavoclean.errors import (
-    CalibrationError,
-    ConfigError,
     HawaVoCleanError,
     InvalidUserInputError,
+    MediaPreflightError,
+    MediaPreflightReason,
     PreflightError,
     PublicationError,
     WorkerCrashError,
@@ -54,18 +59,25 @@ from hawavoclean.finishing.detect import (
     aggregate_speech_tilt,
     measure_speech_tilt,
 )
-from hawavoclean.finishing.limiter import apply_lookahead_limiter
-from hawavoclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
+from hawavoclean.finishing.limiter import (
+    apply_lookahead_limiter,
+    apply_lookahead_limiter_to_memmap,
+)
+from hawavoclean.finishing.loudness import (
+    compute_static_master_gain,
+    measure_loudness_and_peaks,
+    measure_loudness_and_peaks_streaming,
+)
 from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
-from hawavoclean.guard.calibration import apply_calibrated_thresholds, load_calibration_artifact
 from hawavoclean.guard.protocol import SpectralProbe
 from hawavoclean.guard.spectral_probe import SpectralSignatureProbe
 from hawavoclean.guard.verdict import GuardVerdict
-from hawavoclean.hashing import hash_bytes, hash_file, hash_json_canonical
+from hawavoclean.hashing import hash_bytes, hash_file, hash_numpy
 from hawavoclean.job import JobWorkspace
 from hawavoclean.journal import JournalEvent
 from hawavoclean.logging import get_logger
-from hawavoclean.paths import models_dir, profile_config_path, resolve_calibration_file
+from hawavoclean.natural_contract import load_core_lock, load_natural_route_contract
+from hawavoclean.paths import work_root
 from hawavoclean.policy.continuity import (
     CONTINUITY_TAPER_ACTION,
     apply_continuity_taper,
@@ -74,7 +86,10 @@ from hawavoclean.policy.continuity import (
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from hawavoclean.progress import (
     PROGRESS_DECODE,
+    PROGRESS_FINISH_ASSEMBLY,
+    PROGRESS_FINISH_ENCODE,
     PROGRESS_FINISH_END,
+    PROGRESS_FINISH_LIMITER,
     PROGRESS_FINISH_START,
     PROGRESS_PREFLIGHT,
     PROGRESS_PUBLISH,
@@ -114,14 +129,173 @@ from hawavoclean.restoration import (
 )
 from hawavoclean.segmentation.types import SpeechUnit
 from hawavoclean.segmentation.utterances import build_speech_units
+from hawavoclean.source_pin import PinnedSource
 
 logger = get_logger("pipeline")
+
+MAX_INPUT_FILE_BYTES = 8 * 1024**3
+MAX_INPUT_DURATION_S = 6 * 60 * 60.0
+MAX_INPUT_CHANNELS = 2
+
+# Every Natural job decodes through the independently bounded, disk-backed
+# decoder. Above 64 MiB of *actual* decoded PCM, later file-length stages and
+# mastering also switch to disk/streaming implementations. This is ~5.6
+# minutes of 48 kHz stereo and keeps ordinary short DSP on its byte-pinned fast
+# path without trusting container metadata to choose a memory-safe decoder.
+# Tests may monkeypatch the threshold to exercise both downstream paths on one
+# small fixture.
+NATURAL_STREAMING_THRESHOLD_BYTES = 64 * 1024 * 1024
+NATURAL_STREAMING_WORKER_BATCH_UNITS = 8
+NATURAL_STREAMING_MAX_WORKERS = 2
+
+
+def _natural_worker_limit(requested: int, *, streaming: bool) -> int:
+    """Cap long-job model concurrency independently of machine RAM/CPU."""
+    return min(requested, NATURAL_STREAMING_MAX_WORKERS) if streaming else requested
+
+
+def _create_audio_memmap(
+    path: Path,
+    channels: int,
+    samples: int,
+) -> np.memmap[Any, np.dtype[np.float32]]:
+    """Create an exact-size planar float32 stage inside a job workspace."""
+    if path.exists():
+        raise PreflightError(f"Audio scratch stage already exists: {path}")
+    byte_count = channels * samples * np.dtype(np.float32).itemsize
+    with open(path, "xb") as handle:
+        handle.truncate(byte_count)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return np.memmap(path, dtype=np.float32, mode="r+", shape=(channels, samples))
+
+
+def _close_audio_memmaps(mappings: list[np.ndarray[Any, np.dtype[np.float32]]]) -> None:
+    """Flush and close each unique numpy mapping before Windows cleanup."""
+    seen: set[int] = set()
+    for value in reversed(mappings):
+        base: Any = value
+        while getattr(base, "base", None) is not None and not isinstance(base, np.memmap):
+            base = base.base
+        if not isinstance(base, np.memmap) or id(base) in seen:
+            continue
+        seen.add(id(base))
+        base.flush()
+        cast(Any, base)._mmap.close()  # numpy exposes no public close API
+    mappings.clear()
+
+
+def _release_audio_memmap(
+    mapping: np.memmap[Any, np.dtype[np.float32]],
+    registry: list[np.ndarray[Any, np.dtype[np.float32]]],
+) -> None:
+    """Close and unlink a consumed scratch stage before the next stage grows."""
+    filename = Path(str(mapping.filename))
+    mapping.flush()
+    cast(Any, mapping)._mmap.close()  # numpy exposes no public close API
+    registry[:] = [candidate for candidate in registry if candidate is not mapping]
+    filename.unlink(missing_ok=True)
+
+
+# Validate both the user-facing extension and the probed container. This
+# refuses renamed or polyglot media instead of passing an ambiguous source to
+# a decoder chosen by suffix. MP4 intentionally allows a video stream: only
+# the selected audio stream is decoded later.
+SUPPORTED_INPUT_CONTAINERS: dict[str, frozenset[str]] = {
+    ".wav": frozenset({"wav", "wavex"}),
+    ".aif": frozenset({"aiff"}),
+    ".aiff": frozenset({"aiff"}),
+    ".aifc": frozenset({"aiff"}),
+    ".flac": frozenset({"flac"}),
+    ".mp3": frozenset({"mp3", "mpeg"}),
+    ".m4a": frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"}),
+    ".mp4": frozenset({"mov", "mp4", "m4a", "3gp", "3g2", "mj2"}),
+}
 
 FINAL_DECISION_BY_VERDICT: dict[GuardVerdict, str] = {
     GuardVerdict.UNVERIFIED: "original_unverified",
     GuardVerdict.ERROR: "original_error",
     GuardVerdict.REVERT: "original_reverted",
 }
+
+
+def _source_identity(path: Path) -> tuple[int, int, int, int]:
+    """Cheap identity used to detect ordinary source mutation during probe."""
+    try:
+        value = path.stat()
+    except OSError as exc:
+        raise MediaPreflightError(
+            MediaPreflightReason.NOT_FOUND,
+            f"Input audio file does not exist or cannot be read: {path}",
+        ) from exc
+    return (int(value.st_dev), int(value.st_ino), int(value.st_size), int(value.st_mtime_ns))
+
+
+def _validate_natural_media_contract(path: Path, media: AudioProbeResult) -> None:
+    """Validate the formats and metadata the production Natural path supports."""
+    if media.path.resolve() != path.resolve():
+        raise MediaPreflightError(
+            MediaPreflightReason.SOURCE_CHANGED,
+            "Probe result belongs to a different source file.",
+        )
+    if len(media.sha256) != 64 or any(char not in "0123456789abcdef" for char in media.sha256):
+        raise MediaPreflightError(
+            MediaPreflightReason.MALFORMED_METADATA,
+            "Probe result does not contain a lowercase SHA-256 source identity.",
+        )
+    suffix = path.suffix.lower()
+    allowed_containers = SUPPORTED_INPUT_CONTAINERS.get(suffix)
+    if allowed_containers is None:
+        supported = ", ".join(sorted(SUPPORTED_INPUT_CONTAINERS))
+        raise MediaPreflightError(
+            MediaPreflightReason.UNSUPPORTED_FORMAT,
+            f"Unsupported input extension {suffix or '<none>'!r}. Supported extensions: {supported}.",
+        )
+
+    format_tokens = frozenset(
+        token.strip().lower() for token in media.format_name.split(",") if token.strip()
+    )
+    if not format_tokens or format_tokens.isdisjoint(allowed_containers):
+        raise MediaPreflightError(
+            MediaPreflightReason.UNSUPPORTED_FORMAT,
+            f"Input {path.name!r} claims {suffix} but probes as {media.format_name!r}; "
+            "renamed or unsupported containers are refused.",
+        )
+    if media.channels not in (1, 2):
+        raise MediaPreflightError(
+            MediaPreflightReason.UNSUPPORTED_CHANNEL_LAYOUT,
+            f"Input has {media.channels} channels; only mono and stereo are supported.",
+        )
+    if not math.isfinite(media.duration_s) or media.duration_s <= 0.0:
+        raise MediaPreflightError(
+            MediaPreflightReason.MALFORMED_METADATA,
+            f"Input duration must be a positive finite value, got {media.duration_s!r}.",
+        )
+    if media.duration_s > MAX_INPUT_DURATION_S:
+        raise MediaPreflightError(
+            MediaPreflightReason.DURATION_LIMIT,
+            f"Input duration is {media.duration_s:.3f}s; the maximum is six hours.",
+        )
+    if media.samples <= 0 or media.sample_rate <= 0:
+        raise MediaPreflightError(
+            MediaPreflightReason.MALFORMED_METADATA,
+            "Input sample count and sample rate must both be positive.",
+        )
+    if media.samples > int(MAX_INPUT_DURATION_S * media.sample_rate):
+        raise MediaPreflightError(
+            MediaPreflightReason.DURATION_LIMIT,
+            "Input sample count exceeds six hours at the declared sample rate.",
+        )
+    if media.bit_depth is not None and not 1 <= media.bit_depth <= 64:
+        raise MediaPreflightError(
+            MediaPreflightReason.MALFORMED_METADATA,
+            f"Input bit depth is outside the supported metadata range: {media.bit_depth!r}.",
+        )
+    if media.audio_stream_index < 0 or media.audio_stream_index > 1024:
+        raise MediaPreflightError(
+            MediaPreflightReason.RESOURCE_BOMB,
+            f"Audio stream index is outside the supported range: {media.audio_stream_index!r}.",
+        )
 
 
 def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> None:
@@ -177,57 +351,9 @@ def _preflight_destination(in_path: Path, out_path: Path, overwrite: bool) -> No
 
 
 def _load_core_lock(core_id: str) -> tuple[dict[str, Any], str]:
-    """Load and verify the configured core's lockfile. Missing or mismatched
-    provenance is a hard failure, never a silent degradation."""
-    registration = resolve_core(core_id)
-    import importlib.util
+    """Compatibility wrapper around the shared model-cold route contract."""
 
-    missing = [m for m in registration.requires_modules if importlib.util.find_spec(m) is None]
-    if missing:
-        raise PreflightError(
-            f"Core {core_id!r} needs optional dependencies that are not "
-            f"installed ({', '.join(missing)}). Install them with: "
-            "uv sync --extra studio"
-        )
-    lock_path = models_dir() / registration.lock_filename
-    if not lock_path.exists():
-        raise PreflightError(
-            f"Core lockfile missing: {lock_path}. Refusing to run without "
-            "verifiable core provenance."
-        )
-    raw_lock = lock_path.read_bytes()
-    lock = tomllib.loads(raw_lock.decode("utf-8"))
-
-    if lock.get("core_id") != core_id:
-        raise PreflightError(
-            f"Configured core_id {core_id!r} does not match lockfile core {lock.get('core_id')!r}"
-        )
-    actual_params_hash = registration.implementation_params_hash()
-    if lock.get("params_hash") != actual_params_hash:
-        raise PreflightError(
-            "Core parameter drift: lockfile params_hash "
-            f"{str(lock.get('params_hash'))[:16]}... does not match the "
-            f"implemented core {actual_params_hash[:16]}..."
-        )
-    # The lock's own tables must reconstruct params_hash (weights digests are
-    # part of the implementation payload when the core has weights).
-    payload: dict[str, Any] = dict(lock.get("params", {}))
-    weight_table = {str(k): str(v) for k, v in dict(lock.get("weight_sha256", {})).items()}
-    if weight_table:
-        payload["weights_sha256"] = weight_table
-    if hash_json_canonical(payload) != actual_params_hash:
-        raise PreflightError(
-            "Core lockfile tables do not recompute to params_hash; "
-            "the lockfile has been hand-edited."
-        )
-    # Weights on disk must match their locked digests.
-    for rel, digest in weight_table.items():
-        weight_path = models_dir() / rel
-        if not weight_path.exists():
-            raise PreflightError(f"Locked weights file missing: {weight_path}")
-        if hash_file(weight_path) != digest:
-            raise PreflightError(f"Weights digest mismatch for {rel}")
-    return lock, hash_bytes(raw_lock)
+    return load_core_lock(core_id)
 
 
 def run_pipeline(
@@ -244,17 +370,25 @@ def run_pipeline(
     cutoff: str = "auto",
     cutoff_hz: float | None = None,
     profiles_dir: str | Path = "profiles",
+    clean_only: bool = False,
+    original_input_path: Path | str | None = None,
+    allow_research_restore: bool = False,
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
     ``on_progress`` (optional) receives a :class:`ProgressEvent` at every
     stage boundary; exceptions it raises are logged and ignored.
     """
-    in_path = Path(input_path).resolve()
+    raw_in_path = Path(input_path).resolve()
+    in_path = (
+        Path(original_input_path).resolve() if original_input_path is not None else raw_in_path
+    )
     out_path = public_output_path(output_path)
 
-    if mode not in ("natural", "restore"):
-        raise InvalidUserInputError(f"Unknown processing mode: '{mode}' (expected natural|restore)")
+    if mode not in ("natural", "restore", "smart_safe"):
+        raise InvalidUserInputError(
+            f"Unknown processing mode: '{mode}' (expected natural|restore|smart_safe)"
+        )
     if mode == "restore" and not speaker_id:
         raise InvalidUserInputError("Restore mode requires an explicit --speaker-id <ID>")
     if mode == "restore" and speaker_id:
@@ -263,10 +397,25 @@ def run_pipeline(
         # segmentation and the enhancement of every unit -- so a typo in
         # --speaker-id cost the user the entire enhancement pass before
         # admitting the id was never going to resolve.
-        try:
-            load_speaker_profile(speaker_id, profiles_root=profiles_dir)
-        except ProfileValidationError as exc:
-            raise InvalidUserInputError(str(exc)) from exc
+        if speaker_id not in ("source", "none"):
+            try:
+                load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+            except ProfileValidationError as exc:
+                raise InvalidUserInputError(str(exc)) from exc
+
+        # R2.1: Quarantine current Restore behind an unmistakable research boundary.
+        # Production profiles follow capability status (blocked) and reject unqualified
+        # loose checkpoints/profiles unless research evaluation is explicitly enabled.
+        allow_research = (
+            allow_research_restore or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
+        )
+        if profile != "development" and not allow_research:
+            raise InvalidUserInputError(
+                f"Production restoration capability is BLOCKED for profile '{profile}': No qualified signed "
+                f"Sorani Restore pack is installed. Loose research checkpoints and profiles are quarantined "
+                f"behind research boundaries and cannot enter a production job or report (pass "
+                f"allow_research_restore=True or use profile='development' for research evaluation)."
+            )
     if cutoff not in ("auto", "manual"):
         raise InvalidUserInputError(f"Unknown cutoff mode: '{cutoff}' (expected auto|manual)")
     if cutoff == "manual" and cutoff_hz is None:
@@ -282,73 +431,82 @@ def run_pipeline(
     _preflight_destination(in_path, out_path, overwrite)
 
     # 1. Configuration, calibration, and core provenance preflight
-    is_prod = profile == "production"
-    if config is None:
-        cfg_file = Path(config_path) if config_path is not None else profile_config_path(profile)
-        config = load_config(cfg_file, is_production=is_prod)
-
-    calib_path = resolve_calibration_file(config.guard.calibration_file)
-    calib_data = load_calibration_artifact(calib_path)
-    if hash_json_canonical(calib_data["thresholds"]) != calib_data.get("calibration_id"):
-        raise CalibrationError(
-            f"Guard calibration artifact {calib_path} has been edited: calibration_id "
-            "does not recompute from its thresholds. Refusing to run with a tampered guard."
-        )
-    active_guard_cfg = apply_calibrated_thresholds(config.guard, calib_data)
-
-    core_lock, core_lock_sha256 = _load_core_lock(config.enhancement.core_id)
-    if bool(core_lock.get("phase_coherent", True)) != config.enhancement.phase_coherent:
-        raise ConfigError(
-            f"enhancement.phase_coherent = {config.enhancement.phase_coherent} but core "
-            f"{config.enhancement.core_id!r} is "
-            f"{'phase-coherent' if core_lock.get('phase_coherent', True) else 'NOT phase-coherent'}; "
-            "the report would misstate the core and the policy would blend residuals incorrectly."
-        )
-    expected_rates = [int(r) for r in core_lock.get("expected_sample_rates", [])]
-    if expected_rates and config.enhancement.model_sample_rate not in expected_rates:
-        raise ConfigError(
-            f"enhancement.model_sample_rate = {config.enhancement.model_sample_rate} but core "
-            f"{config.enhancement.core_id!r} runs at {expected_rates}"
-        )
-
-    # 2. Probe media
-    media = probe_audio(in_path, max_sample_rate=config.input.max_sample_rate)
-    logger.info(
-        f"Probed media: {media.sample_rate}Hz, {media.channels}ch, "
-        f"{media.samples:,} samples ({media.duration_s:.2f}s)"
-    )
-
-    # 3. Workspace and journal
-    workspace = JobWorkspace(
-        input_path=in_path,
-        input_sha256=media.sha256,
+    contract = load_natural_route_contract(
+        profile,
         config=config,
-        core_id=config.enhancement.core_id,
-        guard_id=active_guard_cfg.guard_id,
-        tool_version=__version__,
-        # Restore-only inputs belong in the job identity: without them a
-        # natural master and a reconstruction of the same file shared an id,
-        # as did two reconstructions from two different speaker profiles.
-        restore_context=(
-            f"{mode}:{speaker_id}:{cutoff}:{cutoff_hz}" if mode == "restore" else None
-        ),
+        config_path=config_path,
     )
-    workspace.journal.append(
-        JournalEvent.JOB_STARTED, {"input": str(in_path), "job_id": workspace.job_id}
-    )
-    workspace.check_disk_space(media.samples * media.channels * 12, destination=out_path.parent)
-    workspace.journal.append(JournalEvent.PREFLIGHT_PASSED)
-    emit_progress(
-        on_progress,
-        ProgressEvent("preflight", PROGRESS_PREFLIGHT, "Preflight checks passed"),
-    )
+    config = contract.config
+    calib_data = contract.calibration
+    active_guard_cfg = contract.active_guard
+    core_lock = contract.core_lock
+    core_lock_sha256 = contract.core_lock_sha256
 
+    # 2. Pin, then probe. The user-facing pathname is never reopened by a
+    # parser or decoder after validation: one safely opened regular file is
+    # copied through a bounded buffer into private scratch, hashed as copied,
+    # frozen, and used by ffprobe/FFmpeg/soundfile for the rest of the job.
+    # Replacing or rewriting the original path after this point cannot mix
+    # report identity from one file with decoded samples from another.
+    pinned = PinnedSource.create(
+        raw_in_path,
+        staging_root=work_root(),
+        max_file_size_bytes=MAX_INPUT_FILE_BYTES,
+    )
+    workspace: JobWorkspace | None = None
     try:
+        media = probe_audio(
+            pinned.path,
+            max_sample_rate=config.input.max_sample_rate,
+            max_file_size_bytes=MAX_INPUT_FILE_BYTES,
+            max_duration_s=MAX_INPUT_DURATION_S,
+            max_channels=MAX_INPUT_CHANNELS,
+        )
+        _validate_natural_media_contract(pinned.path, media)
+        pinned.verify()
+        if media.sha256 != pinned.sha256:
+            raise MediaPreflightError(
+                MediaPreflightReason.SOURCE_CHANGED,
+                "Pinned source bytes changed while media metadata was being probed.",
+            )
+        logger.info(
+            f"Probed media: {media.sample_rate}Hz, {media.channels}ch, "
+            f"{media.samples:,} samples ({media.duration_s:.2f}s)"
+        )
+
+        # 3. Workspace and journal. Moving the frozen snapshot under the job
+        # preserves the exact validated input on an unexpected crash; normal
+        # success and known failures remove it with the rest of scratch.
+        workspace = JobWorkspace(
+            input_path=in_path,
+            input_sha256=media.sha256,
+            config=config,
+            core_id=config.enhancement.core_id,
+            guard_id=active_guard_cfg.guard_id,
+            tool_version=__version__,
+            # Restore-only inputs belong in the job identity: without them a
+            # natural master and a reconstruction of the same file shared an id,
+            # as did two reconstructions from two different speaker profiles.
+            restore_context=(
+                f"{mode}:{speaker_id}:{cutoff}:{cutoff_hz}" if mode == "restore" else None
+            ),
+        )
+        media = replace(media, path=pinned.adopt(workspace.root))
+        workspace.journal.append(
+            JournalEvent.JOB_STARTED, {"input": str(in_path), "job_id": workspace.job_id}
+        )
+        workspace.check_disk_space(media.samples * media.channels * 12, destination=out_path.parent)
+        workspace.journal.append(JournalEvent.PREFLIGHT_PASSED)
+        emit_progress(
+            on_progress,
+            ProgressEvent("preflight", PROGRESS_PREFLIGHT, "Preflight checks passed"),
+        )
+
         return _run_after_preflight(
             config,
             active_guard_cfg,
             calib_data,
-            hash_file(calib_path),
+            contract.calibration_sha256,
             core_lock,
             core_lock_sha256,
             media,
@@ -363,12 +521,35 @@ def run_pipeline(
             cutoff=cutoff,
             cutoff_hz=cutoff_hz,
             profiles_dir=profiles_dir,
+            clean_only=clean_only,
+            allow_research_restore=allow_research_restore,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
         # not leak a scratch workspace; a genuine crash keeps it for forensics.
-        workspace.cleanup()
+        if workspace is not None:
+            _close_audio_memmaps(
+                cast(
+                    list[np.ndarray[Any, np.dtype[np.float32]]],
+                    workspace.pipeline_disk_mappings,
+                )
+            )
+            workspace.cleanup()
         raise
+    except BaseException:
+        # A genuine crash keeps the scratch files for forensics, but mapped
+        # handles still have to close (especially on Windows, where an open
+        # mapping pins the file and can block later recovery/cleanup).
+        if workspace is not None:
+            _close_audio_memmaps(
+                cast(
+                    list[np.ndarray[Any, np.dtype[np.float32]]],
+                    workspace.pipeline_disk_mappings,
+                )
+            )
+        raise
+    finally:
+        pinned.cleanup_unadopted()
 
 
 #: Restoration segment length. Long enough that Guard R's F0, harmonic and
@@ -390,7 +571,12 @@ def _restore_in_segments(
     speaker_profile: Any,
     policy: RestorationPolicyManager,
     base_seed: int,
-) -> tuple["np.ndarray[Any, np.dtype[np.float32]]", list[SegmentRestorationDecision]]:
+) -> tuple[
+    "np.ndarray[Any, np.dtype[np.float32]]",
+    list[SegmentRestorationDecision],
+    list[int],
+    int,
+]:
     """Run the restoration policy over overlapping segments and stitch them.
 
     The bandwidth estimate is deliberately shared: a band limit is a property of
@@ -440,7 +626,7 @@ def _restore_in_segments(
             out[..., start:stop] = restored
         covered = stop
 
-    return out, records
+    return out, records, starts, seg_len
 
 
 def _run_after_preflight(
@@ -462,10 +648,30 @@ def _run_after_preflight(
     cutoff: str = "auto",
     cutoff_hz: float | None = None,
     profiles_dir: str | Path = "profiles",
+    clean_only: bool = False,
+    allow_research_restore: bool = False,
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
+    # Probe metadata is not trusted to choose the decoder: a damaged container
+    # can report a tiny duration and expand to hours of PCM. Every Natural job
+    # therefore uses the streamed decoder's independent sample ceiling. The
+    # exact decoded length below chooses whether the remaining stages also
+    # need their disk-backed implementations.
+    disk_backed_decode = mode == "natural"
+    streaming_natural = False
+    disk_mappings: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+    workspace.pipeline_disk_mappings = disk_mappings
+
     # 4. Decode and classify channels
-    audio_buf = decode_audio(media, timeout_s=config.runtime.worker_timeout_s)
+    if disk_backed_decode:
+        audio_buf = decode_audio_to_memmap(
+            media,
+            workspace.root / "decoded-planar.f32",
+            timeout_s=config.runtime.worker_timeout_s,
+        )
+        disk_mappings.append(audio_buf.data)
+    else:
+        audio_buf = decode_audio(media, timeout_s=config.runtime.worker_timeout_s)
     if media.samples != audio_buf.samples:
         # Sync with the exact decoded stream length if the container estimate differed
         media = AudioProbeResult(
@@ -478,7 +684,39 @@ def _run_after_preflight(
             samples=audio_buf.samples,
             bit_depth=media.bit_depth,
             sha256=media.sha256,
+            audio_stream_index=media.audio_stream_index,
         )
+    if mode == "smart_safe":
+        return _run_smart_safe(
+            audio_buf=audio_buf,
+            workspace=workspace,
+            in_path=in_path,
+            out_path=out_path,
+            config=config,
+            active_guard_cfg=active_guard_cfg,
+            calib_data=calib_data,
+            calibration_sha256=calibration_sha256,
+            core_lock=core_lock,
+            core_lock_sha256=core_lock_sha256,
+            media=media,
+            overwrite=overwrite,
+            speaker_id=speaker_id,
+            profiles_dir=profiles_dir,
+            allow_research_restore=allow_research_restore,
+            on_progress=on_progress,
+            clean_only=clean_only,
+        )
+
+    decoded_bytes = audio_buf.samples * audio_buf.channels * np.dtype(np.float32).itemsize
+    streaming_natural = disk_backed_decode and decoded_bytes >= NATURAL_STREAMING_THRESHOLD_BYTES
+    if streaming_natural:
+        # Decoded PCM already occupies one file-length stage. One additional
+        # stage coexists in the current pipeline; reserve two from the actual
+        # length for DSP/encode transients and publication headroom, rather
+        # than trusting the container estimate used by initial preflight. The
+        # destination receives at most an ordinary PCM WAV plus reports.
+        workspace.check_disk_space(decoded_bytes * 2)
+        workspace.check_disk_space(decoded_bytes, destination=out_path.parent)
     # The report's ``input`` block describes the file the user handed us, so
     # its loudness has to be measured here, on the decoded source. It used to
     # be taken from the pre-master buffer, which is the audio AFTER three
@@ -486,8 +724,16 @@ def _run_after_preflight(
     # output LUFS to see what mastering did was reading enhancement into the
     # baseline, and every other field beside it (path, sha256, sample_rate)
     # genuinely described the source.
-    source_loudness = measure_loudness_and_peaks(audio_buf.data, audio_buf.sample_rate)
-    channel_mode = classify_channels(audio_buf, declared_mode=config.input.channel_mode)
+    source_loudness = (
+        measure_loudness_and_peaks_streaming(audio_buf.data, audio_buf.sample_rate)
+        if streaming_natural
+        else measure_loudness_and_peaks(audio_buf.data, audio_buf.sample_rate)
+    )
+    channel_mode = (
+        classify_channels_bounded(audio_buf, declared_mode=config.input.channel_mode)
+        if streaming_natural
+        else classify_channels(audio_buf, declared_mode=config.input.channel_mode)
+    )
     audio_buf.channel_mode = channel_mode
     logger.info(f"Channel classification: {channel_mode}")
     workspace.journal.append(JournalEvent.AUDIO_DECODED, {"channel_mode": str(channel_mode)})
@@ -502,6 +748,7 @@ def _run_after_preflight(
     )
 
     channels_to_process, duplicate_to_stereo = handle_channel_layout(audio_buf, channel_mode)
+    processing_channel_count = len(channels_to_process)
 
     # 5. Segmentation
     all_units: list[SpeechUnit] = []
@@ -513,6 +760,7 @@ def _run_after_preflight(
             channel_id=ch_idx,
             config=config.segmentation,
             start_unit_id=unit_id_offset,
+            retain_speech_mask=not streaming_natural,
         )
         all_units.extend(ch_units)
         unit_id_offset += len(ch_units)
@@ -570,7 +818,10 @@ def _run_after_preflight(
                 enhancer_class=core_registration.enhancer_class,
                 phase_coherent=config.enhancement.phase_coherent,
             ),
-            max_size=configured_worker_hint(config.runtime.num_threads),
+            max_size=_natural_worker_limit(
+                configured_worker_hint(config.runtime.num_threads),
+                streaming=streaming_natural,
+            ),
             prewarm=len(context_items),
             worker_factory=IsolatedEnhancementWorker,
         )
@@ -586,11 +837,34 @@ def _run_after_preflight(
     cand_hashes: list[str | None] = []
     unit_runtimes: list[float] = []
     orig_core_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+    selected_stage: np.memmap[Any, np.dtype[np.float32]] | None = None
+    if streaming_natural:
+        selected_stage = _create_audio_memmap(
+            workspace.root / "selected-units.f32",
+            len(channels_to_process),
+            audio_buf.samples,
+        )
+        disk_mappings.append(selected_stage)
+
+    def persist_decision(unit: SpeechUnit, decision: UnitPolicyDecision) -> UnitPolicyDecision:
+        if selected_stage is None:
+            return decision
+        destination = selected_stage[unit.channel_id, unit.start_sample : unit.end_sample]
+        destination[:] = decision.selected_waveform
+        decision.selected_waveform = destination
+        return decision
 
     enh_run: EnhancementRun | None = None
+    enh_batch_start = 0
+    enh_batch_end = 0
     try:
         if pool is not None:
-            enh_run = pool.begin(context_items)
+            enh_batch_end = (
+                min(len(context_items), NATURAL_STREAMING_WORKER_BATCH_UNITS)
+                if streaming_natural
+                else len(context_items)
+            )
+            enh_run = pool.begin(context_items[:enh_batch_end])
     except BaseException:
         release_pool(pool)
         raise
@@ -598,8 +872,18 @@ def _run_after_preflight(
     def enhancement_for(slot: int) -> UnitEnhancement:
         """Unit ``slot``'s candidate: from the pool, or computed here when the
         run is configured for an in-process core."""
+        nonlocal enh_batch_end, enh_batch_start, enh_run
         if enh_run is not None:
-            return enh_run.result(slot)
+            if slot >= enh_batch_end:
+                enh_run.join()
+                enh_batch_start = enh_batch_end
+                enh_batch_end = min(
+                    len(context_items),
+                    enh_batch_start + NATURAL_STREAMING_WORKER_BATCH_UNITS,
+                )
+                assert pool is not None
+                enh_run = pool.begin(context_items[enh_batch_start:enh_batch_end])
+            return enh_run.result(slot - enh_batch_start)
         wave, rate = context_items[slot]
         t_enh = time.perf_counter()
         try:
@@ -619,12 +903,17 @@ def _run_after_preflight(
 
             if not u.is_speech:
                 decisions.append(
-                    UnitPolicyDecision(
-                        selected_waveform=core_orig.copy(),
-                        is_enhanced=False,
-                        chosen_strength=0.0,
-                        guard_verdict=GuardVerdict.NO_SPEECH,
-                        decision_reason="Non-speech unit passthrough.",
+                    persist_decision(
+                        u,
+                        UnitPolicyDecision(
+                            selected_waveform=(
+                                core_orig if streaming_natural else core_orig.copy()
+                            ),
+                            is_enhanced=False,
+                            chosen_strength=0.0,
+                            guard_verdict=GuardVerdict.NO_SPEECH,
+                            decision_reason="Non-speech unit passthrough.",
+                        ),
                     )
                 )
                 cand_hashes.append(None)
@@ -692,7 +981,7 @@ def _run_after_preflight(
                 policy_config=config.policy,
                 phase_coherent=config.enhancement.phase_coherent,
             )
-            decisions.append(pol_dec)
+            decisions.append(persist_decision(u, pol_dec))
             cand_hashes.append(cand_sha256)
             # Per-unit WORK, not per-unit wall clock: under a pool the two
             # stop being the same number, and the report is about the unit.
@@ -726,6 +1015,12 @@ def _run_after_preflight(
             continuity_reverted_ids = resolution.reverted_ids
             taper_in = resolution.fade_in_samples
             taper_out = resolution.fade_out_samples
+
+        # A continuity revert creates a small in-memory original copy. Persist
+        # it back into the same stage and rebind every decision to a bounded
+        # view so no unit waveform survives in the heap until assembly.
+        if selected_stage is not None:
+            decisions = [persist_decision(unit, decisions[i]) for i, unit in enumerate(all_units)]
 
         # 9. Finishing (Guard B) on surviving enhanced units, then records
         emit_progress(
@@ -786,6 +1081,14 @@ def _run_after_preflight(
                     f"{CONTINUITY_TAPER_ACTION}(in={taper_in[idx]},out={taper_out[idx]})",
                 ]
 
+            if selected_stage is not None:
+                # Continuity has consumed every Guard-A decision and file tilt
+                # was measured above, so the selected stage can become the
+                # finished stage in place. This removes one complete PCM copy
+                # from the mapped working set without changing a sample.
+                stored = selected_stage[u.channel_id, u.start_sample : u.end_sample]
+                stored[:] = final_wave
+                final_wave = stored
             final_waveforms.append(final_wave)
             workspace.journal.append(
                 JournalEvent.UNIT_COMMITTED,
@@ -812,9 +1115,9 @@ def _run_after_preflight(
                     start_time_s=float(u.start_sample / audio_buf.sample_rate),
                     end_time_s=float(u.end_sample / audio_buf.sample_rate),
                     is_speech=u.is_speech,
-                    input_sha256=u.input_sha256 or hash_bytes(orig_core_waveforms[idx].tobytes()),
+                    input_sha256=u.input_sha256 or hash_numpy(orig_core_waveforms[idx]),
                     candidate_sha256=cand_hashes[idx],
-                    output_sha256=hash_bytes(final_wave.astype(np.float32).tobytes()),
+                    output_sha256=hash_numpy(final_wave),
                     guard_a_verdict=dec.guard_verdict,
                     guard_a_scores=dec.guard_scores,
                     guard_b_verdict=guard_b_verdict,
@@ -836,24 +1139,61 @@ def _run_after_preflight(
         if inline_enhancer is not None and hasattr(inline_enhancer, "close"):
             inline_enhancer.close()
 
+    if streaming_natural:
+        # Finished unit audio now lives in ``selected_stage``. Drop every
+        # decision/decode view and reclaim the decoded source before assembly
+        # allocates its file-length destination. The selected/finished stage
+        # stays mapped until its unit views have been stitched.
+        for decision in decisions:
+            decision.selected_waveform = np.empty(0, dtype=np.float32)
+        orig_core_waveforms.clear()
+        context_items.clear()
+        channels_to_process.clear()
+        assert selected_stage is not None and isinstance(audio_buf.data, np.memmap)
+        _release_audio_memmap(audio_buf.data, disk_mappings)
+
     # 10. Assembly
-    assembled_channels: list[np.ndarray[Any, np.dtype[np.float32]]] = []
-    for ch_idx in range(len(channels_to_process)):
-        ch_pairs = [
-            (u, final_waveforms[i]) for i, u in enumerate(all_units) if u.channel_id == ch_idx
-        ]
-        ch_timeline = assemble_channel_timeline(
-            units=[p[0] for p in ch_pairs],
-            unit_waveforms=[p[1] for p in ch_pairs],
-            total_samples=media.samples,
-            sample_rate=audio_buf.sample_rate,
+    emit_progress(
+        on_progress,
+        ProgressEvent("finish", PROGRESS_FINISH_ASSEMBLY, "Assembling timeline"),
+    )
+    assembled_data: np.ndarray[Any, np.dtype[np.float32]]
+    if streaming_natural:
+        assembled_data = _create_audio_memmap(
+            workspace.root / "assembled-natural.f32", media.channels, media.samples
         )
-        assembled_channels.append(ch_timeline)
+        disk_mappings.append(assembled_data)
+        for ch_idx in range(processing_channel_count):
+            ch_pairs = [
+                (u, final_waveforms[i]) for i, u in enumerate(all_units) if u.channel_id == ch_idx
+            ]
+            assemble_channel_timeline_into(
+                assembled_data[ch_idx],
+                units=[pair[0] for pair in ch_pairs],
+                unit_waveforms=[pair[1] for pair in ch_pairs],
+                total_samples=media.samples,
+                sample_rate=audio_buf.sample_rate,
+            )
+        if duplicate_to_stereo:
+            assembled_data[1, :] = assembled_data[0, :]
+        assembled_data.flush()
+    else:
+        assembled_channels: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+        for ch_idx in range(len(channels_to_process)):
+            ch_pairs = [
+                (u, final_waveforms[i]) for i, u in enumerate(all_units) if u.channel_id == ch_idx
+            ]
+            ch_timeline = assemble_channel_timeline(
+                units=[p[0] for p in ch_pairs],
+                unit_waveforms=[p[1] for p in ch_pairs],
+                total_samples=media.samples,
+                sample_rate=audio_buf.sample_rate,
+            )
+            assembled_channels.append(ch_timeline)
 
-    if duplicate_to_stereo and len(assembled_channels) == 1:
-        assembled_channels.append(assembled_channels[0].copy())
-
-    assembled_data = np.stack(assembled_channels, axis=0)
+        if duplicate_to_stereo and len(assembled_channels) == 1:
+            assembled_channels.append(assembled_channels[0].copy())
+        assembled_data = np.stack(assembled_channels, axis=0)
     assembled_buffer = AudioBuffer(
         data=assembled_data,
         sample_rate=audio_buf.sample_rate,
@@ -868,6 +1208,10 @@ def _run_after_preflight(
         units=all_units,
     )
     workspace.journal.append(JournalEvent.ASSEMBLY_COMPLETE)
+    if streaming_natural:
+        final_waveforms.clear()
+        assert selected_stage is not None
+        _release_audio_memmap(selected_stage, disk_mappings)
 
     # 10.5. Spectral Restoration Subsystem (HawaRestore-KD)
     restoration_report: dict[str, Any] | None = None
@@ -880,7 +1224,11 @@ def _run_after_preflight(
         from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
 
         assert speaker_id is not None
-        speaker_profile = load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        speaker_profile = (
+            None
+            if speaker_id in ("source", "none")
+            else load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        )
 
         # Target sample rate for restored output is 48000 Hz
         target_sr = 48000
@@ -915,7 +1263,7 @@ def _run_after_preflight(
         #
         # Segments overlap and are cross-faded, so neighbours that reach
         # different verdicts meet without a click at the seam.
-        restored_data, segment_records = _restore_in_segments(
+        restored_data, segment_records, seg_starts, seg_len = _restore_in_segments(
             natural_audio=current_data,
             sample_rate=target_sr,
             bandwidth_est=bw_est,
@@ -948,43 +1296,11 @@ def _run_after_preflight(
             channel_mode=channel_mode,
         )
 
-        rest_rep = RestorationReport(
-            mode="restore",
-            speaker_id=speaker_id,
-            profile_hash=speaker_profile.compute_hash(),
-            natural_output_hash=hash_bytes(assembled_data.tobytes()),
-            # ``cutoff_mode`` records whether the protected-band boundary was
-            # measured or asserted by the operator — the reader cannot tell them
-            # apart from the frequency alone.
-            bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
-            restorer={
-                "name": "hawarestore-kd",
-                "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
-                # Reported by the restorer itself, so the hash can only describe
-                # weights that were actually loaded into the network.
-                "weights_sha256": restorer.weights_sha256,
-                "checkpoint_path": str(restorer.checkpoint_path),
-                "device": restorer.device,
-                "seed_policy": "deterministic_job_id",
-                "solver": "midpoint",
-                "steps": 4,
-                "guidance_scale": 0.0,
-            },
-            segments=RestorationSegmentCounts(
-                restored=counts.get("restored", 0),
-                reduced=counts.get("reduced", 0),
-                reverted=counts.get("reverted", 0),
-                bypassed=counts.get("bypassed", 0),
-                errors=counts.get("error", 0),
-            ),
-            guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
-            review_timecodes=review_segments,
-        )
-        restoration_report = rest_rep.to_dict()
-
     # 11. Loudness normalization and true-peak limiting
-    premaster_loudness = measure_loudness_and_peaks(
-        assembled_buffer.data, assembled_buffer.sample_rate
+    premaster_loudness = (
+        measure_loudness_and_peaks_streaming(assembled_buffer.data, assembled_buffer.sample_rate)
+        if streaming_natural
+        else measure_loudness_and_peaks(assembled_buffer.data, assembled_buffer.sample_rate)
     )
     target_lufs = (
         config.loudness.target_lufs_stereo
@@ -1001,40 +1317,175 @@ def _run_after_preflight(
     )
 
     gain_linear = 10.0 ** (static_gain_db / 20.0)
-    gained_data = assembled_buffer.data * gain_linear
-
-    limited_res = apply_lookahead_limiter(
-        waveform=gained_data,
-        sample_rate=assembled_buffer.sample_rate,
-        ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+    emit_progress(
+        on_progress,
+        ProgressEvent("finish", PROGRESS_FINISH_LIMITER, "Applying lookahead limiter"),
     )
+    if streaming_natural:
+
+        def on_limiter_progress(fraction: float) -> None:
+            pct = (
+                PROGRESS_FINISH_LIMITER
+                + fraction * (PROGRESS_FINISH_ENCODE - PROGRESS_FINISH_LIMITER) * 0.95
+            )
+            emit_progress(
+                on_progress,
+                ProgressEvent("finish", round(pct, 3), "Applying lookahead limiter"),
+            )
+
+        limited_res = apply_lookahead_limiter_to_memmap(
+            waveform=assembled_buffer.data,
+            sample_rate=assembled_buffer.sample_rate,
+            output_path=workspace.root / "mastered-natural.f32",
+            input_gain_linear=gain_linear,
+            ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+            on_progress=on_limiter_progress if on_progress is not None else None,
+        )
+        disk_mappings.append(limited_res.limited_waveform)
+    else:
+        gained_data = assembled_buffer.data * gain_linear
+        limited_res = apply_lookahead_limiter(
+            waveform=gained_data,
+            sample_rate=assembled_buffer.sample_rate,
+            ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+        )
     if limited_res.max_gain_reduction_db > config.loudness.max_limiter_reduction_db:
         logger.warning(
             f"Limiter reduced peaks by {limited_res.max_gain_reduction_db:.2f} dB, "
             f"beyond the static-gain headroom budget of "
             f"{config.loudness.max_limiter_reduction_db:.2f} dB — transient-heavy material."
         )
+
+    if mode == "restore":
+        # Master the Natural reference identically for post-mastering verification
+        nat_gained = current_data * gain_linear
+        nat_limited_res = apply_lookahead_limiter(
+            waveform=nat_gained,
+            sample_rate=target_sr,
+            ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+        )
+        mastered_natural = nat_limited_res.limited_waveform
+        mastered_restored = limited_res.limited_waveform
+
+        post_master_result = guard_r.verify_post_mastering(
+            mastered_natural=mastered_natural,
+            mastered_restored=mastered_restored,
+            segment_records=segment_records,
+            starts=seg_starts,
+            seg_len=seg_len,
+            cutoff_hz=float(bw_est.effective_cutoff_hz),
+            transition_hz=500.0,
+            tolerance_rms=1e-4,
+            tolerance_stft=1e-3,
+            tolerance_third_octave_db=0.25,
+            canonical_embedding=speaker_profile.embedding_vector if speaker_profile else None,
+            variance_vector=speaker_profile.variance_vector if speaker_profile else None,
+        )
+
+        if post_master_result.fallback_applied:
+            logger.warning(
+                f"Post-mastering Guard R failed ({post_master_result.reason}) — "
+                "reverting to mastered Natural audio."
+            )
+            final_mastered_data = mastered_natural
+            reconstructed_count = counts.get("restored", 0) + counts.get("reduced", 0)
+            rep_segments = RestorationSegmentCounts(
+                restored=0,
+                reduced=0,
+                reverted=counts.get("reverted", 0) + reconstructed_count,
+                bypassed=counts.get("bypassed", 0),
+                errors=counts.get("error", 0),
+            )
+            for ev in post_master_result.segments_evidence:
+                if not ev.passes:
+                    review_segments.append(
+                        {
+                            "segment_index": ev.segment_index,
+                            "start_time_s": ev.start_time_s,
+                            "action": "post_mastering_reverted",
+                            "verdict": "FAIL",
+                            "reason": ev.reason,
+                        }
+                    )
+        else:
+            final_mastered_data = mastered_restored
+            rep_segments = RestorationSegmentCounts(
+                restored=counts.get("restored", 0),
+                reduced=counts.get("reduced", 0),
+                reverted=counts.get("reverted", 0),
+                bypassed=counts.get("bypassed", 0),
+                errors=counts.get("error", 0),
+            )
+
+        rest_rep = RestorationReport(
+            mode="restore",
+            speaker_id=speaker_id,
+            profile_hash=speaker_profile.compute_hash() if speaker_profile else None,
+            natural_output_hash=hash_bytes(assembled_data.tobytes()),
+            bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
+            restorer={
+                "name": "hawarestore-kd",
+                "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
+                "weights_sha256": restorer.weights_sha256,
+                "checkpoint_path": str(restorer.checkpoint_path),
+                "device": restorer.device,
+                "seed_policy": "deterministic_job_id",
+                "solver": "midpoint",
+                "steps": 4,
+                "guidance_scale": 0.0,
+                "research_quarantine": True,
+                "production_qualified": False,
+            },
+            segments=rep_segments,
+            guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
+            review_timecodes=review_segments,
+            post_mastering_verification=post_master_result.to_dict(),
+        )
+        restoration_report = rest_rep.to_dict()
+    else:
+        final_mastered_data = limited_res.limited_waveform
+
     mastered_buffer = AudioBuffer(
-        data=limited_res.limited_waveform,
+        data=final_mastered_data,
         sample_rate=assembled_buffer.sample_rate,
         channel_mode=channel_mode,
     )
+    if streaming_natural:
+        assert isinstance(assembled_data, np.memmap)
+        _release_audio_memmap(assembled_data, disk_mappings)
 
-    final_loudness = measure_loudness_and_peaks(mastered_buffer.data, mastered_buffer.sample_rate)
+    final_loudness = (
+        measure_loudness_and_peaks_streaming(mastered_buffer.data, mastered_buffer.sample_rate)
+        if streaming_natural
+        else measure_loudness_and_peaks(mastered_buffer.data, mastered_buffer.sample_rate)
+    )
     workspace.journal.append(
         JournalEvent.FINAL_VALIDATION_PASSED,
         {"lufs": final_loudness.integrated_lufs, "dbtp": final_loudness.true_peak_dbtp},
     )
 
     # 12. Encode master into the workspace
-    tmp_out = workspace.root / "candidate-output.wav.tmp"
-    encode_audio(
-        buffer=mastered_buffer,
-        output_path=tmp_out,
-        output_bit_depth=config.input.output_bit_depth,
-        dither=config.loudness.dither,
-        seed_context=workspace.job_id,
+    emit_progress(
+        on_progress,
+        ProgressEvent("finish", PROGRESS_FINISH_ENCODE, "Encoding master audio"),
     )
+    tmp_out = workspace.root / "candidate-output.wav.tmp"
+    if streaming_natural:
+        encode_audio_streaming(
+            buffer=mastered_buffer,
+            output_path=tmp_out,
+            output_bit_depth=config.input.output_bit_depth,
+            dither=config.loudness.dither,
+            seed_context=workspace.job_id,
+        )
+    else:
+        encode_audio(
+            buffer=mastered_buffer,
+            output_path=tmp_out,
+            output_bit_depth=config.input.output_bit_depth,
+            dither=config.loudness.dither,
+            seed_context=workspace.job_id,
+        )
 
     emit_progress(
         on_progress,
@@ -1169,6 +1620,258 @@ def _run_after_preflight(
         json_report_str=json_str,
         txt_summary_str=txt_str,
         overwrite=overwrite,
+        clean_only=clean_only,
+    )
+
+    workspace.journal.append(
+        JournalEvent.OUTPUT_PUBLISHED,
+        {"audio": str(dest_audio), "json": str(dest_json), "txt": str(dest_txt)},
+    )
+    workspace.journal.append(JournalEvent.JOB_COMPLETE)
+    _close_audio_memmaps(disk_mappings)
+    workspace.cleanup()
+
+    logger.info(f"Pipeline finished successfully! Published master to {dest_audio}")
+    return report
+
+
+def _run_smart_safe(
+    audio_buf: AudioBuffer,
+    workspace: JobWorkspace,
+    in_path: Path,
+    out_path: Path,
+    config: HawaVoCleanConfig,
+    active_guard_cfg: Any,
+    calib_data: Any,
+    calibration_sha256: str,
+    core_lock: Any,
+    core_lock_sha256: str,
+    media: AudioProbeResult,
+    overwrite: bool,
+    speaker_id: str | None = None,
+    profiles_dir: str | Path = "profiles",
+    allow_research_restore: bool = False,
+    on_progress: ProgressCallback | None = None,
+    clean_only: bool = False,
+) -> HawaVoCleanReport:
+    from hawavoclean.audio.encode import encode_audio
+    from hawavoclean.audio.types import AudioBuffer, ChannelMode
+    from hawavoclean.finishing.limiter import apply_lookahead_limiter
+    from hawavoclean.hashing import hash_file
+    from hawavoclean.report.summary import generate_human_summary
+    from hawavoclean.report.writer import serialize_json_report
+    from hawavoclean.smart_safe.analyzer import analyze_audio_stream
+    from hawavoclean.smart_safe.preview import (
+        SmartSafePreviewEngine,
+        abstain_to_least_intervention,
+        verify_post_master_invariants,
+    )
+
+    emit_progress(on_progress, ProgressEvent("decode", 0.15, "Analyzing acoustic environment"))
+    raw_data = audio_buf.data
+    sr = audio_buf.sample_rate
+
+    # Ensure 48 kHz
+    if sr != 48000:
+        gcd = math.gcd(sr, 48000)
+        down = sr // gcd
+        up = 48000 // gcd
+        raw_data = scipy.signal.resample_poly(raw_data, up, down, axis=-1).astype(np.float32)
+        sr = 48000
+
+    # Extract 1D mono for analysis
+    if raw_data.ndim == 2:
+        mono_raw = np.mean(raw_data, axis=0).astype(np.float32)
+    else:
+        mono_raw = raw_data.astype(np.float32)
+
+    # 1. Bounded Streaming Acoustic Analysis
+    input_chunk = AudioBuffer(
+        data=mono_raw.reshape(1, -1),
+        sample_rate=sr,
+        channel_mode=ChannelMode.MONO,
+    )
+    acoustic_rep = analyze_audio_stream([input_chunk])
+    evidence = acoustic_rep.decision_evidence(reconstruction_consent=allow_research_restore)
+
+    # 2. Preview Generation and Decision inside engine
+    emit_progress(
+        on_progress,
+        ProgressEvent("segment", 0.30, "Generating candidate previews inside engine"),
+    )
+    engine = SmartSafePreviewEngine(
+        sample_rate=sr,
+        allow_research_restore=allow_research_restore,
+    )
+    speaker_profile = None
+    if speaker_id is not None:
+        try:
+            speaker_profile = load_speaker_profile(speaker_id, profiles_root=profiles_dir)
+        except Exception:
+            speaker_profile = None
+
+    emit_progress(
+        on_progress,
+        ProgressEvent("guard", 0.50, "Evaluating hard guards and selecting route"),
+    )
+    decision, previews = engine.decide(
+        mono_raw,
+        sr,
+        acoustic_evidence=evidence,
+        restore_policy="auto" if allow_research_restore else "disabled",
+        speaker_profile=speaker_profile,
+        speaker_profile_id=speaker_id,
+        ranker=None,
+        require_qualified_ranker=False,
+    )
+    selected_route = decision.selected_route
+
+    # 4. Full Master Render
+    emit_progress(
+        on_progress,
+        ProgressEvent("enhance", 0.70, f"Rendering full master ({selected_route})"),
+    )
+    master_audio, render_err = engine.render_route_audio(
+        selected_route,
+        raw_data,
+        sr,
+        speaker_profile_id=speaker_id,
+        allow_research_restore=allow_research_restore,
+    )
+
+    # 5. Post-Master Invariant Verification
+    emit_progress(on_progress, ProgressEvent("guard", 0.85, "Verifying post-master invariants"))
+    check_mono = (
+        np.mean(master_audio, axis=0).astype(np.float32) if master_audio.ndim == 2 else master_audio
+    )
+    passed, _ = verify_post_master_invariants(check_mono, mono_raw, selected_route, sr)
+
+    if not passed or render_err is not None:
+        selected_route = abstain_to_least_intervention(previews, failed_route=selected_route)
+        master_audio, _ = engine.render_route_audio(
+            selected_route,
+            raw_data,
+            sr,
+            speaker_profile_id=speaker_id,
+            allow_research_restore=allow_research_restore,
+        )
+
+    # 6. True-Peak Limiting (mastering)
+    limiter_in = master_audio if master_audio.ndim == 2 else master_audio.reshape(1, -1)
+    res = apply_lookahead_limiter(
+        limiter_in, sr, ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp
+    )
+    master_final = res.limited_waveform if master_audio.ndim == 2 else res.limited_waveform[0]
+
+    # 7. Write temp audio and serialize report
+    tmp_out = workspace.root / "master.wav"
+    out_buf_data = master_final if master_final.ndim == 2 else master_final.reshape(1, -1)
+    channel_mode = audio_buf.channel_mode if master_final.ndim == 2 else ChannelMode.MONO
+    out_buffer = AudioBuffer(data=out_buf_data, sample_rate=sr, channel_mode=channel_mode)
+    encode_audio(
+        out_buffer,
+        tmp_out,
+        output_bit_depth="pcm24",
+    )
+
+    from dataclasses import asdict
+
+    decision_summary = {
+        "strategy": "smart_safe",
+        "selected_route": selected_route,
+        "abstained": decision.abstained,
+        "confidence": decision.confidence,
+        "decision_sha256": decision.decision_sha256,
+        "acoustic_evidence": asdict(evidence),
+        "candidates": [
+            {
+                "route": c.route,
+                "eligible": c.eligible,
+                "safe": c.safe,
+                "reasons": list(c.reasons),
+                "rank_score": c.rank_score,
+                "confidence": c.prediction_confidence,
+                "evidence_sha256": c.evidence_sha256,
+            }
+            for c in decision.candidates
+        ],
+    }
+
+    in_stats = MediaStats(
+        path=str(in_path),
+        sha256=media.sha256,
+        samples=media.samples,
+        channels=media.channels,
+        sample_rate=media.sample_rate,
+        duration_s=media.duration_s,
+    )
+    out_sha = hash_file(tmp_out)
+    out_samples = master_final.shape[-1]
+    out_stats = MediaStats(
+        path=str(out_path),
+        sha256=out_sha,
+        samples=out_samples,
+        channels=master_final.shape[0] if master_final.ndim == 2 else 1,
+        sample_rate=sr,
+        duration_s=out_samples / float(sr),
+    )
+
+    report = HawaVoCleanReport(
+        schema_version=REPORT_SCHEMA_VERSION,
+        release=current_release_metadata(),
+        build=current_build_metadata(),
+        job_id=workspace.job_id,
+        config_hash=workspace.config_hash,
+        input=in_stats,
+        output=out_stats,
+        core=CoreMetadata(
+            id=config.enhancement.core_id,
+            algorithm="smart_safe_preview_engine",
+            params_hash=decision.decision_sha256,
+            phase_coherent=True,
+            lock_sha256=core_lock_sha256,
+            weight_sha256={
+                str(k): str(v) for k, v in dict(core_lock.get("weight_sha256", {})).items()
+            }
+            if isinstance(core_lock, dict)
+            else {},
+        ),
+        guard=GuardMetadata(
+            id=active_guard_cfg.guard_id,
+            probe_hash="",
+            calibration_id=str(calib_data["calibration_id"]),
+            calibration_sha256=calibration_sha256,
+        ),
+        environment=EnvironmentMetadata(
+            platform=platform.platform(),
+            os_version=platform.version(),
+            python_version=platform.python_version(),
+            numpy_version=np.__version__,
+            scipy_version=scipy.__version__,
+            soundfile_version=soundfile.__version__,
+            cpu_model=platform.processor(),
+            runtime_versions=runtime_versions(),
+            deterministic_settings=deterministic_settings(config),
+        ),
+        summary=UnitSummary(
+            units_total=1,
+            enhanced=1 if selected_route != "preserve" else 0,
+            reverted=1 if selected_route == "preserve" else 0,
+        ),
+        restoration=decision_summary,
+    )
+
+    json_str = serialize_json_report(report)
+    txt_str = generate_human_summary(report)
+
+    emit_progress(on_progress, ProgressEvent("publish", PROGRESS_PUBLISH, "Publishing master"))
+    dest_audio, dest_json, dest_txt = workspace.publish_atomically(
+        temp_audio_path=tmp_out,
+        destination_audio_path=out_path,
+        json_report_str=json_str,
+        txt_summary_str=txt_str,
+        overwrite=overwrite,
+        clean_only=clean_only,
     )
 
     workspace.journal.append(
@@ -1178,5 +1881,5 @@ def _run_after_preflight(
     workspace.journal.append(JournalEvent.JOB_COMPLETE)
     workspace.cleanup()
 
-    logger.info(f"Pipeline finished successfully! Published master to {dest_audio}")
+    logger.info(f"Smart Safe pipeline finished successfully! Published master to {dest_audio}")
     return report

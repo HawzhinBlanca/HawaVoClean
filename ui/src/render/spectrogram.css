@@ -1,0 +1,48 @@
+/* D3 · Scrollable spectrogram panel styling. */
+
+.spectrogram-panel {
+  /* Panel follows the same grid pattern as the waveform. */
+}
+
+.spectrogram-body {
+  position: relative;
+  padding: 0 var(--panel-pad, 12px) 8px;
+}
+
+.spectrogram-canvas {
+  display: block;
+  width: 100%;
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+
+.spectrogram-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 9px;
+  color: var(--text-muted, #8e97a5);
+  font-family: 'SF Mono', ui-monospace, Menlo, Monaco, 'Roboto Mono', monospace;
+}
+
+.spectrogram-legend .lo,
+.spectrogram-legend .hi {
+  white-space: nowrap;
+}
+
+.spectrogram-gradient {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(
+    to right,
+    #000000,
+    #2d1160,
+    #721f81,
+    #b5367a,
+    #f1605d,
+    #feae65,
+    #fcfdbf
+  );
+}

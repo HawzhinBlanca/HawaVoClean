@@ -35,17 +35,21 @@ const player = vi.hoisted(() => ({
   // "the engine died mid-load" apart from "these bytes are junk", both of
   // which Chromium reports as MediaError.code 4.
   setLivenessProbe: vi.fn((_fn: (() => boolean) | null) => undefined),
+  setLoudnessMatch: vi.fn(),
+  gainOffsetDb: 0,
 }));
+const registerDroppedFile = vi.hoisted(() => vi.fn());
 vi.mock('../audio/player', () => ({ getPlayer: () => player }));
 
 vi.mock('../bridge', () => ({
   getBridge: () => ({
     host: 'web',
     engine: {
-      getEndpoint: async () => ({ baseUrl: 'http://127.0.0.1:8765', token: 'devtok' }),
+      getEndpoint: async () => ({ baseUrl: 'http://127.0.0.1:8765' }),
     },
     files: {
       pickAudio: async () => null,
+      registerDroppedFile: (file: File) => registerDroppedFile(file),
       pathForFile: () => null,
       revealInFinder: async () => undefined,
     },
@@ -163,8 +167,17 @@ interface FakeClient {
   cancelJob: ReturnType<typeof vi.fn>;
   peaks: ReturnType<typeof vi.fn>;
   verify: ReturnType<typeof vi.fn>;
+  createV1Jobs?: ReturnType<typeof vi.fn>;
+  listBatches?: ReturnType<typeof vi.fn>;
+  getBatch?: ReturnType<typeof vi.fn>;
+  pauseBatch?: ReturnType<typeof vi.fn>;
+  resumeBatch?: ReturnType<typeof vi.fn>;
+  cancelBatch?: ReturnType<typeof vi.fn>;
+  retryJob?: ReturnType<typeof vi.fn>;
+  cancelV1Job?: ReturnType<typeof vi.fn>;
   fileUrl: (p: string) => string;
   eventsUrl: (id: string) => string;
+  v1BatchEventsUrl?: (id: string) => string;
 }
 
 function makeClient(): FakeClient {
@@ -190,7 +203,8 @@ function makeClient(): FakeClient {
     // otherwise.
     verify: vi.fn(async (_path: string) => ({ status: 206, delivered: true, size: 1000 })),
     fileUrl: (p: string) => `http://127.0.0.1:8765/api/audio?path=${encodeURIComponent(p)}`,
-    eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events?token=devtok`,
+    eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events`,
+    v1BatchEventsUrl: (id: string) => `http://127.0.0.1:8765/api/v1/batches/${id}/events`,
   };
 }
 
@@ -241,6 +255,8 @@ beforeEach(() => {
   player.hasDeck.mockReturnValue(true);
   player.deckFault.mockReturnValue(null);
   player.onFault.mockClear();
+  registerDroppedFile.mockReset();
+  registerDroppedFile.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -259,7 +275,7 @@ describe('startJob', () => {
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
     });
     const st = store.useStore.getState();
@@ -280,6 +296,29 @@ describe('startJob', () => {
     FakeEventSource.live.send('status', JSON.stringify(jobStatus('running')));
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('posts one run for a burst of presses, not one per press', async () => {
+    // The guard above reads `st.job`, which `setJob` only fills in after
+    // `createJob` resolves. Every press inside that window saw the previous,
+    // terminal job and went through: six presses posted six runs, the store
+    // kept the last, and the rest ran on the engine unreferenced and
+    // uncancellable. Deliberately NOT awaiting between the calls — awaiting is
+    // what let the sibling test above pass while the race was wide open.
+    const { actions, store, client } = await boot();
+    armed(store);
+    await Promise.all([actions.startJob(), actions.startJob(), actions.startJob()]);
+    expect(client.createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets the next press through after a refusal, having created nothing', async () => {
+    const { actions, store, client, EngineError } = await boot();
+    armed(store);
+    client.createJob.mockRejectedValueOnce(new EngineError(503, 'busy', 'Engine busy'));
+    await actions.startJob();
+    expect(store.useStore.getState().job).toBeNull();
+    await actions.startJob();
+    expect(client.createJob).toHaveBeenCalledTimes(2);
   });
 
   it('does nothing without a source', async () => {
@@ -751,11 +790,18 @@ describe('report access and helpers (B7)', () => {
     expect(actions.baseName('a.wav')).toBe('a.wav');
   });
 
-  it('isAcceptedFile takes audio and video containers and refuses the rest', async () => {
+  it('accepts exactly the production media extension contract', async () => {
     const { actions } = await boot();
     const f = (name: string, type = ''): File => new File(['x'], name, { type });
-    expect(actions.isAcceptedFile(f('take.wav', 'audio/wav'))).toBe(true);
-    expect(actions.isAcceptedFile(f('take.MP4'))).toBe(true);
+    const allowed = ['wav', 'wave', 'aif', 'aiff', 'aifc', 'flac', 'mp3', 'm4a', 'mp4'];
+    expect([...actions.ACCEPTED_EXTENSIONS]).toEqual(allowed);
+    for (const extension of allowed) {
+      expect(actions.isAcceptedFile(f(`take.${extension}`))).toBe(true);
+    }
+    for (const extension of ['mov', 'aac', 'ogg', 'oga', 'opus', 'caf', 'w64', 'mkv', 'webm']) {
+      expect(actions.isAcceptedFile(f(`take.${extension}`, 'audio/mpeg'))).toBe(false);
+    }
+    expect(actions.isAcceptedFile(f('take', 'audio/wav'))).toBe(false);
     expect(actions.isAcceptedFile(f('notes.txt', 'text/plain'))).toBe(false);
     expect(actions.extensionOf('Flute 09.m4a.mp4')).toBe('mp4');
     expect(actions.extensionOf('noext')).toBe('');
@@ -1114,7 +1160,7 @@ describe('B5 · two runs of the same profile do not overwrite each other', () =>
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
     });
   });
@@ -1122,24 +1168,24 @@ describe('B5 · two runs of the same profile do not overwrite each other', () =>
   it('the second run of the same profile is given its own output path', async () => {
     const { actions, store, client } = await boot();
     armed(store);
-    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
+    done(store, { jobId: 'j1', outputPath: '/dir/a_production.wav', profile: 'production' });
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
-      output_path: '/dir/a_studio-2.wav',
+      output_path: '/dir/a_production-2.wav',
     });
   });
 
   it('a third run counts on rather than stacking suffixes', async () => {
     const { actions, store, client } = await boot();
     armed(store);
-    done(store, { jobId: 'j1', outputPath: '/dir/a_studio.wav' });
-    done(store, { jobId: 'j2', outputPath: '/dir/a_studio-2.wav' });
+    done(store, { jobId: 'j1', outputPath: '/dir/a_production.wav', profile: 'production' });
+    done(store, { jobId: 'j2', outputPath: '/dir/a_production-2.wav', profile: 'production' });
     await actions.startJob();
     expect(client.createJob.mock.calls[0]?.[0]).toMatchObject({
-      output_path: '/dir/a_studio-3.wav',
+      output_path: '/dir/a_production-3.wav',
     });
   });
 
@@ -1164,7 +1210,7 @@ describe('B5 · two runs of the same profile do not overwrite each other', () =>
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
     });
   });
@@ -1363,7 +1409,7 @@ describe('B5 · restoring a run restores the run, not half of it', () => {
     const { actions, store } = await boot();
     done(store, { jobId: 'j1', outputPath: '/out/j1.wav', profile: 'production' });
     done(store, { jobId: 'j2', outputPath: '/out/j2.wav', profile: 'studio' });
-    expect(store.useStore.getState().profile).toBe('studio');
+    expect(store.useStore.getState().profile).toBe('production');
 
     await actions.selectRun('j1');
     await settle();
@@ -1765,12 +1811,13 @@ describe('restore mode (contract addendum 2)', () => {
   it('a restore submit carries mode and speaker — and only those when the cutoff is auto', async () => {
     const { actions, store, client } = await boot();
     armed(store);
-    store.useStore.getState().setCapabilities(['character_01'], true);
+    store.useStore.getState().setCapabilities(['character_01', 'character_02'], true);
+    store.useStore.getState().setReconstructionConsent(true);
     store.useStore.getState().setMode('restore');
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
       mode: 'restore',
       speaker_id: 'character_01',
@@ -1782,18 +1829,80 @@ describe('restore mode (contract addendum 2)', () => {
     armed(store);
     const st = store.useStore.getState();
     st.setCapabilities(['character_01', 'character_02'], true);
+    st.setReconstructionConsent(true);
     st.setMode('restore');
     st.setSpeakerId('character_02');
     st.setCutoffHz(7800);
     await actions.startJob();
     expect(client.createJob).toHaveBeenCalledWith({
       input_path: '/a.wav',
-      profile: 'studio',
+      profile: 'production',
       overwrite: true,
       mode: 'restore',
       speaker_id: 'character_02',
       cutoff_hz: 7800,
     });
+  });
+
+  it('refuses to start restore without generative reconstruction consent (True-10 D4.11)', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const st = store.useStore.getState();
+    st.setCapabilities(['character_01'], true);
+    st.setMode('restore');
+    st.setReconstructionConsent(false);
+    await actions.startJob();
+    expect(client.createJob).not.toHaveBeenCalled();
+    expect(store.useStore.getState().errorLabel).toBe('Consent required');
+  });
+
+  it('refuses to start a blocked route based on v1 capabilities (True-10 D4.11)', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const st = store.useStore.getState();
+    st.setCapabilitiesV1([
+      { capability_id: 'production', available: false, maturity: 'blocked', reason: 'Production route blocked by policy' },
+    ]);
+    st.setMode('natural');
+    st.setProfile('production');
+    await actions.startJob();
+    expect(client.createJob).not.toHaveBeenCalled();
+    expect(store.useStore.getState().error).toContain('Production route blocked by policy');
+  });
+
+  it('submits versioned ProcessingRequestV1 when client.createV1Jobs is supported (True-10 D4.11)', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    const createV1JobsMock = vi.fn(async () => ({
+      schemaVersion: 1,
+      jobs: [
+        {
+          jobId: 'v1-job-123',
+          outputPath: '/out/a_clean.wav',
+          reportPath: '/out/a_clean.hawavoclean.json',
+        },
+      ],
+    }));
+    (client as any).createV1Jobs = createV1JobsMock;
+    const st = store.useStore.getState();
+    st.setSource({ path: '/a.wav', name: 'a.wav', origin: 'file', sourceId: 'src123456' });
+    st.setMode('smart_safe');
+
+    await actions.startJob();
+    expect(createV1JobsMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        schema_version: 1,
+        source_ids: ['src123456'],
+        strategy: {
+          kind: 'smart_safe',
+          restore_policy: 'disabled',
+          allow_generative_reconstruction: false,
+        },
+        execution_policy: 'offline_only',
+        conflict_policy: 'unique',
+      }),
+    );
+    expect(store.useStore.getState().job?.id).toBe('v1-job-123');
   });
 
   it('a natural submit sends none of the three — the engine forbids extras', async () => {
@@ -1807,7 +1916,7 @@ describe('restore mode (contract addendum 2)', () => {
     st.setMode('natural');
     await actions.startJob();
     const req = client.createJob.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(req).toEqual({ input_path: '/a.wav', profile: 'studio', overwrite: true });
+    expect(req).toEqual({ input_path: '/a.wav', profile: 'production', overwrite: true });
     expect('mode' in req).toBe(false);
     expect('speaker_id' in req).toBe(false);
     expect('cutoff_hz' in req).toBe(false);
@@ -2173,6 +2282,36 @@ describe('the web-mode upload state machine', () => {
     return f;
   };
 
+  it('uses only a main-registered native path and skips upload', async () => {
+    const { actions, store, client } = await boot();
+    registerDroppedFile.mockResolvedValue('/native/selected.wav');
+    client.uploadWithProgress = vi.fn();
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(registerDroppedFile).toHaveBeenCalledTimes(1);
+    expect(client.uploadWithProgress).not.toHaveBeenCalled();
+    expect(client.analyze).toHaveBeenCalledWith(
+      '/native/selected.wav',
+      expect.any(Number),
+      expect.anything(),
+    );
+    expect(store.useStore.getState().source?.path).toBe('/native/selected.wav');
+  });
+
+  it('falls back to managed upload when native registration fails', async () => {
+    const { actions, store, client } = await boot();
+    registerDroppedFile.mockRejectedValue(new Error('registration unavailable'));
+    client.uploadWithProgress = vi.fn(() => Promise.resolve({ path: '/work/up/fallback.wav' }));
+
+    await actions.ingestFile(wav());
+    await settle(20);
+
+    expect(client.uploadWithProgress).toHaveBeenCalledTimes(1);
+    expect(store.useStore.getState().source?.path).toBe('/work/up/fallback.wav');
+  });
+
   it('publishes progress so the bar can move, and flips to "finishing" at 100%', async () => {
     const { actions, store, client } = await boot();
     const st = () => store.useStore.getState();
@@ -2285,3 +2424,263 @@ describe('the web-mode upload state machine', () => {
     expect(st().rejection?.kind).toBe('empty');
   });
 });
+
+describe('batch queue actions (True-10 D4.1)', () => {
+  function setupBatchClient(client: FakeClient) {
+    client.createV1Jobs = vi.fn(async () => ({
+      schemaVersion: 1,
+      batchId: 'b_test123',
+      execution: 'local',
+      jobs: [
+        { jobId: 'j1', outputPath: '/out/a.wav', reportPath: '/out/a.json' },
+        { jobId: 'j2', outputPath: '/out/b.wav', reportPath: '/out/b.json' },
+      ],
+    }));
+    client.getBatch = vi.fn(async (id: string) => ({
+      batch_id: id,
+      state: 'running',
+      total_items: 2,
+      completed_items: 0,
+      failed_items: 0,
+      cancelled_items: 0,
+      running_items: 1,
+      queued_items: 1,
+      progress: 0.25,
+      created_at: '2026-09-05T00:00:00Z',
+      updated_at: '2026-09-05T00:00:01Z',
+      jobs: [
+        {
+          job_id: 'j1',
+          seq: 1,
+          state: 'queued',
+          stage: 'queued',
+          progress: 0,
+          message: 'Queued',
+          input_path: '/path/to/a.wav',
+          output_path: '/out/a.wav',
+          report_path: '/out/a.json',
+          profile: 'production',
+          mode: 'natural',
+          created_at: '2026-09-05T00:00:00Z',
+          started_at: null,
+          finished_at: null,
+        },
+        {
+          job_id: 'j2',
+          seq: 2,
+          state: 'queued',
+          stage: 'queued',
+          progress: 0,
+          message: 'Queued',
+          input_path: '/path/to/b.wav',
+          output_path: '/out/b.wav',
+          report_path: '/out/b.json',
+          profile: 'production',
+          mode: 'natural',
+          created_at: '2026-09-05T00:00:00Z',
+          started_at: null,
+          finished_at: null,
+        },
+      ],
+    }));
+    client.pauseBatch = vi.fn(async (id: string) => ({ ok: true, batchId: id, state: 'paused' }));
+    client.resumeBatch = vi.fn(async (id: string) => ({ ok: true, batchId: id, state: 'running' }));
+    client.cancelBatch = vi.fn(async (id: string) => ({ ok: true, batchId: id, state: 'cancelled' }));
+    client.retryJob = vi.fn(async (id: string) => ({ ok: true, jobId: id }));
+    client.cancelV1Job = vi.fn(async (id: string) => ({ ok: true, jobId: id }));
+    client.v1BatchEventsUrl = (id: string) => `http://127.0.0.1:8765/api/v1/batches/${id}/events`;
+  }
+
+  it('submitBatch queues a multi-file batch request and sets store batch', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(20);
+
+    expect(client.createV1Jobs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source_ids: ['/path/to/a.wav', '/path/to/b.wav'],
+      }),
+    );
+    expect(st().batch).not.toBeNull();
+    expect(st().batch?.batch_id).toBe('b_test123');
+  });
+
+  it('pauseCurrentBatch calls client pause and patches batch state', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.pauseCurrentBatch();
+
+    expect(client.pauseBatch).toHaveBeenCalledWith('b_test123');
+    expect(st().batch?.state).toBe('paused');
+  });
+
+  it('resumeCurrentBatch calls client resume and patches batch state', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.pauseCurrentBatch();
+    await actions.resumeCurrentBatch();
+
+    expect(client.resumeBatch).toHaveBeenCalledWith('b_test123');
+    expect(st().batch?.state).toBe('running');
+  });
+
+  it('cancelCurrentBatch calls client cancelBatch', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.cancelCurrentBatch();
+
+    expect(client.cancelBatch).toHaveBeenCalledWith('b_test123', false);
+    expect(st().batch?.state).toBe('cancelled');
+  });
+
+  it('cancelBatchItem marks job cancelled', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.cancelBatchItem('j1');
+
+    expect(client.cancelV1Job).toHaveBeenCalledWith('j1');
+    const job = st().batch?.jobs.find((j) => j.job_id === 'j1');
+    expect(job?.state).toBe('cancelled');
+  });
+
+  it('retryBatchItem calls client retryJob and resets item state', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+    await actions.retryBatchItem('j1');
+
+    expect(client.retryJob).toHaveBeenCalledWith('j1');
+    const job = st().batch?.jobs.find((j) => j.job_id === 'j1');
+    expect(job?.state).toBe('queued');
+  });
+
+  it('inspectBatchItem sets activeInspectJobId and loads decks without stopping batch', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    await actions.submitBatch(['/path/to/a.wav', '/path/to/b.wav']);
+    await settle(10);
+
+    const item = {
+      job_id: 'j1',
+      seq: 1,
+      state: 'done' as const,
+      stage: 'done',
+      progress: 1.0,
+      message: 'Done',
+      input_path: '/path/to/a.wav',
+      output_path: '/out/a.wav',
+      report_path: '/out/a.json',
+      profile: 'studio' as const,
+      mode: 'natural' as const,
+      created_at: '2026-09-05T00:00:00Z',
+      started_at: '2026-09-05T00:00:01Z',
+      finished_at: '2026-09-05T00:00:05Z',
+    };
+
+    await actions.inspectBatchItem(item);
+
+    expect(st().activeInspectJobId).toBe('j1');
+    expect(st().source?.name).toBe('a.wav');
+    expect(player.load).toHaveBeenCalledWith('original', client.fileUrl('/path/to/a.wav'));
+    expect(player.load).toHaveBeenCalledWith('cleaned', client.fileUrl('/out/a.wav'));
+    expect(st().batch).not.toBeNull();
+  });
+
+  it('rehydrateBatchQueue restores active batch on reconnect', async () => {
+    const { actions, store, client } = await boot();
+    setupBatchClient(client);
+    const st = () => store.useStore.getState();
+
+    client.listBatches = vi.fn(async () => ({
+      schemaVersion: 1,
+      batches: [
+        {
+          batch_id: 'b_rehydrate',
+          state: 'running' as const,
+          total_items: 3,
+          completed_items: 1,
+          failed_items: 0,
+          cancelled_items: 0,
+          running_items: 1,
+          queued_items: 1,
+          progress: 0.33,
+          created_at: '2026-09-05T00:00:00Z',
+          updated_at: '2026-09-05T00:00:02Z',
+          jobs: [],
+        },
+      ],
+    }));
+
+    client.getBatch = vi.fn(async (id: string) => ({
+      batch_id: id,
+      state: 'running' as const,
+      total_items: 3,
+      completed_items: 1,
+      failed_items: 0,
+      cancelled_items: 0,
+      running_items: 1,
+      queued_items: 1,
+      progress: 0.33,
+      created_at: '2026-09-05T00:00:00Z',
+      updated_at: '2026-09-05T00:00:02Z',
+      jobs: [],
+    }));
+
+    await actions.rehydrateBatchQueue(client as any);
+
+    expect(st().batch?.batch_id).toBe('b_rehydrate');
+    expect(st().batch?.state).toBe('running');
+  });
+
+  it('toggles loudness-matched comparison and synchronizes DualPlayer (D4.2)', async () => {
+    const { actions, store } = await boot();
+    const st = () => store.useStore.getState();
+    expect(st().loudnessMatch).toBe(true);
+
+    actions.setLoudnessMatch(false);
+    expect(st().loudnessMatch).toBe(false);
+    expect(player.setLoudnessMatch).toHaveBeenCalledWith(false, null, null);
+
+    actions.toggleLoudnessMatch();
+    expect(st().loudnessMatch).toBe(true);
+    expect(player.setLoudnessMatch).toHaveBeenCalledWith(true, null, null);
+  });
+
+  it('toggles advanced controls disclosure state (D4.2)', async () => {
+    const { actions, store } = await boot();
+    const st = () => store.useStore.getState();
+    expect(st().advancedOpen).toBe(false);
+
+    actions.setAdvancedOpen(true);
+    expect(st().advancedOpen).toBe(true);
+
+    actions.toggleAdvancedOpen();
+    expect(st().advancedOpen).toBe(false);
+  });
+});
+
+

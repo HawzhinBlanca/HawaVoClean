@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useI18n } from '../state/i18n';
 import { useReducedMotion } from '../state/reducedMotion';
 import { useStore } from '../state/store';
 import { Led, type LedState } from './Led';
@@ -70,75 +71,76 @@ function HeaderNow() {
   const upload = useStore((s) => s.upload);
   const job = useStore((s) => s.job);
   const report = useStore((s) => s.report);
+  const { t } = useI18n();
 
   const status = job?.status ?? null;
   const state = status?.state ?? (job ? 'queued' : null);
   const running = state === 'running' || state === 'queued';
 
   let tone = 'idle';
-  let label = 'No clip';
+  let label = t.noClip;
   const facts: Array<{ k: string; v: string }> = [];
 
   if (upload) {
     tone = 'busy';
-    label = 'Uploading';
+    label = t.uploading;
     // The name goes in the *value* slot, like every other branch here. It was
     // in the key slot, which does not shrink, so a long filename clipped hard
     // and pushed the percentage off the end of the header.
-    facts.push({ k: 'Clip', v: upload.name });
+    facts.push({ k: t.clip, v: upload.name });
     // "Sent", not "Done": `upload.phase` reaches 'finishing' at
     // loaded === total while the engine is still writing the file, so 100%
     // here does not mean the upload is over.
     facts.push({
-      k: 'Sent',
+      k: t.sent,
       v: `${Math.round((upload.total ? upload.loaded / upload.total : 0) * 100)}%`,
     });
   } else if (analyzing) {
     tone = 'busy';
-    label = 'Analyzing';
-    if (source) facts.push({ k: 'Clip', v: source.name });
+    label = t.analyzing;
+    if (source) facts.push({ k: t.clip, v: source.name });
   } else if (running) {
     tone = 'busy';
-    label = 'Running';
-    facts.push({ k: 'Stage', v: status?.stage ?? 'working' });
-    if (status?.unit) facts.push({ k: 'Unit', v: `${status.unit.index} / ${status.unit.total}` });
-    facts.push({ k: 'Done', v: `${Math.round((status?.progress ?? 0) * 100)}%` });
+    label = t.running;
+    facts.push({ k: t.stage, v: status?.stage ?? 'working' });
+    if (status?.unit) facts.push({ k: t.unit, v: `${status.unit.index} / ${status.unit.total}` });
+    facts.push({ k: t.done, v: `${Math.round((status?.progress ?? 0) * 100)}%` });
   } else if (state === 'failed') {
     tone = 'fail';
-    label = 'Failed';
-    facts.push({ k: 'Reason', v: status?.error?.code ?? status?.message ?? 'unknown' });
+    label = t.failed;
+    facts.push({ k: t.reason, v: status?.error?.code ?? status?.message ?? 'unknown' });
   } else if (state === 'cancelled') {
     tone = 'idle';
-    label = 'Cancelled';
-    if (source) facts.push({ k: 'Clip', v: source.name });
+    label = t.cancelled;
+    if (source) facts.push({ k: t.clip, v: source.name });
   } else if (state === 'done' && report) {
     tone = 'done';
-    label = 'Done';
+    label = t.done;
     const sum = report.summary;
-    facts.push({ k: 'Units', v: `${sum.enhanced ?? 0} / ${sum.units_total ?? 0}` });
+    facts.push({ k: t.units, v: `${sum.enhanced ?? 0} / ${sum.units_total ?? 0}` });
     const li = original?.loudness.integrated_lufs;
     const lo = cleaned?.loudness.integrated_lufs;
     if (li !== null && li !== undefined && lo !== null && lo !== undefined) {
-      facts.push({ k: 'LUFS', v: signed(lo - li) });
+      facts.push({ k: t.lufs, v: signed(lo - li) });
     }
     const ni = original?.noise_floor_db;
     const no = cleaned?.noise_floor_db;
     if (ni !== null && ni !== undefined && no !== null && no !== undefined) {
-      facts.push({ k: 'Noise', v: `${signed(no - ni)} dB` });
+      facts.push({ k: t.noise, v: `${signed(no - ni)} dB` });
     }
   } else if (source && original) {
     tone = 'ready';
-    label = 'Armed';
-    facts.push({ k: 'Clip', v: source.name });
-    facts.push({ k: 'Length', v: fmtDur(original.duration_s) });
+    label = t.armed;
+    facts.push({ k: t.clip, v: source.name });
+    facts.push({ k: t.length, v: fmtDur(original.duration_s) });
     facts.push({
-      k: 'Format',
-      v: `${(original.sample_rate / 1000).toFixed(1)} kHz · ${original.channels === 1 ? 'mono' : original.channels === 2 ? 'stereo' : `${original.channels} ch`}`,
+      k: t.format,
+      v: `${(original.sample_rate / 1000).toFixed(1)} kHz · ${original.channels === 1 ? t.mono : original.channels === 2 ? t.stereo : `${original.channels} ${t.channelsSuffix}`}`,
     });
   } else if (source) {
     tone = 'idle';
-    label = 'No analysis';
-    facts.push({ k: 'Clip', v: source.name });
+    label = t.noAnalysis;
+    facts.push({ k: t.clip, v: source.name });
   }
 
   return (
@@ -165,20 +167,21 @@ export function Header() {
   const job = useStore((s) => s.job);
   const analyzing = useStore((s) => s.analyzing);
   const reduced = useReducedMotion() === true;
+  const { locale, setLocale, t } = useI18n();
 
   const busy =
     analyzing || (job?.status && (job.status.state === 'running' || job.status.state === 'queued'));
   let led: LedState = 'off';
-  let text = 'ENGINE OFFLINE';
+  let text = t.engineOffline;
   if (engineStatus === 'connecting') {
     led = 'busy';
-    text = 'ENGINE CONNECTING';
+    text = t.engineConnecting;
   } else if (engineStatus === 'ready') {
     led = busy ? 'busy' : 'ok';
-    text = busy ? 'ENGINE BUSY' : 'ENGINE READY';
+    text = busy ? t.engineBusy : t.engineReady;
   } else {
     led = 'err';
-    text = 'ENGINE OFFLINE';
+    text = t.engineOffline;
   }
 
   // CONNECTING → READY → BUSY are three readings of one instrument, so they
@@ -217,19 +220,31 @@ export function Header() {
           accessibility tree, readable whenever the user browses the header;
           the one engine transition that is *not* covered elsewhere — the
           engine going away — is announced assertively by the offline banner. */}
-      <div className="engine">
-        <Led state={led} />
-        <span className="txt">
-          {prev ? (
-            <span className="out" key={prev} aria-hidden="true">
-              {prev}
+      <div className="header-right">
+        <button
+          type="button"
+          className="lang-toggle"
+          onClick={() => setLocale(locale === 'en' ? 'ckb' : 'en')}
+          aria-label={t.langToggleAria}
+          title={t.langToggleAria}
+          data-locale={locale}
+        >
+          {t.langToggleLabel}
+        </button>
+        <div className="engine">
+          <Led state={led} />
+          <span className="txt">
+            {prev ? (
+              <span className="out" key={prev} aria-hidden="true">
+                {prev}
+              </span>
+            ) : null}
+            <span className="in" key={text}>
+              {text}
             </span>
-          ) : null}
-          <span className="in" key={text}>
-            {text}
           </span>
-        </span>
-        {engineVersion ? <span className="ver">v{engineVersion}</span> : null}
+          {engineVersion ? <span className="ver">v{engineVersion}</span> : null}
+        </div>
       </div>
     </header>
   );

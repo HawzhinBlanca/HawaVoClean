@@ -14,7 +14,11 @@ from scipy import signal
 
 from hawavoclean.errors import ModelProvenanceError
 from hawavoclean.hashing import hash_file
-from hawavoclean.restoration.base import RestorationCandidate, Restorer
+from hawavoclean.restoration.base import (
+    RestorationCandidate,
+    RestorationRenderResult,
+    Restorer,
+)
 from hawavoclean.restoration.protected_band import (
     compute_transition_mask,
     merge_protected_spectrum,
@@ -278,3 +282,37 @@ class UniverSRBaseline(Restorer):
             )
 
         return candidates
+
+    def render(
+        self,
+        audio_48k: np.ndarray,
+        sample_rate: int,
+        effective_cutoff_hz: float,
+        speaker_id: str | None = None,
+        speaker_embedding: np.ndarray | None = None,
+        f0_trajectory: np.ndarray | None = None,
+        vuv_mask: np.ndarray | None = None,
+        strengths: list[float] | None = None,
+        seed: int = 42,
+    ) -> RestorationRenderResult:
+        """Generate typed render result carrying telemetry and candidates."""
+        candidates = self.restore(
+            audio_48k=audio_48k,
+            sample_rate=sample_rate,
+            effective_cutoff_hz=effective_cutoff_hz,
+            speaker_id=speaker_id,
+            speaker_embedding=speaker_embedding,
+            f0_trajectory=f0_trajectory,
+            vuv_mask=vuv_mask,
+            strengths=strengths,
+            seed=seed,
+        )
+        has_active = any(c.strength > 0.0 for c in candidates)
+        return RestorationRenderResult(
+            success=has_active,
+            fallback_status="none" if has_active else "no_active_candidates",
+            model_name=self.model_name,
+            provider=self.device,
+            solver="universr_ode",
+            candidates=candidates,
+        )

@@ -40,14 +40,16 @@ const bridge = {
   },
   files: {
     pickAudio: () => invoke('hawa:files:pick'),
-    pathForFile: (file) => {
+    registerDroppedFile: async (file) => {
       try {
         const p = webUtils.getPathForFile(file);
-        return typeof p === 'string' && p.length > 0 ? p : null;
+        if (typeof p !== 'string' || p.length === 0) return null;
+        return await invoke('hawa:files:register-dropped', p);
       } catch {
         return null;
       }
     },
+    pathForFile: () => null,
     revealInFinder: (filePath) => invoke('hawa:files:reveal', filePath),
   },
 };
@@ -58,6 +60,7 @@ if (host === 'resolve') {
     importMedia: (filePath) => invoke('hawa:resolve:import', filePath),
     replaceClip: (mediaId, filePath) => invoke('hawa:resolve:replace', mediaId, filePath),
     appendToTimeline: (mediaId) => invoke('hawa:resolve:append', mediaId),
+    newTrack: (mediaId, filePath, options) => invoke('hawa:resolve:new-track', mediaId, filePath, options),
     getContext: () => invoke('hawa:resolve:context'),
   };
 }

@@ -68,3 +68,112 @@ def test_studio_inference_preserves_length_and_finiteness() -> None:
     assert np.all(np.isfinite(res.waveform))
     # It must attenuate the noise bed between modulation peaks.
     assert float(np.sqrt(np.mean(res.waveform**2))) < float(np.sqrt(np.mean(x**2)))
+
+
+def test_studio_core_validation_and_branch_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hawavoclean.enhancement.studio import (
+        StudioVoiceCore,
+        studio_weight_digests,
+    )
+
+    # 1. Phase coherent rejection
+    with pytest.raises(ValueError, match="not phase-coherent"):
+        StudioVoiceCore(phase_coherent=True)
+
+    # 2. Sample rate mismatch rejection
+    with pytest.raises(ValueError, match="runs at 48000 Hz internally"):
+        StudioVoiceCore(sample_rate=16000)
+
+    core = StudioVoiceCore()
+    assert core.metadata.core_id == "studio-dfn3-48k-v1"
+    assert core.metadata.phase_coherent is False
+
+    # 3. Zero-length input
+    empty = np.zeros(0, dtype=np.float32)
+    empty_res = core.enhance(empty, 48000)
+    assert len(empty_res.waveform) == 0
+    assert empty_res.input_samples == 0
+
+    # 4. studio_weight_digests with missing file
+    import hawavoclean.enhancement.studio as studio_mod
+
+    fake_path = Path("/nonexistent/models/deepfilternet3")
+    monkeypatch.setattr(studio_mod, "_MODEL_DIR", fake_path)
+    digests = studio_weight_digests()
+    assert all(v == "MISSING" for v in digests.values())
+
+
+def test_studio_core_advanced_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    import hawavoclean.enhancement.studio as studio_mod
+    from hawavoclean.enhancement.studio import (
+        STUDIO_PARAMS,
+        StudioVoiceCore,
+        load_deepfilternet3,
+    )
+
+    # 1. Device property
+    core = StudioVoiceCore()
+    assert core.device == "cpu"
+
+    # 2. Non-cpu device warning
+    mock_model = MagicMock()
+    mock_state = MagicMock()
+    monkeypatch.setattr(studio_mod, "load_deepfilternet3", lambda _dev: (mock_model, mock_state))
+    monkeypatch.setattr(
+        studio_mod,
+        "resolve_device",
+        lambda *_args, **_kwargs: MagicMock(resolved="cuda"),
+    )
+    gpu_core = StudioVoiceCore(device="cuda")
+    gpu_core._ensure_model()
+    assert gpu_core._model is mock_model
+
+    # 3. Warmup
+    mock_core = StudioVoiceCore()
+    mock_core._model = mock_model
+    mock_core._df_state = mock_state
+    monkeypatch.setattr(
+        studio_mod,
+        "run_deepfilternet3",
+        lambda _m, _s, a, _lim: np.zeros_like(a),
+    )
+    mock_core.warmup()
+
+    # 4. Device mismatch in load_deepfilternet3
+    import sys
+
+    from hawavoclean.enhancement.dependency_probe import install_torchaudio_compat
+
+    install_torchaudio_compat()
+    import df.enhance  # noqa: F401
+    import df.utils  # noqa: F401
+
+    monkeypatch.setattr(
+        sys.modules["df.enhance"],
+        "init_df",
+        lambda **_kwargs: (MagicMock(), MagicMock(), None),
+    )
+    monkeypatch.setattr(sys.modules["df.utils"], "get_device", lambda: "cuda")
+
+    with pytest.raises(ValueError, match="DeepFilterNet resolved device"):
+        load_deepfilternet3("cpu")
+
+    # 5. WPE dereverb and tail_suppress branches
+    wpe_core = StudioVoiceCore()
+    wpe_core._model = mock_model
+    wpe_core._df_state = mock_state
+    monkeypatch.setitem(STUDIO_PARAMS, "wpe_dereverb", True)
+    monkeypatch.setitem(STUDIO_PARAMS, "tail_suppress", True)
+
+    sr = 48000
+    audio = np.sin(np.linspace(0, 100 * np.pi, sr // 10, dtype=np.float32))
+    # Return hot audio to trigger peak > 0.99 scaling
+    monkeypatch.setattr(
+        studio_mod,
+        "run_deepfilternet3",
+        lambda _m, _s, a, _lim: np.full_like(a, 2.0),
+    )
+    res = wpe_core.enhance(audio, sr)
+    assert np.max(np.abs(res.waveform)) <= 0.991

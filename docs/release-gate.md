@@ -14,20 +14,25 @@ Each pass runs all of the following against the same commit:
 - the default suite with branch coverage at or above 92.49%;
 - the separate fuzz suite and all declared owner-scoped mutations;
 - two-run frozen real-audio regressions for production, studio and lowband;
-- exact UI/plugin installs, typechecking, production build and UI tests;
-- Python, UI, plugin and build-tool lock audits;
+- exact UI, desktop-shell and plugin installs, typechecking, production builds and tests, including
+  source-shell lifecycle and hard-crash process-tree exercises;
+- Python, UI, desktop, plugin and build-tool lock audits;
 - deterministic wheel and source-archive builds plus a fresh Python 3.11 wheel
   install, doctor, production-profile process and verify exercise;
 - a relocatable Resolve engine build and the real staged Electron-to-engine
   lifecycle self-test using the hash-pinned Resolve SDK bridge;
+- an actual source-bound, unsigned macOS arm64 `.app` containing that engine, with exact ASAR-header
+  integrity validation before and after smoke; the packaged executable itself must load its ASAR,
+  preload, renderer and broker and pass the bridge/auth/network-sandbox self-test before the separate
+  packaged-engine version, doctor, process and verify exercises;
 - the pinned CPU container build, exact package check, non-root read-only
   doctor plus production-profile process/verify exercise, and current high/critical vulnerability and
   configuration scans; and
 - generation and validation of the artifact-bound CycloneDX 1.6 SBOM.
 
-The gate compares the two passes' wheel, source archive, UI tree, Resolve
-engine, Resolve plugin, container image, SBOM, real-audio regression record and
-both independent CLI audio outputs. A difference in any promised identity is a
+The gate compares the two passes' wheel, source archive, UI tree, complete unsigned desktop-app tree,
+desktop packaged-engine output, Resolve engine, Resolve plugin, container image, SBOM, real-audio
+regression record and both independent CLI audio outputs. A difference in any promised identity is a
 failure, even when both individual passes otherwise succeed.
 
 ## Pinned host contract
@@ -49,8 +54,8 @@ copying only the required files into an isolated checkout.
 
 `.github/workflows/ci.yml` invokes this exact command on a protected, dedicated Apple-silicon runner;
 it does not redefine a smaller remote “release gate.” Separate hosted jobs add the complete declared
-Python 3.11–3.14 × Linux/macOS support matrix and a macOS web/Resolve-shell check. The stable
-`required` job fails unless every component succeeds on the same source commit.
+Python 3.11–3.14 × Linux/macOS support matrix and a macOS web/desktop/Resolve-shell check. The
+stable `required` job fails unless every component succeeds on the same source commit.
 
 Private regression files are never stored in GitHub or uploaded as evidence. After protected
 environment approval, `scripts/hydrate_release_evidence.py` validates them from an external
@@ -80,18 +85,27 @@ bash scripts/run_release_checks.sh --retain-candidate-assets
 ```
 
 This adds no weaker build path. Each isolated pass exports the wheel, source archive, hash-locked
-runtime requirements, normalized UI archive, normalized full Resolve-plugin archive, normalized
-Linux-arm64 container archive, and CycloneDX SBOM from the artifacts it just tested. The gate compares
-those release-file SHA-256 identities across both passes, retains pass 1 under `candidate-inputs/`, and
-deletes the redundant passing copy. A mismatch fails the full gate. Failed exports remain in their
-timestamped session for diagnosis.
+runtime requirements, normalized UI archive, normalized unsigned macOS-app proof archive, normalized
+full Resolve-plugin archive, normalized Linux-arm64 container archive, and CycloneDX SBOM from the
+artifacts it just tested. The gate compares those eight proof-bound SHA-256 identities across both passes, retains pass 1 under
+`candidate-inputs/`, and deletes the redundant passing copy. A mismatch fails the full gate. Failed
+exports remain in their timestamped session for diagnosis. The desktop archive is explicitly typed
+`unsigned-macos-app-proof-tar-gzip-tree`, marked non-distributable in candidate schema 2, and exists to
+prove packaging, embedded-engine integrity and reproducibility. Developer ID signed/notarized/stapled
+DMG/ZIP, Authenticode NSIS and signed PKG artifacts remain separate isolated native release gates.
+Candidate-only smoke reconstructs this app tree and launches it through the same packaged-app
+bridge/auth/network-sandbox harness before exercising the embedded engine directly; reconstruction
+cannot regress qualification back to an engine-only check.
 
 Directory archives use sorted members, source-commit time, zero owner/group identities, preserved
 executable modes, and validated relative symlinks. The Docker export normalizes only its outer tar
 metadata and order; its content-addressed configuration and layer bytes are unchanged. The retained
 container is exported by image ID so a per-pass tag cannot contaminate reproducibility.
 
-The committed compact checkpoint is validated on every generated-status check.
+The committed compact checkpoint is validated on every generated-status check. Schema 1 remains a
+valid historical record; only schema 2 can attest the packaged desktop app and its smoke path. The
+committed schema-1 checkpoint is therefore not silently promoted—the current desktop proof remains
+pending until the exact gate is rerun and a new checkpoint is derived from its retained logs.
 To additionally prove that every committed count, artifact identity and digest
 was derived from a retained raw proof and its hash-bound logs, run:
 

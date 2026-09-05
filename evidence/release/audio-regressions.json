@@ -32,12 +32,12 @@
       "profile": "studio",
       "input": "test_output/ui-smoke/Flute 09.m4a.mp4",
       "input_sha256": "73fdacaf824651107864dcdafeabee4770de065ab34a94eba66eed8ef1508c0f",
-      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
+      "reference_source_commit": "da8b9ce631675529535235816508d6f131dff01f",
       "reference_audio": "test_output/deep-audit/Flute09_studio.wav",
-      "audio_sha256": "dfcbff36e3bbc6e6fdfbd612fa0ba68570274f0fefa443c1e7416996430eb5dd",
-      "candidate_audio_sha256": "dfcbff36e3bbc6e6fdfbd612fa0ba68570274f0fefa443c1e7416996430eb5dd",
+      "audio_sha256": "d58086c66636a02e45873957f28639062811d1b5a46cb7c83609fde220a1205d",
+      "candidate_audio_sha256": "d58086c66636a02e45873957f28639062811d1b5a46cb7c83609fde220a1205d",
       "reference_report": "test_output/deep-audit/Flute09_studio.hawavoclean.json",
-      "report_sha256": "e015ea7ba3ee5c2266bef0ed693bb58de1d698a9ba37088880c145af92b09518",
+      "report_sha256": "0e2e3c45f23cdbef4ba8397bd803dbd7a8bf317f645555adb171f088e739be9b",
       "core_id": "studio-dfn3-48k-v1"
     },
     {
@@ -71,12 +71,12 @@
       "profile": "studio",
       "input": "test_output/teat1vo-lab/src.mp3",
       "input_sha256": "a414a1d343517202b649f98b450eb330c6a74145f4d7164c9b0b2818fbe04923",
-      "reference_source_commit": "d37ef29a32e9895a255d333f781916d243ab7ba4",
+      "reference_source_commit": "da8b9ce631675529535235816508d6f131dff01f",
       "reference_audio": "test_output/perf-ref/src_studio.wav",
-      "audio_sha256": "7c453a54611ebc10c7e5606f8262f973bfb62095bcf046419dfe26b967fe787e",
-      "candidate_audio_sha256": "7c453a54611ebc10c7e5606f8262f973bfb62095bcf046419dfe26b967fe787e",
+      "audio_sha256": "f814e5b481bb86b4a4ffef12f7cb8257bfaaa4a9dfd8facb39603eddd36b878d",
+      "candidate_audio_sha256": "f814e5b481bb86b4a4ffef12f7cb8257bfaaa4a9dfd8facb39603eddd36b878d",
       "reference_report": "test_output/perf-ref/src_studio.hawavoclean.json",
-      "report_sha256": "ddbe983bf7a9683b6c78befcfd865e9a33f385a74dd37701b5c767071dfb66c2",
+      "report_sha256": "476483caa96c2273527a559e31e99cfd63180b0ddd4082bb7e1e5c1127738ce5",
       "core_id": "studio-dfn3-48k-v1"
     },
     {

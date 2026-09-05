@@ -10,6 +10,7 @@ import {
   cancelJob,
   cancelUpload,
   isAnalyzing,
+  playSelection,
   seekTo,
   setAb,
   startJob,
@@ -123,6 +124,10 @@ export function handleKeyDown(e: KeyboardEvent): void {
       if (canStart) void startJob();
       break;
     }
+    // D2: play selection range, looping
+    case 'l':
+      if (hasAudio && st.selectionRange) playSelection(true);
+      break;
     default:
       break;
   }

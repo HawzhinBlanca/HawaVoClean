@@ -7,14 +7,13 @@ import json
 import math
 import os
 import queue
-import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -38,14 +37,28 @@ from hawavoclean.guard.calibration import load_calibration_artifact
 from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.logging import get_logger, setup_logging
 from hawavoclean.multipass import MAX_PASSES, run_multipass
-from hawavoclean.paths import models_dir, profile_config_path
+from hawavoclean.paths import (
+    ffmpeg_bin_path,
+    ffprobe_bin_path,
+    models_dir,
+    profile_config_path,
+)
 from hawavoclean.paths import profiles_root as paths_profiles_root
 from hawavoclean.pipeline import run_pipeline
+from hawavoclean.process_supervisor import ProcessSupervisor
 from hawavoclean.progress import ProgressEvent
 from hawavoclean.publication import (
     public_output_path,
     publication_paths,
     resolve_committed_publication,
+)
+from hawavoclean.record_bundle import (
+    ProcessingRecord,
+    RecordTrustedKey,
+    RecordTrustStore,
+    create_processing_record,
+    sign_processing_record,
+    verify_processing_record,
 )
 from hawavoclean.report.writer import load_json_report
 from hawavoclean.watchdog import child_env, install_parent_death_watchdog
@@ -86,8 +99,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     )
 
     # 2. FFmpeg and FFprobe binaries
-    ffmpeg_path = shutil.which("ffmpeg")
-    ffprobe_path = shutil.which("ffprobe")
+    ffmpeg_path = ffmpeg_bin_path()
+    ffprobe_path = ffprobe_bin_path()
     if ffmpeg_path:
         print(f"[OK] FFmpeg found: {ffmpeg_path}")
     else:
@@ -157,6 +170,12 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
             print(f"[FAIL] {core_id}: core lock missing: {lock_file}")
             all_passed = False
 
+    # 6. Production capabilities status (Quarantine boundaries)
+    print(
+        "[OK] Production capabilities: Natural routes active (production, studio, lowband). "
+        "Restore and Smart Safe quarantined (BLOCKED) until qualified signed packs are installed."
+    )
+
     print("================================================================================")
     if all_passed:
         print("Doctor status: ALL CHECKS PASSED. Ready for processing.")
@@ -175,6 +194,10 @@ def cmd_restore_doctor(_args: argparse.Namespace) -> int:
     print("================================================================================")
     print("                HAWAVOCLEAN - SPECTRAL RESTORATION DOCTOR (v2.1)                ")
     print("================================================================================")
+    print(
+        "[BLOCKED] Production capability: Restore is NOT production qualified (blocked).\n"
+        "          Loose checkpoint and profiles are quarantined for research evaluation only."
+    )
 
     all_passed = True
 
@@ -293,7 +316,10 @@ def cmd_restore_doctor(_args: argparse.Namespace) -> int:
 
     print("================================================================================")
     if all_passed:
-        print("Restore-Doctor status: ALL RESTORATION CHECKS PASSED. Ready for restore mode.")
+        print(
+            "Restore-Doctor status: ALL RESTORATION CHECKS PASSED "
+            "(RESEARCH-ONLY: quarantined prototype, not production qualified)."
+        )
         return int(ExitCode.SUCCESS)
     print("Restore-Doctor status: PREFLIGHT FAILED. Address errors above.")
     return int(ExitCode.PREFLIGHT_FAILURE)
@@ -333,6 +359,53 @@ def cmd_speaker_profile(args: argparse.Namespace) -> int:
     except Exception as e:
         print(f"[FAIL] Speaker profile invalid: {e}")
         return int(ExitCode.INVALID_USER_INPUT)
+
+
+def cmd_enroll_speaker(args: argparse.Namespace) -> int:
+    """Enroll a real speaker from production audio files."""
+    from hawavoclean.enrollment import enroll_speaker
+
+    audio_dir = Path(args.audio_dir)
+    if not audio_dir.is_dir():
+        print(f"[FAIL] Audio directory not found: {audio_dir}")
+        return int(ExitCode.INVALID_USER_INPUT)
+
+    output_dir = (
+        Path(args.output_dir) if args.output_dir else (paths_profiles_root() / args.speaker_id)
+    )
+
+    try:
+        result = enroll_speaker(
+            speaker_id=args.speaker_id,
+            display_name=args.display_name or args.speaker_id.replace("_", " ").title(),
+            audio_dir=audio_dir,
+            output_dir=output_dir,
+            consent_granted=args.consent_granted,
+            consent_note=args.consent_note
+            or "Enrolled by producer from owned production recordings.",
+            verbose=True,
+        )
+        print(f"\n{'=' * 60}")
+        print(f"✅ Enrollment complete: {result.speaker_id}")
+        print(f"   Files: {result.n_files}")
+        print(f"   Duration: {result.total_duration_s / 3600:.1f} hours")
+        print(
+            f"   F0: {result.f0_median_hz:.1f} Hz (range {result.f0_p05_hz:.1f} – {result.f0_p95_hz:.1f})"
+        )
+        print(f"   Embedding: {result.embedding_dim}-dim")
+        print(f"   Profile: {result.profile_dir}")
+        print(f"{'=' * 60}")
+
+        # Auto-validate the created profile
+        from hawavoclean.restoration.profiles import validate_speaker_profile
+
+        prof = validate_speaker_profile(output_dir / "profile.json", base_dir=output_dir)
+        print(f"   Validation: ✅ PASS ({prof.speaker_id})")
+        return int(ExitCode.SUCCESS)
+    except Exception as e:
+        print(f"[FAIL] Enrollment failed: {e}")
+        logger.exception("Enrollment error")
+        return int(ExitCode.PREFLIGHT_FAILURE)
 
 
 def cmd_restoration_benchmark(args: argparse.Namespace) -> int:
@@ -407,15 +480,43 @@ def cmd_process(args: argparse.Namespace) -> int:
         def on_progress(event: ProgressEvent) -> None:
             sink.emit(event.to_dict())
 
-    passes: int | str = getattr(args, "passes", 1)
-    if passes != 1 and getattr(args, "mode", "natural") == "restore":
-        # run_multipass has no restoration stage. Silently dropping --mode would
-        # publish a Natural master that the report never admits was un-restored.
+    clean_only = bool(getattr(args, "clean_only", False))
+    in_path = Path(args.input)
+    if in_path.is_dir():
+        # Route directory input directly to batch processing
+        args.inputs = [in_path]
+        args.output_dir = args.output
+        args.suffix = getattr(args, "suffix", "_clean")
+        args.skip_existing = False
+        args.per_file_timeout_s = 1800.0
+        return cmd_batch(args)
+
+    mode = getattr(args, "mode", "natural")
+    passes = getattr(args, "passes", 1)
+    allow_research_restore = (
+        bool(getattr(args, "allow_research_restore", False))
+        or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
+    )
+    if mode in ("restore", "smart_safe") and passes != 1:
         exit_with_code(
             ExitCode.INVALID_USER_INPUT,
-            "Restore mode is single-pass only: --mode restore cannot be combined with "
+            f"{mode.capitalize()} mode is single-pass only: --mode {mode} cannot be combined with "
             "--passes. Re-run with --passes 1 (the default).",
         )
+    if mode == "restore":
+        if not getattr(args, "speaker_id", None):
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "Restore mode requires an explicit --speaker-id <ID>",
+            )
+        if args.profile != "development" and not allow_research_restore:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                f"Production restoration capability is BLOCKED for profile '{args.profile}': No qualified signed "
+                f"Sorani Restore pack is installed. Loose research checkpoints and profiles are quarantined "
+                f"behind research boundaries and cannot enter a production job or report (pass "
+                f"--allow-research-restore or use --profile development for research evaluation).",
+            )
     try:
         if passes == 1:
             # The default path: byte-identical to a run before --passes
@@ -432,6 +533,9 @@ def cmd_process(args: argparse.Namespace) -> int:
                 cutoff=getattr(args, "cutoff", "auto"),
                 cutoff_hz=getattr(args, "cutoff_hz", None),
                 profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
+                clean_only=clean_only,
+                original_input_path=getattr(args, "original_input_path", None),
+                allow_research_restore=allow_research_restore,
             )
         else:
             run_multipass(
@@ -442,17 +546,45 @@ def cmd_process(args: argparse.Namespace) -> int:
                 profile=args.profile,
                 overwrite=args.overwrite,
                 on_progress=on_progress,
+                clean_only=clean_only,
+                original_input_path=getattr(args, "original_input_path", None),
+            )
+        processing_record: ProcessingRecord | None = None
+        record_destination = getattr(args, "record_bundle", None)
+        if record_destination is not None:
+            out_path = public_output_path(args.output)
+            published = publication_paths(out_path)
+            if sink is not None:
+                sink.emit(
+                    {
+                        "event": "progress",
+                        "stage": "record_bundle",
+                        "progress": 0.995,
+                        "message": "Creating and verifying Full Processing Record",
+                    }
+                )
+            processing_record = create_processing_record(
+                master_path=published.audio,
+                report_path=published.json,
+                summary_path=published.txt,
+                destination=record_destination,
+                overwrite=bool(args.overwrite),
             )
         if sink is not None:
             out_path = public_output_path(args.output)
-            sink.emit(
-                {
-                    "event": "done",
-                    "progress": 1.0,
-                    "output_path": str(out_path),
-                    "report_path": str(out_path.parent / f"{out_path.stem}.hawavoclean.json"),
-                }
-            )
+            done: dict[str, Any] = {
+                "event": "done",
+                "progress": 1.0,
+                "output_path": str(out_path),
+                "report_path": str(out_path.parent / f"{out_path.stem}.hawavoclean.json"),
+            }
+            if processing_record is not None:
+                done["bundle"] = _processing_record_payload(
+                    processing_record,
+                    event="processing_record_verified",
+                    operation="create",
+                )
+            sink.emit(done)
         return int(ExitCode.SUCCESS)
     except PreflightError as e:
         return fail(ExitCode.PREFLIGHT_FAILURE, "Preflight failure", e)
@@ -534,7 +666,17 @@ def _passes_arg(value: str) -> int | str:
     return n
 
 
-_AUDIO_SUFFIXES = {".wav", ".mp4", ".m4a", ".mp3", ".aac", ".flac", ".ogg", ".mov", ".aiff"}
+_AUDIO_SUFFIXES = {
+    ".wav",
+    ".wave",
+    ".mp4",
+    ".m4a",
+    ".mp3",
+    ".flac",
+    ".aif",
+    ".aiff",
+    ".aifc",
+}
 
 
 def _clean_stem(path: Path) -> str:
@@ -592,6 +734,8 @@ def cmd_batch_worker(_args: argparse.Namespace) -> int:
                     cutoff=str(req.get("cutoff", "auto")),
                     cutoff_hz=req.get("cutoff_hz"),
                     profiles_dir=_resolve_profiles_dir(req.get("profiles_dir")),
+                    clean_only=bool(req.get("clean_only", False)),
+                    allow_research_restore=bool(req.get("allow_research_restore", False)),
                 )
                 reply = {"ok": True}
             except HawaVoCleanError as e:
@@ -627,6 +771,7 @@ class _BatchChild:
 
     def __init__(self, env: dict[str, str] | None = None) -> None:
         self._proc: subprocess.Popen[str] | None = None
+        self._supervisor: ProcessSupervisor | None = None
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._reader: threading.Thread | None = None
         self._stderr_path: Path | None = None
@@ -638,7 +783,7 @@ class _BatchChild:
         self._stderr_path = Path(tempfile.mkstemp(prefix="hawavoclean-batch-", suffix=".log")[1])
         err = open(self._stderr_path, "w", encoding="utf-8")  # noqa: SIM115 - owned by the child
         try:
-            self._proc = subprocess.Popen(
+            self._supervisor = ProcessSupervisor.spawn(
                 [sys.executable, "-m", "hawavoclean.cli", "batch-worker"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -647,11 +792,8 @@ class _BatchChild:
                 # child_env: a batch killed with SIGKILL cannot reap this
                 # child, so the child is told whose death to watch for.
                 env=child_env(self._env),
-                # Its own process group, so a deadline breach can take the
-                # decoder and the enhancement workers with it rather than
-                # leaving the grandchildren behind.
-                start_new_session=True,
             )
+            self._proc = self._supervisor.process
         finally:
             err.close()
         self.spawns += 1
@@ -721,6 +863,8 @@ class _BatchChild:
         cutoff: str = "auto",
         cutoff_hz: float | None = None,
         profiles_dir: str | Path | None = None,
+        clean_only: bool = False,
+        allow_research_restore: bool = False,
     ) -> str:
         deadline = time.monotonic() + timeout_s
         try:
@@ -739,6 +883,8 @@ class _BatchChild:
                 "cutoff": cutoff,
                 "cutoff_hz": cutoff_hz,
                 "profiles_dir": str(_resolve_profiles_dir(profiles_dir)),
+                "clean_only": clean_only,
+                "allow_research_restore": allow_research_restore,
             }
             self._proc.stdin.write(json.dumps(payload) + "\n")
             self._proc.stdin.flush()
@@ -759,13 +905,20 @@ class _BatchChild:
 
     def close(self) -> None:
         proc, self._proc = self._proc, None
+        supervisor, self._supervisor = self._supervisor, None
         if proc is not None:
             with contextlib.suppress(Exception):
                 if proc.stdin is not None:
                     proc.stdin.close()
-            if proc.poll() is None:
+            if supervisor is not None:
+                # Give the worker and its warm model pool a short cleanup
+                # window, then end the complete POSIX group / Windows job.
                 with contextlib.suppress(Exception):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    supervisor.terminate_tree(0.5)
+                supervisor.close(kill_remaining=True)
+            elif proc.poll() is None:  # defensive for a partially initialized instance
+                with contextlib.suppress(Exception):
+                    proc.kill()
             with contextlib.suppress(Exception):
                 proc.wait(timeout=5.0)
         reader, self._reader = self._reader, None
@@ -786,15 +939,19 @@ atexit.register(_batch_child.close)
 def _summarize_published(dest: Path) -> str:
     """The one-line status of a file that published successfully."""
     report_path = dest.parent / f"{dest.stem}.hawavoclean.json"
-    try:
-        rep = json.loads(report_path.read_text(encoding="utf-8"))
-        summ = rep["summary"]
-        return (
-            f"ok: {summ['enhanced']}/{summ['units_total']} units enhanced, "
-            f"{rep['output']['integrated_lufs']:.1f} LUFS"
-        )
-    except Exception as e:
-        return f"FAILED: published but report unreadable ({type(e).__name__})"
+    if report_path.exists():
+        try:
+            rep = json.loads(report_path.read_text(encoding="utf-8"))
+            summ = rep["summary"]
+            return (
+                f"ok: {summ['enhanced']}/{summ['units_total']} units enhanced, "
+                f"{rep['output']['integrated_lufs']:.1f} LUFS"
+            )
+        except Exception as e:
+            return f"FAILED: published but report unreadable ({type(e).__name__})"
+    if dest.exists() and dest.stat().st_size > 0:
+        return f"ok: published clean master ({dest.stat().st_size / (1024 * 1024):.1f} MB)"
+    return "FAILED: output file missing after publish"
 
 
 def _run_one_isolated(
@@ -808,6 +965,8 @@ def _run_one_isolated(
     cutoff: str = "auto",
     cutoff_hz: float | None = None,
     profiles_dir: str | Path | None = None,
+    clean_only: bool = False,
+    allow_research_restore: bool = False,
 ) -> str:
     """Process one file in a child process under a hard deadline."""
     return _batch_child.run(
@@ -821,6 +980,8 @@ def _run_one_isolated(
         cutoff=cutoff,
         cutoff_hz=cutoff_hz,
         profiles_dir=_resolve_profiles_dir(profiles_dir),
+        clean_only=clean_only,
+        allow_research_restore=allow_research_restore,
     )
 
 
@@ -839,8 +1000,16 @@ def cmd_batch(args: argparse.Namespace) -> int:
         candidate = Path(raw)
         if candidate.is_file():
             inputs.append(candidate)
+        elif candidate.is_dir():
+            for child in sorted(candidate.iterdir()):
+                if (
+                    child.is_file()
+                    and child.suffix.lower() in _AUDIO_SUFFIXES
+                    and not child.name.startswith(".")
+                ):
+                    inputs.append(child)
         else:
-            print(f"[SKIP] not a file: {candidate}")
+            print(f"[SKIP] not an audio file or directory: {candidate}")
 
     if not inputs:
         exit_with_code(ExitCode.INVALID_USER_INPUT, "No input files to process.")
@@ -864,11 +1033,25 @@ def cmd_batch(args: argparse.Namespace) -> int:
 
     mode = getattr(args, "mode", "natural")
     speaker_id = getattr(args, "speaker_id", None)
-    if mode == "restore" and not speaker_id:
-        exit_with_code(
-            ExitCode.INVALID_USER_INPUT,
-            "Restore mode requires an explicit --speaker-id <ID>",
-        )
+    clean_only = bool(getattr(args, "clean_only", False))
+    allow_research_restore = (
+        bool(getattr(args, "allow_research_restore", False))
+        or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
+    )
+    if mode == "restore":
+        if not speaker_id:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "Restore mode requires an explicit --speaker-id <ID>",
+            )
+        if args.profile != "development" and not allow_research_restore:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                f"Production restoration capability is BLOCKED for profile '{args.profile}': No qualified signed "
+                f"Sorani Restore pack is installed. Loose research checkpoints and profiles are quarantined "
+                f"behind research boundaries and cannot enter a production job or report (pass "
+                f"--allow-research-restore or use --profile development for research evaluation).",
+            )
 
     results: list[tuple[str, str]] = []
     failed = 0
@@ -892,6 +1075,8 @@ def cmd_batch(args: argparse.Namespace) -> int:
                     cutoff=getattr(args, "cutoff", "auto"),
                     cutoff_hz=getattr(args, "cutoff_hz", None),
                     profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
+                    clean_only=clean_only,
+                    allow_research_restore=allow_research_restore,
                 )
             else:
                 status = _run_one_isolated(
@@ -900,6 +1085,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
                     args.profile,
                     args.overwrite or args.skip_existing,
                     args.per_file_timeout_s,
+                    clean_only=clean_only,
                 )
             if not status.startswith("ok"):
                 failed += 1
@@ -1020,6 +1206,270 @@ def cmd_verify(args: argparse.Namespace) -> int:
             print(f"  Effective Cutoff:    {cutoff_val:.1f} Hz")
     print("================================================================================")
     return int(ExitCode.SUCCESS)
+
+
+def _processing_record_payload(
+    record: ProcessingRecord, *, event: str, operation: str
+) -> dict[str, object]:
+    """Return the stable, one-line JSON result for Processing Record commands."""
+
+    return {
+        "schema_version": 1,
+        "event": event,
+        "operation": operation,
+        "path": str(record.path),
+        "archive_sha256": record.archive_sha256,
+        "content_sha256": record.content_sha256,
+        "master_sha256": record.master_sha256,
+        "report_sha256": record.report_sha256,
+        "summary_sha256": record.summary_sha256,
+        "total_uncompressed_bytes": record.total_uncompressed_bytes,
+        "internal_hashes_verified": True,
+        "authenticated_publisher": record.authenticated_publisher,
+        "key_id": record.key_id,
+        "signature_sha256": record.signature_sha256,
+    }
+
+
+def _emit_processing_record_result(
+    record: ProcessingRecord, *, event: str, operation: str, json_output: bool
+) -> None:
+    payload = _processing_record_payload(record, event=event, operation=operation)
+    if json_output:
+        sys.stdout.write(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
+        )
+        return
+
+    action_map = {"create": "CREATED", "verify": "VERIFIED", "sign": "SIGNED"}
+    action = action_map.get(operation, operation.upper())
+    print("================================================================================")
+    print(f"FULL PROCESSING RECORD {action}: {record.path}")
+    print(f"  Archive SHA-256:        {record.archive_sha256}")
+    print(f"  Content SHA-256:        {record.content_sha256}")
+    print(f"  Uncompressed bytes:     {record.total_uncompressed_bytes:,}")
+    print("  Internal hashes:        VERIFIED")
+    if record.authenticated_publisher:
+        print(f"  Publisher authentication: VERIFIED (key_id: {record.key_id})")
+    elif record.key_id is not None:
+        print(f"  Publisher authentication: UNVERIFIED (signed by key_id: {record.key_id})")
+    else:
+        print("  Publisher authentication: ABSENT (integrity-only archive, not a signature)")
+    print("================================================================================")
+
+
+def _parse_private_key(value: str) -> bytes:
+    p = Path(value)
+    if p.is_file():
+        raw = p.read_bytes()
+        if len(raw) == 32:
+            return raw
+        try:
+            text = raw.decode("utf-8").strip()
+            decoded = bytes.fromhex(text)
+            if len(decoded) == 32:
+                return decoded
+        except Exception:
+            pass
+        raise PublicationError(
+            f"Private key file {value} must contain 32 raw bytes or 64 hex characters"
+        )
+    try:
+        decoded = bytes.fromhex(value.strip())
+        if len(decoded) == 32:
+            return decoded
+    except Exception:
+        pass
+    raise PublicationError(
+        "Private key must be a 64-character hex string or path to a 32-byte private key file"
+    )
+
+
+def _parse_trusted_key_item(spec: str) -> list[RecordTrustedKey]:
+    spec = spec.strip()
+    spec_path = Path(spec)
+    if spec_path.is_file():
+        try:
+            content = spec_path.read_text(encoding="utf-8")
+            data = json.loads(content)
+        except Exception:
+            data = None
+        if isinstance(data, list):
+            keys: list[RecordTrustedKey] = []
+            for item in data:
+                if isinstance(item, dict):
+                    keys.append(
+                        RecordTrustedKey.from_hex(
+                            key_id=str(item["key_id"]),
+                            public_key_hex=str(item["public_key_hex"]),
+                            revoked=bool(item.get("revoked", False)),
+                        )
+                    )
+            return keys
+        elif isinstance(data, dict) and "keys" in data and isinstance(data["keys"], list):
+            keys = []
+            for item in data["keys"]:
+                if isinstance(item, dict):
+                    keys.append(
+                        RecordTrustedKey.from_hex(
+                            key_id=str(item["key_id"]),
+                            public_key_hex=str(item["public_key_hex"]),
+                            revoked=bool(item.get("revoked", False)),
+                        )
+                    )
+            return keys
+
+    revoked = False
+    if spec.startswith("revoked:"):
+        revoked = True
+        spec = spec[len("revoked:") :]
+
+    if ":" not in spec:
+        raise PublicationError(
+            f"Invalid trusted key specification {spec!r}: expected '[revoked:]KEY_ID:HEX_OR_FILE'"
+        )
+    key_id, material = spec.split(":", 1)
+    material_path = Path(material)
+    if material_path.is_file():
+        raw = material_path.read_bytes()
+        if len(raw) == 32:
+            return [RecordTrustedKey(key_id=key_id, public_key_bytes=raw, revoked=revoked)]
+        try:
+            text = raw.decode("utf-8").strip()
+            return [RecordTrustedKey.from_hex(key_id=key_id, public_key_hex=text, revoked=revoked)]
+        except Exception as exc:
+            raise PublicationError(f"Invalid public key in file {material}: {exc}") from exc
+    return [RecordTrustedKey.from_hex(key_id=key_id, public_key_hex=material, revoked=revoked)]
+
+
+def _parse_trust_store(specs: Sequence[str] | None) -> RecordTrustStore | None:
+    if not specs:
+        return None
+    keys: list[RecordTrustedKey] = []
+    for spec in specs:
+        keys.extend(_parse_trusted_key_item(spec))
+    return RecordTrustStore(keys)
+
+
+def cmd_record_create(args: argparse.Namespace) -> int:
+    """Create and atomically publish a portable Full Processing Record ZIP."""
+
+    has_key_id = getattr(args, "signing_key_id", None) is not None
+    has_private_key = getattr(args, "signing_private_key", None) is not None
+    if has_key_id != has_private_key:
+        raise PublicationError(
+            "Both --signing-key-id and --signing-private-key must be provided to sign a record"
+        )
+    private_key = _parse_private_key(args.signing_private_key) if has_private_key else None
+    trust_store = _parse_trust_store(getattr(args, "trusted_keys", None))
+
+    try:
+        record = create_processing_record(
+            master_path=args.master,
+            report_path=args.report,
+            summary_path=args.summary,
+            destination=args.output,
+            overwrite=bool(args.overwrite),
+            signing_key_id=args.signing_key_id,
+            signing_private_key=private_key,
+            trust_store=trust_store,
+        )
+    except HawaVoCleanError:
+        raise
+    except (OSError, ValueError) as error:
+        raise PublicationError(f"Cannot create Full Processing Record: {error}") from error
+    _emit_processing_record_result(
+        record,
+        event="processing_record_created",
+        operation="create",
+        json_output=bool(args.record_json),
+    )
+    return int(ExitCode.SUCCESS)
+
+
+def cmd_record_verify(args: argparse.Namespace) -> int:
+    """Verify the closed archive, internal hashes, and report/master binding."""
+
+    trust_store = _parse_trust_store(getattr(args, "trusted_keys", None))
+    try:
+        record = verify_processing_record(
+            args.record,
+            trust_store=trust_store,
+            require_authenticated=bool(getattr(args, "require_authenticated", False)),
+        )
+    except HawaVoCleanError:
+        raise
+    except (OSError, ValueError) as error:
+        raise PublicationError(f"Cannot verify Full Processing Record: {error}") from error
+    _emit_processing_record_result(
+        record,
+        event="processing_record_verified",
+        operation="verify",
+        json_output=bool(args.record_json),
+    )
+    return int(ExitCode.SUCCESS)
+
+
+def cmd_record_sign(args: argparse.Namespace) -> int:
+    """Sign an existing Full Processing Record with an Ed25519 publisher key."""
+
+    private_key = _parse_private_key(args.private_key)
+    trust_store = _parse_trust_store(getattr(args, "trusted_keys", None))
+    try:
+        record = sign_processing_record(
+            archive_path=args.record,
+            key_id=args.key_id,
+            private_key=private_key,
+            destination=args.output,
+            overwrite=bool(args.overwrite),
+            trust_store=trust_store,
+        )
+    except HawaVoCleanError:
+        raise
+    except (OSError, ValueError) as error:
+        raise PublicationError(f"Cannot sign Full Processing Record: {error}") from error
+    _emit_processing_record_result(
+        record,
+        event="processing_record_signed",
+        operation="sign",
+        json_output=bool(args.record_json),
+    )
+    return int(ExitCode.SUCCESS)
+
+
+def _emit_processing_record_error(args: argparse.Namespace, error: HawaVoCleanError) -> bool:
+    """Emit one machine-readable error when a record command requested JSON."""
+
+    if getattr(args, "command", None) != "record" or not getattr(args, "record_json", False):
+        return False
+    payload = {
+        "schema_version": 1,
+        "event": "processing_record_error",
+        "operation": getattr(args, "record_action", "unknown"),
+        "error": {
+            "code": error.exit_code.name,
+            "exit_code": int(error.exit_code),
+            "message": str(error),
+        },
+    }
+    sys.stdout.write(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    )
+    return True
 
 
 def cmd_audit_models(_args: argparse.Namespace) -> int:
@@ -1200,6 +1650,51 @@ def cmd_blind_abx(args: argparse.Namespace) -> int:
     return int(ExitCode.SUCCESS)
 
 
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """Compute standard SE quality metrics (PESQ, ESTOI, SI-SNR, LSD) on a pair."""
+    from hawavoclean.eval.metrics import compute_corpus_metrics, compute_metrics
+
+    if args.corpus:
+        # Corpus mode: JSON file with list of {"reference": ..., "candidate": ...}
+        corpus_data = json.loads(Path(args.corpus).read_text())
+        pairs = [(p["reference"], p["candidate"]) for p in corpus_data]
+        report = compute_corpus_metrics(pairs, output_path=args.output)
+        agg = report["aggregate"]
+        print(f"Corpus metrics ({report['total_pairs']} pairs):")
+        for name in ("pesq_wb", "estoi", "si_snr_db", "lsd_db", "separation_db"):
+            stats = agg.get(name)
+            if stats:
+                print(f"  {name:15s}  mean={stats['mean']:.4f}  std={stats['std']:.4f}")
+            else:
+                print(f"  {name:15s}  (not available)")
+    else:
+        if not args.reference or not args.candidate:
+            print("Error: provide --reference and --candidate, or --corpus")
+            return int(ExitCode.PREFLIGHT_FAILURE)
+        m = compute_metrics(args.reference, args.candidate)
+        result = {
+            "pesq_wb": m.pesq_wb,
+            "estoi": m.estoi,
+            "si_snr_db": m.si_snr_db,
+            "lsd_db": m.lsd_db,
+            "separation_db": m.separation_db,
+            "duration_s": m.duration_s,
+            "compute_time_s": m.compute_time_s,
+            "warnings": m.warnings,
+        }
+        if args.output:
+            Path(args.output).write_text(json.dumps(result, indent=2) + "\n")
+        print(f"PESQ (wb):    {m.pesq_wb or 'N/A'}")
+        print(f"ESTOI:        {m.estoi or 'N/A'}")
+        print(f"SI-SNR (dB):  {m.si_snr_db:.2f}")
+        print(f"LSD (dB):     {m.lsd_db:.4f}")
+        print(f"Separation:   {m.separation_db:.2f} dB")
+        if m.warnings:
+            for w in m.warnings:
+                print(f"  [WARN] {w}")
+    return int(ExitCode.SUCCESS)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Run the loopback HTTP engine bridge for the UI (docs/ui-contract.md)."""
     try:
@@ -1209,8 +1704,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
             ExitCode.PREFLIGHT_FAILURE,
             f"The engine server needs the 'ui' extra ({e}). Install it with: uv sync --extra ui",
         )
+    token = args.token
+    if bool(args.token_stdin):
+        # Native shells pass the bootstrap secret through a one-shot pipe so
+        # it never appears in process listings, crash command lines, or launch
+        # diagnostics. The bounded read also prevents a broken parent from
+        # turning startup into an unbounded secret ingestion channel.
+        raw = sys.stdin.readline(258)
+        if len(raw) > 257 or (len(raw) == 257 and not raw.endswith(("\n", "\r"))):
+            raise InvalidUserInputError("--token-stdin input exceeds 256 characters")
+        token = raw.rstrip("\r\n")
+    if token is None or not token or len(token) > 256:
+        raise InvalidUserInputError("server token must contain 1-256 characters")
     ui_dir = Path(args.ui_dir).resolve() if args.ui_dir else None
-    return run_server(host=args.host, port=int(args.port), token=args.token, ui_dir=ui_dir)
+    return run_server(host=args.host, port=int(args.port), token=token, ui_dir=ui_dir)
 
 
 def _install_signal_handlers() -> None:
@@ -1291,6 +1798,44 @@ def _main() -> None:
     p_spk_val.add_argument("profile_target", help="Path to profile.json or profiles directory")
     p_spk_val.set_defaults(func=cmd_speaker_profile)
 
+    # enroll-speaker
+    p_enroll = subparsers.add_parser(
+        "enroll-speaker",
+        help="Enroll a real speaker from production audio files",
+    )
+    p_enroll.add_argument(
+        "--speaker-id",
+        required=True,
+        help="Machine-readable speaker ID (e.g., seidi_nursi)",
+    )
+    p_enroll.add_argument(
+        "--display-name",
+        default=None,
+        help="Human-readable name (default: derived from speaker-id)",
+    )
+    p_enroll.add_argument(
+        "--audio-dir",
+        required=True,
+        help="Directory containing clean WAV/FLAC files for this speaker",
+    )
+    p_enroll.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output profile directory (default: profiles/<speaker-id>/)",
+    )
+    p_enroll.add_argument(
+        "--consent-note",
+        default=None,
+        help="Consent record note (default: producer enrollment)",
+    )
+    p_enroll.add_argument(
+        "--consent-granted",
+        action="store_true",
+        default=False,
+        help="Explicitly confirm speaker consent verification",
+    )
+    p_enroll.set_defaults(func=cmd_enroll_speaker)
+
     # restoration-benchmark
     p_rest_bench = subparsers.add_parser(
         "restoration-benchmark", help="Run restoration benchmark across cutoffs and models"
@@ -1314,9 +1859,9 @@ def _main() -> None:
     p_proc.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
     p_proc.add_argument(
         "--mode",
-        choices=["natural", "restore"],
+        choices=["natural", "restore", "smart_safe"],
         default="natural",
-        help="Processing mode: natural (default) or restore (opt-in)",
+        help="Processing mode: natural (default), restore, or smart_safe",
     )
     p_proc.add_argument(
         "--speaker-id",
@@ -1345,6 +1890,14 @@ def _main() -> None:
         "--overwrite", action="store_true", help="Overwrite destination output if exists"
     )
     p_proc.add_argument(
+        "--record-bundle",
+        metavar="ZIP",
+        help=(
+            "After publishing the master, create and verify a portable Full Processing "
+            "Record ZIP. The command succeeds only when the ZIP verifies."
+        ),
+    )
+    p_proc.add_argument(
         "--progress-json",
         action="store_true",
         help="Emit one JSON progress object per line on stdout (logs stay on stderr)",
@@ -1362,6 +1915,24 @@ def _main() -> None:
             "process only — batch always runs single-pass jobs."
         ),
     )
+    p_proc.add_argument(
+        "--clean-only",
+        "--no-sidecars",
+        dest="clean_only",
+        action="store_true",
+        help="Output only the master audio WAV file; omit .json and .txt sidecar reports",
+    )
+    p_proc.add_argument(
+        "--original-input-path",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    p_proc.add_argument(
+        "--allow-research-restore",
+        action="store_true",
+        default=False,
+        help="Allow execution of quarantined research restoration models in non-development profiles",
+    )
     p_proc.set_defaults(func=cmd_process)
 
     # batch
@@ -1373,6 +1944,13 @@ def _main() -> None:
     p_batch.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
     p_batch.add_argument(
         "--suffix", default="_clean", help="Appended to each stem (default: _clean)"
+    )
+    p_batch.add_argument(
+        "--clean-only",
+        "--no-sidecars",
+        dest="clean_only",
+        action="store_true",
+        help="Output only master audio WAV files; omit .json and .txt sidecar reports",
     )
     p_batch.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
     p_batch.add_argument(
@@ -1386,9 +1964,9 @@ def _main() -> None:
     )
     p_batch.add_argument(
         "--mode",
-        choices=["natural", "restore"],
+        choices=["natural", "restore", "smart_safe"],
         default="natural",
-        help="Processing mode: natural (default) or restore (opt-in)",
+        help="Processing mode: natural (default), restore, or smart_safe",
     )
     p_batch.add_argument(
         "--speaker-id",
@@ -1413,6 +1991,12 @@ def _main() -> None:
             "(default: $HAWAVOCLEAN_PROFILES_DIR, else the installed profiles tree)"
         ),
     )
+    p_batch.add_argument(
+        "--allow-research-restore",
+        action="store_true",
+        default=False,
+        help="Allow execution of quarantined research restoration models in non-development profiles",
+    )
     p_batch.set_defaults(func=cmd_batch)
 
     # batch-worker: the long-lived child `batch` drives. Registered so it can
@@ -1426,8 +2010,15 @@ def _main() -> None:
     )
     p_serve.add_argument("--host", default="127.0.0.1", help="Loopback address (default 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=0, help="TCP port; 0 = OS-assigned (default)")
-    p_serve.add_argument(
-        "--token", required=True, help="Shared secret every /api request must carry"
+    serve_token = p_serve.add_mutually_exclusive_group(required=True)
+    serve_token.add_argument(
+        "--token",
+        help="Legacy shared-secret argv transport (deprecated; prefer --token-stdin)",
+    )
+    serve_token.add_argument(
+        "--token-stdin",
+        action="store_true",
+        help="Read the shared secret once from standard input",
     )
     p_serve.add_argument("--ui-dir", help="Directory with index.html + assets/ to serve at /")
     p_serve.set_defaults(func=cmd_serve)
@@ -1437,6 +2028,113 @@ def _main() -> None:
     p_ver.add_argument("output", help="Path to mastered WAV file")
     p_ver.add_argument("--report", "-r", required=True, help="Path to .hawavoclean.json report")
     p_ver.set_defaults(func=cmd_verify)
+
+    # Full Processing Record. This remains separate from ``verify`` because
+    # the latter verifies a loose master/report pair and can provide a weaker,
+    # unanchored answer. Record verification checks the archive's closed
+    # inventory and every internal binding, while explicitly making no claim
+    # that a publisher signature is present.
+    p_record = subparsers.add_parser(
+        "record", help="Create or verify a portable Full Processing Record ZIP"
+    )
+    p_record_sub = p_record.add_subparsers(dest="record_action", required=True)
+
+    p_record_create = p_record_sub.add_parser(
+        "create", help="Create a Full Processing Record from a master and its reports"
+    )
+    p_record_create.add_argument("master", help="Path to the self-contained mastered WAV")
+    p_record_create.add_argument(
+        "--report", "-r", required=True, help="Path to the validated .hawavoclean.json report"
+    )
+    p_record_create.add_argument(
+        "--summary", "-s", required=True, help="Path to the human-readable report summary"
+    )
+    p_record_create.add_argument(
+        "--output", "-o", required=True, help="Destination .zip Processing Record"
+    )
+    p_record_create.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Atomically replace an existing destination (default: fail safely)",
+    )
+    p_record_create.add_argument(
+        "--signing-key-id",
+        help="Optional Ed25519 key ID to authenticate this record at creation",
+    )
+    p_record_create.add_argument(
+        "--signing-private-key",
+        help="Private key (hex string or path to 32-byte key file) matching --signing-key-id",
+    )
+    p_record_create.add_argument(
+        "--trusted-key",
+        dest="trusted_keys",
+        action="append",
+        help="Optional trusted public key spec ('[revoked:]KEY_ID:HEX_OR_FILE' or path to JSON trust store)",
+    )
+    p_record_create.add_argument(
+        "--json",
+        dest="record_json",
+        action="store_true",
+        help="Emit exactly one machine-readable JSON result on stdout",
+    )
+    p_record_create.set_defaults(func=cmd_record_create)
+
+    p_record_verify = p_record_sub.add_parser(
+        "verify", help="Verify archive layout, hashes, and report/master binding"
+    )
+    p_record_verify.add_argument("record", help="Path to a Full Processing Record .zip")
+    p_record_verify.add_argument(
+        "--trusted-key",
+        dest="trusted_keys",
+        action="append",
+        help="Trusted public key spec ('[revoked:]KEY_ID:HEX_OR_FILE' or path to JSON trust store)",
+    )
+    p_record_verify.add_argument(
+        "--require-authenticated",
+        action="store_true",
+        help="Require that the record has a valid signature from a trusted non-revoked key",
+    )
+    p_record_verify.add_argument(
+        "--json",
+        dest="record_json",
+        action="store_true",
+        help="Emit exactly one machine-readable JSON result on stdout",
+    )
+    p_record_verify.set_defaults(func=cmd_record_verify)
+
+    p_record_sign = p_record_sub.add_parser(
+        "sign", help="Sign an existing Full Processing Record with an Ed25519 publisher key"
+    )
+    p_record_sign.add_argument("record", help="Path to an existing Full Processing Record .zip")
+    p_record_sign.add_argument(
+        "--key-id", required=True, help="Ed25519 key identifier for publisher signature"
+    )
+    p_record_sign.add_argument(
+        "--private-key",
+        required=True,
+        help="Private key (hex string or path to 32-byte key file)",
+    )
+    p_record_sign.add_argument(
+        "--output", "-o", help="Optional new destination .zip (default: sign in place)"
+    )
+    p_record_sign.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite destination if different from input archive",
+    )
+    p_record_sign.add_argument(
+        "--trusted-key",
+        dest="trusted_keys",
+        action="append",
+        help="Optional trusted public key spec to verify signature upon signing",
+    )
+    p_record_sign.add_argument(
+        "--json",
+        dest="record_json",
+        action="store_true",
+        help="Emit exactly one machine-readable JSON result on stdout",
+    )
+    p_record_sign.set_defaults(func=cmd_record_sign)
 
     # audit-models
     p_audit = subparsers.add_parser(
@@ -1509,13 +2207,30 @@ def _main() -> None:
     )
     p_abx.set_defaults(func=cmd_blind_abx)
 
+    # metrics
+    p_metrics = subparsers.add_parser(
+        "metrics",
+        help="Compute research-grade SE quality metrics (PESQ, ESTOI, SI-SNR, LSD)",
+    )
+    p_metrics.add_argument("--reference", "-r", help="Reference (clean) WAV file")
+    p_metrics.add_argument("--candidate", "-c", help="Candidate (enhanced) WAV file")
+    p_metrics.add_argument(
+        "--corpus",
+        help='JSON file with list of {"reference": ..., "candidate": ...} pairs',
+    )
+    p_metrics.add_argument(
+        "--output", "-o", help="Output JSON path (single-pair or corpus results)"
+    )
+    p_metrics.set_defaults(func=cmd_metrics)
+
     args = parser.parse_args()
     try:
         code = args.func(args)
     except HawaVoCleanError as e:
         # Every subcommand maps known failures to their documented exit code —
         # not just `process`. No tracebacks for user-facing errors.
-        logger.error(str(e))
+        if not _emit_processing_record_error(args, e):
+            logger.error(str(e))
         sys.exit(int(e.exit_code))
     sys.exit(code)
 

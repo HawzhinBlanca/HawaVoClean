@@ -73,10 +73,11 @@ guarantee, the guarantee is not made.
    `hawavoclean audit-models` fails if the lockfile and the implementation
    disagree. No digest in this repository refers to a file that does not
    exist.
-7. **One committed output generation** — the WAV, JSON report, and text
-   summary are published as one verified transaction. An interruption can
-   leave the previous complete generation or the new complete generation,
-   never a mixed triplet; the previous generation remains recoverable.
+7. **One authoritative output generation** — an immutable, verified
+   generation and one atomic `current` record decide which WAV/report/summary
+   belongs together. The visible files are ordinary, self-contained exports;
+   official readers resolve and repair them from that authority after an
+   interruption, and the previous generation remains recoverable.
 
 ## Known limitations
 
@@ -89,10 +90,10 @@ guarantee, the guarantee is not made.
    corpus roughly half of speech units keep their original audio (they
    still receive loudness normalization).
 4. Processed audio is an enhanced dialogue master, not forensic evidence.
-5. A processed output is a three-file publication backed by its adjacent
-   hidden `.<output-name>.hawavoclean/` generation bundle. When moving or
-   archiving it, export/copy the WAV, both reports, and that bundle together;
-   copying only the visible symlink can produce a dangling file.
+5. A processed output is a three-file export backed by its adjacent hidden
+   `.<output-name>.hawavoclean/` generation bundle. The visible WAV is an
+   ordinary self-contained file, not a symlink. For a portable, tamper-evident
+   master plus both reports, use the Full Processing Record ZIP.
 6. The supported container is CPU/production only. Studio/GPU container
    support and Windows are not claimed for 3.3.0.
 7. Restore mode is generative and produces audio that was never recorded. It
@@ -124,12 +125,21 @@ hawavoclean process interview.wav --output interview_studio.wav --profile studio
 hawavoclean process rumbly.wav --output rumbly_lowband.wav --profile lowband
 hawavoclean batch recordings/*.m4a --output-dir cleaned/ --profile studio --suffix _studio
 hawavoclean verify interview_clean.wav --report interview_clean.hawavoclean.json
+hawavoclean record create interview_clean.wav --report interview_clean.hawavoclean.json \
+  --summary interview_clean.hawavoclean.txt --output interview_clean.record.zip
+hawavoclean record verify interview_clean.record.zip --json
 hawavoclean audit-models
 ```
 
 `batch` isolates failures: one bad file never aborts the rest, the summary
 names every failure, and the exit code is non-zero unless every file
 succeeded.
+
+`record create` publishes a self-contained ZIP atomically and refuses to
+replace an existing destination unless `--overwrite` is explicit. `record
+verify` checks the closed inventory, every internal hash, and the report/master
+binding. Version 1 is an integrity-only record, not a publisher signature; both
+human and `--json` output disclose `authenticated_publisher: false`.
 
 For a muffled recording sitting on low-frequency rumble, the measured best
 result is the low-band profile followed by a production pass — the band
@@ -148,12 +158,13 @@ dependencies:
 uv sync --frozen --extra studio
 ```
 
-### Restore mode (opt-in, generative)
+### Legacy Restore research prototype (not production-qualified)
 
-Everything above is non-generative: the output only ever contains audio that
-was in the input. `--mode restore` is the exception. It extends band-limited
-Kurdish dialogue above its cutoff using the HawaRestore-KD model conditioned on
-a consent-backed speaker profile, and it is off by default.
+Everything above is non-generative. The source-checkout CLI still contains the
+retired HawaRestore-KD research path, but it is not a production capability,
+is not bundled as qualified Restore, and is refused by the server even when a
+loose checkpoint/profile happens to exist. It cannot satisfy the source-based
+or enrolled-speaker Restore v2 contract.
 
 ```bash
 uv sync --frozen --extra restoration
@@ -162,13 +173,12 @@ hawavoclean process telephony.wav --output restored.wav \
   --mode restore --speaker-id character_01
 ```
 
-Content below the detected cutoff is preserved by construction and re-verified
-afterwards; the generated band is only kept if Restoration Guard R accepts it,
-and otherwise the Natural master ships unchanged with verdict `FAIL` and the
-rejecting layer's metrics in the report. Restore mode requires `--speaker-id`,
-requires a loadable checkpoint (it refuses to run on untrained weights), is
-single-pass, and publishes at 48 kHz. `--cutoff-hz` asserts the cutoff instead
-of measuring it, and the report records which of the two happened.
+Those commands are retained only for controlled research and regression work.
+They require an explicit speaker ID and checkpoint, are not eligible through
+`/api/v1/capabilities`, and must never be described or distributed as the new
+Restore. Production source/enrolled Restore stays blocked until a genuine
+source-conditioned pack, exact release-owned qualification policy, provider
+matrix, per-segment guards, and independent Sorani evaluation all pass.
 
 Development and evaluation commands:
 
@@ -187,7 +197,8 @@ package and can be overridden with `HAWAVOCLEAN_CONFIG_DIR`,
 The browser/desktop UI uses the same engine over authenticated loopback only:
 
 ```bash
-hawavoclean serve --host 127.0.0.1 --port 0 --token REPLACE_WITH_A_RANDOM_SECRET
+printf '%s\n' REPLACE_WITH_A_RANDOM_SECRET | \
+  hawavoclean serve --host 127.0.0.1 --port 0 --token-stdin
 ```
 
 The server has bounded active/terminal jobs, upload size/total/TTL limits,
@@ -207,8 +218,8 @@ bash scripts/run_release_checks.sh
 ```
 
 It runs the complete gate twice in fresh detached checkouts and succeeds only
-when the shipped wheel, UI, Resolve plugin, container and SBOM identities
-reproduce. The pinned host requirements, every included check, retained proof
+when the wheel, UI, non-distributable unsigned desktop-app proof, Resolve plugin, container and SBOM
+identities reproduce. The pinned host requirements, every included check, retained proof
 format and honest external limits are documented in
 [docs/release-gate.md](docs/release-gate.md).
 

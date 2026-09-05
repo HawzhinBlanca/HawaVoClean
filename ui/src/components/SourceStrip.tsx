@@ -36,11 +36,7 @@ function fmtBytes(n: number): string {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
-const ACCEPT_ATTR = [
-  'audio/*',
-  'video/*',
-  ...ACCEPTED_EXTENSIONS.map((e) => `.${e}`),
-].join(',');
+const ACCEPT_ATTR = ACCEPTED_EXTENSIONS.map((extension) => `.${extension}`).join(',');
 
 /**
  * B2 · the transfer, while it is happening. An upload is the only thing in
@@ -378,6 +374,15 @@ export function SourceStrip() {
                     {chanNote ? <IconWarn size={10} /> : null}
                   </span>
                 </span>
+                {source.name.toLowerCase().endsWith('.mp4') ? (
+                  <span
+                    className="kv mp4-tag"
+                    title="Audio stream extracted directly from video container without video re-encoding"
+                  >
+                    <span className="k">Container</span>
+                    <span className="v">MP4 (Audio Isolated)</span>
+                  </span>
+                ) : null}
               </>
             ) : analyzing ? (
               <span className="kv">

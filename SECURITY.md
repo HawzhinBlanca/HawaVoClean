@@ -65,8 +65,16 @@ registries/advisory services and are outside that offline processing claim.
 ### Electron and Resolve
 
 - The renderer loads checksum-covered local content from a private non-persistent `hawa://app`
-  session. Sandbox/context isolation are enabled; Node integration, webviews, foreign navigation,
-  popups, unexpected permissions, arbitrary network requests, and unvalidated IPC senders are denied.
+  in-memory session (`hawavoclean-desktop`, with no `persist:` prefix). Sandbox/context isolation
+  are enabled; Node integration, webviews, foreign navigation, popups, unexpected permissions,
+  arbitrary network requests, and unvalidated IPC senders are denied.
+- All private audio, waveform peaks, analysis payloads, job artifacts, and API routes enforce
+  `Cache-Control: no-store, no-cache, must-revalidate, private` and `Pragma: no-cache` at the
+  server protocol layer. Private audio bytes are never cached to disk or stored in browser storage.
+- The desktop shell exposes a safe local data clearing action (`hawa:session:clear-local-data`).
+  When invoked, it flushes Chromium's in-memory/disk caches, storage data, code caches, and
+  legacy partition directories without deleting user-exported WAV masters, processing record ZIPs,
+  or the engine job database.
 - The controlled standalone shell is exact Electron 43.4.1 and is lock-audited. DaVinci Resolve
   21.0.3 embeds vendor-owned Electron 36.3.2 with known high-severity advisories. Application controls
   reduce reachable configurations but cannot patch that binary. This remains an explicit release
@@ -79,6 +87,19 @@ decisions, and review timecodes. They do not transcribe dialogue or create speak
 evaluation manifests are a separate workflow and can contain pseudonymous speaker IDs and Sorani
 transcripts; keep those manifests and all raw/consent material outside public Git according to the
 approved evaluation protocol.
+
+### Retained vs. Cleared Items Specification
+
+| Item Category | Retention Policy | Guaranteed Safe Handling |
+|---|---|---|
+| **Exported Master WAVs** | **Retained** | User-owned master outputs saved via native export dialogs. Stored outside transient directories; never touched by retention sweeps or local-data clearing. |
+| **Full Processing Records** | **Retained** | User-saved audit ZIP archives containing reports, provenance manifests, and hash chains. Never deleted by cleanup. |
+| **User Source Media** | **Retained** | User-selected input audio and video files. The engine opens sources read-only and never modifies or deletes original source files. |
+| **Engine Job Database** | **Retained** | SQLite WAL-mode database (`jobs.db` under user data) recording job metadata, idempotency, and audit trails. Preserved across session clears. |
+| **Renderer Session Data** | **Ephemeral / Cleared** | In-memory Chromium partition (`hawavoclean-desktop`) discarded automatically on application exit. No session cookies, tokens, or IndexedDB persist on disk. |
+| **Private Audio Cache** | **Never Stored** | Protocol-level `Cache-Control: no-store, no-cache, must-revalidate, private` ensures audio, peaks, and artifacts never touch HTTP disk or memory caches. |
+| **Upload Scratch Inputs** | **Ephemeral / Cleared** | Temporary files in engine upload store (`work/uploads/<uuid>/`). Automatically deleted upon terminal job completion or after retention TTL (`scavenge`). |
+| **Legacy Disk Partitions** | **Cleared on Demand** | Any partition directories from older persistent releases under `userData/Partitions/` are purged during startup hygiene and safe session clearing. |
 
 Uploaded inputs are local temporary data, deleted when their job reaches a terminal state or after the
 bounded retention interval. A process crash can leave scratch material for recovery/forensics until

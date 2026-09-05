@@ -1,19 +1,18 @@
 """Crash-safe publication of one audio/report/summary generation.
 
 Three flat-file renames cannot be atomic as a set. HawaVoClean therefore stores
-immutable generations in an adjacent hidden bundle and changes the three public
-aliases through one shared ``current`` symlink. See ADR 0005.
+immutable generations in an adjacent hidden bundle and changes one ``current``
+record atomically. Public paths are recoverable exports of that authoritative
+generation and are regular, self-contained files on both POSIX and Windows.
 """
 
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
 import shutil
-import stat
 import tempfile
 import uuid
 from collections.abc import Iterator
@@ -23,8 +22,16 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from hawavoclean.errors import PublicationError
+from hawavoclean.platform_fs import (
+    exclusive_file_lock,
+    flush_directory,
+    is_reparse_or_symlink,
+    rename_new_path,
+    replace_path,
+)
 
 _BUNDLE_SCHEMA = 1
+_POINTER_SCHEMA = 1
 _OWNER_FILE = "bundle.json"
 _CURRENT = "current"
 _TRANSACTION = "transaction.json"
@@ -34,7 +41,7 @@ _FILES = {"audio": "master.wav", "json": "report.json", "txt": "summary.txt"}
 
 @dataclass(frozen=True)
 class PublicationPaths:
-    """Public aliases and their adjacent private generation bundle."""
+    """Public exports and their adjacent private generation bundle."""
 
     audio: Path
     json: Path
@@ -51,7 +58,7 @@ class PublicationPaths:
 
 
 def public_output_path(path: Path | str) -> Path:
-    """Resolve the parent while preserving the final public output alias."""
+    """Resolve the parent while preserving the final public output filename."""
     expanded = Path(path).expanduser()
     absolute = Path(os.path.abspath(os.fspath(expanded)))
     return absolute.parent.resolve() / absolute.name
@@ -84,9 +91,9 @@ def publication_exists(destination_audio_path: Path | str) -> bool:
     paths = publication_paths(destination_audio_path)
     if _lexists(paths.current):
         return True
-    # An interrupted first publish may leave some owned aliases dangling before
-    # the one authoritative pointer exists. Those are recoverable staging
-    # debris, not a committed output, so a normal no-overwrite retry is safe.
+    # A first publish from the legacy symlink implementation may leave owned
+    # aliases dangling before its authoritative pointer exists. Those are
+    # recoverable debris, not a committed output, so no-overwrite retry is safe.
     for role, public in _public_roles(paths):
         if _lexists(public) and not _owned_alias(public, _relative_alias_target(paths, role)):
             return True
@@ -108,11 +115,7 @@ def _canonical_bytes(value: object) -> bytes:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    flush_directory(path)
 
 
 def _write_bytes_fsync(path: Path, data: bytes) -> None:
@@ -136,7 +139,7 @@ def _replace_json(path: Path, value: object) -> None:
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     try:
         _write_bytes_fsync(temporary, encoded)
-        os.replace(temporary, path)
+        replace_path(temporary, path)
         _fsync_directory(path.parent)
     finally:
         with contextlib.suppress(OSError):
@@ -149,21 +152,15 @@ def _checkpoint(_name: str) -> None:
 
 @contextmanager
 def _publication_lock(path: Path) -> Iterator[None]:
-    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    lock = exclusive_file_lock(path)
     try:
-        descriptor = os.open(path, flags, 0o600)
+        lock.__enter__()
     except OSError as exc:
         raise PublicationError(f"Cannot acquire safe publication lock {path}: {exc}") from exc
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise PublicationError(f"Publication lock is not a regular file: {path}")
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        lock.__exit__(None, None, None)
 
 
 def _owner_payload(paths: PublicationPaths) -> dict[str, object]:
@@ -180,7 +177,7 @@ def _owner_payload(paths: PublicationPaths) -> dict[str, object]:
 def _ensure_bundle(paths: PublicationPaths) -> None:
     expected = _owner_payload(paths)
     if _lexists(paths.bundle):
-        if paths.bundle.is_symlink() or not paths.bundle.is_dir():
+        if is_reparse_or_symlink(paths.bundle) or not paths.bundle.is_dir():
             raise PublicationError(f"Publication bundle is not a real directory: {paths.bundle}")
         owner = paths.bundle / _OWNER_FILE
         try:
@@ -191,7 +188,7 @@ def _ensure_bundle(paths: PublicationPaths) -> None:
             ) from exc
         if actual != expected:
             raise PublicationError(f"Publication bundle belongs to different public paths: {owner}")
-        if paths.generations.is_symlink() or not paths.generations.is_dir():
+        if is_reparse_or_symlink(paths.generations) or not paths.generations.is_dir():
             raise PublicationError(
                 f"Publication generations directory is unsafe: {paths.generations}"
             )
@@ -209,7 +206,7 @@ def _ensure_bundle(paths: PublicationPaths) -> None:
         _fsync_directory(generations)
         _fsync_directory(staging)
         with contextlib.suppress(FileExistsError):
-            os.rename(staging, paths.bundle)
+            rename_new_path(staging, paths.bundle)
             # Another serialized process can only win before our flock on
             # filesystems whose locking implementation is not process-wide.
         _fsync_directory(paths.audio.parent)
@@ -236,7 +233,7 @@ def _validate_report_audio(report_path: Path, audio_sha256: str) -> None:
 
 
 def _verify_generation(generation: Path) -> dict[str, Any]:
-    if generation.is_symlink() or not generation.is_dir():
+    if is_reparse_or_symlink(generation) or not generation.is_dir():
         raise PublicationError(f"Generation is not a real directory: {generation}")
     manifest_path = generation / "manifest.json"
     try:
@@ -255,7 +252,7 @@ def _verify_generation(generation: Path) -> dict[str, Any]:
         if not isinstance(record, dict) or record.get("filename") != filename:
             raise PublicationError(f"Generation {role} record is invalid: {manifest_path}")
         artifact = generation / filename
-        if artifact.is_symlink() or not artifact.is_file():
+        if is_reparse_or_symlink(artifact) or not artifact.is_file():
             raise PublicationError(f"Generation artifact is missing or unsafe: {artifact}")
         if record.get("size_bytes") != artifact.stat().st_size:
             raise PublicationError(f"Generation artifact size mismatch: {artifact}")
@@ -304,8 +301,7 @@ def _prepare_generation(
             _verify_generation(destination)
             shutil.rmtree(staging)
         else:
-            os.rename(staging, destination)
-            _fsync_directory(paths.generations)
+            rename_new_path(staging, destination)
         _checkpoint("generation_committed")
         return generation_id, _verify_generation(destination)
     finally:
@@ -315,14 +311,33 @@ def _prepare_generation(
 def _read_current_id(paths: PublicationPaths) -> str | None:
     if not _lexists(paths.current):
         return None
-    if not paths.current.is_symlink():
-        raise PublicationError(f"Publication current pointer is not a symlink: {paths.current}")
-    target = PurePath(os.readlink(paths.current))
-    if target.is_absolute() or len(target.parts) != 2 or target.parts[0] != _GENERATIONS:
-        raise PublicationError(f"Publication current pointer escapes its bundle: {paths.current}")
-    generation_id = str(target.parts[1])
+    if paths.current.is_symlink():
+        target = PurePath(os.readlink(paths.current))
+        if target.is_absolute() or len(target.parts) != 2 or target.parts[0] != _GENERATIONS:
+            raise PublicationError(
+                f"Publication current pointer escapes its bundle: {paths.current}"
+            )
+        generation_id = str(target.parts[1])
+    else:
+        if is_reparse_or_symlink(paths.current) or not paths.current.is_file():
+            raise PublicationError(f"Publication current pointer is unsafe: {paths.current}")
+        try:
+            pointer = json.loads(paths.current.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PublicationError(
+                f"Publication current pointer is unreadable: {paths.current}"
+            ) from exc
+        if (
+            not isinstance(pointer, dict)
+            or pointer.get("schema_version") != _POINTER_SCHEMA
+            or not isinstance(pointer.get("generation_id"), str)
+        ):
+            raise PublicationError(f"Publication current pointer is invalid: {paths.current}")
+        generation_id = str(pointer["generation_id"])
     if not re_full_sha256(generation_id):
-        raise PublicationError(f"Publication current pointer has an invalid generation: {target}")
+        raise PublicationError(
+            f"Publication current pointer has an invalid generation: {generation_id!r}"
+        )
     _verify_generation(paths.generations / generation_id)
     return generation_id
 
@@ -335,12 +350,12 @@ def _relative_alias_target(paths: PublicationPaths, role: str) -> str:
     return f"{paths.bundle.name}/{_CURRENT}/{_FILES[role]}"
 
 
-def _replace_symlink(path: Path, target: str) -> None:
-    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.link"
+def _replace_regular_file(source: Path, destination: Path) -> None:
+    temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.tmp"
     try:
-        os.symlink(target, temporary)
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
+        _copy_fsync(source, temporary)
+        replace_path(temporary, destination)
+        _fsync_directory(destination.parent)
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()
@@ -354,32 +369,57 @@ def _public_roles(paths: PublicationPaths) -> tuple[tuple[str, Path], ...]:
     return ("audio", paths.audio), ("json", paths.json), ("txt", paths.txt)
 
 
-def _repair_aliases(paths: PublicationPaths, current_id: str | None) -> None:
-    manifest = _verify_generation(paths.generations / current_id) if current_id else None
-    for role, public in _public_roles(paths):
-        expected = _relative_alias_target(paths, role)
-        if _owned_alias(public, expected):
+def _matches_known_generation(paths: PublicationPaths, role: str, public: Path) -> bool:
+    digest = _sha256_file(public)
+    for candidate in paths.generations.iterdir():
+        if (
+            not re_full_sha256(candidate.name)
+            or is_reparse_or_symlink(candidate)
+            or not candidate.is_dir()
+        ):
             continue
-        if public.is_symlink():
-            raise PublicationError(f"Refusing unexpected public output symlink: {public}")
-        if _lexists(public):
-            if manifest is None:
-                raise PublicationError(f"Incomplete legacy output triplet at {public}")
+        try:
+            manifest = json.loads((candidate / "manifest.json").read_text(encoding="utf-8"))
             record = manifest["artifacts"][role]
-            if not public.is_file() or _sha256_file(public) != record["sha256"]:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            continue
+        if isinstance(record, dict) and record.get("sha256") == digest:
+            _verify_generation(candidate)
+            return True
+    return False
+
+
+def _repair_public_exports(paths: PublicationPaths, current_id: str) -> None:
+    generation = paths.generations / current_id
+    manifest = _verify_generation(generation)
+    for role, public in _public_roles(paths):
+        record = manifest["artifacts"][role]
+        expected_alias = _relative_alias_target(paths, role)
+        if public.is_symlink():
+            if not _owned_alias(public, expected_alias):
+                raise PublicationError(f"Refusing unexpected public output symlink: {public}")
+        elif _lexists(public):
+            if is_reparse_or_symlink(public) or not public.is_file():
+                raise PublicationError(f"Public output is not a regular file: {public}")
+            if _sha256_file(public) == record["sha256"]:
+                continue
+            if not _matches_known_generation(paths, role, public):
                 raise PublicationError(
                     f"Public file differs from the committed generation; refusing overwrite: {public}"
                 )
-        _replace_symlink(public, expected)
+        _replace_regular_file(generation / _FILES[role], public)
         _checkpoint(f"alias_{role}_replaced")
 
 
 def _replace_current(paths: PublicationPaths, generation_id: str) -> None:
-    target = f"{_GENERATIONS}/{generation_id}"
-    temporary = paths.bundle / f".{_CURRENT}.{uuid.uuid4().hex}.link"
+    temporary = paths.bundle / f".{_CURRENT}.{uuid.uuid4().hex}.tmp"
     try:
-        os.symlink(target, temporary)
-        os.replace(temporary, paths.current)
+        encoded = (
+            _canonical_bytes({"schema_version": _POINTER_SCHEMA, "generation_id": generation_id})
+            + b"\n"
+        )
+        _write_bytes_fsync(temporary, encoded)
+        replace_path(temporary, paths.current)
         _checkpoint("pointer_replaced")
         _fsync_directory(paths.bundle)
         _checkpoint("pointer_durable")
@@ -391,12 +431,18 @@ def _replace_current(paths: PublicationPaths, generation_id: str) -> None:
 def _complete_legacy_migration(paths: PublicationPaths) -> str | None:
     current = _read_current_id(paths)
     if current is not None:
-        _repair_aliases(paths, current)
+        legacy_pointer = paths.current.is_symlink()
+        _repair_public_exports(paths, current)
+        if legacy_pointer:
+            _replace_current(paths, current)
         return current
 
     states = [(_lexists(path), path.is_symlink()) for path in paths.public]
     if all(not exists for exists, _ in states):
         return None
+    for public in paths.public:
+        if _lexists(public) and is_reparse_or_symlink(public) and not public.is_symlink():
+            raise PublicationError(f"Unexpected public output reparse point: {public}")
     if any(is_link for _, is_link in states):
         # A hard kill during first publication can leave only our dangling
         # aliases. With no current pointer, no generation was authoritative.
@@ -427,7 +473,7 @@ def _complete_legacy_migration(paths: PublicationPaths) -> str | None:
         },
     )
     _replace_current(paths, legacy_id)
-    _repair_aliases(paths, legacy_id)
+    _repair_public_exports(paths, legacy_id)
     _replace_json(
         paths.transaction,
         {
@@ -445,10 +491,9 @@ def _verify_public(paths: PublicationPaths, expected_generation: str) -> None:
         raise PublicationError("Committed generation pointer changed during verification")
     manifest = _verify_generation(paths.generations / expected_generation)
     for role, public in _public_roles(paths):
-        target = _relative_alias_target(paths, role)
-        if not _owned_alias(public, target):
-            raise PublicationError(f"Public output alias is not owned by this bundle: {public}")
-        if not public.is_file() or _sha256_file(public) != manifest["artifacts"][role]["sha256"]:
+        if is_reparse_or_symlink(public) or not public.is_file():
+            raise PublicationError(f"Public output is not a regular file: {public}")
+        if _sha256_file(public) != manifest["artifacts"][role]["sha256"]:
             raise PublicationError(f"Public output does not match committed generation: {public}")
 
 
@@ -465,8 +510,13 @@ def resolve_committed_publication(
     if not _lexists(paths.bundle):
         return None
     with _publication_lock(paths.lock):
-        _ensure_bundle(paths)
-        current = _complete_legacy_migration(paths)
+        try:
+            _ensure_bundle(paths)
+            current = _complete_legacy_migration(paths)
+        except PublicationError:
+            raise
+        except Exception as exc:
+            raise PublicationError(f"Publication recovery failed: {exc}") from exc
         if current is None:
             return None
         _verify_public(paths, current)
@@ -478,19 +528,107 @@ def resolve_committed_publication(
         )
 
 
+def resolve_immutable_publication_generation(
+    destination_audio_path: Path | str,
+    *,
+    audio_sha256: str,
+    report_sha256: str | None = None,
+    summary_sha256: str | None = None,
+) -> tuple[Path, Path, Path] | None:
+    """Resolve the immutable generation owned by one completed job.
+
+    ``resolve_committed_publication`` intentionally follows the current
+    pointer.  A durable job artifact URL instead needs the generation that the
+    job itself reported, even after a later replace-mode job advances that
+    pointer. This reader selects by the available job-bound artifact digests
+    and refuses an ambiguous audio-only match. It returns only verified
+    generation files and never serves recoverable public exports, so a hard
+    kill between their independent copy operations cannot expose a mixed
+    triplet through the broker.
+    """
+
+    expected = {
+        "audio": audio_sha256,
+        "json": report_sha256,
+        "txt": summary_sha256,
+    }
+    if any(value is not None and not re_full_sha256(value) for value in expected.values()):
+        raise PublicationError("Expected publication digest is not a SHA-256 value")
+    paths = publication_paths(destination_audio_path)
+    if not _lexists(paths.bundle):
+        return None
+    with _publication_lock(paths.lock):
+        try:
+            _ensure_bundle(paths)
+            # No current pointer means no generation has ever crossed the
+            # atomic publication boundary, even if durable-looking staging is
+            # present below ``generations``.
+            if _read_current_id(paths) is None:
+                return None
+            matches: list[tuple[Path, Path, Path]] = []
+            for generation in paths.generations.iterdir():
+                if (
+                    not re_full_sha256(generation.name)
+                    or is_reparse_or_symlink(generation)
+                    or not generation.is_dir()
+                ):
+                    continue
+                manifest = _verify_generation(generation)
+                artifacts = manifest["artifacts"]
+                if all(
+                    value is None or artifacts[role]["sha256"] == value
+                    for role, value in expected.items()
+                ):
+                    matches.append(
+                        (
+                            generation / _FILES["audio"],
+                            generation / _FILES["json"],
+                            generation / _FILES["txt"],
+                        )
+                    )
+            # Audio bytes alone are not a unique job identity: two runs may
+            # publish the same master with different reports or summaries.
+            # Never pick whichever directory iteration happens to see first.
+            return matches[0] if len(matches) == 1 else None
+        except PublicationError:
+            raise
+        except Exception as exc:
+            raise PublicationError(f"Immutable publication lookup failed: {exc}") from exc
+
+
 def publish_output_generation(
     temp_audio_path: Path,
     destination_audio_path: Path,
     json_report_str: str,
     txt_summary_str: str,
     overwrite: bool = False,
+    clean_only: bool = False,
 ) -> tuple[Path, Path, Path]:
-    """Durably publish a complete generation through one atomic pointer."""
+    """Durably publish output audio.
+
+    If clean_only is True, emits only the destination .wav master file without
+    creating public sidecars or hidden bundle directories.
+    """
     source = Path(temp_audio_path)
-    if source.is_symlink() or not source.is_file():
+    if is_reparse_or_symlink(source) or not source.is_file():
         raise PublicationError(f"Temporary candidate audio file missing or unsafe: {source}")
     paths = publication_paths(destination_audio_path)
     paths.audio.parent.mkdir(parents=True, exist_ok=True)
+
+    if clean_only:
+        if not overwrite and paths.audio.exists():
+            raise PublicationError(
+                f"Destination output file already exists and overwrite=False: {paths.audio}"
+            )
+        _replace_regular_file(source, paths.audio)
+        for sidecar in (paths.json, paths.txt, paths.lock):
+            with contextlib.suppress(OSError):
+                if sidecar.is_file():
+                    sidecar.unlink()
+        with contextlib.suppress(OSError):
+            if paths.bundle.is_dir():
+                shutil.rmtree(paths.bundle)
+        return paths.public
 
     with _publication_lock(paths.lock):
         if not overwrite and (
@@ -533,9 +671,11 @@ def publish_output_generation(
         except Exception as exc:
             raise PublicationError(f"Publication preparation failed: {exc}") from exc
         try:
-            _repair_aliases(paths, prior)
+            if prior is not None:
+                _verify_public(paths, prior)
             _checkpoint("before_pointer_commit")
             _replace_current(paths, generation_id)
+            _repair_public_exports(paths, generation_id)
             _replace_json(
                 paths.transaction,
                 {
@@ -554,7 +694,7 @@ def publish_output_generation(
             try:
                 if _read_current_id(paths) == generation_id:
                     _fsync_directory(paths.bundle)
-                    _repair_aliases(paths, generation_id)
+                    _repair_public_exports(paths, generation_id)
                     _replace_json(
                         paths.transaction,
                         {
@@ -571,14 +711,6 @@ def publish_output_generation(
                 pass
             if recovered:
                 return paths.public
-            if prior is None:
-                for role, public in _public_roles(paths):
-                    expected = _relative_alias_target(paths, role)
-                    if _owned_alias(public, expected):
-                        with contextlib.suppress(OSError):
-                            public.unlink()
-                with contextlib.suppress(OSError):
-                    _fsync_directory(paths.audio.parent)
             if isinstance(exc, Exception):
                 raise PublicationError(f"Committed-generation publish failed: {exc}") from exc
             raise

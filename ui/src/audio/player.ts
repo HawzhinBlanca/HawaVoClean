@@ -40,6 +40,10 @@ export interface PlayerSnapshot {
   active: Deck;
   /** A deck that has been asked for but is still fetching, or null. */
   pending: Deck | null;
+  /** Whether level-matching gain adjustment is active. */
+  loudnessMatch: boolean;
+  /** Gain offset in dB applied to Cleaned deck during level matching. */
+  gainOffsetDb: number;
 }
 
 /**
@@ -157,6 +161,9 @@ export class DualPlayer {
   private faultListeners = new Set<FaultListener>();
   private raf = 0;
   private wantPlaying = false;
+  private loudnessMatchEnabled = true;
+  private lufsIn: number | null = null;
+  private lufsOut: number | null = null;
 
   constructor() {
     this.els = {
@@ -275,7 +282,7 @@ export class DualPlayer {
       const src = ctx.createMediaElementSource(this.els[deck]);
       src.connect(gains[deck]);
       gains[deck].connect(analyser);
-      gains[deck].gain.value = deck === this.active ? 1 : 0;
+      gains[deck].gain.value = deck === this.active ? this.getTargetGain(deck) : 0;
       // Element-level mute was the pre-graph A/B mechanism; from here on the
       // gain nodes own it (a muted element also mutes its source node).
       this.els[deck].muted = false;
@@ -283,6 +290,56 @@ export class DualPlayer {
     this.ctx = ctx;
     this.gains = gains;
     this.analyser = analyser;
+  }
+
+  setLoudnessMatch(enabled: boolean, lufsIn: number | null, lufsOut: number | null): void {
+    this.loudnessMatchEnabled = enabled;
+    this.lufsIn = lufsIn;
+    this.lufsOut = lufsOut;
+    this.applyTargetGain();
+    this.emit();
+  }
+
+  get isLoudnessMatchEnabled(): boolean {
+    return this.loudnessMatchEnabled;
+  }
+
+  get gainOffsetDb(): number {
+    if (
+      !this.loudnessMatchEnabled ||
+      this.lufsIn === null ||
+      this.lufsOut === null ||
+      !Number.isFinite(this.lufsIn) ||
+      !Number.isFinite(this.lufsOut)
+    ) {
+      return 0;
+    }
+    const delta = this.lufsIn - this.lufsOut;
+    return Math.max(-12, Math.min(12, delta));
+  }
+
+  getTargetGain(deck: Deck): number {
+    if (deck === 'original') return 1.0;
+    const offset = this.gainOffsetDb;
+    if (offset === 0) return 1.0;
+    return Math.pow(10, offset / 20);
+  }
+
+  private applyTargetGain(): void {
+    const targetCleaned = this.getTargetGain('cleaned');
+    if (this.gains && this.ctx) {
+      const now = this.ctx.currentTime;
+      for (const deck of ['original', 'cleaned'] as const) {
+        const g = this.gains[deck].gain;
+        const target = deck === this.active ? this.getTargetGain(deck) : 0;
+        g.cancelScheduledValues(now);
+        g.setValueAtTime(g.value, now);
+        g.linearRampToValueAtTime(target, now + FADE_S);
+      }
+    } else {
+      this.els.cleaned.volume = Math.min(1, Math.max(0, targetCleaned));
+      this.applyMuteFallback();
+    }
   }
 
   getAnalyser(): AnalyserNode | null {
@@ -677,6 +734,14 @@ export class DualPlayer {
     this.active = deck;
     const from = this.els[prev];
     const to = this.els[deck];
+    // Common-region bounds: ensure neither deck compares past the end of the shorter take.
+    const maxTime = this.duration;
+    if (maxTime > 0 && from.currentTime > maxTime) {
+      from.currentTime = maxTime;
+    }
+    if (maxTime > 0 && to.currentTime > maxTime) {
+      to.currentTime = maxTime;
+    }
     // A/B has to stay sample-locked; when both decks are in memory (the normal
     // case) this correction costs nothing at all.
     if (Math.abs(to.currentTime - from.currentTime) > SYNC_TOLERANCE_S) {
@@ -691,9 +756,10 @@ export class DualPlayer {
       gFrom.setValueAtTime(gFrom.value, now);
       gTo.setValueAtTime(gTo.value, now);
       gFrom.linearRampToValueAtTime(0, now + FADE_S);
-      gTo.linearRampToValueAtTime(1, now + FADE_S);
+      gTo.linearRampToValueAtTime(this.getTargetGain(deck), now + FADE_S);
     } else {
       this.applyMuteFallback();
+      this.els.cleaned.volume = Math.min(1, Math.max(0, this.getTargetGain('cleaned')));
     }
     if (this.wantPlaying && to.paused) {
       void to.play().catch(() => undefined);
@@ -708,6 +774,9 @@ export class DualPlayer {
       await this.ctx.resume();
     }
     this.wantPlaying = true;
+    if (this.duration > 0 && this.time >= this.duration) {
+      this.seek(0);
+    }
     const t = this.els[this.active].currentTime;
     const plays: Promise<void>[] = [];
     for (const deck of ['original', 'cleaned'] as const) {
@@ -749,15 +818,22 @@ export class DualPlayer {
   }
 
   get duration(): number {
-    if (this.state[this.active] === 'ready') {
-      const d = this.els[this.active].duration;
-      if (Number.isFinite(d) && d > 0) return d;
+    const origReady = this.state.original === 'ready';
+    const cleanReady = this.state.cleaned === 'ready';
+    const dOrig =
+      origReady && Number.isFinite(this.els.original.duration) && this.els.original.duration > 0
+        ? this.els.original.duration
+        : null;
+    const dClean =
+      cleanReady && Number.isFinite(this.els.cleaned.duration) && this.els.cleaned.duration > 0
+        ? this.els.cleaned.duration
+        : null;
+
+    if (dOrig !== null && dClean !== null) {
+      return Math.min(dOrig, dClean);
     }
-    const other: Deck = this.active === 'original' ? 'cleaned' : 'original';
-    if (this.state[other] === 'ready') {
-      const d2 = this.els[other].duration;
-      if (Number.isFinite(d2) && d2 > 0) return d2;
-    }
+    if (dOrig !== null) return dOrig;
+    if (dClean !== null) return dClean;
     return 0;
   }
 
@@ -775,6 +851,8 @@ export class DualPlayer {
       // been asked to arrive at. Neither can drift from the player.
       active: this.active,
       pending: this.pendingActive,
+      loudnessMatch: this.loudnessMatchEnabled,
+      gainOffsetDb: this.gainOffsetDb,
     };
   }
 
@@ -798,10 +876,20 @@ export class DualPlayer {
     const tick = (): void => {
       this.raf = 0;
       if (!this.wantPlaying) return;
-      // Drift guard: keep the inactive deck within tolerance of the active one.
       const a = this.els[this.active];
       const other: Deck = this.active === 'original' ? 'cleaned' : 'original';
       const b = this.els[other];
+      const maxTime = this.duration;
+      const bothReady = this.state.original === 'ready' && this.state.cleaned === 'ready';
+      if (bothReady && maxTime > 0 && (a.currentTime >= maxTime || b.currentTime >= maxTime)) {
+        this.wantPlaying = false;
+        this.pauseAll();
+        if (a.currentTime > maxTime) a.currentTime = maxTime;
+        if (b.currentTime > maxTime) b.currentTime = maxTime;
+        this.emit();
+        return;
+      }
+      // Drift guard: keep the inactive deck within tolerance of the active one.
       if (
         this.state[other] === 'ready' &&
         !b.paused &&

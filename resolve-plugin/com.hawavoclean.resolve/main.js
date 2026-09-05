@@ -5,8 +5,8 @@
  * Contract: docs/ui-contract.md sections 3, 4 and 5.
  *
  *  - Spawns the Python engine (`hawavoclean serve`) described by engine.json (next to this
- *    file), waits for its single `{"event":"ready",...}` stdout line, and hands the renderer
- *    the endpoint + token over IPC (`hawa:engine:endpoint`).
+ *    file), waits for its single `{"event":"ready",...}` stdout line, mints a short-lived
+ *    session in main, and hands the renderer only the credential-free endpoint over IPC.
  *  - Loads index.html (the built UI bundle) into a sandboxed, context-isolated BrowserWindow.
  *  - Talks to Resolve through WorkflowIntegration.node (required here in main; the sandboxed
  *    preload cannot load native modules). If the module is missing or Resolve is not running
@@ -18,6 +18,7 @@
  * Environment knobs:
  *   HAWA_DEVTOOLS=1            open DevTools
  *   HAWA_SELFTEST=1            headless smoke test: load UI, query the bridge, print a result line, quit
+ *   HAWA_SELFTEST_HARD_CRASH=1 leave the self-test host alive so the harness can SIGKILL it
  *   HAWA_ENGINE_TIMEOUT_MS=N   override the 60 s ready timeout (tests only)
  */
 
@@ -29,6 +30,18 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { fileURLToPath, pathToFileURL } = require('node:url');
+const {
+  exactEngineOrigin,
+  isEngineApiRequest,
+  rendererEngineEndpoint,
+  requestEngineSession,
+  requestNativeSourceRegistration,
+  sessionNeedsRenewal,
+  withEngineAuthorization,
+  withoutRendererCredentials,
+} = require('./session-auth.js');
+const { discoverDesktopEngine } = require('./engine-discovery.js');
+const { TimelineTransactionManager } = require('./timeline-transactions.js');
 
 const PLUGIN_ID = 'com.hawavoclean.resolve';
 const APP_TITLE = 'HawaVoClean';
@@ -45,6 +58,7 @@ const QUIT_HARD_DEADLINE_MS = 10_000;
 const STDERR_TAIL_LINES = 80;
 const DEVTOOLS = process.env.HAWA_DEVTOOLS === '1';
 const SELFTEST = process.env.HAWA_SELFTEST === '1';
+const SELFTEST_HARD_CRASH = SELFTEST && process.env.HAWA_SELFTEST_HARD_CRASH === '1';
 const RUNTIME_EVIDENCE = Object.freeze({
   electron: process.versions.electron || null,
   chromium: process.versions.chrome || null,
@@ -134,6 +148,7 @@ function trustedClipboardRequest(contents, permission, requestingUrl) {
 
 function configureSessionSecurity() {
   const appSession = session.fromPartition(SESSION_PARTITION);
+  const requestAuthorization = new Map();
   appSession.protocol.handle(APP_SCHEME, (request) => {
     try {
       const url = new URL(request.url);
@@ -181,7 +196,7 @@ function configureSessionSecurity() {
         } else if (url.protocol === 'file:') {
           allowed = pathInside(__dirname, fileURLToPath(url));
         } else if (url.protocol === 'http:') {
-          allowed = url.hostname === '127.0.0.1' && Number(url.port) === engine.port;
+          allowed = isEngineApiRequest(details.url, engineOrigin()) && url.pathname !== '/api/session';
         }
       } catch {
         allowed = false;
@@ -193,6 +208,53 @@ function configureSessionSecurity() {
       callback({ cancel: !allowed });
     },
   );
+  appSession.webRequest.onBeforeSendHeaders(
+    { urls: ['http://127.0.0.1:*/*'] },
+    (details, callback) => {
+      if (!isEngineApiRequest(details.url, engineOrigin())) {
+        callback({ requestHeaders: details.requestHeaders });
+        return;
+      }
+      if (details.method === 'OPTIONS') {
+        callback({ requestHeaders: withoutRendererCredentials(details.requestHeaders) });
+        return;
+      }
+      engineAuthorization().then(
+        (authorization) => {
+          try {
+            requestAuthorization.set(details.id, authorization);
+            callback({ requestHeaders: withEngineAuthorization(details.requestHeaders, authorization) });
+          } catch {
+            callback({ cancel: true });
+          }
+        },
+        () => callback({ cancel: true }),
+      );
+    },
+  );
+  appSession.webRequest.onCompleted({ urls: ['http://127.0.0.1:*/*'] }, (details) => {
+    const authorization = requestAuthorization.get(details.id);
+    requestAuthorization.delete(details.id);
+    if (
+      authorization !== undefined &&
+      details.statusCode === 401 &&
+      isEngineApiRequest(details.url, engineOrigin())
+    ) {
+      invalidateEngineSession(authorization);
+    }
+  });
+  appSession.webRequest.onErrorOccurred({ urls: ['http://127.0.0.1:*/*'] }, (details) => {
+    requestAuthorization.delete(details.id);
+  });
+
+  const STRICT_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: http://127.0.0.1:*; connect-src http://127.0.0.1:* ws://127.0.0.1:*; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none';";
+  appSession.webRequest.onHeadersReceived((details, callback) => {
+    const responseHeaders = { ...(details.responseHeaders || {}) };
+    responseHeaders['Content-Security-Policy'] = [STRICT_CSP];
+    responseHeaders['X-Frame-Options'] = ['DENY'];
+    responseHeaders['X-Content-Type-Options'] = ['nosniff'];
+    callback({ responseHeaders });
+  });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -207,15 +269,61 @@ const engine = {
   pid: null,
   version: null,
   stderrTail: [], // last STDERR_TAIL_LINES lines of stderr (plus unexpected stdout)
-  ready: null, // Promise<{baseUrl, token}>
+  ready: null, // Promise<{baseUrl}>; renderer-facing and deliberately credential-free
+  endpoint: null, // immutable {baseUrl}
+  session: null, // main-only {authorization, expiresAtMs, refreshAtMs}
+  sessionPromise: null,
   failure: null, // Error once the engine is known to be unusable
   exited: false,
   exitInfo: null, // {code, signal}
   settled: false,
+  bootstrapping: false,
 };
 
 let resolveReady = null; // resolve() of engine.ready
 let rejectReady = null; // reject() of engine.ready
+
+function engineOrigin() {
+  return engine.endpoint ? exactEngineOrigin(engine.endpoint.baseUrl) : null;
+}
+
+async function engineAuthorization() {
+  if (engine.failure) throw engine.failure;
+  const endpoint = engine.endpoint || (await engine.ready);
+  if (!sessionNeedsRenewal(engine.session, Date.now()) && engine.session !== null) {
+    return engine.session.authorization;
+  }
+  if (engine.sessionPromise === null) {
+    engine.sessionPromise = requestEngineSession(endpoint, engine.token);
+  }
+  const pending = engine.sessionPromise;
+  try {
+    const capability = await pending;
+    engine.session = capability;
+    return capability.authorization;
+  } finally {
+    if (engine.sessionPromise === pending) engine.sessionPromise = null;
+  }
+}
+
+async function registerNativePath(filePath) {
+  if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+    throw new Error('Selected source path must be absolute.');
+  }
+  const extension = path.extname(filePath).slice(1).toLowerCase();
+  if (!AUDIO_EXTENSIONS.includes(extension)) {
+    throw new Error('Selected source must use a supported audio or video extension.');
+  }
+  if (engine.failure) throw engine.failure;
+  const endpoint = engine.endpoint || (await engine.ready);
+  const registration = await requestNativeSourceRegistration(endpoint, engine.token, filePath);
+  return registration.path;
+}
+
+function invalidateEngineSession(authorization) {
+  if (authorization !== undefined && engine.session && engine.session.authorization !== authorization) return;
+  engine.session = null;
+}
 
 function pushTail(line) {
   engine.stderrTail.push(line);
@@ -264,6 +372,9 @@ function readEngineConfig() {
 
 function buildEngineEnv(config) {
   const env = { ...process.env, ...config.env };
+  // A detached broker would otherwise survive a hard Resolve/Electron crash,
+  // because that path runs none of this process's shutdown handlers.
+  env.HAWAVOCLEAN_PARENT_PID = String(process.pid);
   const commandDir = path.isAbsolute(config.command[0]) ? path.dirname(config.command[0]) : null;
   const wanted = [commandDir, ...EXTRA_PATH_DIRS].filter(Boolean);
   const current = (env.PATH || '').split(path.delimiter).filter(Boolean);
@@ -271,6 +382,20 @@ function buildEngineEnv(config) {
   env.PATH = [...prepend, ...current].join(path.delimiter);
   if (!('PYTHONUNBUFFERED' in env)) env.PYTHONUNBUFFERED = '1';
   return env;
+}
+
+function signalEngineTree(child, signal) {
+  if (!child || !Number.isInteger(child.pid) || child.pid <= 0) return false;
+  try {
+    // Resolve support is macOS-only. A detached POSIX child leads a process
+    // group, so the negative pid reaches the broker and every decoder/model
+    // descendant even when the leader has already stopped responding.
+    if (process.platform !== 'win32') process.kill(-child.pid, signal);
+    else child.kill(signal);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function failEngine(message) {
@@ -281,40 +406,45 @@ function failEngine(message) {
   if (rejectReady) rejectReady(err);
   log('engine failure:', message);
   // Make sure a half-started child does not linger.
-  if (engine.child && !engine.exited) {
-    try {
-      engine.child.kill('SIGTERM');
-    } catch {
-      /* ignore */
-    }
+  if (engine.child) {
+    signalEngineTree(engine.child, 'SIGTERM');
     const c = engine.child;
     setTimeout(() => {
-      if (!engine.exited) {
-        try {
-          c.kill('SIGKILL');
-        } catch {
-          /* ignore */
-        }
-      }
+      // The leader's exit is not proof that a decoder/model descendant is
+      // gone. Signalling the retained process-group id is safe after exit.
+      signalEngineTree(c, 'SIGKILL');
     }, SHUTDOWN_SIGTERM_GRACE_MS).unref();
   }
   showErrorPage('The HawaVoClean engine could not be started', message);
 }
 
 function handleReadyLine(obj) {
-  if (engine.settled) return;
+  if (engine.settled || engine.bootstrapping) return;
   const port = Number(obj.port);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     failEngine(`Engine reported an invalid port in its ready line: ${JSON.stringify(obj)}`);
     return;
   }
-  engine.settled = true;
+  engine.bootstrapping = true;
   engine.port = port;
   engine.pid = Number.isInteger(obj.pid) ? obj.pid : engine.child ? engine.child.pid : null;
   engine.version = typeof obj.version === 'string' ? obj.version : null;
-  const endpoint = { baseUrl: `http://127.0.0.1:${port}`, token: engine.token };
-  log(`engine ready: ${endpoint.baseUrl} (pid ${engine.pid}, version ${engine.version || '?'})`);
-  if (resolveReady) resolveReady(endpoint);
+  engine.endpoint = rendererEngineEndpoint(port);
+  log(`engine ready: ${engine.endpoint.baseUrl} (pid ${engine.pid}, version ${engine.version || '?'}); minting renderer session`);
+  requestEngineSession(engine.endpoint, engine.token).then(
+    (capability) => {
+      if (engine.settled) return;
+      engine.session = capability;
+      engine.bootstrapping = false;
+      engine.settled = true;
+      log('engine renderer session ready');
+      if (resolveReady) resolveReady(engine.endpoint);
+    },
+    (error) => {
+      engine.bootstrapping = false;
+      failEngine(`Could not establish an engine renderer session: ${error.message}`);
+    },
+  );
 }
 
 function startEngine() {
@@ -325,32 +455,77 @@ function startEngine() {
   // Swallow "unhandled rejection" noise; consumers (IPC handler) attach their own handlers.
   engine.ready.catch(() => {});
 
-  let config;
+  let discovery;
   try {
-    config = readEngineConfig();
+    discovery = discoverDesktopEngine();
   } catch (err) {
-    failEngine(err.message);
+    failEngine(`Desktop engine discovery failed: ${err.message}`);
     return;
+  }
+
+  if (discovery.type === 'active_rendezvous') {
+    log(`connecting to active desktop engine rendezvous: ${discovery.origin} (pid ${discovery.pid})`);
+    engine.endpoint = { baseUrl: discovery.origin };
+    engine.token = discovery.token;
+    engine.pid = discovery.pid;
+    engine.bootstrapping = true;
+    engine.shared = true;
+
+    requestEngineSession(engine.endpoint, engine.token).then(
+      (capability) => {
+        if (engine.settled) return;
+        engine.session = capability;
+        engine.bootstrapping = false;
+        engine.settled = true;
+        log('engine renderer session ready via desktop rendezvous');
+        if (resolveReady) resolveReady(engine.endpoint);
+      },
+      (err) => {
+        engine.bootstrapping = false;
+        failEngine(`Could not bootstrap session with active desktop engine: ${err.message}`);
+      },
+    );
+    return;
+  }
+
+  let config;
+  if (discovery.type === 'installed_desktop_engine') {
+    config = {
+      command: discovery.command,
+      cwd: discovery.cwd,
+      env: discovery.env,
+      file: discovery.executable,
+    };
+  } else {
+    try {
+      config = readEngineConfig();
+    } catch (err) {
+      failEngine(discovery.message || err.message);
+      return;
+    }
   }
   engine.config = config;
 
   const [exe, ...rest] = config.command;
-  const args = [...rest, '--port', '0', '--token', engine.token, '--ui-dir', __dirname];
-  log(`spawning engine: ${exe} ${args.map((a) => (a === engine.token ? '<token>' : a)).join(' ')} (cwd ${config.cwd})`);
+  const args = [...rest, '--port', '0', '--token-stdin', '--ui-dir', __dirname];
+  log(`spawning engine: ${exe} ${args.join(' ')} (cwd ${config.cwd})`);
 
   let child;
   try {
     child = spawn(exe, args, {
       cwd: config.cwd,
       env: buildEngineEnv(config),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      detached: process.platform !== 'win32',
     });
   } catch (err) {
     failEngine(`Could not spawn engine (${exe}): ${err.message}`);
     return;
   }
   engine.child = child;
+  child.stdin.on('error', () => {});
+  child.stdin.end(`${engine.token}\n`);
 
   // ---- stdout: exactly one JSON "ready" line is expected; tolerate stray lines before it. ----
   let stdoutBuf = '';
@@ -476,25 +651,27 @@ function waitForExit(timeoutMs) {
 }
 
 async function stopEngine() {
+  if (engine.shared) {
+    log('shared desktop engine: leaving process intact on Resolve exit');
+    return;
+  }
   const child = engine.child;
-  if (!child || engine.exited) return;
-  if (engine.port) {
+  if (!child) return;
+  if (!engine.exited && engine.port) {
     await postShutdown(engine.port, engine.token, SHUTDOWN_POST_TIMEOUT_MS);
-    if (await waitForExit(1_000)) return;
+    if (await waitForExit(1_000)) {
+      signalEngineTree(child, 'SIGKILL');
+      return;
+    }
   }
-  try {
-    child.kill('SIGTERM');
-  } catch {
-    /* ignore */
+  signalEngineTree(child, 'SIGTERM');
+  if (!engine.exited && await waitForExit(SHUTDOWN_SIGTERM_GRACE_MS)) {
+    signalEngineTree(child, 'SIGKILL');
+    return;
   }
-  if (await waitForExit(SHUTDOWN_SIGTERM_GRACE_MS)) return;
   log('engine ignored SIGTERM; sending SIGKILL');
-  try {
-    child.kill('SIGKILL');
-  } catch {
-    /* ignore */
-  }
-  await waitForExit(1_000);
+  signalEngineTree(child, 'SIGKILL');
+  if (!engine.exited) await waitForExit(1_000);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -707,27 +884,41 @@ async function resolveImportMedia(filePath) {
   return clipInfo(items[0]);
 }
 
-async function resolveReplaceClip(mediaId, filePath) {
-  if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('replaceClip: path must be an absolute path.');
-  const item = await findItemByMediaId(mediaId);
-  if (!item) throw new Error(`Clip ${mediaId} was not found in the media pool.`);
-  if (typeof item.ReplaceClipPreserveSubClip === 'function') {
-    try {
-      if (await item.ReplaceClipPreserveSubClip(filePath)) return true;
-    } catch (err) {
-      log(`ReplaceClipPreserveSubClip failed (${err.message}); falling back to ReplaceClip`);
-    }
+let timelineTxManager = null;
+function getTimelineTxManager() {
+  if (!timelineTxManager) {
+    timelineTxManager = new TimelineTransactionManager({
+      getProject,
+      getMediaPool,
+      findItemByMediaId,
+      log,
+    });
   }
-  return Boolean(await item.ReplaceClip(filePath));
+  return timelineTxManager;
 }
 
-async function resolveAppendToTimeline(mediaId) {
-  const item = await findItemByMediaId(mediaId);
-  if (!item) throw new Error(`Clip ${mediaId} was not found in the media pool.`);
-  const mediaPool = await getMediaPool();
-  if (!mediaPool) throw new Error('No project is open in DaVinci Resolve.');
-  const result = await mediaPool.AppendToTimeline([item]);
-  return Array.isArray(result) ? result.length > 0 : Boolean(result);
+async function resolveReplaceClip(mediaId, filePath) {
+  const mgr = getTimelineTxManager();
+  const res = await mgr.transactionalReplace(mediaId, filePath);
+  return res.success;
+}
+
+async function resolveAppendToTimeline(target) {
+  const item = await findItemByMediaId(target);
+  if (item) {
+    const mediaPool = await getMediaPool();
+    if (!mediaPool) throw new Error('No project is open in DaVinci Resolve.');
+    const result = await mediaPool.AppendToTimeline([item]);
+    return Array.isArray(result) ? result.length > 0 : Boolean(result);
+  }
+  const mgr = getTimelineTxManager();
+  const res = await mgr.transactionalAppend(target);
+  return res.success;
+}
+
+async function resolveNewTrack(mediaId, filePath, options) {
+  const mgr = getTimelineTxManager();
+  return mgr.transactionalNewTrack(mediaId, filePath, options);
 }
 
 async function resolveGetContext() {
@@ -758,7 +949,7 @@ async function resolveGetContext() {
 let mainWindow = null;
 let errorShown = false;
 
-const AUDIO_EXTENSIONS = ['wav', 'aif', 'aiff', 'flac', 'mp3', 'm4a', 'aac', 'ogg', 'opus', 'caf', 'wma', 'mp4', 'mov', 'mkv', 'webm', 'm4v'];
+const AUDIO_EXTENSIONS = ['wav', 'wave', 'aif', 'aiff', 'aifc', 'flac', 'mp3', 'm4a', 'mp4'];
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -908,11 +1099,15 @@ function registerIpc() {
       properties: ['openFile', 'treatPackageAsDirectory'],
       filters: [
         { name: 'Audio and video', extensions: AUDIO_EXTENSIONS },
-        { name: 'All files', extensions: ['*'] },
       ],
     });
     if (result.canceled || !result.filePaths || result.filePaths.length === 0) return null;
-    return result.filePaths[0];
+    return registerNativePath(result.filePaths[0]);
+  });
+
+  ipcMain.handle('hawa:files:register-dropped', async (event, filePath) => {
+    requireTrustedIpcSender(event);
+    return registerNativePath(filePath);
   });
 
   ipcMain.handle('hawa:files:reveal', async (event, filePath) => {
@@ -923,7 +1118,9 @@ function registerIpc() {
 
   ipcMain.handle('hawa:resolve:selected', async (event) => {
     requireTrustedIpcSender(event);
-    return resolveGetSelectedClip();
+    const clip = await resolveGetSelectedClip();
+    if (!clip) return null;
+    return { ...clip, filePath: await registerNativePath(clip.filePath) };
   });
   ipcMain.handle('hawa:resolve:import', async (event, filePath) => {
     requireTrustedIpcSender(event);
@@ -936,6 +1133,10 @@ function registerIpc() {
   ipcMain.handle('hawa:resolve:append', async (event, mediaId) => {
     requireTrustedIpcSender(event);
     return resolveAppendToTimeline(mediaId);
+  });
+  ipcMain.handle('hawa:resolve:new-track', async (event, mediaId, filePath, options) => {
+    requireTrustedIpcSender(event);
+    return resolveNewTrack(mediaId, filePath, options);
   });
   ipcMain.handle('hawa:resolve:context', async (event) => {
     requireTrustedIpcSender(event);
@@ -957,10 +1158,21 @@ async function runSelfTest() {
     out.pathForFileNull = window.hawa.files.pathForFile(new File(['x'], 'x.wav')) === null;
     const ep = await window.hawa.engine.getEndpoint();
     out.endpoint = ep;
-    const r = await fetch(ep.baseUrl + '/api/health', { headers: { 'X-Hawa-Token': ep.token } });
+    out.endpointHasCredential = Object.keys(ep).some((key) => /token|auth|session|secret/i.test(key)) || /[?&](?:token|auth|session)=/i.test(ep.baseUrl);
+    const r = await fetch(ep.baseUrl + '/api/health', {
+      headers: {
+        'X-Hawa-Token': 'renderer-controlled-root',
+        Authorization: 'Bearer renderer-controlled-session',
+        Range: 'bytes=0-1023',
+      },
+    });
     out.health = { status: r.status, body: await r.json() };
-    const r2 = await fetch(ep.baseUrl + '/api/health');
-    out.unauthStatus = r2.status;
+    try {
+      await fetch(ep.baseUrl + '/api/session', { method: 'POST' });
+      out.sessionBootstrapBlocked = false;
+    } catch {
+      out.sessionBootstrapBlocked = true;
+    }
     const csp = document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content || '';
     out.security = { csp };
     delete window.__hawaInjectedInlineRan;
@@ -1017,7 +1229,7 @@ async function runSelfTest() {
   } catch (err) {
     console.log('HAWA_SELFTEST_ERROR ' + JSON.stringify({ title: 'selftest threw', detail: String(err && err.message ? err.message : err) }));
   }
-  app.quit();
+  if (!SELFTEST_HARD_CRASH) app.quit();
 }
 
 // ---------------------------------------------------------------------------------------------
