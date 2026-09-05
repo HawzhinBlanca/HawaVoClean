@@ -252,6 +252,8 @@ def test_a_child_whose_real_spawner_dies_is_gone_without_publishing(tmp_path: Pa
     """The honored contract, in real processes: spawner declares itself and
     dies; the child must go down with it, whether the death lands before or
     after the child finished arming."""
+    if sys.platform == "win32":
+        pytest.skip("Windows does not support os.kill(pid, 0) probe or init reparenting")
     marker = tmp_path / "still-running"
     grandchild = tmp_path / "grandchild.py"
     grandchild.write_text(

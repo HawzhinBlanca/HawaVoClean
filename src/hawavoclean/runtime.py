@@ -303,8 +303,22 @@ def evict_memmap_pages(
 
             windll = getattr(ctypes, "windll", None)
             if windll is not None:
+                windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
                 process = windll.kernel32.GetCurrentProcess()
-                windll.psapi.EmptyWorkingSet(process)
+                if hasattr(windll.psapi, "EmptyWorkingSet"):
+                    windll.psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+                    windll.psapi.EmptyWorkingSet.restype = ctypes.c_int
+                    windll.psapi.EmptyWorkingSet(process)
+                elif hasattr(windll.kernel32, "SetProcessWorkingSetSize"):
+                    windll.kernel32.SetProcessWorkingSetSize.argtypes = [
+                        ctypes.c_void_p,
+                        ctypes.c_size_t,
+                        ctypes.c_size_t,
+                    ]
+                    windll.kernel32.SetProcessWorkingSetSize.restype = ctypes.c_int
+                    windll.kernel32.SetProcessWorkingSetSize(
+                        process, ctypes.c_size_t(-1), ctypes.c_size_t(-1)
+                    )
         except Exception:
             pass
         return

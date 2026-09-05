@@ -344,8 +344,8 @@ def test_rotation_store_internal_parsers_and_validation(monkeypatch: pytest.Monk
     from unittest.mock import MagicMock
 
     stat_mock = MagicMock(spec=os.stat_result)
-    current_uid = getattr(os, "getuid", lambda: 1000)()
-    stat_mock.st_uid = current_uid
+    monkeypatch.setattr(os, "getuid", lambda: 1000, raising=False)
+    stat_mock.st_uid = 1000
     stat_mock.st_mode = stat.S_IFREG | 0o666  # group and other writable
     assert _trusted_metadata(stat_mock) is False
 
