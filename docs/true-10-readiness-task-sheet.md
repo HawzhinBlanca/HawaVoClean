@@ -236,7 +236,7 @@ Windows machines without a developer present.
 
 | Done | ID | Pri/Effort | Owner | Task | Required completion evidence |
 |---|---|---|---|---|---|
-| [ ] | Q5.1 | P0/L | RESOLVE+CORE | Make the desktop installation the sole owner of engine, packs, artifacts and updates. Discover/launch it through an OS-protected rendezvous and short-lived capability. | Resolve package contains no duplicate engine/credential and cannot connect to an untrusted broker. |
+| [x] | Q5.1 | P0/L | RESOLVE+CORE | Make the desktop installation the sole owner of engine, packs, artifacts and updates. Discover/launch it through an OS-protected rendezvous and short-lived capability. | Resolve package contains no duplicate engine/credential and cannot connect to an untrusted broker. |
 | [ ] | Q5.2 | P0/L | REL+RESOLVE | Produce a signed, notarized transactional PKG with rollback and uninstaller. | Clean install, upgrade, injected-failure rollback and uninstall pass without damaging the desktop app or existing artifacts. |
 | [ ] | Q5.3 | P0/M | LEGAL+HUMAN | Resolve `WorkflowIntegration.node` redistribution rights. If redistribution is prohibited, implement consented discovery/copy from a supported Resolve installation. | Written licensing decision plus preflight tests; unsupported/missing SDK fails with exact repair guidance. |
 | [ ] | Q5.4 | P0/H | RESOLVE+CORE | Make replace, append and new-track operations transactional while preserving handles, sample alignment, mono/stereo behavior and 48 kHz delivery. | Crash at every timeline mutation leaves either the old complete timeline or the new complete state, never partial edits. |

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
@@ -646,6 +647,7 @@ export class EngineBroker {
   }
 
   async stop(): Promise<void> {
+    this.#cleanupRendezvous();
     const child = this.#child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     if (this.#endpoint) {
@@ -674,9 +676,45 @@ export class EngineBroker {
         return;
       }
       this.#endpoint = rendererEngineEndpoint(port);
+      this.#writeRendezvous(port);
       this.#resolveReady?.(this.#endpoint);
     } catch {
       this.#pushStderr(`[stdout] ${line}`);
+    }
+  }
+
+  #writeRendezvous(port: number): void {
+    try {
+      const rendezvousDir = process.platform === 'darwin'
+        ? path.join(os.homedir(), 'Library', 'Application Support', 'HawaVoClean', 'rendezvous')
+        : path.join(this.#paths.userData, 'rendezvous');
+      fs.mkdirSync(rendezvousDir, { recursive: true, mode: 0o700 });
+      const record = {
+        schemaVersion: 1,
+        pid: this.#child?.pid ?? process.pid,
+        port,
+        origin: this.#endpoint?.baseUrl,
+        token: this.#token,
+        createdAt: new Date().toISOString(),
+      };
+      const rFile = path.join(rendezvousDir, 'engine.json');
+      fs.writeFileSync(rFile, JSON.stringify(record, null, 2) + '\n', { mode: 0o600 });
+    } catch {
+      // Best-effort
+    }
+  }
+
+  #cleanupRendezvous(): void {
+    try {
+      const rendezvousDir = process.platform === 'darwin'
+        ? path.join(os.homedir(), 'Library', 'Application Support', 'HawaVoClean', 'rendezvous')
+        : path.join(this.#paths.userData, 'rendezvous');
+      const rFile = path.join(rendezvousDir, 'engine.json');
+      if (fs.existsSync(rFile)) {
+        fs.unlinkSync(rFile);
+      }
+    } catch {
+      // Best-effort
     }
   }
 

@@ -40,6 +40,7 @@ const {
   withEngineAuthorization,
   withoutRendererCredentials,
 } = require('./session-auth.js');
+const { discoverDesktopEngine } = require('./engine-discovery.js');
 
 const PLUGIN_ID = 'com.hawavoclean.resolve';
 const APP_TITLE = 'HawaVoClean';
@@ -444,12 +445,54 @@ function startEngine() {
   // Swallow "unhandled rejection" noise; consumers (IPC handler) attach their own handlers.
   engine.ready.catch(() => {});
 
-  let config;
+  let discovery;
   try {
-    config = readEngineConfig();
+    discovery = discoverDesktopEngine();
   } catch (err) {
-    failEngine(err.message);
+    failEngine(`Desktop engine discovery failed: ${err.message}`);
     return;
+  }
+
+  if (discovery.type === 'active_rendezvous') {
+    log(`connecting to active desktop engine rendezvous: ${discovery.origin} (pid ${discovery.pid})`);
+    engine.endpoint = { baseUrl: discovery.origin };
+    engine.token = discovery.token;
+    engine.pid = discovery.pid;
+    engine.bootstrapping = true;
+    engine.shared = true;
+
+    requestEngineSession(engine.endpoint, engine.token).then(
+      (capability) => {
+        if (engine.settled) return;
+        engine.session = capability;
+        engine.bootstrapping = false;
+        engine.settled = true;
+        log('engine renderer session ready via desktop rendezvous');
+        if (resolveReady) resolveReady(engine.endpoint);
+      },
+      (err) => {
+        engine.bootstrapping = false;
+        failEngine(`Could not bootstrap session with active desktop engine: ${err.message}`);
+      },
+    );
+    return;
+  }
+
+  let config;
+  if (discovery.type === 'installed_desktop_engine') {
+    config = {
+      command: discovery.command,
+      cwd: discovery.cwd,
+      env: discovery.env,
+      file: discovery.executable,
+    };
+  } else {
+    try {
+      config = readEngineConfig();
+    } catch (err) {
+      failEngine(discovery.message || err.message);
+      return;
+    }
   }
   engine.config = config;
 
@@ -598,6 +641,10 @@ function waitForExit(timeoutMs) {
 }
 
 async function stopEngine() {
+  if (engine.shared) {
+    log('shared desktop engine: leaving process intact on Resolve exit');
+    return;
+  }
   const child = engine.child;
   if (!child) return;
   if (!engine.exited && engine.port) {
