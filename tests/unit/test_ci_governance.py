@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -173,6 +174,9 @@ def test_workflow_tee_pipelines_are_executable_fail_closed(tmp_path: Path) -> No
     _rehash(unsafe_shell_contract)
     with pytest.raises(governance.GovernanceError, match="does not declare shell: bash"):
         governance.validate_contract(unsafe_shell_contract, root=tmp_path)
+
+    if sys.platform == "win32":
+        return
 
     log = tmp_path / "producer.log"
     result = subprocess.run(
