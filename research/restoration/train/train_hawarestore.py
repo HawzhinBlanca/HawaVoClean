@@ -43,6 +43,7 @@ from hawavoclean.restoration.checkpoint import (
     load_safe_checkpoint,
     save_safe_checkpoint,
 )
+from hawavoclean.restoration.f0 import F0Extractor
 from hawavoclean.restoration.hawarestore_kd import HawaRestoreKDNet
 from hawavoclean.restoration.speaker_embed import SpeakerEmbeddingExtractor
 from research.restoration.simulation.degradation import DegradationSimulator
@@ -53,10 +54,17 @@ SAMPLE_RATE = 48000
 SIGMA_MIN = 1e-4
 
 #: Metric keys HawaRestoreLoss must report when every term is wired in.
-REQUIRED_METRIC_KEYS = ("loss_flow", "loss_stft", "loss_env", "loss_speaker", "loss_total")
+REQUIRED_METRIC_KEYS = (
+    "loss_flow",
+    "loss_stft",
+    "loss_env",
+    "loss_harmonic",
+    "loss_speaker",
+    "loss_total",
+)
 
 #: Checkpoint-facing names for the active loss terms, in REQUIRED_METRIC_KEYS order.
-ACTIVE_LOSS_TERMS = ("flow", "stft", "envelope", "speaker", "total")
+ACTIVE_LOSS_TERMS = ("flow", "stft", "envelope", "harmonic", "speaker", "total")
 
 
 @dataclass(frozen=True)
@@ -202,6 +210,11 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         self.hop = n_fft // 2
         self.extractor = SpeakerEmbeddingExtractor(sample_rate=sr)
         self.simulator = DegradationSimulator(sample_rate=sr)
+        self.f0_extractor = F0Extractor(
+            sample_rate=sr,
+            hop_length=self.hop,
+            frame_length=self.n_fft,
+        )
 
         # Load canonical embeddings from enrolled profiles when available.
         # Falls back to per-chunk extraction for speakers without profiles.
@@ -232,7 +245,9 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
             self._file_cache[source_path] = (audio.astype(np.float32), int(file_sr))
         return self._file_cache[source_path]
 
-    def _synthesize(self, item: ItemSpec, rng: np.random.Generator) -> np.ndarray:
+    def _synthesize(
+        self, item: ItemSpec, rng: np.random.Generator
+    ) -> tuple[np.ndarray, float, float]:
         f0 = float(rng.uniform(90.0, 260.0))
         n = int(self.sr * item.duration_s)
         t = np.linspace(0, item.duration_s, n, endpoint=False, dtype=np.float32)
@@ -243,9 +258,9 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
                 break
             sig += (1.0 / (h**0.8)) * np.sin(2 * np.pi * freq * t + rng.uniform(0, 2 * np.pi))
         out: np.ndarray = (sig / (np.max(np.abs(sig)) + 1e-6) * 0.7).astype(np.float32)
-        return out
+        return out, f0, 1.0
 
-    def _load_real(self, item: ItemSpec) -> np.ndarray:
+    def _load_real(self, item: ItemSpec) -> tuple[np.ndarray, float, float]:
         full_audio, orig_sr = self._get_full_audio(item.source)
         if orig_sr != self.sr:
             start_48k = int(round(item.start_frame * (self.sr / orig_sr)))
@@ -259,7 +274,11 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         peak = float(np.max(np.abs(audio)))
         if peak > 1e-6:
             audio = audio / peak * 0.7
-        return audio.astype(np.float32)
+        audio_f32 = audio.astype(np.float32)
+        f0_traj = self.f0_extractor.extract(audio_f32)
+        f0_median = float(f0_traj.statistics.median_hz)
+        vuv_fraction = float(f0_traj.statistics.voiced_fraction)
+        return audio_f32, f0_median, vuv_fraction
 
     def _degrade(
         self, clean: np.ndarray, item: ItemSpec, rng: np.random.Generator, cutoff_hz: float
@@ -302,7 +321,10 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         item = self.items[idx]
         rng = np.random.default_rng(item.seed)
         cutoff_hz = float(rng.uniform(2500.0, 16000.0))
-        clean = self._synthesize(item, rng) if item.source == "synthetic" else self._load_real(item)
+        if item.source == "synthetic":
+            clean, f0_val, vuv_val = self._synthesize(item, rng)
+        else:
+            clean, f0_val, vuv_val = self._load_real(item)
         degraded = self._degrade(clean, item, rng, cutoff_hz)
 
         # Prefer enrolled canonical embedding; fall back to per-chunk extraction.
@@ -319,6 +341,8 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
             "cutoff_hz": torch.tensor(cutoff_hz, dtype=torch.float32),
             "speaker_idx": torch.tensor(self.speaker_index[item.speaker_id], dtype=torch.long),
             "speaker_proto": torch.from_numpy(proto).float(),
+            "f0_hz": torch.tensor(f0_val, dtype=torch.float32),
+            "vuv": torch.tensor(vuv_val, dtype=torch.float32),
         }
 
 
@@ -431,6 +455,8 @@ def _run_epoch(
         cutoff_hz = batch["cutoff_hz"].to(device)  # (B,)
         spk_idx = batch["speaker_idx"].to(device)  # (B,)
         spk_proto = batch["speaker_proto"].to(device)  # (B, 192)
+        f0_hz = batch["f0_hz"].to(device)  # (B,)
+        vuv = batch["vuv"].to(device)  # (B,)
         B = clean_stft.shape[0]
 
         with torch.set_grad_enabled(training):
@@ -444,7 +470,16 @@ def _run_epoch(
             t_expand = t.view(B, 1, 1, 1)
             x_t = (1.0 - (1.0 - SIGMA_MIN) * t_expand) * x0 + t_expand * x1
             target_v = x1 - (1.0 - SIGMA_MIN) * x0
-            pred_v = model(x_t, t, cutoff_hz, spk_idx, spk_proto, x_obs=x_obs)
+            pred_v = model(
+                x_t,
+                t,
+                cutoff_hz,
+                spk_idx,
+                spk_proto,
+                x_obs=x_obs,
+                f0_hz=f0_hz,
+                vuv=vuv,
+            )
 
             # One-step clean estimate from the path identity
             #   x1 = (1 - sigma_min) * x_t + (1 - (1 - sigma_min) * t) * v,
@@ -460,16 +495,16 @@ def _run_epoch(
                 torch.complex(x1[:, 0], x1[:, 1]), n_fft=n_fft, hop_length=hop, window=window
             )
 
-            # Batch-min cutoff: the high-band mask must cover every item's
-            # missing band, so the most conservative (lowest) cutoff wins.
+            # Per-example missing-band losses with F0 harmonic consistency
             loss, metrics = loss_fn(
                 pred_v,
                 target_v,
                 pred_audio=pred_audio,
                 target_audio=target_audio,
-                cutoff_hz=float(cutoff_hz.min().item()),
+                cutoff_hz=cutoff_hz,
                 pred_speaker_emb=spk_embed(pred_audio),
                 target_speaker_emb=spk_embed(target_audio),
+                f0_hz=f0_hz,
             )
 
         missing = set(REQUIRED_METRIC_KEYS) - set(metrics)
@@ -667,6 +702,13 @@ def train_model(
         "prototype_dim": 192,
         "cond_dim": 256,
         "n_fft": n_fft,
+        "hop_length": train_ds.hop,
+        "win_length": n_fft,
+        "sample_rate": SAMPLE_RATE,
+        "chunk_seconds": duration_s,
+        "chunk_overlap_seconds": 0.25,
+        "solver": "midpoint",
+        "use_f0_cond": True,
     }
     model = HawaRestoreKDNet(**config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -786,6 +828,7 @@ def train_model(
                 "flow": loss_fn.lambda_flow,
                 "stft": loss_fn.lambda_stft,
                 "envelope": loss_fn.lambda_envelope,
+                "harmonic": loss_fn.lambda_harmonic,
                 "speaker": loss_fn.lambda_speaker,
             },
             "rng_state": _serialize_rng_state(),
@@ -823,6 +866,7 @@ def train_model(
             "flow": loss_fn.lambda_flow,
             "stft": loss_fn.lambda_stft,
             "envelope": loss_fn.lambda_envelope,
+            "harmonic": loss_fn.lambda_harmonic,
             "speaker": loss_fn.lambda_speaker,
         },
         "final_losses": {

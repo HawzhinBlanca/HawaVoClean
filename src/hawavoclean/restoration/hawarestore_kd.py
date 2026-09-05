@@ -104,10 +104,12 @@ class HawaRestoreKDNet(nn.Module):
         prototype_dim: int = 192,
         cond_dim: int = 256,
         n_fft: int = 1024,
+        use_f0_cond: bool = True,
     ) -> None:
         super().__init__()
         self.n_fft = n_fft
         self.num_freq_bins = n_fft // 2 + 1
+        self.use_f0_cond = use_f0_cond
 
         # Embeddings
         self.time_embed = SinusoidalEmbedding(64)
@@ -115,10 +117,15 @@ class HawaRestoreKDNet(nn.Module):
         self.speaker_embedding = nn.Embedding(num_speakers, speaker_embed_dim)
         self.proto_proj = nn.Linear(prototype_dim, 64)
 
+        cond_in_dim = 64 + 64 + speaker_embed_dim + 64
+        if use_f0_cond:
+            self.f0_embed = SinusoidalEmbedding(32)
+            self.vuv_proj = nn.Linear(1, 32)
+            cond_in_dim += 64
+
         # Total condition projector
-        # time(64) + cutoff(64) + spk_id(64) + proto(64) = 256
         self.cond_mlp = nn.Sequential(
-            nn.Linear(64 + 64 + speaker_embed_dim + 64, cond_dim),
+            nn.Linear(cond_in_dim, cond_dim),
             nn.GELU(),
             nn.Linear(cond_dim, cond_dim),
         )
@@ -151,9 +158,14 @@ class HawaRestoreKDNet(nn.Module):
         speaker_idx: torch.Tensor | None = None,  # (B,)
         speaker_prototype: torch.Tensor | None = None,  # (B, 192)
         x_obs: torch.Tensor | None = None,  # (B, 2, F, T)
-        _f0_hz: torch.Tensor | None = None,  # (B,)
+        f0_hz: torch.Tensor | None = None,  # (B,)
+        vuv: torch.Tensor | None = None,  # (B,) or (B, 1)
+        speaker_proto: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict velocity field v_t(x_t)."""
+        if speaker_prototype is None and speaker_proto is not None:
+            speaker_prototype = speaker_proto
+
         B = x_t.shape[0]
         device = x_t.device
 
@@ -171,7 +183,20 @@ class HawaRestoreKDNet(nn.Module):
         else:
             proto_emb = torch.zeros(B, 64, device=device)
 
-        cond = self.cond_mlp(torch.cat([t_emb, c_emb, spk_emb, proto_emb], dim=-1))
+        cond_parts = [t_emb, c_emb, spk_emb, proto_emb]
+        if self.use_f0_cond:
+            if f0_hz is not None:
+                f0_e = self.f0_embed(f0_hz / 100.0)
+            else:
+                f0_e = torch.zeros(B, 32, device=device)
+            if vuv is not None:
+                vuv_in = vuv.view(B, 1) if vuv.dim() <= 1 else vuv
+                vuv_e = self.vuv_proj(vuv_in)
+            else:
+                vuv_e = torch.zeros(B, 32, device=device)
+            cond_parts.extend([f0_e, vuv_e])
+
+        cond = self.cond_mlp(torch.cat(cond_parts, dim=-1))
 
         # 2. Forward through vector field network with low-band observed conditioning
         h = self.in_proj(x_t)
@@ -246,6 +271,15 @@ class HawaRestoreKD(Restorer):
             net_config = ckpt.get("config", {})
             num_speakers = int(net_config.get("num_speakers", 10))
             ckpt_n_fft = int(net_config.get("n_fft", n_fft))
+            self.n_fft = ckpt_n_fft
+            self.win_length = int(net_config.get("win_length", self.win_length))
+            self.hop_length = int(net_config.get("hop_length", self.hop_length))
+            self.chunk_seconds = float(net_config.get("chunk_seconds", self.chunk_seconds))
+            self.chunk_overlap_seconds = float(
+                net_config.get("chunk_overlap_seconds", self.chunk_overlap_seconds)
+            )
+            self.solver = str(net_config.get("solver", self.solver))
+            use_f0_cond = bool(net_config.get("use_f0_cond", False))
 
             # Speaker table: from checkpoint metadata or legacy character_XX list.
             train_speakers = ckpt.get("train_speakers", [])
@@ -259,6 +293,7 @@ class HawaRestoreKD(Restorer):
                 HawaRestoreKDNet(
                     n_fft=ckpt_n_fft,
                     num_speakers=num_speakers,
+                    use_f0_cond=use_f0_cond,
                 )
                 .to(self.device)
                 .eval()
@@ -272,6 +307,14 @@ class HawaRestoreKD(Restorer):
             raise ModelProvenanceError(
                 f"Failed to load HawaRestore-KD checkpoint {ckpt_path}: {e}"
             ) from e
+
+        from hawavoclean.restoration.f0 import F0Extractor
+
+        self.f0_extractor = F0Extractor(
+            sample_rate=self.sample_rate,
+            hop_length=self.hop_length,
+            frame_length=self.win_length,
+        )
 
         #: SHA-256 of the checkpoint that was actually loaded into ``self.net``.
         #: Reports must quote this rather than re-hashing a path they assume exists.
@@ -309,6 +352,8 @@ class HawaRestoreKD(Restorer):
         speaker_idx: torch.Tensor | None,
         speaker_proto: torch.Tensor | None,
         generator: torch.Generator,
+        f0_hz: torch.Tensor | None = None,
+        vuv: torch.Tensor | None = None,
         steps: int = 4,
     ) -> torch.Tensor:
         """Midpoint or Heun flow-matching ODE solver with low-band guidance."""
@@ -335,11 +380,25 @@ class HawaRestoreKD(Restorer):
                         [min(1.0, t_val + dt)], device=self.device, dtype=torch.float32
                     )
                     v_0 = self.net(
-                        x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                        x_t,
+                        t_curr,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
                     )
                     x_pred = x_t + v_0 * dt
                     v_1 = self.net(
-                        x_pred, t_next, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                        x_pred,
+                        t_next,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
                     )
                     x_t = x_t + 0.5 * (v_0 + v_1) * dt
                 else:
@@ -348,11 +407,25 @@ class HawaRestoreKD(Restorer):
                         [t_val + dt / 2.0], device=self.device, dtype=torch.float32
                     )
                     v_curr = self.net(
-                        x_t, t_curr, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                        x_t,
+                        t_curr,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
                     )
                     x_mid = x_t + v_curr * (dt / 2.0)
                     v_mid = self.net(
-                        x_mid, t_mid, cutoff_t, speaker_idx, speaker_proto, x_obs=Z_obs_real
+                        x_mid,
+                        t_mid,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
                     )
                     x_t = x_t + v_mid * dt
 
@@ -405,6 +478,8 @@ class HawaRestoreKD(Restorer):
         spk_idx_t: torch.Tensor | None,
         proto_t: torch.Tensor | None,
         generator: torch.Generator,
+        f0_t: torch.Tensor | None = None,
+        vuv_t: torch.Tensor | None = None,
         solver_errors: list[str] | None = None,
     ) -> dict[float, np.ndarray]:
         """Restore one block, returning one waveform per active strength."""
@@ -427,6 +502,8 @@ class HawaRestoreKD(Restorer):
                 speaker_idx=spk_idx_t,
                 speaker_proto=proto_t,
                 generator=generator,
+                f0_hz=f0_t,
+                vuv=vuv_t,
                 steps=4,
             )
             flow_np = Z_flow.squeeze(0).cpu().numpy()
@@ -480,8 +557,8 @@ class HawaRestoreKD(Restorer):
         effective_cutoff_hz: float,
         speaker_id: str | None = None,
         speaker_embedding: np.ndarray | None = None,
-        f0_trajectory: np.ndarray | None = None,  # noqa: ARG002
-        vuv_mask: np.ndarray | None = None,  # noqa: ARG002
+        f0_trajectory: np.ndarray | None = None,
+        vuv_mask: np.ndarray | None = None,
         strengths: list[float] | None = None,
         seed: int = 42,
     ) -> RestorationRenderResult:
@@ -542,6 +619,28 @@ class HawaRestoreKD(Restorer):
                 torch.from_numpy(speaker_embedding.astype(np.float32)).unsqueeze(0).to(self.device)
             )
 
+        # F0 and Voicing conditioning extraction
+        f0_t: torch.Tensor | None = None
+        vuv_t: torch.Tensor | None = None
+        if f0_trajectory is not None and len(f0_trajectory) > 0:
+            valid_f0 = f0_trajectory[f0_trajectory > 0.0]
+            median_f0 = float(np.median(valid_f0)) if len(valid_f0) > 0 else 0.0
+            voiced_frac = (
+                float(np.mean(vuv_mask > 0.5))
+                if vuv_mask is not None and len(vuv_mask) > 0
+                else (1.0 if median_f0 > 0.0 else 0.0)
+            )
+            f0_t = torch.tensor([median_f0], device=self.device, dtype=torch.float32)
+            vuv_t = torch.tensor([[voiced_frac]], device=self.device, dtype=torch.float32)
+        elif getattr(self.net, "use_f0_cond", False):
+            f0_traj = self.f0_extractor.extract(audio_48k)
+            f0_t = torch.tensor(
+                [f0_traj.statistics.median_hz], device=self.device, dtype=torch.float32
+            )
+            vuv_t = torch.tensor(
+                [[f0_traj.statistics.voiced_fraction]], device=self.device, dtype=torch.float32
+            )
+
         active_strengths = [s for s in strengths if s > 0.0]
 
         short_input = False
@@ -575,6 +674,8 @@ class HawaRestoreKD(Restorer):
                     spk_idx_t=spk_idx_t,
                     proto_t=proto_t,
                     generator=gen,
+                    f0_t=f0_t,
+                    vuv_t=vuv_t,
                     solver_errors=solver_errors,
                 )
 
