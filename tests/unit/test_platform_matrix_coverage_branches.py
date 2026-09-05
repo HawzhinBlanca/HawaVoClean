@@ -8,6 +8,8 @@ on Windows runners.
 
 from __future__ import annotations
 
+import errno
+import os
 import sys
 import types
 from pathlib import Path
@@ -403,3 +405,273 @@ def test_open_safe_lock_and_lease_roundtrip(tmp_path: Path) -> None:
             try_acquire_exclusive_file_lease(lock_file)
     finally:
         lease.release()
+
+
+# ---------------------------------------------------------------------------
+# platform_fs extra branches (locking, Windows move, atomic renames)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_open_safe_lock_identity_mismatch_and_reparse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hawavoclean.platform_fs import _open_safe_lock
+
+    # 1. Target is a directory (not a regular file) -> raises OSError(ELOOP)
+    dir_target = tmp_path / "lock_dir"
+    dir_target.mkdir()
+    with pytest.raises(OSError) as exc_info:
+        _open_safe_lock(dir_target)
+    assert exc_info.value.errno == errno.ELOOP
+
+    # 2. If after is reparse point / symlink
+    target = tmp_path / "lock.txt"
+    target.write_text("ok", encoding="utf-8")
+    monkeypatch.setattr("hawavoclean.platform_fs._is_reparse_or_symlink", lambda _stat: True)
+    with pytest.raises(OSError) as exc_info2:
+        _open_safe_lock(target)
+    assert exc_info2.value.errno == errno.ELOOP
+
+
+@pytest.mark.unit
+def test_windows_move_failure_and_flush_rename_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ctypes
+
+    from hawavoclean.platform_fs import _flush_rename_directories, _windows_move
+
+    src = tmp_path / "sub1" / "file.txt"
+    dst = tmp_path / "sub2" / "file.txt"
+    src.parent.mkdir()
+    dst.parent.mkdir()
+    src.write_text("x", encoding="utf-8")
+
+    # _flush_rename_directories cross-directory
+    monkeypatch.setattr("hawavoclean.platform_fs._platform_name", lambda: "posix")
+    with monkeypatch.context() as m:
+        m.setattr("hawavoclean.platform_fs.flush_directory", MagicMock())
+        _flush_rename_directories(src, dst)
+
+    # _windows_move failure raises ctypes.WinError
+    mock_kernel32 = MagicMock()
+    mock_kernel32.MoveFileExW.return_value = 0  # FALSE
+    mock_windll = MagicMock(return_value=mock_kernel32)
+    monkeypatch.setattr(ctypes, "WinDLL", mock_windll, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    monkeypatch.setattr(ctypes, "WinError", OSError, raising=False)
+    mock_wintypes = types.SimpleNamespace(LPCWSTR=str, DWORD=int, BOOL=int)
+    monkeypatch.setitem(sys.modules, "ctypes.wintypes", mock_wintypes)
+    with pytest.raises(OSError):
+        _windows_move(src, dst, replace=True)
+
+
+# ---------------------------------------------------------------------------
+# paths branches (cross-platform app_data_root, ffmpeg/ffprobe binaries)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_paths_app_data_root_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hawavoclean.paths import app_data_root
+
+    # 1. State dir env override
+    monkeypatch.setenv("HAWAVOCLEAN_STATE_DIR", "/custom/state")
+    assert app_data_root() == Path("/custom/state").resolve()
+    monkeypatch.delenv("HAWAVOCLEAN_STATE_DIR")
+
+    # 2. Windows with LOCALAPPDATA
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\Test\\AppData\\Local")
+    assert "HawaVoClean" in str(app_data_root())
+
+    # 3. Windows without LOCALAPPDATA
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    assert "HawaVoClean" in str(app_data_root())
+
+    # 4. Darwin
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert "Application Support" in str(app_data_root())
+
+    # 5. Linux with XDG_DATA_HOME
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", "/custom/xdg")
+    assert str(app_data_root()).startswith("/custom/xdg")
+
+    # 6. Linux without XDG_DATA_HOME
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    assert ".local/share" in str(app_data_root())
+
+
+@pytest.mark.unit
+def test_paths_binary_resolution_fallbacks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hawavoclean.paths import ffmpeg_bin_path, ffprobe_bin_path, resolve_calibration_file
+
+    fake_bin = tmp_path / "fake_ffmpeg"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
+
+    # 1. Env override
+    monkeypatch.setenv("HAWAVOCLEAN_FFMPEG_PATH", str(fake_bin))
+    assert ffmpeg_bin_path() == str(fake_bin)
+    monkeypatch.setenv("HAWAVOCLEAN_FFPROBE_PATH", str(fake_bin))
+    assert ffprobe_bin_path() == str(fake_bin)
+
+    # 2. Missing binary fallback to shutil.which
+    monkeypatch.delenv("HAWAVOCLEAN_FFMPEG_PATH")
+    monkeypatch.delenv("HAWAVOCLEAN_FFPROBE_PATH")
+    monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+    assert ffmpeg_bin_path() == "/usr/bin/ffmpeg"
+    assert ffprobe_bin_path() == "/usr/bin/ffprobe"
+
+    # 3. resolve_calibration_file: absolute vs relative
+    abs_p = Path("/tmp/calib.json")
+    assert resolve_calibration_file(str(abs_p)) == abs_p
+    rel_p = "calib.json"
+    assert resolve_calibration_file(rel_p).name == "calib.json"
+
+
+# ---------------------------------------------------------------------------
+# audio.probe metadata validation branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_audio_probe_metadata_validators() -> None:
+    from hawavoclean.audio.probe import (
+        MAX_METADATA_INTEGER,
+        _count_samples_by_decoding,
+        _metadata_float,
+        _metadata_int,
+        _metadata_text,
+    )
+    from hawavoclean.errors import MediaPreflightError
+
+    # int validator
+    assert _metadata_int(42, "field") == 42
+    assert _metadata_int("100", "field") == 100
+    with pytest.raises(MediaPreflightError, match="not an integer"):
+        _metadata_int(True, "field")
+    with pytest.raises(MediaPreflightError, match="not a valid integer"):
+        _metadata_int("bad", "field")
+    with pytest.raises(MediaPreflightError, match="outside the supported range"):
+        _metadata_int(-1, "field", minimum=0)
+    with pytest.raises(MediaPreflightError, match="outside the supported range"):
+        _metadata_int(MAX_METADATA_INTEGER + 1, "field")
+
+    # float validator
+    assert _metadata_float(3.14, "field") == pytest.approx(3.14)
+    with pytest.raises(MediaPreflightError, match="not a valid number"):
+        _metadata_float(False, "field")
+    with pytest.raises(MediaPreflightError, match="must be finite"):
+        _metadata_float("nan", "field")
+    with pytest.raises(MediaPreflightError, match="must be finite"):
+        _metadata_float("inf", "field")
+
+    # text validator
+    assert _metadata_text("valid", "field") == "valid"
+    with pytest.raises(MediaPreflightError, match="missing or malformed"):
+        _metadata_text("", "field")
+    with pytest.raises(MediaPreflightError, match="missing or malformed"):
+        _metadata_text(123, "field")
+    with pytest.raises(MediaPreflightError, match="control characters"):
+        _metadata_text("line\x00break", "field")
+
+    # _count_samples_by_decoding with None binary
+    assert _count_samples_by_decoding(Path("f.wav"), None, 48000, 0, None) == 0
+
+
+# ---------------------------------------------------------------------------
+# audio.decode edge checks & window bounds
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_audio_decode_window_bounds_and_checks() -> None:
+    from hawavoclean.audio.decode import _check_decoded, window_sample_bounds
+    from hawavoclean.audio.types import AudioProbeResult
+
+    probe = AudioProbeResult(
+        path=Path("sample.wav"),
+        channels=2,
+        sample_rate=48000,
+        samples=480000,
+        duration_s=10.0,
+        format_name="wav",
+        codec_name="pcm_s16le",
+        bit_depth=16,
+        sha256="0" * 64,
+    )
+
+    # Valid window
+    assert window_sample_bounds(probe, 1.0, 2.0) == (48000, 96000)
+
+    # Invalid windows
+    with pytest.raises(InvalidUserInputError, match="must be finite"):
+        window_sample_bounds(probe, float("nan"), 2.0)
+    with pytest.raises(InvalidUserInputError, match="must be >= 0"):
+        window_sample_bounds(probe, -1.0, 2.0)
+    with pytest.raises(InvalidUserInputError, match="must be greater than start_s"):
+        window_sample_bounds(probe, 2.0, 1.0)
+    with pytest.raises(InvalidUserInputError, match="past the end of"):
+        window_sample_bounds(probe, 12.0, 15.0)
+
+    # _check_decoded
+    with pytest.raises(InvalidUserInputError, match="NaN or Infinite"):
+        _check_decoded(np.array([[np.nan]], dtype=np.float32), Path("a.wav"))
+    with pytest.raises(InvalidUserInputError, match="NaN or Infinite"):
+        _check_decoded(np.array([[np.inf]], dtype=np.float32), Path("a.wav"))
+    with pytest.raises(InvalidUserInputError, match="abnormal float amplitude"):
+        _check_decoded(np.array([[100.0]], dtype=np.float32), Path("a.wav"))
+
+
+# ---------------------------------------------------------------------------
+# watchdog branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_watchdog_signal_and_parent_alive_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+
+    from hawavoclean.watchdog import (
+        _self_interrupt_signal,
+        install_parent_death_watchdog,
+        parent_is_alive,
+    )
+
+    # 1. Signals: Win32 returns SIGTERM
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert _self_interrupt_signal() == signal.SIGTERM
+
+    # POSIX with SIGINT ignored returns SIGTERM
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(signal, "getsignal", lambda _sig: signal.SIG_IGN)
+    assert _self_interrupt_signal() == signal.SIGTERM
+
+    # POSIX default returns SIGINT
+    monkeypatch.setattr(signal, "getsignal", lambda _sig: signal.default_int_handler)
+    assert _self_interrupt_signal() == signal.SIGINT
+
+    # 2. parent_is_alive reparenting check
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "getppid", lambda: 1)
+    assert not parent_is_alive(99999)  # reparented to 1 != 99999
+
+    # 3. install_parent_death_watchdog invalid configs
+    monkeypatch.delenv("HAWAVOCLEAN_PARENT_PID", raising=False)
+    assert install_parent_death_watchdog() is None
+
+    monkeypatch.setenv("HAWAVOCLEAN_PARENT_PID", "invalid")
+    assert install_parent_death_watchdog() is None
+
+    monkeypatch.setenv("HAWAVOCLEAN_PARENT_PID", "1")  # <= 1
+    assert install_parent_death_watchdog() is None
+
+    monkeypatch.setenv("HAWAVOCLEAN_PARENT_PID", str(os.getpid()))  # self
+    assert install_parent_death_watchdog() is None
+
+    monkeypatch.setenv("HAWAVOCLEAN_PARENT_PID", "99999")
+    monkeypatch.setattr(os, "getppid", lambda: 22222)
+    assert install_parent_death_watchdog() is None
