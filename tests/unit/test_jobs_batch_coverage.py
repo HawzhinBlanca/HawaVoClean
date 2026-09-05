@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -15,6 +16,10 @@ from hawavoclean.server.jobs import JobManager
 
 def _dummy_command(record: Any) -> list[str]:
     return ["echo", record.job_id]
+
+
+def _slow_command(_record: Any) -> list[str]:
+    return [sys.executable, "-c", "import time; time.sleep(10)"]
 
 
 def test_job_manager_init_and_submit_validation(tmp_path: Path) -> None:
@@ -76,7 +81,7 @@ def test_job_manager_init_and_submit_validation(tmp_path: Path) -> None:
 
 def test_jobs_batch_pause_resume_cancel(tmp_path: Path) -> None:
     db_path = tmp_path / "jobs.sqlite3"
-    manager = JobManager(store_path=db_path, command_factory=_dummy_command)
+    manager = JobManager(store_path=db_path, command_factory=_slow_command)
     try:
         # 1. Batch does not exist
         assert manager.pause_batch("nonexistent_batch") is False
@@ -169,7 +174,7 @@ def test_jobs_batch_summary_states_and_in_memory_listing(tmp_path: Path) -> None
 
 def test_jobs_retry_job_branches(tmp_path: Path) -> None:
     db_path = tmp_path / "retry_jobs.sqlite3"
-    manager = JobManager(store_path=db_path, command_factory=_dummy_command)
+    manager = JobManager(store_path=db_path, command_factory=_slow_command)
     try:
         # 1. Non-existent job
         with pytest.raises(KeyError, match="not found"):
