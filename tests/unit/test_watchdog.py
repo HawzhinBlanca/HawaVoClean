@@ -156,7 +156,8 @@ def test_watchdog_interrupts_then_hard_exits(monkeypatch: pytest.MonkeyPatch) ->
     assert actions.fired.wait(10.0), "watchdog never acted on a dead parent"
     thread.join(timeout=5.0)
 
-    assert actions.signals == [(os.getpid(), signal.SIGINT)], actions.signals
+    expected_sig = signal.SIGTERM if sys.platform == "win32" else signal.SIGINT
+    assert actions.signals == [(os.getpid(), expected_sig)], actions.signals
     assert actions.exits == [130]
 
 
@@ -198,6 +199,8 @@ def test_a_child_reparented_before_arming_still_tears_down(
     the not-our-parent check ignored this too, the window between exec and
     arming would be a free pass to finish and publish.
     """
+    if sys.platform == "win32":
+        pytest.skip("Windows processes are never reparented to init (PID 1)")
     dead = _a_pid_that_has_exited()
     actions = _RecordedActions(monkeypatch)  # probes report the pid as gone
     monkeypatch.setattr(os, "getppid", lambda: 1)
@@ -415,3 +418,122 @@ def test_pid_exists_windows_winerror_87(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(os, "kill", _raise_winerror_5)
     with pytest.raises(OSError):
         _pid_exists(12345)
+
+
+def test_windows_get_parent_pid_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    import ctypes
+    from typing import Any
+
+    from hawavoclean.watchdog import _windows_get_parent_pid
+
+    # 1. windll is None
+    monkeypatch.delattr(ctypes, "windll", raising=False)
+    assert _windows_get_parent_pid(1234) is None
+
+    # 2. snapshot returns -1
+    class MockK32Fail:
+        def CreateToolhelp32Snapshot(self, _flags: int, _pid: int) -> int:
+            return -1
+
+    monkeypatch.setattr(
+        ctypes, "windll", type("MockWindll", (), {"kernel32": MockK32Fail()})(), raising=False
+    )
+    assert _windows_get_parent_pid(1234) is None
+
+    # 2b. Process32FirstW returns False
+    class MockK32FirstFail:
+        def CreateToolhelp32Snapshot(self, _flags: int, _pid: int) -> int:
+            return 100
+
+        def Process32FirstW(self, _snap: int, _entry: Any) -> bool:
+            return False
+
+        def CloseHandle(self, _snap: int) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        ctypes,
+        "windll",
+        type("MockWindll", (), {"kernel32": MockK32FirstFail()})(),
+        raising=False,
+    )
+    assert _windows_get_parent_pid(1234) is None
+
+    # 3. Process iteration finds target PID
+    class MockK32Success:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.closed = False
+
+        def CreateToolhelp32Snapshot(self, _flags: int, _pid: int) -> int:
+            return 100
+
+        def Process32FirstW(self, _snap: int, byref_entry: Any) -> bool:
+            entry = byref_entry._obj
+            entry.th32ProcessID = 999
+            entry.th32ParentProcessID = 888
+            return True
+
+        def Process32NextW(self, _snap: int, byref_entry: Any) -> bool:
+            self.calls += 1
+            if self.calls == 1:
+                entry = byref_entry._obj
+                entry.th32ProcessID = 1234
+                entry.th32ParentProcessID = 5678
+                return True
+            return False
+
+        def CloseHandle(self, _snap: int) -> bool:
+            self.closed = True
+            return True
+
+    mock_success = MockK32Success()
+    monkeypatch.setattr(
+        ctypes, "windll", type("MockWindll", (), {"kernel32": mock_success})(), raising=False
+    )
+    assert _windows_get_parent_pid(1234) == 5678
+    assert mock_success.closed
+
+    # 4. Target PID not found in list
+    mock_not_found = MockK32Success()
+    monkeypatch.setattr(
+        ctypes, "windll", type("MockWindll", (), {"kernel32": mock_not_found})(), raising=False
+    )
+    assert _windows_get_parent_pid(99999) is None
+
+    # 5. Exception handling
+    class MockK32Crash:
+        def CreateToolhelp32Snapshot(self, _flags: int, _pid: int) -> int:
+            raise RuntimeError("ctypes fault")
+
+    monkeypatch.setattr(
+        ctypes, "windll", type("MockWindll", (), {"kernel32": MockK32Crash()})(), raising=False
+    )
+    assert _windows_get_parent_pid(1234) is None
+
+
+def test_install_parent_death_watchdog_windows_parent_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hawavoclean import watchdog
+
+    monkeypatch.setenv(watchdog.PARENT_PID_ENV, "100")
+    monkeypatch.setattr(os, "getppid", lambda: 200)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        watchdog, "_windows_get_parent_pid", lambda pid: 100 if pid == 200 else None
+    )
+    monkeypatch.setattr(watchdog, "parent_is_alive", lambda _pid: False)
+
+    killed: list[int] = []
+
+    def mock_kill(pid: int, _sig: object) -> None:
+        killed.append(pid)
+
+    monkeypatch.setattr(os, "kill", mock_kill)
+    monkeypatch.setattr(os, "_exit", lambda _code: None)
+
+    t = watchdog.install_parent_death_watchdog(poll_interval_s=0.01, grace_s=0.01)
+    assert t is not None
+    t.join(timeout=1.0)
+    assert len(killed) > 0

@@ -420,6 +420,14 @@ def probe_audio(
             format_name = info.format
             codec_name = info.subtype
             bit_depth = None
+            if info.subtype in ("FLOAT", "PCM_32"):
+                bit_depth = 32
+            elif info.subtype == "PCM_24":
+                bit_depth = 24
+            elif info.subtype == "PCM_16":
+                bit_depth = 16
+            elif info.subtype in ("PCM_U8", "PCM_S8"):
+                bit_depth = 8
         except Exception as e:
             raise MediaPreflightError(
                 MediaPreflightReason.PROBE_FAILED,

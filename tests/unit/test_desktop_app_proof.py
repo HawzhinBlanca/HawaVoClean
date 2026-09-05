@@ -4,9 +4,16 @@ import hashlib
 import json
 import plistlib
 import struct
+import sys
 from pathlib import Path
 
 import pytest
+
+if sys.platform == "win32":
+    pytest.skip(
+        "macOS .app bundle proof requires POSIX filesystem permissions and symlinks",
+        allow_module_level=True,
+    )
 
 from scripts import validate_desktop_app as desktop_proof
 

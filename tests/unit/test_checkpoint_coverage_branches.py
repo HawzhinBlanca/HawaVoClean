@@ -87,9 +87,10 @@ def test_save_and_load_safetensors_and_metadata(tmp_path: Path) -> None:
         load_safe_checkpoint(st_path)
 
     # Safetensors load error
-    st_path.write_bytes(b"corrupted binary")
+    corrupted_st = tmp_path / "corrupted.safetensors"
+    corrupted_st.write_bytes(b"corrupted binary")
     with pytest.raises(ModelProvenanceError, match="Failed to load safetensors"):
-        load_safe_checkpoint(st_path)
+        load_safe_checkpoint(corrupted_st)
 
 
 def test_load_safe_checkpoint_error_branches(tmp_path: Path) -> None:

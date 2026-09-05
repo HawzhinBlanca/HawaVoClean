@@ -99,7 +99,10 @@ def _windows_get_parent_pid(pid: int) -> int | None:
                 ("szExeFile", ctypes.c_wchar * 260),
             ]
 
-        kernel32 = vars(ctypes)["windll"].kernel32
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:
+            return None
+        kernel32 = windll.kernel32
         snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
         if snapshot == wintypes.HANDLE(-1).value or snapshot == -1:
             return None
@@ -180,11 +183,7 @@ def install_parent_death_watchdog(
         # child is already hanging off init (or parent died on Windows) and the declared pid is gone, and
         # it must still tear itself down or the arming gap is a free pass to
         # finish and publish. Everything else is a stale or leaked variable.
-        is_spawner_death = (
-            (ppid == 1 and not _pid_exists(parent_pid))
-            if sys.platform != "win32"
-            else not _pid_exists(parent_pid)
-        )
+        is_spawner_death = sys.platform != "win32" and ppid == 1 and not _pid_exists(parent_pid)
         if not is_spawner_death:
             logger.warning(
                 "Ignoring %s=%d: not set by this process's parent (ppid %d). "

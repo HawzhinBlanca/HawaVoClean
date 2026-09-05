@@ -130,6 +130,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ffmpeg libsndfile
 
+      - name: Install Windows audio libraries
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress
+
       - name: Synchronize the frozen dependency graph
         shell: bash
         run: |

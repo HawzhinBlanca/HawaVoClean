@@ -23,6 +23,14 @@ def _contract() -> dict[str, object]:
     return cast(dict[str, object], raw)
 
 
+def _read_workflow() -> str:
+    return (
+        (ROOT / ".github" / "workflows" / "ci.yml")
+        .read_text(encoding="utf-8")
+        .replace("\r\n", "\n")
+    )
+
+
 def _rehash(value: dict[str, object]) -> None:
     integrity = value["integrity"]
     assert isinstance(integrity, dict)
@@ -101,7 +109,7 @@ def test_u1_approval_must_bind_the_exact_design() -> None:
 
 
 def test_workflow_validator_rejects_floating_actions_and_reduced_gate(tmp_path: Path) -> None:
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = _read_workflow()
     target = tmp_path / ".github" / "workflows" / "ci.yml"
     target.parent.mkdir(parents=True)
     floating = workflow.replace(
@@ -132,7 +140,7 @@ def test_workflow_validator_rejects_floating_actions_and_reduced_gate(tmp_path: 
 
 
 def test_workflow_tee_pipelines_are_executable_fail_closed(tmp_path: Path) -> None:
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = _read_workflow()
     assert workflow.count("| tee") == 5
 
     target = tmp_path / ".github" / "workflows" / "ci.yml"
@@ -209,7 +217,7 @@ def test_workflow_validator_covers_non_tee_pipelines(tmp_path: Path) -> None:
 
 
 def test_evidence_uploads_fail_when_artifact_paths_are_missing(tmp_path: Path) -> None:
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = _read_workflow()
     unsafe = workflow.replace("if-no-files-found: error", "if-no-files-found: warn", 1)
     target = tmp_path / ".github" / "workflows" / "ci.yml"
     target.parent.mkdir(parents=True)
@@ -244,7 +252,7 @@ def test_evidence_uploads_fail_when_artifact_paths_are_missing(tmp_path: Path) -
 def test_required_aggregate_validator_rejects_false_green_mutations(
     tmp_path: Path, old: str, new: str, message: str
 ) -> None:
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = _read_workflow()
     unsafe = workflow.replace(old, new, 1)
     assert unsafe != workflow
     target = tmp_path / ".github" / "workflows" / "ci.yml"
@@ -271,7 +279,13 @@ def _required_aggregate_script(workflow: str) -> str:
 
 
 def test_deliberate_ui_failure_turns_leaf_and_required_aggregate_red(tmp_path: Path) -> None:
-    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    import shutil
+    import sys
+
+    if sys.platform == "win32" or not shutil.which("bash"):
+        pytest.skip("Bash subprocess pipeline simulation requires a POSIX environment")
+
+    workflow = _read_workflow()
     ui_lines = workflow.splitlines()
     producer_index = ui_lines.index('          node "$PNPM" --dir ui test:run \\')
     ui_pipeline = "\n".join(ui_lines[producer_index : producer_index + 2])
@@ -364,7 +378,10 @@ def test_private_evidence_hydration_checks_hash_ignore_rule_and_mode(tmp_path: P
     hydrated = hydration.hydrate(source, destination, manifest)
     target = destination / "private" / "input.bin"
     assert target.read_bytes() == payload
-    assert target.stat().st_mode & 0o777 == 0o600
+    import sys
+
+    if sys.platform != "win32":
+        assert target.stat().st_mode & 0o777 == 0o600
     assert hydrated == {"private/input.bin": hashlib.sha256(payload).hexdigest()}
     assert hydration.hydrate(source, destination, manifest) == hydrated
 
