@@ -76,6 +76,9 @@ const bridge = Object.freeze({
   }),
   updates: Object.freeze({
     getState: () => invoke(IPC.updateState),
+    checkForUpdates: () => invoke(IPC.updateState, { action: 'check' }),
+    applyUpdate: () => invoke(IPC.updateState, { action: 'apply' }),
+    rollback: (version?: string) => invoke(IPC.updateState, { action: 'rollback', version }),
   }),
   session: Object.freeze({
     clearLocalData: () => invoke(IPC.clearLocalData),

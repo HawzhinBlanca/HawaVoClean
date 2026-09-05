@@ -27,6 +27,7 @@ import {
 } from './contracts.js';
 import { EngineBroker } from './engine.js';
 import { DiagnosticsManager, type RedactedDiagnosticReport } from './diagnostics.js';
+import { UpdateManager } from './updates/index.js';
 import { packagedProofSelfTestAllowed } from './proof.js';
 import {
   APP_ENTRY_URL,
@@ -94,6 +95,13 @@ const broker = new EngineBroker({
   platform: process.platform,
 });
 const diagnosticsManager = new DiagnosticsManager();
+const updateManager = new UpdateManager({
+  currentVersion: app.getVersion() || '3.3.0',
+  feedUrl: process.env.HAWAVOCLEAN_UPDATE_FEED_URL,
+  publicKey: process.env.HAWAVOCLEAN_UPDATE_PUBLIC_KEY,
+  updateDir: path.join(app.getPath('userData'), 'updates'),
+  dbPath: path.join(app.getPath('userData'), 'state', 'jobs.sqlite3'),
+});
 
 let mainWindow: BrowserWindow | null = null;
 let quitState: 'running' | 'stopping' | 'done' = 'running';
@@ -334,14 +342,25 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle(IPC.updateState, (event): UpdateState => {
-    requireTrustedIpcSender(event);
-    return Object.freeze({
-      status: 'disabled',
-      reason: 'release_feed_not_configured',
-      canCheck: false,
-    });
-  });
+  ipcMain.handle(
+    IPC.updateState,
+    async (
+      event,
+      payload?: { action?: 'check' | 'apply' | 'rollback'; version?: string },
+    ): Promise<UpdateState> => {
+      requireTrustedIpcSender(event);
+      if (payload && typeof payload === 'object' && payload.action) {
+        if (payload.action === 'check') {
+          await updateManager.checkForUpdates();
+        } else if (payload.action === 'apply') {
+          await updateManager.applyUpdate();
+        } else if (payload.action === 'rollback') {
+          await updateManager.rollback(payload.version ?? '3.3.0');
+        }
+      }
+      return updateManager.getState();
+    },
+  );
 
   ipcMain.handle(IPC.clearLocalData, async (event) => {
     requireTrustedIpcSender(event);
