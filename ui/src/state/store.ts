@@ -72,6 +72,7 @@ export interface JobInfo {
   id: string;
   outputPath: string;
   reportPath: string;
+  bundlePath?: string;
   status: JobStatus | null;
   streamConnected: boolean;
 }

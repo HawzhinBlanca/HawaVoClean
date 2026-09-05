@@ -2688,6 +2688,7 @@ export async function saveCleanedMaster(): Promise<void> {
       const chosen = await bridge.files.chooseExportPath({
         kind: 'master',
         suggestedName: suggested,
+        sourcePath: st.cleanedPath,
       });
       if (chosen) {
         st.setStatus(`Master exported: ${baseName(chosen)}`);
@@ -2710,6 +2711,49 @@ export async function saveCleanedMaster(): Promise<void> {
     a.click();
     a.remove();
     st.setStatus(`Downloading master: ${baseName(st.cleanedPath)}`);
+    return;
+  }
+  await revealOutput();
+}
+
+export async function saveProcessingRecord(): Promise<void> {
+  const st = getState();
+  if (!st.cleanedPath) return;
+  const bridge = getBridge();
+  const reportPath = st.job?.reportPath;
+  const bundlePath = st.job?.bundlePath ?? (reportPath ? reportPath.replace(/\.json$/i, '.zip') : null);
+
+  if (bridge.host === 'electron' && typeof bridge.files.chooseExportPath === 'function') {
+    try {
+      const suggested = bundlePath
+        ? baseName(bundlePath)
+        : `${baseName(st.cleanedPath).replace(/\.wav$/i, '')}.hawavoclean.zip`;
+      const chosen = await bridge.files.chooseExportPath({
+        kind: 'record_bundle',
+        suggestedName: suggested,
+        ...(bundlePath ? { sourcePath: bundlePath } : {}),
+      });
+      if (chosen) {
+        st.setStatus(`Processing record exported: ${baseName(chosen)}`);
+        return;
+      }
+    } catch {
+      /* fall back to reveal */
+    }
+    await revealOutput();
+    return;
+  }
+  if (bridge.host === 'web' && bundlePath) {
+    const client = requireClient();
+    const url = client.fileUrl(bundlePath);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = baseName(bundlePath);
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    st.setStatus(`Downloading processing record: ${baseName(bundlePath)}`);
     return;
   }
   await revealOutput();

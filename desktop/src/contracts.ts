@@ -34,7 +34,11 @@ const AUDIO_EXTENSION_SET: ReadonlySet<string> = new Set(AUDIO_EXTENSIONS);
 /** Renderer-visible endpoint. Authentication never crosses preload IPC. */
 export type EngineEndpoint = Readonly<{ baseUrl: string }>;
 export type ExportKind = 'master' | 'record_bundle';
-export type ExportRequest = Readonly<{ kind: ExportKind; suggestedName?: string }>;
+export type ExportRequest = Readonly<{
+  kind: ExportKind;
+  suggestedName?: string;
+  sourcePath?: string;
+}>;
 
 export type AppInfo = Readonly<{
   name: string;
@@ -127,7 +131,15 @@ export function parseExportRequest(value: unknown): ExportRequest {
   if (suggestedName && suggestedName.length > 240) {
     throw new TypeError('Suggested export name is too long.');
   }
-  return suggestedName ? { kind: candidate.kind, suggestedName } : { kind: candidate.kind };
+  let sourcePath: string | undefined;
+  if (candidate.sourcePath !== undefined) {
+    sourcePath = requireAbsolutePath(candidate.sourcePath, 'chooseExportPath source');
+  }
+  return {
+    kind: candidate.kind,
+    ...(suggestedName ? { suggestedName } : {}),
+    ...(sourcePath ? { sourcePath } : {}),
+  };
 }
 
 export function safeSuggestedExportName(request: ExportRequest): string {

@@ -33,6 +33,7 @@ import {
   APP_SCHEME,
   isAllowedRendererRequest,
   isEngineApiRequest,
+  isTrustedIpcSenderEvent,
   isTrustedRendererUrl,
   resolveAppAsset,
   withoutRendererCredentials,
@@ -98,9 +99,12 @@ let mainWindow: BrowserWindow | null = null;
 let quitState: 'running' | 'stopping' | 'done' = 'running';
 
 function isTrustedIpcSender(event: IpcMainInvokeEvent): boolean {
-  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return false;
-  if (event.senderFrame && event.senderFrame !== event.senderFrame.top) return false;
-  return isTrustedRendererUrl(event.senderFrame?.url ?? event.sender.getURL());
+  return isTrustedIpcSenderEvent(
+    event,
+    mainWindow?.webContents,
+    !mainWindow || mainWindow.isDestroyed(),
+    event.sender.getURL(),
+  );
 }
 
 function requireTrustedIpcSender(event: IpcMainInvokeEvent): void {
@@ -277,7 +281,15 @@ function registerIpc(): void {
           : [{ name: 'ZIP archive', extensions: ['zip'] }],
       properties: ['showOverwriteConfirmation', 'createDirectory'],
     });
-    return result.canceled ? null : (result.filePath ?? null);
+    if (result.canceled || !result.filePath) return null;
+    const destination = result.filePath;
+    if (request.sourcePath) {
+      if (!fs.existsSync(request.sourcePath)) {
+        throw new Error('chooseExportPath: source file no longer exists.');
+      }
+      fs.copyFileSync(request.sourcePath, destination);
+    }
+    return destination;
   });
 
   ipcMain.handle(IPC.reveal, async (event, value: unknown) => {

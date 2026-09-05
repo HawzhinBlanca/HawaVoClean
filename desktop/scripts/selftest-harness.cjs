@@ -60,7 +60,14 @@ function assertSelfTestResult(result, expectedPackaged) {
     Number.isInteger(result.renderer.moduleScriptCount) && result.renderer.moduleScriptCount >= 1,
     'production renderer module did not load',
   );
-  assert.deepEqual(result.diagnostics, { status: 'unavailable', reason: 'not_implemented' });
+  assert.deepEqual(result.diagnostics, {
+    status: 'ready',
+    optIn: false,
+    canExport: false,
+    reason: 'Opt-in required to retain diagnostics',
+    pendingErrorCount: 0,
+    telemetryEgress: 'none',
+  });
   assert.deepEqual(result.updates, {
     status: 'disabled',
     reason: 'release_feed_not_configured',

@@ -39,13 +39,40 @@ export function isEngineApiRequest(value: string, engineOrigin: string | null): 
   }
 }
 
+export type IpcSenderFrameLike = Readonly<{
+  url: string;
+  top?: unknown;
+}>;
+
+export type IpcSenderEventLike = Readonly<{
+  sender: unknown;
+  senderFrame?: IpcSenderFrameLike | null;
+}>;
+
+export function isTrustedIpcSenderEvent(
+  event: IpcSenderEventLike,
+  trustedSender: unknown,
+  windowIsDestroyed = false,
+  fallbackUrl?: string,
+): boolean {
+  if (windowIsDestroyed || !trustedSender || event.sender !== trustedSender) return false;
+  if (event.senderFrame && event.senderFrame !== event.senderFrame.top) return false;
+  const candidateUrl = event.senderFrame?.url ?? fallbackUrl ?? '';
+  return isTrustedRendererUrl(candidateUrl);
+}
+
 export function withoutRendererCredentials(
   headers: Readonly<Record<string, string>>,
 ): Record<string, string> {
   const secured: Record<string, string> = {};
   for (const [name, value] of Object.entries(headers)) {
     const lowered = name.toLowerCase();
-    if (lowered === 'authorization' || lowered === 'x-hawa-token' || lowered === 'cookie') continue;
+    if (
+      lowered === 'authorization' ||
+      lowered === 'proxy-authorization' ||
+      lowered === 'x-hawa-token' ||
+      lowered === 'cookie'
+    ) continue;
     secured[name] = value;
   }
   return secured;

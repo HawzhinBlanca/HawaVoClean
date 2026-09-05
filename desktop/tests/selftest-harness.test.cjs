@@ -47,7 +47,14 @@ function resultFixture() {
       moduleScriptCount: 1,
       documentTitle: 'HawaVoClean',
     },
-    diagnostics: { status: 'unavailable', reason: 'not_implemented' },
+    diagnostics: {
+      status: 'ready',
+      optIn: false,
+      canExport: false,
+      reason: 'Opt-in required to retain diagnostics',
+      pendingErrorCount: 0,
+      telemetryEgress: 'none',
+    },
     updates: { status: 'disabled', reason: 'release_feed_not_configured', canCheck: false },
   };
 }

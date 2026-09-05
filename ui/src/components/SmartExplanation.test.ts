@@ -163,4 +163,31 @@ describe('SmartExplanation', () => {
     expect(host.textContent).toContain('2 units');
     expect(host.textContent).toContain('Level-matched A/B (-1.2 dB on Cleaned)');
   });
+
+  it('renders MP4 dialogue isolation note when input file is an MP4 video container', async () => {
+    useStore.setState({
+      source: { path: '/tmp/interview.mp4', name: 'interview.mp4', origin: 'file' },
+      analyzing: false,
+      original: fakeAnalysis(),
+      profile: 'production',
+      mode: 'natural',
+    });
+
+    await act(async () => {
+      root.render(createElement(SmartExplanation));
+    });
+
+    expect(host.querySelector('.se-mp4-notice')).not.toBeNull();
+    expect(host.textContent).toContain('MP4 Dialogue Isolated');
+    expect(host.textContent).toContain('without video recoding');
+
+    await act(async () => {
+      useStore.setState({
+        report: fakeReport(),
+      });
+    });
+
+    expect(host.querySelector('.se-mp4-notice')).not.toBeNull();
+    expect(host.textContent).toContain('MP4 Dialogue Master');
+  });
 });

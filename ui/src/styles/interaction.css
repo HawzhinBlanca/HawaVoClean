@@ -3098,6 +3098,11 @@ input:focus-visible,
   flex: none;
 }
 
+.clipinfo .kv.mp4-tag .v {
+  color: #60a5fa;
+  font-weight: var(--fw-medium);
+}
+
 /* --- True-10 D4.1 · Batch Queue ------------------------------------------- */
 
 .batch-history-wrapper {

@@ -374,6 +374,15 @@ export function SourceStrip() {
                     {chanNote ? <IconWarn size={10} /> : null}
                   </span>
                 </span>
+                {source.name.toLowerCase().endsWith('.mp4') ? (
+                  <span
+                    className="kv mp4-tag"
+                    title="Audio stream extracted directly from video container without video re-encoding"
+                  >
+                    <span className="k">Container</span>
+                    <span className="v">MP4 (Audio Isolated)</span>
+                  </span>
+                ) : null}
               </>
             ) : analyzing ? (
               <span className="kv">

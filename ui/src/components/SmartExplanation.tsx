@@ -10,6 +10,7 @@ export function SmartExplanation() {
   const profile = useStore((s) => s.profile);
   const loudnessMatch = useStore((s) => s.loudnessMatch);
   const gainOffsetDb = useStore((s) => s.gainOffsetDb);
+  const isMp4 = Boolean(source && source.name.toLowerCase().endsWith('.mp4'));
 
   if (!source) {
     return (
@@ -75,6 +76,14 @@ export function SmartExplanation() {
             ? ` Level-matched A/B (${gainOffsetDb > 0 ? '+' : ''}${gainOffsetDb.toFixed(1)} dB on Cleaned) active below to eliminate volume bias.`
             : ' Compare Original vs Cleaned below, then export your Master WAV.'}
         </p>
+        {isMp4 ? (
+          <div className="se-mp4-notice" role="note" aria-label="MP4 dialogue extraction note">
+            <span className="se-mp4-tag">MP4 Dialogue Master</span>
+            <p className="se-mp4-detail">
+              Master WAV contains the cleaned dialogue extracted from your MP4 container, sample-accurate and ready for timeline import.
+            </p>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -128,6 +137,14 @@ export function SmartExplanation() {
           ? 'HawaRestore-KD will rebuild missing upper harmonics above cutoff with generative reconstruction.'
           : 'Smart Safe will preserve natural Kurdish phonetics, eliminate ambient noise, and verify zero phoneme loss with Guard R.'}
       </p>
+      {isMp4 ? (
+        <div className="se-mp4-notice" role="note" aria-label="MP4 dialogue extraction note">
+          <span className="se-mp4-tag">MP4 Dialogue Isolated</span>
+          <p className="se-mp4-detail">
+            Audio stream extracted directly from video container without video recoding. Original frame rate and timeline sync preserved.
+          </p>
+        </div>
+      ) : null}
     </div>
   );
 }

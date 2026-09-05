@@ -30,6 +30,7 @@ const {
   APP_ENTRY_URL,
   isAllowedRendererRequest,
   isEngineApiRequest,
+  isTrustedIpcSenderEvent,
   isTrustedRendererUrl,
   pathInside,
   resolveAppAsset,
@@ -129,6 +130,7 @@ test('engine API matching and auth injection are exact and replace renderer cred
   const original = {
     Range: 'bytes=0-0',
     authorization: 'Bearer renderer-controlled',
+    'Proxy-Authorization': 'Basic malicious-proxy-auth',
     'X-Hawa-Token': 'root-must-not-cross-renderer',
     Cookie: 'hawa_session=stale',
   };
@@ -283,8 +285,66 @@ test('custom protocol resolver blocks traversal, encoded traversal, queries, and
   }
 });
 
+test('IPC sender validation strictly requires top frame and exact trusted app URL', () => {
+  const trustedContents = { id: 1 };
+  const rogueContents = { id: 2 };
+  const topFrame = { url: APP_ENTRY_URL };
+  topFrame.top = topFrame;
+
+  const subFrame = { url: APP_ENTRY_URL };
+  subFrame.top = topFrame;
+
+  // 1. Trusted top frame succeeds
+  assert.equal(
+    isTrustedIpcSenderEvent({ sender: trustedContents, senderFrame: topFrame }, trustedContents, false),
+    true,
+  );
+
+  // 2. Spoofed sender WebContents rejected
+  assert.equal(
+    isTrustedIpcSenderEvent({ sender: rogueContents, senderFrame: topFrame }, trustedContents, false),
+    false,
+  );
+
+  // 3. Subframe / iframe rejected
+  assert.equal(
+    isTrustedIpcSenderEvent({ sender: trustedContents, senderFrame: subFrame }, trustedContents, false),
+    false,
+  );
+
+  // 4. Untrusted URL / origin rejected
+  const maliciousFrame = { url: 'hawa://app/malicious.html' };
+  maliciousFrame.top = maliciousFrame;
+  assert.equal(
+    isTrustedIpcSenderEvent({ sender: trustedContents, senderFrame: maliciousFrame }, trustedContents, false),
+    false,
+  );
+
+  const webFrame = { url: 'https://attacker.com/index.html' };
+  webFrame.top = webFrame;
+  assert.equal(
+    isTrustedIpcSenderEvent({ sender: trustedContents, senderFrame: webFrame }, trustedContents, false),
+    false,
+  );
+
+  // 5. Destroyed window rejected
+  assert.equal(
+    isTrustedIpcSenderEvent({ sender: trustedContents, senderFrame: topFrame }, trustedContents, true),
+    false,
+  );
+});
+
 test('export requests are schema checked and filenames cannot escape the dialog folder', () => {
   assert.deepEqual(parseExportRequest({ kind: 'master' }), { kind: 'master' });
+  const validSource = path.resolve('/tmp/out.wav');
+  assert.deepEqual(
+    parseExportRequest({ kind: 'master', suggestedName: 'voice.wav', sourcePath: validSource }),
+    { kind: 'master', suggestedName: 'voice.wav', sourcePath: validSource },
+  );
+  assert.deepEqual(
+    parseExportRequest({ kind: 'record_bundle', suggestedName: 'bundle.zip' }),
+    { kind: 'record_bundle', suggestedName: 'bundle.zip' },
+  );
   assert.equal(safeSuggestedExportName({ kind: 'master', suggestedName: '../../voice.zip' }), 'voice.wav');
   assert.equal(
     safeSuggestedExportName({ kind: 'record_bundle', suggestedName: '..\\..\\record.wav' }),
@@ -293,6 +353,8 @@ test('export requests are schema checked and filenames cannot escape the dialog 
   assert.equal(safeSuggestedExportName({ kind: 'master', suggestedName: 'CON.wav' }), 'HawaVoClean-CON.wav');
   assert.throws(() => parseExportRequest({ kind: 'raw_directory' }), /Export kind/);
   assert.throws(() => parseExportRequest({ kind: 'master', suggestedName: 4 }), /must be a string/);
+  assert.throws(() => parseExportRequest({ kind: 'master', sourcePath: '../relative.wav' }), /absolute path/);
+  assert.throws(() => parseExportRequest({ kind: 'master', sourcePath: `${path.resolve('/tmp')}\u0000bad.wav` }), /NUL byte/);
 });
 
 test('absolute-path guard rejects relative and NUL-bearing paths', () => {

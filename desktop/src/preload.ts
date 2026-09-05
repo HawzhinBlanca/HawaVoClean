@@ -18,6 +18,7 @@ const IPC = Object.freeze({
 type ExportRequest = Readonly<{
   kind: 'master' | 'record_bundle';
   suggestedName?: string;
+  sourcePath?: string;
 }>;
 
 function cleanMessage(error: unknown): string {

@@ -1744,6 +1744,32 @@ kbd {
   line-height: 1.4;
 }
 
+.se-mp4-notice {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.se-mp4-tag {
+  font-size: 10px;
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: #60a5fa;
+}
+
+.se-mp4-detail {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.35;
+}
+
 .se-spinner {
   width: 12px;
   height: 12px;
