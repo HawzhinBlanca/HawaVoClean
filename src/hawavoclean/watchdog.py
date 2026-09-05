@@ -71,6 +71,11 @@ def _pid_exists(pid: int) -> bool:
         return False
     except PermissionError:  # pragma: no cover - alive, just not ours to signal
         return True
+    except OSError as exc:
+        # On Windows, os.kill(dead_pid, 0) raises OSError with WinError 87 (ERROR_INVALID_PARAMETER)
+        if getattr(exc, "winerror", None) == 87:
+            return False
+        raise
     return True
 
 

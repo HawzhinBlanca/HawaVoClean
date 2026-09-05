@@ -94,7 +94,9 @@ def test_resolve_native_selected_path_and_registry_branches(
 
     # Non-existent path
     with pytest.raises(PathPolicyError, match="not found"):
-        resolve_native_selected_path("/nonexistent/file/path_12345.wav")
+        resolve_native_selected_path(
+            str(Path.cwd().resolve() / "nonexistent" / "file" / "path_12345.wav")
+        )
 
     registry = NativeSourceRegistry()
     source = _source("reg_path.wav")
@@ -152,3 +154,36 @@ def test_source_caps_validation_edge_branches() -> None:
         descriptor=registered.descriptor,
     )
     assert not registry._valid_locked(mismatch_source)
+
+
+def test_open_nofollow_descriptor_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import ctypes
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    from hawavoclean.server.source_caps import _open_nofollow_descriptor
+
+    test_file = tmp_path / "win_test.wav"
+    test_file.write_bytes(b"data")
+
+    fake_msvcrt = types.ModuleType("msvcrt")
+    fake_msvcrt.open_osfhandle = MagicMock(return_value=42)  # type: ignore[attr-defined]
+
+    fake_windll = MagicMock()
+    fake_kernel32 = MagicMock()
+    fake_kernel32.CreateFileW.return_value = 1234
+    fake_windll.kernel32 = fake_kernel32
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setitem(vars(ctypes), "windll", fake_windll)
+
+    fd = _open_nofollow_descriptor(test_file)
+    assert fd == 42
+
+    # Error branch: invalid handle returned by CreateFileW
+    fake_kernel32.CreateFileW.return_value = -1
+    fake_kernel32.GetLastError.return_value = 5
+    with pytest.raises(OSError, match="CreateFileW failed"):
+        _open_nofollow_descriptor(test_file)

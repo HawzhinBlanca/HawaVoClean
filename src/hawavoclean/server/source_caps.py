@@ -17,6 +17,7 @@ import contextlib
 import os
 import secrets
 import stat
+import sys
 import threading
 from collections import OrderedDict
 from collections.abc import Iterator
@@ -37,6 +38,45 @@ def _is_redirect(info: os.stat_result) -> bool:
 
 
 def _open_nofollow_descriptor(path: Path) -> int:
+    if sys.platform == "win32":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        FILE_SHARE_READ = 0x00000001
+        FILE_SHARE_WRITE = 0x00000002
+        FILE_SHARE_DELETE = 0x00000004
+        OPEN_EXISTING = 3
+        FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+        FILE_ATTRIBUTE_NORMAL = 0x00000080
+        GENERIC_READ = 0x80000000
+
+        kernel32 = vars(ctypes)["windll"].kernel32
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        handle = kernel32.CreateFileW(
+            str(path),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        invalid_handle = wintypes.HANDLE(-1).value
+        if handle == invalid_handle or handle == -1 or handle is None:
+            err = int(kernel32.GetLastError())
+            raise OSError(None, f"CreateFileW failed with error {err}", str(path), err)
+        return int(msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)))
+
     flags = os.O_RDONLY
     flags |= getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)

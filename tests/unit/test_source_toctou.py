@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import numpy as np
@@ -120,6 +121,8 @@ def test_pinned_source_edge_cases_and_error_branches(tmp_path: Path) -> None:
     try:
         # File deleted
         pin2.directory.chmod(0o700)
+        with contextlib.suppress(OSError):
+            pin2.path.chmod(0o600)
         pin2.path.unlink()
         with pytest.raises(MediaPreflightError, match="disappeared"):
             pin2.verify()
@@ -132,6 +135,8 @@ def test_pinned_source_edge_cases_and_error_branches(tmp_path: Path) -> None:
     try:
         # File replaced by directory
         pin3.directory.chmod(0o700)
+        with contextlib.suppress(OSError):
+            pin3.path.chmod(0o600)
         pin3.path.unlink()
         pin3.path.mkdir()
         with pytest.raises(MediaPreflightError, match="no longer a regular file"):

@@ -253,6 +253,13 @@ def _windows_peak_rss_bytes() -> int:
     counters = ProcessMemoryCounters()
     counters.cb = ctypes.sizeof(counters)
     windll = vars(ctypes)["windll"]
+    windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    windll.psapi.GetProcessMemoryInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ProcessMemoryCounters),
+        ctypes.c_ulong,
+    ]
+    windll.psapi.GetProcessMemoryInfo.restype = ctypes.c_int
     process = windll.kernel32.GetCurrentProcess()
     if not windll.psapi.GetProcessMemoryInfo(process, byref(counters), counters.cb):
         raise OSError("GetProcessMemoryInfo failed")

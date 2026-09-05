@@ -389,3 +389,26 @@ def test_the_interrupt_path_survives_an_inherited_sig_ign(tmp_path: Path) -> Non
         )
     assert not partial.exists(), "the unwind never ran its cleanup"
     assert not published.exists(), "the orphan published despite the watchdog"
+
+
+def test_pid_exists_windows_winerror_87(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hawavoclean.watchdog import _pid_exists
+
+    err = OSError("The parameter is incorrect")
+    err.winerror = 87  # type: ignore[attr-defined]
+
+    def _raise_winerror_87(_pid: int, _sig: int) -> None:
+        raise err
+
+    monkeypatch.setattr(os, "kill", _raise_winerror_87)
+    assert _pid_exists(12345) is False
+
+    other_err = OSError("Other error")
+    other_err.winerror = 5  # type: ignore[attr-defined]
+
+    def _raise_winerror_5(_pid: int, _sig: int) -> None:
+        raise other_err
+
+    monkeypatch.setattr(os, "kill", _raise_winerror_5)
+    with pytest.raises(OSError):
+        _pid_exists(12345)
