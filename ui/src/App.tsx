@@ -6,8 +6,8 @@ import { Header } from './components/Header';
 import { JobHistory } from './components/JobHistory';
 import { MetricsTiles } from './components/MetricsTiles';
 import { ProcessButton } from './components/ProcessButton';
-import { ProfileControl } from './components/ProfileControl';
-import { RestoreControl } from './components/RestoreControl';
+import { SmartExplanation } from './components/SmartExplanation';
+import { AdvancedControls } from './components/AdvancedControls';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { SourceStrip } from './components/SourceStrip';
 import { SpectrumDisplay } from './components/SpectrumDisplay';
@@ -184,13 +184,11 @@ export default function App() {
                 the section stays: it names the landmark, which is a different
                 job from being a stop in the heading list. */}
             <h2 className="sr-only">Processing controls</h2>
-            <ProfileControl />
-            {/* Renders nothing until the engine's health answer offers
-                speaker profiles (contract addendum 2). */}
-            <RestoreControl />
+            <SmartExplanation />
             <ProcessButton />
             <Transport />
             <Actions />
+            <AdvancedControls />
           </section>
         </aside>
       </main>

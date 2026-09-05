@@ -48,6 +48,9 @@ function buildWebBridge(): HawaBridge {
       async registerDroppedFile() {
         return null;
       },
+      async chooseExportPath() {
+        return null;
+      },
       async revealInFinder() {
         /* not available in a browser */
       },

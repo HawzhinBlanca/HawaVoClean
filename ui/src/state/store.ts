@@ -232,6 +232,12 @@ export interface AppState {
   cleanedPath: string | null;
 
   abMode: AbMode;
+  /** Whether loudness-matched A/B comparison is active (D4.2). */
+  loudnessMatch: boolean;
+  /** Current gain offset in dB applied to Cleaned deck during level-matched A/B. */
+  gainOffsetDb: number;
+  /** Whether the advanced controls drawer/disclosure is expanded (D4.2). */
+  advancedOpen: boolean;
   /**
    * A deck that could not be played, and what is playing instead. Set from the
    * player's fault event, cleared when a deck is asked for again.
@@ -322,6 +328,9 @@ export interface AppState {
   patchJob(patch: Partial<JobInfo>): void;
   setReport(r: HawaVoCleanReport | null): void;
   setAbMode(m: AbMode): void;
+  setLoudnessMatch(v: boolean): void;
+  setGainOffsetDb(v: number): void;
+  setAdvancedOpen(v: boolean): void;
   setDeckFault(f: DeckFaultInfo | null): void;
   setArtifacts(a: ArtifactState | null): void;
   setPlaying(v: boolean): void;
@@ -376,6 +385,9 @@ export const useStore = create<AppState>((set) => ({
   cleanedPath: null,
 
   abMode: 'original',
+  loudnessMatch: true,
+  gainOffsetDb: 0,
+  advancedOpen: false,
   deckFault: null,
   artifacts: null,
   playing: false,
@@ -463,6 +475,9 @@ export const useStore = create<AppState>((set) => ({
   // A new report invalidates any selection made against the previous one.
   setReport: (report) => set({ report, selectedUnit: null, highlightRange: null }),
   setAbMode: (abMode) => set({ abMode }),
+  setLoudnessMatch: (loudnessMatch) => set({ loudnessMatch }),
+  setGainOffsetDb: (gainOffsetDb) => set({ gainOffsetDb }),
+  setAdvancedOpen: (advancedOpen) => set({ advancedOpen }),
   setDeckFault: (deckFault) => set({ deckFault }),
   setArtifacts: (artifacts) => set({ artifacts }),
   setPlaying: (playing) => set({ playing }),
@@ -538,6 +553,7 @@ export const useStore = create<AppState>((set) => ({
       job: null,
       report: null,
       abMode: 'original',
+      gainOffsetDb: 0,
       deckFault: null,
       artifacts: null,
       playing: false,

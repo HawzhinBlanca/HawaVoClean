@@ -35,6 +35,8 @@ const player = vi.hoisted(() => ({
   // "the engine died mid-load" apart from "these bytes are junk", both of
   // which Chromium reports as MediaError.code 4.
   setLivenessProbe: vi.fn((_fn: (() => boolean) | null) => undefined),
+  setLoudnessMatch: vi.fn(),
+  gainOffsetDb: 0,
 }));
 const registerDroppedFile = vi.hoisted(() => vi.fn());
 vi.mock('../audio/player', () => ({ getPlayer: () => player }));
@@ -2653,5 +2655,32 @@ describe('batch queue actions (True-10 D4.1)', () => {
     expect(st().batch?.batch_id).toBe('b_rehydrate');
     expect(st().batch?.state).toBe('running');
   });
+
+  it('toggles loudness-matched comparison and synchronizes DualPlayer (D4.2)', async () => {
+    const { actions, store } = await boot();
+    const st = () => store.useStore.getState();
+    expect(st().loudnessMatch).toBe(true);
+
+    actions.setLoudnessMatch(false);
+    expect(st().loudnessMatch).toBe(false);
+    expect(player.setLoudnessMatch).toHaveBeenCalledWith(false, null, null);
+
+    actions.toggleLoudnessMatch();
+    expect(st().loudnessMatch).toBe(true);
+    expect(player.setLoudnessMatch).toHaveBeenCalledWith(true, null, null);
+  });
+
+  it('toggles advanced controls disclosure state (D4.2)', async () => {
+    const { actions, store } = await boot();
+    const st = () => store.useStore.getState();
+    expect(st().advancedOpen).toBe(false);
+
+    actions.setAdvancedOpen(true);
+    expect(st().advancedOpen).toBe(true);
+
+    actions.toggleAdvancedOpen();
+    expect(st().advancedOpen).toBe(false);
+  });
 });
+
 

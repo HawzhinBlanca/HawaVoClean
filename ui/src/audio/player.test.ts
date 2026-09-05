@@ -643,3 +643,73 @@ describe('a webview with no WebAudio', () => {
     expect(el('original').muted).toBe(true);
   });
 });
+
+describe('loudness matching (D4.2)', () => {
+  it('computes level delta between original and cleaned and clamps to [-12, +12] dB', async () => {
+    await bothReady();
+    // Case 1: Cleaned is 2 dB louder (-18 LUFS vs -20 LUFS)
+    player.setLoudnessMatch(true, -20, -18);
+    expect(player.gainOffsetDb).toBeCloseTo(-2.0, 3);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, -2 / 20), 3);
+    expect(player.getTargetGain('original')).toBe(1.0);
+    expect(player.snapshot().loudnessMatch).toBe(true);
+    expect(player.snapshot().gainOffsetDb).toBeCloseTo(-2.0, 3);
+
+    // Case 2: Cleaned is quieter by 3 dB (-21 LUFS vs -24 LUFS)
+    player.setLoudnessMatch(true, -21, -24);
+    expect(player.gainOffsetDb).toBeCloseTo(3.0, 3);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, 3 / 20), 3);
+
+    // Case 3: Extreme delta clamped to -12 dB
+    player.setLoudnessMatch(true, -30, -10);
+    expect(player.gainOffsetDb).toBe(-12);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, -12 / 20), 3);
+
+    // Case 4: Extreme delta clamped to +12 dB
+    player.setLoudnessMatch(true, -10, -30);
+    expect(player.gainOffsetDb).toBe(12);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, 12 / 20), 3);
+
+    // Case 5: Disabled -> unity gain (0 dB delta)
+    player.setLoudnessMatch(false, -20, -18);
+    expect(player.gainOffsetDb).toBe(0);
+    expect(player.getTargetGain('cleaned')).toBe(1.0);
+    expect(player.snapshot().loudnessMatch).toBe(false);
+
+    // Case 6: Missing or null LUFS -> unity gain (0 dB delta)
+    player.setLoudnessMatch(true, null, -18);
+    expect(player.gainOffsetDb).toBe(0);
+    expect(player.getTargetGain('cleaned')).toBe(1.0);
+  });
+});
+
+describe('common-region time bounding (D4.2)', () => {
+  it('bounds duration to the shorter deck when both are ready', async () => {
+    await bothReady();
+    Object.defineProperty(el('original'), 'duration', { configurable: true, value: 60 });
+    Object.defineProperty(el('cleaned'), 'duration', { configurable: true, value: 45 });
+
+    // Duration must never exceed the shorter deck during A/B comparison
+    expect(player.duration).toBeCloseTo(45, 3);
+
+    // Seeking past the shorter duration must be clamped to the common boundary
+    player.seek(55);
+    expect(el('original').currentTime).toBeCloseTo(45, 3);
+    expect(el('cleaned').currentTime).toBeCloseTo(45, 3);
+
+    // Switching active deck at the boundary clamps both decks
+    player.setActive('cleaned');
+    expect(el('cleaned').currentTime).toBeLessThanOrEqual(45);
+    expect(player.activeDeck).toBe('cleaned');
+  });
+
+  it('reports the active deck duration when only one deck is ready', async () => {
+    engine({ [OK]: 206 });
+    start();
+    player.load('original', OK);
+    await settle();
+    Object.defineProperty(el('original'), 'duration', { configurable: true, value: 32 });
+
+    expect(player.duration).toBeCloseTo(32, 3);
+  });
+});

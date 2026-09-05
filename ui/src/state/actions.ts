@@ -862,6 +862,7 @@ export async function loadSource(source: SourceInfo): Promise<void> {
     const analysis = await client.analyze(source.path, envelopeBuckets(), ac.signal);
     if (ac.signal.aborted) return;
     useStore.getState().setOriginal(analysis);
+    syncPlayerLoudnessMatch();
     // The engine has just decoded this file end to end, so its length is
     // known: a deck that opens far shorter than that is not this clip.
     player.load('original', client.fileUrl(source.path), analysis.duration_s);
@@ -1314,6 +1315,7 @@ function onJobStatus(status: JobStatus): void {
         });
         if (!cur.job || cur.job.id !== status.job_id) return;
         cur.setCleaned(analysis, out);
+        syncPlayerLoudnessMatch();
         const player = getPlayer();
         player.load(
           'cleaned',
@@ -1960,6 +1962,7 @@ export async function inspectBatchItem(item: BatchItem): Promise<void> {
     const analysis = await client.analyze(item.input_path, envelopeBuckets());
     if (getState().activeInspectJobId === item.job_id) {
       st.setOriginal(analysis);
+      syncPlayerLoudnessMatch();
       st.setStatus(`Inspecting: ${baseName(item.input_path)} (${item.state})`);
     }
   } catch {
@@ -2085,6 +2088,7 @@ export async function selectRun(jobId: string): Promise<void> {
     'cleaned',
     client && doneRun ? client.fileUrl(entry.outputPath) : null,
   );
+  syncPlayerLoudnessMatch();
 
   // B5 · a cached analysis is not proof that the file behind it is still
   // there. Before this check a restore reported "RESULT Complete 5/5" with an
@@ -2640,4 +2644,75 @@ export function playSelection(loop = false): void {
   };
   handle = requestAnimationFrame(check);
 }
+
+// ---------------------------------------------------------------------------
+// D4.2 · Loudness-matched A/B & workflow helpers
+
+export function syncPlayerLoudnessMatch(): void {
+  const st = getState();
+  const lufsIn = st.original?.loudness?.integrated_lufs ?? null;
+  const lufsOut = st.cleaned?.loudness?.integrated_lufs ?? null;
+  const player = getPlayer();
+  if (player && typeof player.setLoudnessMatch === 'function') {
+    player.setLoudnessMatch(st.loudnessMatch, lufsIn, lufsOut);
+    st.setGainOffsetDb(player.gainOffsetDb ?? 0);
+  }
+}
+
+export function setLoudnessMatch(enabled: boolean): void {
+  getState().setLoudnessMatch(enabled);
+  syncPlayerLoudnessMatch();
+}
+
+export function toggleLoudnessMatch(): void {
+  const cur = getState().loudnessMatch;
+  setLoudnessMatch(!cur);
+}
+
+export function setAdvancedOpen(open: boolean): void {
+  getState().setAdvancedOpen(open);
+}
+
+export function toggleAdvancedOpen(): void {
+  const cur = getState().advancedOpen;
+  setAdvancedOpen(!cur);
+}
+
+export async function saveCleanedMaster(): Promise<void> {
+  const st = getState();
+  if (!st.cleanedPath) return;
+  const bridge = getBridge();
+  if (bridge.host === 'electron' && typeof bridge.files.chooseExportPath === 'function') {
+    try {
+      const suggested = baseName(st.cleanedPath);
+      const chosen = await bridge.files.chooseExportPath({
+        kind: 'master',
+        suggestedName: suggested,
+      });
+      if (chosen) {
+        st.setStatus(`Master exported: ${baseName(chosen)}`);
+        return;
+      }
+    } catch {
+      /* fall back to reveal */
+    }
+    await revealOutput();
+    return;
+  }
+  if (bridge.host === 'web') {
+    const client = requireClient();
+    const url = client.fileUrl(st.cleanedPath);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = baseName(st.cleanedPath);
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    st.setStatus(`Downloading master: ${baseName(st.cleanedPath)}`);
+    return;
+  }
+  await revealOutput();
+}
+
 

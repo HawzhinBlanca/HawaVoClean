@@ -1574,9 +1574,246 @@ kbd {
 /* transport */
 .transport {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--pad-3);
+  gap: var(--pad-2);
+}
+
+.btn-level-match {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--hair);
+  box-shadow: var(--elev-1);
+  color: var(--fg-3);
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all var(--dur) var(--ease-out);
+  white-space: nowrap;
+}
+
+.btn-level-match:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--hair-strong);
+}
+
+.btn-level-match.on {
+  background: linear-gradient(180deg, rgba(57, 208, 255, 0.15), rgba(57, 208, 255, 0.06));
+  border-color: rgba(57, 208, 255, 0.45);
+  color: var(--cyan);
+  box-shadow: 0 0 8px rgba(57, 208, 255, 0.2);
+}
+
+.btn-level-match:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.btn-level-match .lm-badge {
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--fg-2);
+}
+
+.btn-level-match.on .lm-badge {
+  color: var(--cyan-2);
+  background: rgba(57, 208, 255, 0.22);
+}
+
+/* Smart explanation card (D4.2) */
+.smart-explanation {
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+  border: 1px solid var(--hair);
+  box-shadow: var(--elev-1);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: all var(--dur) var(--ease-out);
+}
+
+.smart-explanation.empty {
+  border-style: dashed;
+  border-color: var(--hair-strong);
+  opacity: 0.85;
+}
+
+.smart-explanation.armed {
+  border-color: rgba(255, 179, 71, 0.35);
+  background: linear-gradient(180deg, rgba(255, 179, 71, 0.05), var(--panel-2));
+}
+
+.smart-explanation.done {
+  border-color: rgba(74, 222, 128, 0.35);
+  background: linear-gradient(180deg, rgba(74, 222, 128, 0.05), var(--panel-2));
+}
+
+.se-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.se-header svg {
+  color: var(--amber);
+  flex: none;
+}
+
+.smart-explanation.done .se-header svg {
+  color: var(--ok);
+}
+
+.se-title {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--fg);
+  flex: 1;
+}
+
+.se-badge {
+  font-size: 10px;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  font-weight: var(--fw-medium);
+}
+
+.se-badge.low, .se-badge.safe {
+  background: rgba(74, 222, 128, 0.16);
+  color: var(--ok);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+}
+
+.se-badge.med {
+  background: rgba(255, 179, 71, 0.16);
+  color: var(--amber);
+  border: 1px solid rgba(255, 179, 71, 0.3);
+}
+
+.se-badge.high {
+  background: rgba(255, 90, 95, 0.16);
+  color: var(--err);
+  border: 1px solid rgba(255, 90, 95, 0.3);
+}
+
+.se-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  gap: 6px;
+  padding: 6px 0;
+  border-top: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
+}
+
+.se-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.se-metric-label {
+  font-size: 10px;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--fg-4);
+}
+
+.se-metric-val {
+  font-size: var(--fs-secondary);
+  color: var(--fg-2);
+  font-weight: var(--fw-medium);
+}
+
+.se-body {
+  margin: 0;
+  font-size: var(--fs-secondary);
+  color: var(--fg-3);
+  line-height: 1.4;
+}
+
+.se-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--hair-strong);
+  border-top-color: var(--cyan);
+  animation: se-spin 0.8s linear infinite;
+}
+
+@keyframes se-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Advanced controls isolation (D4.2) */
+.advanced-controls {
+  border-radius: var(--r-md);
+  background: var(--panel-2);
+  border: 1px solid var(--hair);
+  overflow: hidden;
+  margin-top: 4px;
+}
+
+.advanced-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: var(--fg-3);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur) var(--ease-out), color var(--dur) var(--ease-out);
+}
+
+.advanced-toggle:hover {
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--fg);
+}
+
+.adv-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.adv-icon {
+  font-size: 11px;
+  color: var(--fg-4);
+}
+
+.adv-title {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+}
+
+.adv-summary {
+  font-size: var(--fs-secondary);
+  color: var(--fg-4);
+}
+
+.advanced-body {
+  padding: 8px 12px 12px;
+  border-top: 1px solid var(--hair);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* A deck that could not be played, said under the switch it is about.
