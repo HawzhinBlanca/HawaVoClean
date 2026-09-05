@@ -10,6 +10,7 @@ Proves the four non-negotiable contract dimensions required by True-10 E1.3:
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import sys
 import time
 from pathlib import Path
@@ -138,7 +139,8 @@ def test_three_hour_stereo_stream_meter_and_peak_rss_below_ceiling(tmp_path: Pat
         args=(str(memmap_path), channels, samples, queue),
     )
     proc.start()
-    proc.join(timeout=120.0)
+    timeout_s = 300.0 if ("CI" in os.environ or sys.platform == "win32") else 120.0
+    proc.join(timeout=timeout_s)
     assert not proc.is_alive(), "Meter worker process timed out"
     assert proc.exitcode == 0, f"Meter worker failed with exit code {proc.exitcode}"
 

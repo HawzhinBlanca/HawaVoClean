@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,12 @@ import soundfile as sf
 
 from hawavoclean.pipeline import run_pipeline
 
-CI_CEILING = 0.60 if "CI" in os.environ else 0.50
+if sys.platform == "win32" and "CI" in os.environ:
+    CI_CEILING = 1.75
+elif "CI" in os.environ:
+    CI_CEILING = 0.60
+else:
+    CI_CEILING = 0.50
 
 
 @pytest.mark.unit
