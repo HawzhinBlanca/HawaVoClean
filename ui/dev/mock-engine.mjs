@@ -106,6 +106,21 @@ function isCleanedPath(p) {
   return Object.values(OUTPUT_SUFFIX).some((s) => b.includes(`_${s}`));
 }
 
+// Precomputed formant lookup table (0 Hz to 5000 Hz at 1 Hz resolution) and harmonic weights
+const MAX_FORMANT_HZ = 5000;
+const FORMANT_LUT = new Float32Array(MAX_FORMANT_HZ + 1);
+for (let f = 0; f <= MAX_FORMANT_HZ; f++) {
+  FORMANT_LUT[f] =
+    Math.exp(-((f - 600) ** 2) / (2 * 300 ** 2)) +
+    0.6 * Math.exp(-((f - 1700) ** 2) / (2 * 450 ** 2)) +
+    0.35 * Math.exp(-((f - 2700) ** 2) / (2 * 500 ** 2));
+}
+
+const H_INV_POW_07 = new Float32Array(15);
+for (let h = 1; h <= 14; h++) {
+  H_INV_POW_07[h] = 1 / (h ** 0.7);
+}
+
 /** Synthesize a speech-like mono signal. Cleaned variant: lower noise floor. */
 function synthesize(path) {
   const cleaned = isCleanedPath(path);
@@ -157,9 +172,9 @@ function synthesize(path) {
       // harmonic stack with formant-ish weighting
       let v = 0;
       for (let h = 1; h <= 14; h++) {
-        const fh = f0 * h;
-        const formant = Math.exp(-((fh - 600) ** 2) / (2 * 300 ** 2)) + 0.6 * Math.exp(-((fh - 1700) ** 2) / (2 * 450 ** 2)) + 0.35 * Math.exp(-((fh - 2700) ** 2) / (2 * 500 ** 2));
-        v += (Math.sin(phase * h) * (0.12 + formant)) / h ** 0.7;
+        const fh = Math.round(f0 * h);
+        const formant = fh <= MAX_FORMANT_HZ ? FORMANT_LUT[fh] : 0;
+        v += Math.sin(phase * h) * (0.12 + formant) * H_INV_POW_07[h];
       }
       // fricative bursts (high band noise) on syllable onsets
       const fric = Math.max(0, Math.sin(2 * Math.PI * 4.2 * t + ph.pitch + 1.3)) ** 8;

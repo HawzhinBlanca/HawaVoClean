@@ -14,6 +14,7 @@ Qualifies:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import zipfile
@@ -156,27 +157,26 @@ def test_schema_migration_v1_to_v3(tmp_path: Path) -> None:
 
     store = DurableJobStore(db_path)
     try:
-        raw_conn = sqlite3.connect(str(db_path))
-        version = raw_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        with contextlib.closing(sqlite3.connect(str(db_path))) as raw_conn:
+            version = raw_conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == 3
 
-        cols = {row[1] for row in raw_conn.execute("PRAGMA table_info(jobs)").fetchall()}
-        assert "terminal_at" in cols
-        assert "history_visible" in cols
-        assert "batch_id" in cols
+            cols = {row[1] for row in raw_conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            assert "terminal_at" in cols
+            assert "history_visible" in cols
+            assert "batch_id" in cols
 
-        tables = {
-            row[0]
-            for row in raw_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        assert "batches" in tables
+            tables = {
+                row[0]
+                for row in raw_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "batches" in tables
 
-        indexes = {row[1] for row in raw_conn.execute("PRAGMA index_list(jobs)").fetchall()}
-        assert "visible_terminal_retention" in indexes
-        assert "jobs_batch_id" in indexes
-        raw_conn.close()
+            indexes = {row[1] for row in raw_conn.execute("PRAGMA index_list(jobs)").fetchall()}
+            assert "visible_terminal_retention" in indexes
+            assert "jobs_batch_id" in indexes
 
         loaded = store.load_and_interrupt(max_terminal_jobs=10, terminal_ttl_s=7 * 86400.0)
         by_id = {j["job_id"]: j for j in loaded}
@@ -231,24 +231,23 @@ def test_schema_migration_v2_to_v3(tmp_path: Path) -> None:
 
     store = DurableJobStore(db_path)
     try:
-        raw_conn = sqlite3.connect(str(db_path))
-        version = raw_conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        with contextlib.closing(sqlite3.connect(str(db_path))) as raw_conn:
+            version = raw_conn.execute("PRAGMA user_version").fetchone()[0]
+            assert version == 3
 
-        cols = {row[1] for row in raw_conn.execute("PRAGMA table_info(jobs)").fetchall()}
-        assert "batch_id" in cols
+            cols = {row[1] for row in raw_conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            assert "batch_id" in cols
 
-        tables = {
-            row[0]
-            for row in raw_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        assert "batches" in tables
+            tables = {
+                row[0]
+                for row in raw_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            assert "batches" in tables
 
-        indexes = {row[1] for row in raw_conn.execute("PRAGMA index_list(jobs)").fetchall()}
-        assert "jobs_batch_id" in indexes
-        raw_conn.close()
+            indexes = {row[1] for row in raw_conn.execute("PRAGMA index_list(jobs)").fetchall()}
+            assert "jobs_batch_id" in indexes
 
         # Verify batch methods work seamlessly on migrated store
         store.create_batch("batch_test_1", 2, options={"profile": "balanced"})
@@ -305,9 +304,8 @@ def test_interrupted_migration_rolls_back(tmp_path: Path, monkeypatch: pytest.Mo
     with pytest.raises(JobStoreError, match="migration failed"):
         DurableJobStore(db_path)
 
-    raw_conn = orig_connect(str(db_path))
-    assert raw_conn.execute("PRAGMA user_version").fetchone()[0] == 1
-    raw_conn.close()
+    with contextlib.closing(orig_connect(str(db_path))) as raw_conn:
+        assert raw_conn.execute("PRAGMA user_version").fetchone()[0] == 1
 
 
 def test_corrupt_row_does_not_destroy_readable_history(tmp_path: Path) -> None:
@@ -344,13 +342,12 @@ def test_corrupt_row_does_not_destroy_readable_history(tmp_path: Path) -> None:
     store.update({"job_id": "job2", "state": "done", "output_path": str(out2)}, terminal=True)
     store.close()
 
-    raw_conn = sqlite3.connect(str(db_path))
-    raw_conn.execute(
-        "UPDATE jobs SET record_json = '{\"corrupted_json_truncated:' WHERE job_id = 'job2'"
-    )
-    raw_conn.execute("UPDATE jobs SET record_json = '<<NOT_EVEN_JSON>>' WHERE job_id = 'job3'")
-    raw_conn.commit()
-    raw_conn.close()
+    with contextlib.closing(sqlite3.connect(str(db_path))) as raw_conn:
+        raw_conn.execute(
+            "UPDATE jobs SET record_json = '{\"corrupted_json_truncated:' WHERE job_id = 'job2'"
+        )
+        raw_conn.execute("UPDATE jobs SET record_json = '<<NOT_EVEN_JSON>>' WHERE job_id = 'job3'")
+        raw_conn.commit()
 
     reopened = DurableJobStore(db_path)
     try:
@@ -382,10 +379,11 @@ def test_corrupt_row_does_not_destroy_readable_history(tmp_path: Path) -> None:
         assert res4.record["job_id"] == "job4"
 
         # 5. find_job on corrupt row returns quarantined tombstone
-        raw_conn = sqlite3.connect(str(db_path))
-        raw_conn.execute("UPDATE jobs SET record_json = 'INVALID_JSON_BLOB' WHERE job_id = 'job1'")
-        raw_conn.commit()
-        raw_conn.close()
+        with contextlib.closing(sqlite3.connect(str(db_path))) as raw_conn:
+            raw_conn.execute(
+                "UPDATE jobs SET record_json = 'INVALID_JSON_BLOB' WHERE job_id = 'job1'"
+            )
+            raw_conn.commit()
 
         res1_corrupt = reopened.find_job("job1")
         assert res1_corrupt is not None

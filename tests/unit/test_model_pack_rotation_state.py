@@ -696,3 +696,73 @@ def test_model_pack_store_qualification_and_error_branches(tmp_path: Path) -> No
     store = ModelPackStore(tmp_path / "store")
     with pytest.raises(ModelPackSignatureError, match="pinned rotation root is required"):
         store.verify_and_commit_key_rotation(b"", b"", "bad_root")  # type: ignore[arg-type]
+
+
+def test_key_rotation_state_store_additional_branches(tmp_path: Path) -> None:
+    # 1. application_default classmethod
+    default_store = KeyRotationStateStore.application_default()
+    assert default_store.root.name == "model-packs"
+
+    # 2. Invalid pinned root types
+    store = KeyRotationStateStore(tmp_path / "store")
+    with pytest.raises(ModelPackSignatureError, match="explicit pinned rotation root is required"):
+        store.load_verified("not_a_root")  # type: ignore[arg-type]
+    with pytest.raises(ModelPackSignatureError, match="explicit pinned rotation root is required"):
+        store.verify_and_commit(b"{}", b"sig", "not_a_root")  # type: ignore[arg-type]
+
+    # 3. Missing verification material in _write_state
+    from hawavoclean.model_packs.rotation_store import KeyRotationState
+
+    missing_material_state = KeyRotationState(ROOT_ID, 1, "0" * 64)
+    with pytest.raises(ModelPackInstallError) as exc_info:
+        store._write_state(missing_material_state)
+    assert exc_info.value.code == "rotation_state_material_missing"
+
+    # 4. Legacy state upgrade required & root mismatch
+    root_key = Ed25519PrivateKey.generate()
+    pinned = PinnedRotationRoot(ROOT_ID, _public_bytes(root_key))
+    legacy_state = {
+        "schema_version": 1,
+        "state": {
+            "highest_generation": 1,
+            "metadata_sha256": "0" * 64,
+            "root_key_id": ROOT_ID,
+        },
+    }
+    store._ensure_root()
+    (store.root / "key-rotation-state.json").write_bytes(canonical_json_bytes(legacy_state))
+
+    with pytest.raises(ModelPackInstallError) as exc_info:
+        store.load_verified(pinned, now=NOW)
+    assert exc_info.value.code == "rotation_state_upgrade_required"
+
+    other_pinned = PinnedRotationRoot("other-root", _public_bytes(root_key))
+    with pytest.raises(ModelPackRollbackError) as rollback_exc:
+        store.load_verified(other_pinned, now=NOW)
+    assert rollback_exc.value.code == "rotation_state_root_mismatch"
+
+    # 5. Oversized state file and non-canonical JSON
+    (store.root / "key-rotation-state.json").write_bytes(b"x" * 70000)
+    with pytest.raises(ModelPackInstallError) as exc_info:
+        store.current()
+    assert exc_info.value.code == "corrupt_rotation_state"
+
+    (store.root / "key-rotation-state.json").write_bytes(b'{\n  "schema_version": 1\n}')
+    with pytest.raises(ModelPackInstallError) as exc_info:
+        store.current()
+    assert exc_info.value.code == "corrupt_rotation_state"
+
+    # 6. Identity mismatch in state material (verified gen != state highest_gen)
+    pack_key = Ed25519PrivateKey.generate()
+    gen2_meta, gen2_sig = _signed_generation(root_key, pack_key, generation=2)
+    meta_digest = hashlib.sha256(gen2_meta).hexdigest()
+    tampered_state = KeyRotationState(
+        ROOT_ID,
+        1,  # Lower than generation 2 in metadata
+        meta_digest,
+        gen2_meta,
+        gen2_sig,
+    )
+    with pytest.raises(ModelPackInstallError) as exc_info:
+        store._verify_state_material(tampered_state, pinned, now=NOW)
+    assert exc_info.value.code == "rotation_state_identity_mismatch"

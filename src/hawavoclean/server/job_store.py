@@ -1003,6 +1003,10 @@ class DurableJobStore:
             self._conn.close()
             self._closed = True
 
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.close()
+
 
 __all__ = [
     "ConflictPolicy",

@@ -103,6 +103,17 @@ class NativeSourceRegistry:
         self._lock = threading.Lock()
 
     @staticmethod
+    def _identity(path: Path) -> tuple[int, int] | None:
+        try:
+            current = path.resolve(strict=True)
+            info = current.stat()
+        except (OSError, ValueError):
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        return int(info.st_dev), int(info.st_ino)
+
+    @staticmethod
     def _close_source(source: NativeSource) -> None:
         if source.descriptor >= 0:
             with contextlib.suppress(OSError):

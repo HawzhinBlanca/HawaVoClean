@@ -105,7 +105,7 @@ class HawaRestoreKDNet(nn.Module):
         cond_dim: int = 256,
         n_fft: int = 1024,
         use_f0_cond: bool = True,
-        **kwargs: Any,
+        **_kwargs: object,
     ) -> None:
         super().__init__()
         self.n_fft = n_fft

@@ -67,6 +67,22 @@ def _run_pipeline_worker(
     queue.put((peak_rss, t1 - t0, report.summary.units_total))
 
 
+def _run_meter_worker(
+    memmap_path_str: str,
+    channels: int,
+    samples: int,
+    queue: mp.Queue[tuple[int, float, float]],
+) -> None:
+    """Run streaming meter in an isolated process and record true peak RSS."""
+    mem = pipeline._create_audio_memmap(Path(memmap_path_str), channels, samples)
+    try:
+        res = measure_loudness_and_peaks_streaming(mem, 48000, chunk_samples=1 << 20)
+        peak_rss = process_peak_rss_bytes()
+        queue.put((peak_rss, float(res.integrated_lufs), float(res.true_peak_dbtp)))
+    finally:
+        pipeline._release_audio_memmap(mem, [])
+
+
 @pytest.mark.unit
 def test_long_stereo_media_runs_strictly_below_memory_ceiling(tmp_path: Path) -> None:
     """Long stereo audio exceeding the 64 MiB streaming threshold stays well below 2 GB RSS."""
@@ -108,27 +124,31 @@ def test_three_hour_stereo_stream_meter_and_peak_rss_below_ceiling(tmp_path: Pat
     channels = 2
     memmap_path = tmp_path / "three_hour_test.f32"
     mem = pipeline._create_audio_memmap(memmap_path, channels, samples)
+    mem[0, : 48_000 * 5] = 0.25
+    mem[1, : 48_000 * 5] = 0.25
+    mem.flush()
+    pipeline._release_audio_memmap(mem, [])
 
-    try:
-        mem[0, : 48_000 * 5] = 0.25
-        mem[1, : 48_000 * 5] = 0.25
-        mem.flush()
+    ctx = mp.get_context("spawn")
+    queue: mp.Queue[tuple[int, float, float]] = ctx.Queue()
+    proc = ctx.Process(
+        target=_run_meter_worker,
+        args=(str(memmap_path), channels, samples, queue),
+    )
+    proc.start()
+    proc.join(timeout=60.0)
+    assert not proc.is_alive(), "Meter worker process timed out"
+    assert proc.exitcode == 0, f"Meter worker failed with exit code {proc.exitcode}"
 
-        initial_rss = process_peak_rss_bytes()
-        res = measure_loudness_and_peaks_streaming(mem, 48000, chunk_samples=1 << 20)
-        peak_rss = process_peak_rss_bytes()
-
-        assert peak_rss < TWO_GB_BYTES, (
-            f"3-hour stereo peak RSS {peak_rss / (1024 * 1024):.1f} MB exceeded 2 GB ceiling"
-        )
-        if initial_rss < FIVE_HUNDRED_MB_BYTES:
-            assert peak_rss < FIVE_HUNDRED_MB_BYTES, (
-                f"3-hour stereo peak RSS {peak_rss / (1024 * 1024):.1f} MB exceeded 500 MB target"
-            )
-        assert res.integrated_lufs <= 0.0
-        assert res.true_peak_dbtp <= 0.0
-    finally:
-        pipeline._release_audio_memmap(mem, [])
+    peak_rss, integrated_lufs, true_peak_dbtp = queue.get(timeout=5.0)
+    assert peak_rss < TWO_GB_BYTES, (
+        f"3-hour stereo peak RSS {peak_rss / (1024 * 1024):.1f} MB exceeded 2 GB ceiling"
+    )
+    assert peak_rss < FIVE_HUNDRED_MB_BYTES, (
+        f"3-hour stereo peak RSS {peak_rss / (1024 * 1024):.1f} MB exceeded 500 MB target"
+    )
+    assert integrated_lufs <= 0.0
+    assert true_peak_dbtp <= 0.0
 
 
 @pytest.mark.unit

@@ -710,7 +710,7 @@ def train_model(
         "solver": "midpoint",
         "use_f0_cond": True,
     }
-    model = HawaRestoreKDNet(**config).to(device)
+    model = HawaRestoreKDNet(**cast(dict[str, Any], config)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = HawaRestoreLoss().to(device)
     spk_embed = DifferentiableSpeakerEmbed().to(device)

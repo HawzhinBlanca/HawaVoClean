@@ -9,8 +9,13 @@ This conftest makes that class of failure loud and impossible:
 - Every test gets a fresh ``HAWAVOCLEAN_WORK_DIR`` under its own tmp dir.
 """
 
+import contextlib
 import os
 from pathlib import Path
+
+# Pre-import torch before coverage tracing to prevent Python 3.14 multi-load errors
+with contextlib.suppress(ImportError):
+    import torch  # noqa: F401
 
 import pytest
 

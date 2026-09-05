@@ -848,23 +848,42 @@ class JobManager:
         if policy not in {"unique", "fail", "replace"}:
             raise ValueError(f"unsupported conflict policy: {policy}")
         pinned: PinnedSource | None = None
+        source_sha256: str | None = None
+        source_size_bytes: int | None = None
         if input_path.exists() and input_path.is_file():
             pinned = PinnedSource.create(
                 input_path,
                 staging_root=work_root(),
                 max_file_size_bytes=MAX_INPUT_FILE_BYTES,
             )
-        elif self._command_factory is default_command:
-            raise MediaPreflightError(
-                MediaPreflightReason.NOT_FOUND,
-                f"Input audio file does not exist or cannot be read: {input_path}",
-            )
+            source_sha256 = pinned.sha256
+            source_size_bytes = pinned.size_bytes
+        else:
+            existing_rec: JobRecord | None = None
+            if idempotency_key is not None:
+                with self._wake:
+                    if idempotency_key in self._idempotency:
+                        existing_rec = self._jobs.get(self._idempotency[idempotency_key])
+                    elif self._store is not None:
+                        durable_res = self._store.find_idempotent(idempotency_key)
+                        if durable_res is not None:
+                            existing_rec = JobRecord.from_storage(durable_res.record)
+            if existing_rec is not None and existing_rec.state in TERMINAL_STATES:
+                source_sha256 = existing_rec.source_sha256
+                source_size_bytes = existing_rec.source_size_bytes
+            elif self._command_factory is default_command:
+                raise MediaPreflightError(
+                    MediaPreflightReason.NOT_FOUND,
+                    f"Input audio file does not exist or cannot be read: {input_path}",
+                )
 
         try:
             effective_overwrite = policy == "replace"
             report_path = output_path.parent / f"{output_path.stem}.hawavoclean.json"
             bundle_path = (
-                output_path.parent / f"{output_path.stem}.hawavoclean.zip" if record_bundle else None
+                output_path.parent / f"{output_path.stem}.hawavoclean.zip"
+                if record_bundle
+                else None
             )
             request_payload = {
                 "input_path": str(input_path),
@@ -876,8 +895,8 @@ class JobManager:
                 "conflict_policy": policy,
                 "request_context_hash": request_context_hash,
                 "record_bundle": record_bundle,
-                "source_sha256": pinned.sha256 if pinned is not None else None,
-                "source_size_bytes": pinned.size_bytes if pinned is not None else None,
+                "source_sha256": source_sha256,
+                "source_size_bytes": source_size_bytes,
             }
             request_hash = canonical_request_hash(request_payload)
 
@@ -1504,6 +1523,10 @@ class JobManager:
             if self._owner_lease is not None:
                 self._owner_lease.release()
                 self._owner_lease = None
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.shutdown(grace_s=0.1)
 
     # ---------------------------------------------------------------- internal
 
