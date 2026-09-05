@@ -108,3 +108,32 @@ def test_current_documentation_local_links_resolve() -> None:
             if not resolved.exists():
                 failures.append(f"{document.relative_to(ROOT)} -> {raw_target}")
     assert not failures, "broken local documentation links:\n" + "\n".join(failures)
+
+
+def test_documentation_consistency_gate_no_open_item_described_as_shipped() -> None:
+    """Documentation consistency gate (G0.8): ensure open items are not described as shipped."""
+    open_claims = (
+        "Windows 11 installer shipped",
+        "Resolve PKG signed and notarized",
+        "Sorani 300-hour corpus completed",
+        "UAE cloud deployed to production",
+        "Restore is fully production qualified",
+        "HawaVoClean is published 10/10",
+    )
+    all_docs = CURRENT_DOCS + (
+        ROOT / "docs" / "high-end-production-implementation.md",
+        ROOT / "docs" / "true-10-readiness-task-sheet.md",
+        ROOT / "docs" / "media-preflight.md",
+        ROOT / "docs" / "natural-streaming-render.md",
+    )
+    joined = "\n".join(_text(p) for p in all_docs).lower()
+    for claim in open_claims:
+        assert claim.lower() not in joined, f"Disallowed shipped claim found: {claim}"
+
+    task_sheet = _text(ROOT / "docs" / "true-10-readiness-task-sheet.md")
+    assert "Honest readiness rating" in task_sheet
+    assert "[x] | G0.1" in task_sheet
+    assert "[x] | G0.2" in task_sheet
+    assert "[x] | G0.3" in task_sheet
+    assert "[x] | G0.4" in task_sheet
+    assert "[x] | G0.8" in task_sheet

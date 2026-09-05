@@ -19,9 +19,8 @@ excessive stream tables, extreme metadata integers, invalid stream indices and
 unsupported channel layouts. Refusals use `MediaPreflightError.reason`, a
 stable `MediaPreflightReason` value suitable for client explanations.
 
-Decoded samples still pass the decoder's NaN, infinity and abnormal-amplitude
-checks before DSP. This boundary does **not** make the Natural renderer
-streaming: the current render path still decodes the complete audio stream into
-memory. Six-hour, bounded-memory production qualification therefore remains
-open until the renderer and mastering stages are converted and tested as a
-streaming pipeline.
+Decoded samples pass the decoder's NaN, infinity and abnormal-amplitude
+checks before DSP. Long inputs at or above 64 MiB decoded PCM use the
+disk-backed streaming Natural pipeline (`docs/natural-streaming-render.md`),
+which batches unit processing, avoids speech mask allocations, and assembles
+and masters in memory-mapped chunks to enforce bounded memory below 2 GB RSS.
