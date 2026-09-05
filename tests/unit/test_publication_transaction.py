@@ -638,7 +638,10 @@ def test_partial_artifact_write_and_permission_loss_preserve_prior_generation(
     assert _assert_complete_generation(tmp_path) == b"old"
 
 
-@pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGKILL"])
+_SIGNAL_NAMES = ["SIGINT", "SIGTERM"] + (["SIGKILL"] if hasattr(signal, "SIGKILL") else [])
+
+
+@pytest.mark.parametrize("signal_name", _SIGNAL_NAMES)
 @pytest.mark.parametrize(
     "checkpoint",
     [
@@ -667,7 +670,8 @@ import hawavoclean.publication as publication
 
 def checkpoint(name: str) -> None:
     if name == sys.argv[4]:
-        os.kill(os.getpid(), getattr(signal, sys.argv[5]))
+        sig_num = getattr(signal, sys.argv[5], signal.SIGTERM)
+        os.kill(os.getpid(), sig_num)
 
 publication._checkpoint = checkpoint
 publication.publish_output_generation(
@@ -714,7 +718,7 @@ import hawavoclean.publication as publication
 
 def checkpoint(name: str) -> None:
     if name == "pointer_replaced":
-        os.kill(os.getpid(), signal.SIGKILL)
+        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
 
 publication._checkpoint = checkpoint
 publication.publish_output_generation(
@@ -725,7 +729,10 @@ publication.publish_output_generation(
         [sys.executable, "-c", script, str(candidate), str(tmp_path / "out.wav"), report],
         check=False,
     )
-    assert result.returncode == -signal.SIGKILL
+    if sys.platform == "win32":
+        assert result.returncode != 0
+    else:
+        assert result.returncode == -getattr(signal, "SIGKILL", 9)
 
     # Re-running the same publish verifies/reuses the immutable generation,
     # repairs the journal/exports, and cannot delete the old generation.
@@ -749,7 +756,7 @@ import hawavoclean.publication as publication
 
 def checkpoint(name: str) -> None:
     if name == "before_pointer_commit":
-        os.kill(os.getpid(), signal.SIGKILL)
+        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
 
 publication._checkpoint = checkpoint
 publication.publish_output_generation(
@@ -760,7 +767,10 @@ publication.publish_output_generation(
         [sys.executable, "-c", script, str(candidate), str(tmp_path / "out.wav"), report],
         check=False,
     )
-    assert result.returncode == -signal.SIGKILL
+    if sys.platform == "win32":
+        assert result.returncode != 0
+    else:
+        assert result.returncode == -getattr(signal, "SIGKILL", 9)
     paths = publication_paths(tmp_path / "out.wav")
     assert not os.path.lexists(paths.current)
     assert not publication_exists(paths.audio)

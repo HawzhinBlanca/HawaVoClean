@@ -298,7 +298,7 @@ def test_a_child_whose_real_spawner_dies_is_gone_without_publishing(tmp_path: Pa
     except ProcessLookupError:
         pass
     else:  # pragma: no cover - only on a broken watchdog
-        os.kill(child_pid, signal.SIGKILL)
+        os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         pytest.fail(f"the orphan was still running {waited:.1f}s after its spawner died")
     assert not marker.exists(), "the orphan ran on to finish its work"
 
@@ -366,7 +366,7 @@ def test_the_interrupt_path_survives_an_inherited_sig_ign(tmp_path: Path) -> Non
         while not partial.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert partial.exists(), "the grandchild never armed and started work"
-        proc.send_signal(signal.SIGKILL)  # no cleanup anywhere in the spawner
+        proc.kill()  # no cleanup anywhere in the spawner
         proc.wait(timeout=30)
     finally:
         if proc.poll() is None:  # pragma: no cover - only on a wedged spawner
@@ -382,7 +382,7 @@ def test_the_interrupt_path_survives_an_inherited_sig_ign(tmp_path: Path) -> Non
     except ProcessLookupError:
         pass
     else:  # pragma: no cover - only on a broken watchdog
-        os.kill(child_pid, signal.SIGKILL)
+        os.kill(child_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         pytest.fail(
             f"with SIGINT ignored, the orphan was still running {waited:.1f}s "
             f"after its spawner died"

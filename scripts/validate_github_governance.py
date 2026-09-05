@@ -247,7 +247,7 @@ def _validate_workflow(contract: dict[str, Any], workflow_text: str) -> None:
         "CI does not invoke the exact local release contract",
     )
     _require(
-        "os: [ubuntu-24.04, macos-15]" in workflow_text
+        "os: [ubuntu-24.04, macos-15, windows-2025]" in workflow_text
         and 'python: ["3.11", "3.12", "3.13", "3.14"]' in workflow_text,
         "hosted support matrix differs from the declared contract",
     )
@@ -321,7 +321,7 @@ def validate_contract(contract: dict[str, Any], *, root: Path = ROOT) -> str:
     )
     matrix = _object(ci.get("hosted_support_matrix"), "hosted support matrix")
     _require(
-        matrix.get("operating_systems") == ["ubuntu-24.04", "macos-15"],
+        matrix.get("operating_systems") == ["ubuntu-24.04", "macos-15", "windows-2025"],
         "declared OS matrix is incomplete",
     )
     _require(

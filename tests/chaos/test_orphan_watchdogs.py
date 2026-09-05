@@ -43,6 +43,16 @@ from tests.chaos.procwatch import (
     wait_all_gone,
 )
 
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+pytestmark = [
+    pytest.mark.chaos,
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process hierarchy tests (Windows covered by test_process_supervisor.py)",
+    ),
+]
+
 REPO = Path(__file__).resolve().parents[2]
 
 #: A dead parent must be noticed and acted on well inside this. The watchdogs
@@ -266,7 +276,7 @@ def test_worker_orphaned_during_warmup_exits_on_its_own(tmp_path: Path) -> None:
             time.sleep(0.02)
         assert marker.exists(), "the worker never reached warmup; nothing was tested"
 
-        parent.send_signal(signal.SIGKILL)
+        parent.send_signal(SIGKILL)
         parent.wait(timeout=30)
 
         survivors, waited = wait_all_gone([worker_pid], ORPHAN_EXIT_TIMEOUT_S)

@@ -138,8 +138,20 @@ def _start_run(long_input: Path, dest_dir: Path, work_dir: Path) -> "subprocess.
     )
 
 
-@pytest.mark.chaos
-@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM, signal.SIGKILL])
+pytestmark = [
+    pytest.mark.chaos,
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process hierarchy tests (Windows covered by test_process_supervisor.py)",
+    ),
+]
+
+_SIGNALS: list[signal.Signals] = [signal.SIGINT, signal.SIGTERM] + (
+    [signal.SIGKILL] if hasattr(signal, "SIGKILL") else []
+)
+
+
+@pytest.mark.parametrize("sig", _SIGNALS)
 def test_interrupt_leaves_no_partials_and_no_orphans(
     sig: signal.Signals, long_input: Path, tmp_path: Path
 ) -> None:

@@ -23,6 +23,7 @@ from hawavoclean.process_supervisor import (
 from hawavoclean.server.jobs import TERMINAL_STATES, JobManager
 
 REPO = Path(__file__).resolve().parents[2]
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
 def _pid_is_live(pid: int) -> bool:
@@ -88,7 +89,7 @@ def test_posix_termination_kills_stubborn_descendant(tmp_path: Path) -> None:
             proc.kill()
             proc.wait(timeout=5.0)
         if grandchild_pid is not None and _pid_is_live(grandchild_pid):
-            os.kill(grandchild_pid, signal.SIGKILL)
+            os.kill(grandchild_pid, _SIGKILL)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group qualification")
@@ -146,7 +147,7 @@ def test_job_manager_cancel_reaps_the_worker_descendant(tmp_path: Path) -> None:
     finally:
         manager.shutdown(grace_s=0.1)
         if grandchild_pid is not None and _pid_is_live(grandchild_pid):
-            os.kill(grandchild_pid, signal.SIGKILL)
+            os.kill(grandchild_pid, _SIGKILL)
 
 
 class _FakeProcess:
@@ -590,7 +591,7 @@ def test_nested_process_tree_cancellation_within_ten_seconds(tmp_path: Path) -> 
         for cleanup_pid in (proc.pid, child_pid, grandchild_pid, great_grandchild_pid):
             if cleanup_pid is not None and _pid_is_live(cleanup_pid):
                 with contextlib.suppress(OSError):
-                    os.kill(cleanup_pid, signal.SIGKILL)
+                    os.kill(cleanup_pid, _SIGKILL)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group qualification")
@@ -719,7 +720,7 @@ def test_job_manager_cancels_heavy_job_and_starts_next_within_five_seconds(
         manager.shutdown(grace_s=0.2)
         if grandchild_pid is not None and _pid_is_live(grandchild_pid):
             with contextlib.suppress(OSError):
-                os.kill(grandchild_pid, signal.SIGKILL)
+                os.kill(grandchild_pid, _SIGKILL)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX watchdog qualification")
@@ -852,7 +853,7 @@ def test_host_crash_terminates_complete_nested_tree_via_watchdog(tmp_path: Path)
             assert _pid_is_live(p)
 
         # Abrupt host crash: SIGKILL the host (no atexit, no finally, no cleanup)
-        os.kill(host_pid, signal.SIGKILL)
+        os.kill(host_pid, _SIGKILL)
         host_proc.wait(timeout=5.0)
         assert not _pid_is_live(host_pid)
 
@@ -873,7 +874,7 @@ def test_host_crash_terminates_complete_nested_tree_via_watchdog(tmp_path: Path)
         for cleanup_pid in (child_pid, grandchild_pid, great_pid):
             if cleanup_pid is not None and _pid_is_live(cleanup_pid):
                 with contextlib.suppress(OSError):
-                    os.kill(cleanup_pid, signal.SIGKILL)
+                    os.kill(cleanup_pid, _SIGKILL)
 
 
 def test_windows_job_object_nested_children_and_crash_contract() -> None:

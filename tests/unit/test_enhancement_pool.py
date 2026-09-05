@@ -96,7 +96,7 @@ class _DiesOnUnitOne:
 
     def enhance(self, waveform: Any, sample_rate: int) -> EnhancementResult:
         if int(waveform[0]) == 1:
-            os.kill(os.getpid(), signal.SIGKILL)
+            os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
         out = np.array(waveform, dtype=np.float32, copy=True)
         return EnhancementResult(out, sample_rate, 1.0, len(waveform), len(out))
 

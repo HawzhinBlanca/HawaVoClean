@@ -15,7 +15,7 @@
   },
   "ci": {
     "workflow": ".github/workflows/ci.yml",
-    "workflow_sha256": "a97deb12a0a92431ed4077b131b122380b7ebf4182f8cd52118c494250b19839",
+    "workflow_sha256": "81d7d6f5368368af344a7d1c6fca374451d347145b8bcc58689a2d828ee8da58",
     "workflow_name": "release",
     "required_status_context": "required",
     "jobs": [
@@ -28,7 +28,8 @@
     "hosted_support_matrix": {
       "operating_systems": [
         "ubuntu-24.04",
-        "macos-15"
+        "macos-15",
+        "windows-2025"
       ],
       "python": [
         "3.11",
@@ -117,6 +118,6 @@
     "A deliberately failing Python test already proved required-check enforcement. The new UI pipe-failure regression still needs a disposable remote pull-request proof."
   ],
   "integrity": {
-    "contract_sha256": "cdb21a64e3f6ce975070d778358958e302bffdec908d6ea8a84638437d1d8255"
+    "contract_sha256": "54de0bb8bc1d1865c19377ebb065ba6619e25371913b33d4e7be7b0fd83284bc"
   }
 }

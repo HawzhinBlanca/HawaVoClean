@@ -8,6 +8,7 @@ report honestly records the degradation.
 
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,16 @@ from hawavoclean.publication import publication_exists, publication_paths
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"
+
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+pytestmark = [
+    pytest.mark.chaos,
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process hierarchy tests (Windows covered by test_process_supervisor.py)",
+    ),
+]
 
 
 class _SuicidalEnhancer:
@@ -48,7 +59,7 @@ class _SuicidalEnhancer:
         pass
 
     def enhance(self, _waveform: Any, _sample_rate: int) -> EnhancementResult:
-        os.kill(os.getpid(), signal.SIGKILL)
+        os.kill(os.getpid(), SIGKILL)
         raise RuntimeError("unreachable")
 
 
