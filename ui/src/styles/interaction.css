@@ -3516,3 +3516,69 @@ input:focus-visible,
   border-radius: 50%;
 }
 
+/* ========================================================== D4.4 · I18N & RTL/LTR
+ * Sorani Kurdish ('ckb') is an RTL language written in Perso-Arabic script.
+ * When document [dir='rtl'] is active, layout flows Right-to-Left, while
+ * strictly preserving Left-to-Right layout for:
+ * 1. Waveforms, spectrograms, spectrum charts (time/frequency flows LTR)
+ * 2. Timecodes, transport counters, durations, numeric readings, percentages
+ * 3. Metric and audio facts in HeaderNow and VerdictStrip
+ * ======================================================================== */
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.lang-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 8px;
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  color: var(--fg-2);
+  background: var(--panel-3);
+  border: 1px solid var(--hair);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: all 0.1s ease;
+  user-select: none;
+}
+
+.lang-toggle:hover {
+  color: var(--fg);
+  border-color: var(--cyan);
+  background: rgba(57, 208, 255, 0.08);
+}
+
+.lang-toggle:focus-visible {
+  outline: 2px solid var(--ix-focus);
+  outline-offset: 2px;
+}
+
+[dir='rtl'] {
+  font-family: system-ui, -apple-system, 'Segoe UI', Tahoma, Arial, sans-serif;
+  text-align: right;
+}
+
+[dir='rtl'] .wavepanel,
+[dir='rtl'] .spectrogram-panel,
+[dir='rtl'] .spectrum-panel,
+[dir='rtl'] .transport-time,
+[dir='rtl'] .timecode,
+[dir='rtl'] .metric-tile .val,
+[dir='rtl'] .hn-facts,
+[dir='rtl'] .ltr-island {
+  direction: ltr;
+  text-align: left;
+}
+
+[dir='rtl'] .header {
+  direction: rtl;
+}
+
+

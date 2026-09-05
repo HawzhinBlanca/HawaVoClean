@@ -1,8 +1,9 @@
 import { describe, expect, it, beforeEach } from 'vitest';
-import { CATALOGS, getLocale, getTranslation, setLocale, type Locale } from './i18n';
+import { CATALOGS, getLocale, getTranslation, setLocale, pseudolocalize, type Locale } from './i18n';
 
 describe('i18n and RTL layout catalog', () => {
   beforeEach(() => {
+    localStorage.clear();
     setLocale('en');
   });
 
@@ -12,15 +13,17 @@ describe('i18n and RTL layout catalog', () => {
     expect(document.documentElement.dir).toBe('ltr');
   });
 
-  it('switches to Sorani Kurdish (ckb) with RTL direction', () => {
+  it('switches to Sorani Kurdish (ckb) with RTL direction and persists to localStorage', () => {
     setLocale('ckb');
     expect(getLocale()).toBe('ckb');
     expect(document.documentElement.lang).toBe('ckb');
     expect(document.documentElement.dir).toBe('rtl');
+    expect(localStorage.getItem('hawavoclean_locale')).toBe('ckb');
 
     const t = getTranslation();
     expect(t.appName).toBe('هاواڤۆکلین');
     expect(t.processButton).toBe('پاککردنەوەی دەنگ');
+    expect(t.langToggleLabel).toBe('English');
   });
 
   it('contains identical translation keys across all supported catalogs', () => {
@@ -41,5 +44,10 @@ describe('i18n and RTL layout catalog', () => {
   it('returns valid fallback translation for unrecognised locale', () => {
     const fallback = getTranslation('unknown' as Locale);
     expect(fallback.appName).toBe('HawaVoClean');
+  });
+
+  it('pseudolocalizes text for UI layout stress testing', () => {
+    const result = pseudolocalize('Clean Audio');
+    expect(result).toBe('[!! Cleeaan AAuudiioo !!]');
   });
 });
