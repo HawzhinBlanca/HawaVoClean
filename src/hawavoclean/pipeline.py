@@ -1322,12 +1322,24 @@ def _run_after_preflight(
         ProgressEvent("finish", PROGRESS_FINISH_LIMITER, "Applying lookahead limiter"),
     )
     if streaming_natural:
+
+        def on_limiter_progress(fraction: float) -> None:
+            pct = (
+                PROGRESS_FINISH_LIMITER
+                + fraction * (PROGRESS_FINISH_ENCODE - PROGRESS_FINISH_LIMITER) * 0.95
+            )
+            emit_progress(
+                on_progress,
+                ProgressEvent("finish", round(pct, 3), "Applying lookahead limiter"),
+            )
+
         limited_res = apply_lookahead_limiter_to_memmap(
             waveform=assembled_buffer.data,
             sample_rate=assembled_buffer.sample_rate,
             output_path=workspace.root / "mastered-natural.f32",
             input_gain_linear=gain_linear,
             ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+            on_progress=on_limiter_progress if on_progress is not None else None,
         )
         disk_mappings.append(limited_res.limited_waveform)
     else:

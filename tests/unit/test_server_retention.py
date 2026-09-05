@@ -502,7 +502,7 @@ def test_a_terminal_callback_may_ask_the_manager_a_question(tmp_path: Path) -> N
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
             status = manager.get_status(job_id)
-            if status is not None and status["state"] in TERMINAL_STATES:
+            if status is not None and status["state"] in TERMINAL_STATES and seen:
                 reached.append(str(status["state"]))
                 return
             time.sleep(0.02)

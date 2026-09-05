@@ -9,6 +9,7 @@ raises instead of silently clipping.
 """
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -296,6 +297,7 @@ def apply_lookahead_limiter_to_memmap(
     lookahead_ms: float = 5.0,
     release_ms: float = 50.0,
     chunk_samples: int = LIMITER_STREAM_CHUNK_SAMPLES,
+    on_progress: Callable[[float], None] | None = None,
 ) -> LimiterResult:
     """Apply static gain + the canonical limiter into a disk-backed stage.
 
@@ -344,6 +346,8 @@ def apply_lookahead_limiter_to_memmap(
         min_gain = 1.0
 
         for start in range(0, samples, chunk_samples):
+            if on_progress is not None and samples > 0:
+                on_progress(float(start) / float(samples))
             end = min(samples, start + chunk_samples)
             smooth = _stream_required_gain(
                 waveform,

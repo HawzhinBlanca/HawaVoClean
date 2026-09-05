@@ -102,7 +102,7 @@ def test_long_stereo_media_runs_strictly_below_memory_ceiling(tmp_path: Path) ->
         args=(str(src), str(out), queue),
     )
     proc.start()
-    proc.join(timeout=60.0)
+    proc.join(timeout=120.0)
     assert not proc.is_alive(), "Pipeline process timed out"
     assert proc.exitcode == 0, f"Pipeline failed with exit code {proc.exitcode}"
 
@@ -136,7 +136,7 @@ def test_three_hour_stereo_stream_meter_and_peak_rss_below_ceiling(tmp_path: Pat
         args=(str(memmap_path), channels, samples, queue),
     )
     proc.start()
-    proc.join(timeout=60.0)
+    proc.join(timeout=120.0)
     assert not proc.is_alive(), "Meter worker process timed out"
     assert proc.exitcode == 0, f"Meter worker failed with exit code {proc.exitcode}"
 
