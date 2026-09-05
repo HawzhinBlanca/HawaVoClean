@@ -951,3 +951,278 @@ def test_cli_doctor_and_profile_commands(tmp_path: Path) -> None:
         assert cmd_speaker_profile(argparse.Namespace(profile_target=str(real_profiles))) == int(
             ExitCode.SUCCESS
         )
+
+
+# ---------------------------------------------------------------------------
+# contracts, source_caps, paths fallbacks, store, bandwidth & checkpoint branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_server_contracts_validator_branches() -> None:
+    from hawavoclean.server.contracts import (
+        JobStatusResponseV1,
+        ManualStrategyV1,
+        ProcessingRecordEvidenceV1,
+        ProcessingRequestV1,
+        SmartSafeStrategyV1,
+    )
+
+    # 1. SmartSafeStrategyV1 disabled with profile_id
+    with pytest.raises(ValueError, match="speakerProfileId is invalid"):
+        SmartSafeStrategyV1(
+            kind="smart_safe",
+            restore_policy="disabled",
+            speaker_profile_id="spk_1",
+            allow_generative_reconstruction=False,
+        )
+
+    # 2. ManualStrategyV1 natural with allow_generative_reconstruction
+    with pytest.raises(ValueError, match="generative reconstruction consent is invalid"):
+        ManualStrategyV1(
+            kind="manual",
+            route="production",
+            allow_generative_reconstruction=True,
+        )
+
+    # 3. ManualStrategyV1 natural with expert_cutoff_hz
+    with pytest.raises(ValueError, match="expertCutoffHz is valid only"):
+        ManualStrategyV1(
+            kind="manual",
+            route="production",
+            expert_cutoff_hz=4000.0,
+            allow_generative_reconstruction=False,
+        )
+
+    # 4. ProcessingRequestV1 with empty sourceId
+    with pytest.raises(ValueError, match="every sourceId must contain"):
+        ProcessingRequestV1(
+            schema_version=1,
+            source_ids=[""],
+            strategy=ManualStrategyV1(kind="manual", route="production"),
+            execution_policy="offline_only",
+            idempotency_key="key1",
+        )
+
+    # 5. JobStatusResponseV1 bundle validations
+    base_job = {
+        "job_id": "job1",
+        "state": "queued",
+        "stage": "pending",
+        "progress": 0.0,
+        "message": "Queued",
+        "output_path": "/out.wav",
+        "report_path": "/rep.json",
+        "created_at": "2026-09-05T00:00:00Z",
+    }
+    with pytest.raises(ValueError, match="recordBundle jobs require bundlePath"):
+        JobStatusResponseV1(
+            **base_job,  # type: ignore[arg-type]
+            record_bundle=True,
+            bundle_path=None,
+        )
+
+    with pytest.raises(ValueError, match="bundle evidence is invalid"):
+        JobStatusResponseV1(
+            **base_job,  # type: ignore[arg-type]
+            record_bundle=False,
+            bundle_path="/path/to/bundle.zip",
+        )
+
+    dummy_sha = "0" * 64
+    bundle_ev = ProcessingRecordEvidenceV1(
+        path="/path/b.zip",
+        archive_sha256=dummy_sha,
+        content_sha256=dummy_sha,
+        master_sha256=dummy_sha,
+        report_sha256=dummy_sha,
+        summary_sha256=dummy_sha,
+        total_uncompressed_bytes=100,
+        internal_hashes_verified=True,
+        authenticated_publisher=True,
+    )
+    with pytest.raises(ValueError, match="bundle evidence path must equal"):
+        JobStatusResponseV1(
+            **base_job,  # type: ignore[arg-type]
+            record_bundle=True,
+            bundle_path="/path/a.zip",
+            bundle=bundle_ev,
+        )
+
+
+@pytest.mark.unit
+def test_server_source_caps_registry_branches(tmp_path: Path) -> None:
+    from hawavoclean.server.policy import PathPolicyError
+    from hawavoclean.server.source_caps import (
+        NativeSourceRegistry,
+        resolve_native_selected_path,
+    )
+
+    # 1. resolve_native_selected_path empty or bad text
+    with pytest.raises(PathPolicyError, match="selected source path is required"):
+        resolve_native_selected_path("   ")
+
+    # 2. NativeSourceRegistry resolution checks
+    test_file = tmp_path / "test.wav"
+    test_file.write_bytes(b"content")
+
+    with NativeSourceRegistry(maximum=1) as registry:
+        # Invalid hex or length
+        assert registry.resolve_source("short") is None
+        assert registry.resolve_source("z" * 32) is None
+        assert registry.resolve_source("0" * 32) is None
+
+        # Authorizes un-registered path
+        assert not registry.authorizes(tmp_path / "other.wav")
+
+        # Register valid file
+        src1 = registry.register(str(test_file))
+        assert registry.authorizes(test_file)
+        assert registry.resolve_source(src1.source_id) == test_file.resolve()
+
+        # Eviction at maximum capacity
+        file2 = tmp_path / "file2.wav"
+        file2.write_bytes(b"content2")
+        src2 = registry.register(str(file2))
+        assert registry.resolve_source(src2.source_id) == file2.resolve()
+        # src1 was evicted
+        assert registry.resolve_source(src1.source_id) is None
+
+        # Tampered / deleted file on resolve
+        file2.unlink()
+        assert registry.resolve_source(src2.source_id) is None
+
+
+@pytest.mark.unit
+def test_paths_binary_resolution_full_fallbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hawavoclean.paths import (
+        ffmpeg_bin_path,
+        restoration_checkpoint_path,
+    )
+
+    # 1. restoration_checkpoint_path: env override and packaged path
+    fake_ckpt = tmp_path / "fake.pt"
+    fake_ckpt.write_bytes(b"dummy")
+    monkeypatch.setenv("HAWAVOCLEAN_RESTORATION_CHECKPOINT", str(fake_ckpt))
+    assert restoration_checkpoint_path() == fake_ckpt.resolve()
+
+    monkeypatch.delenv("HAWAVOCLEAN_RESTORATION_CHECKPOINT")
+    pkg_dir = tmp_path / "hawarestore-kd"
+    pkg_dir.mkdir()
+    (pkg_dir / "hawarestore_kd.pt").write_bytes(b"dummy")
+    monkeypatch.setattr("hawavoclean.paths.models_dir", lambda: tmp_path)
+    assert restoration_checkpoint_path() == (pkg_dir / "hawarestore_kd.pt").resolve()
+
+    # 2. ffmpeg fallback bins: pkg_bin and prefix_bin
+    exe_name = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    monkeypatch.delenv("HAWAVOCLEAN_FFMPEG_PATH", raising=False)
+    monkeypatch.delenv("HAWAVOCLEAN_FFPROBE_PATH", raising=False)
+
+    fake_pkg_bin = tmp_path / "resources" / "bin" / exe_name
+    fake_pkg_bin.parent.mkdir(parents=True)
+    fake_pkg_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_pkg_bin.chmod(0o755)
+
+    monkeypatch.setattr("hawavoclean.paths._PACKAGE_ROOT", tmp_path)
+    assert ffmpeg_bin_path() == str(fake_pkg_bin)
+    fake_pkg_bin.unlink()
+
+    fake_prefix_bin = tmp_path / "prefix" / "bin" / exe_name
+    fake_prefix_bin.parent.mkdir(parents=True)
+    fake_prefix_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    fake_prefix_bin.chmod(0o755)
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "prefix"))
+    assert ffmpeg_bin_path() == str(fake_prefix_bin)
+
+
+@pytest.mark.unit
+def test_model_packs_store_inspect_branches(tmp_path: Path) -> None:
+    from hawavoclean.model_packs.store import ModelPackStore
+    from hawavoclean.model_packs.trust import TrustStore
+
+    store = ModelPackStore(tmp_path / "packs")
+    trust = TrustStore([])
+
+    # Invalid pack_id pattern
+    cap_bad = store.inspect("INVALID!PACK", trust)
+    assert not cap_bad.usable
+    assert cap_bad.reason_code == "invalid_pack_id"
+
+    # Pack not installed
+    cap_none = store.inspect("valid_pack_id", trust)
+    assert not cap_none.usable
+    assert cap_none.reason_code == "pack_not_installed"
+
+
+@pytest.mark.unit
+def test_bandwidth_detector_extended_branches() -> None:
+    from hawavoclean.restoration.bandwidth import BandwidthDetector
+
+    # 1. 16 kHz sample rate (no bins >= 18 kHz)
+    det16 = BandwidthDetector(sample_rate=16000)
+    sig16 = np.sin(2 * np.pi * 400 * np.linspace(0, 0.5, 8000)).astype(np.float32)
+    est16 = det16.detect(sig16)
+    assert est16.effective_cutoff_hz > 0
+
+    # 2. Short speech mask with active frames <= 5
+    mask_short = np.zeros(100, dtype=np.float32)
+    mask_short[:2] = 1.0
+    sig_short = np.zeros(100 * 256, dtype=np.float32)
+    det_mask = BandwidthDetector(sample_rate=48000)
+    est_mask = det_mask.detect(sig_short, speech_mask=mask_short)
+    assert est_mask.confidence >= 0.0
+
+    # 3. min_cutoff_hz > 16 kHz forces restore_recommended=False and fullband fallback
+    det_high = BandwidthDetector(sample_rate=48000, min_cutoff_hz=17000.0, max_cutoff_hz=20000.0)
+    sig_high = np.ones(48000, dtype=np.float32)
+    est_high = det_high.detect(sig_high)
+    assert not est_high.restore_recommended
+    assert est_high.shape == "fullband"
+
+
+@pytest.mark.unit
+def test_checkpoint_validation_extended_branches(tmp_path: Path) -> None:
+    import torch
+
+    from hawavoclean.errors import ModelProvenanceError
+    from hawavoclean.restoration.checkpoint import load_safe_checkpoint
+
+    # 1. Missing model_state_dict
+    bad_pt1 = tmp_path / "bad1.pt"
+    torch.save({"config": {}}, bad_pt1)
+    with pytest.raises(ModelProvenanceError, match="missing 'model_state_dict'"):
+        load_safe_checkpoint(bad_pt1)
+
+    # 2. model_state_dict not a dict
+    bad_pt2 = tmp_path / "bad2.pt"
+    torch.save({"model_state_dict": "not_a_dict"}, bad_pt2)
+    with pytest.raises(ModelProvenanceError, match="is not a dictionary"):
+        load_safe_checkpoint(bad_pt2)
+
+    # 3. model_state_dict value not a tensor
+    bad_pt3 = tmp_path / "bad3.pt"
+    torch.save({"model_state_dict": {"w": [1.0, 2.0]}}, bad_pt3)
+    with pytest.raises(ModelProvenanceError, match="is not a torch.Tensor"):
+        load_safe_checkpoint(bad_pt3)
+
+    # 4. model_state_dict tensor containing NaN
+    bad_pt4 = tmp_path / "bad4.pt"
+    torch.save(
+        {"model_state_dict": {"w": torch.tensor([float("nan")], dtype=torch.float32)}},
+        bad_pt4,
+    )
+    with pytest.raises(ModelProvenanceError, match="contains non-finite values"):
+        load_safe_checkpoint(bad_pt4)
+
+    # 5. .safetensors with corrupted metadata json sidecar
+    safe_file = tmp_path / "model.safetensors"
+    safe_file.write_bytes(b"dummy")
+    sidecar = tmp_path / "model_metadata.json"
+    sidecar.write_text("{corrupt_json", encoding="utf-8")
+    with pytest.raises(
+        ModelProvenanceError,
+        match="Failed to load safetensors|Corrupted metadata",
+    ):
+        load_safe_checkpoint(safe_file)
