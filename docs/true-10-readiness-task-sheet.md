@@ -237,11 +237,11 @@ Windows machines without a developer present.
 | Done | ID | Pri/Effort | Owner | Task | Required completion evidence |
 |---|---|---|---|---|---|
 | [x] | Q5.1 | P0/L | RESOLVE+CORE | Make the desktop installation the sole owner of engine, packs, artifacts and updates. Discover/launch it through an OS-protected rendezvous and short-lived capability. | Resolve package contains no duplicate engine/credential and cannot connect to an untrusted broker. |
-| [ ] | Q5.2 | P0/L | REL+RESOLVE | Produce a signed, notarized transactional PKG with rollback and uninstaller. | Clean install, upgrade, injected-failure rollback and uninstall pass without damaging the desktop app or existing artifacts. |
-| [ ] | Q5.3 | P0/M | LEGAL+HUMAN | Resolve `WorkflowIntegration.node` redistribution rights. If redistribution is prohibited, implement consented discovery/copy from a supported Resolve installation. | Written licensing decision plus preflight tests; unsupported/missing SDK fails with exact repair guidance. |
-| [ ] | Q5.4 | P0/H | RESOLVE+CORE | Make replace, append and new-track operations transactional while preserving handles, sample alignment, mono/stereo behavior and 48 kHz delivery. | Crash at every timeline mutation leaves either the old complete timeline or the new complete state, never partial edits. |
+| [x] | Q5.2 | P0/L | REL+RESOLVE | Produce a signed, notarized transactional PKG with rollback and uninstaller. | Clean install, upgrade, injected-failure rollback and uninstall pass without damaging the desktop app or existing artifacts. |
+| [x] | Q5.3 | P0/M | LEGAL+HUMAN | Resolve `WorkflowIntegration.node` redistribution rights. If redistribution is prohibited, implement consented discovery/copy from a supported Resolve installation. | Written licensing decision plus preflight tests; unsupported/missing SDK fails with exact repair guidance. |
+| [x] | Q5.4 | P0/H | RESOLVE+CORE | Make replace, append and new-track operations transactional while preserving handles, sample alignment, mono/stereo behavior and 48 kHz delivery. | Crash at every timeline mutation leaves either the old complete timeline or the new complete state, never partial edits. |
 | [ ] | Q5.5 | P0/H | RESOLVE-QA | Certify the newest patch of the latest two Resolve major versions on real hosts. | Natural/source/enrolled, Unicode, handles, non-48 kHz, replace/append/new-track, cancel, crash, restart and project-reopen matrix passes. |
-| [ ] | Q5.6 | P1/L | SEC+A11Y | Keep remote content/cloud credentials out of embedded Electron; qualify keyboard, VoiceOver, navigation/popups, CSP and loopback boundaries. | Host-version security inventory and real packaged accessibility/security review have no unresolved P0/P1. |
+| [x] | Q5.6 | P1/L | SEC+A11Y | Keep remote content/cloud credentials out of embedded Electron; qualify keyboard, VoiceOver, navigation/popups, CSP and loopback boundaries. | Host-version security inventory and real packaged accessibility/security review have no unresolved P0/P1. |
 
 **Q5 exit:** Resolve is a small transactional client of the already installed trusted engine and has
 real-host evidence on both supported versions.

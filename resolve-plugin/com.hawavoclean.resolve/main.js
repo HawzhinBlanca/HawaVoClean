@@ -41,6 +41,7 @@ const {
   withoutRendererCredentials,
 } = require('./session-auth.js');
 const { discoverDesktopEngine } = require('./engine-discovery.js');
+const { TimelineTransactionManager } = require('./timeline-transactions.js');
 
 const PLUGIN_ID = 'com.hawavoclean.resolve';
 const APP_TITLE = 'HawaVoClean';
@@ -244,6 +245,15 @@ function configureSessionSecurity() {
   });
   appSession.webRequest.onErrorOccurred({ urls: ['http://127.0.0.1:*/*'] }, (details) => {
     requestAuthorization.delete(details.id);
+  });
+
+  const STRICT_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: http://127.0.0.1:*; connect-src http://127.0.0.1:* ws://127.0.0.1:*; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none';";
+  appSession.webRequest.onHeadersReceived((details, callback) => {
+    const responseHeaders = { ...(details.responseHeaders || {}) };
+    responseHeaders['Content-Security-Policy'] = [STRICT_CSP];
+    responseHeaders['X-Frame-Options'] = ['DENY'];
+    responseHeaders['X-Content-Type-Options'] = ['nosniff'];
+    callback({ responseHeaders });
   });
 }
 
@@ -874,27 +884,41 @@ async function resolveImportMedia(filePath) {
   return clipInfo(items[0]);
 }
 
-async function resolveReplaceClip(mediaId, filePath) {
-  if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) throw new Error('replaceClip: path must be an absolute path.');
-  const item = await findItemByMediaId(mediaId);
-  if (!item) throw new Error(`Clip ${mediaId} was not found in the media pool.`);
-  if (typeof item.ReplaceClipPreserveSubClip === 'function') {
-    try {
-      if (await item.ReplaceClipPreserveSubClip(filePath)) return true;
-    } catch (err) {
-      log(`ReplaceClipPreserveSubClip failed (${err.message}); falling back to ReplaceClip`);
-    }
+let timelineTxManager = null;
+function getTimelineTxManager() {
+  if (!timelineTxManager) {
+    timelineTxManager = new TimelineTransactionManager({
+      getProject,
+      getMediaPool,
+      findItemByMediaId,
+      log,
+    });
   }
-  return Boolean(await item.ReplaceClip(filePath));
+  return timelineTxManager;
 }
 
-async function resolveAppendToTimeline(mediaId) {
-  const item = await findItemByMediaId(mediaId);
-  if (!item) throw new Error(`Clip ${mediaId} was not found in the media pool.`);
-  const mediaPool = await getMediaPool();
-  if (!mediaPool) throw new Error('No project is open in DaVinci Resolve.');
-  const result = await mediaPool.AppendToTimeline([item]);
-  return Array.isArray(result) ? result.length > 0 : Boolean(result);
+async function resolveReplaceClip(mediaId, filePath) {
+  const mgr = getTimelineTxManager();
+  const res = await mgr.transactionalReplace(mediaId, filePath);
+  return res.success;
+}
+
+async function resolveAppendToTimeline(target) {
+  const item = await findItemByMediaId(target);
+  if (item) {
+    const mediaPool = await getMediaPool();
+    if (!mediaPool) throw new Error('No project is open in DaVinci Resolve.');
+    const result = await mediaPool.AppendToTimeline([item]);
+    return Array.isArray(result) ? result.length > 0 : Boolean(result);
+  }
+  const mgr = getTimelineTxManager();
+  const res = await mgr.transactionalAppend(target);
+  return res.success;
+}
+
+async function resolveNewTrack(mediaId, filePath, options) {
+  const mgr = getTimelineTxManager();
+  return mgr.transactionalNewTrack(mediaId, filePath, options);
 }
 
 async function resolveGetContext() {
@@ -1109,6 +1133,10 @@ function registerIpc() {
   ipcMain.handle('hawa:resolve:append', async (event, mediaId) => {
     requireTrustedIpcSender(event);
     return resolveAppendToTimeline(mediaId);
+  });
+  ipcMain.handle('hawa:resolve:new-track', async (event, mediaId, filePath, options) => {
+    requireTrustedIpcSender(event);
+    return resolveNewTrack(mediaId, filePath, options);
   });
   ipcMain.handle('hawa:resolve:context', async (event) => {
     requireTrustedIpcSender(event);

@@ -60,6 +60,7 @@ if (host === 'resolve') {
     importMedia: (filePath) => invoke('hawa:resolve:import', filePath),
     replaceClip: (mediaId, filePath) => invoke('hawa:resolve:replace', mediaId, filePath),
     appendToTimeline: (mediaId) => invoke('hawa:resolve:append', mediaId),
+    newTrack: (mediaId, filePath, options) => invoke('hawa:resolve:new-track', mediaId, filePath, options),
     getContext: () => invoke('hawa:resolve:context'),
   };
 }

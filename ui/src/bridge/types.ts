@@ -20,6 +20,7 @@ export interface HawaBridge {
     importMedia(path: string): Promise<ResolveClip | null>;        // MediaPool.ImportMedia([path])[0]
     replaceClip(mediaId: string, path: string): Promise<boolean>;  // ReplaceClipPreserveSubClip, fallback ReplaceClip
     appendToTimeline(mediaId: string): Promise<boolean>;
+    newTrack?(mediaId: string, path: string, options?: { trackName?: string }): Promise<{ success: boolean; trackIndex: number; trackName: string }>;
     getContext(): Promise<{ project: string | null; timeline: string | null; page: string | null }>;
   };
 }
