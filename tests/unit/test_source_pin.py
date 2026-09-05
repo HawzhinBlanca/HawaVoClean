@@ -309,3 +309,45 @@ def test_source_pin_edge_cases_and_error_branches(
     (test_dir / "file.txt").write_text("hello")
     remove_source_snapshot_tree(test_dir)
     assert not test_dir.exists()
+
+
+@pytest.mark.unit
+def test_pinned_source_adopt_and_create_error_branches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hawavoclean.errors import PreflightError
+
+    source = tmp_path / "adopt_source.wav"
+    source.write_bytes(b"content for adopt test")
+    staging = tmp_path / "staging"
+    pinned = PinnedSource.create(source, staging_root=staging, max_file_size_bytes=MAX_SOURCE_BYTES)
+
+    # 1. Destination already exists in workspace
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing_dest = workspace / "source-snapshot"
+    existing_dest.mkdir()
+    with pytest.raises(PreflightError, match="destination already exists"):
+        pinned.adopt(workspace)
+
+    # 2. os.replace raises OSError during adopt
+    existing_dest.rmdir()
+
+    def failing_replace(_src: object, _dst: object) -> None:
+        raise OSError("Simulated cross-device link failure")
+
+    monkeypatch.setattr("hawavoclean.source_pin.os.replace", failing_replace)
+    with pytest.raises(PreflightError, match="Could not attach source snapshot"):
+        pinned.adopt(workspace)
+
+    # 3. Destination chmod raises OSError during copy cleanup
+    monkeypatch.undo()
+
+    def failing_fsync(_fd: int) -> None:
+        raise OSError("Disk I/O error during fsync")
+
+    monkeypatch.setattr("hawavoclean.source_pin.os.fsync", failing_fsync)
+    fail_source = tmp_path / "fail_fsync.wav"
+    fail_source.write_bytes(b"data to fail")
+    with pytest.raises(PreflightError, match="Could not create source snapshot"):
+        PinnedSource.create(fail_source, staging_root=staging, max_file_size_bytes=MAX_SOURCE_BYTES)

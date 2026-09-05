@@ -235,3 +235,96 @@ def test_padding_and_error_branches() -> None:
     res_err = render_and_stitch_regions(audio, sr, regions, engine)
     assert res_err.abstained_regions == 1
     assert res_err.regions[0].route == "preserve"
+
+
+def test_filter_region_routes_for_acoustics_branches() -> None:
+    # 1. High music risk with low speech dominance (< 0.50) -> demotes to preserve
+    low_speech_evidence = AcousticEvidence(
+        speech_dominance=0.30,
+        music_risk=0.50,
+        crosstalk_risk=0.0,
+        rumble_confidence=0.0,
+        band_limited_confidence=0.0,
+        recorded_high_frequency_speech_confidence=0.0,
+        speaker_match_confidence=0.0,
+        speaker_match_verified=False,
+        reconstruction_consent=False,
+    )
+    regions = [
+        RegionRecommendation(0.0, 1.0, "studio", confidence=0.90, boundary_confidence=0.90),
+        RegionRecommendation(1.0, 2.0, "preserve", confidence=0.90, boundary_confidence=0.90),
+    ]
+    filtered = filter_region_routes_for_acoustics(regions, low_speech_evidence)
+    assert filtered[0].route == "preserve"
+    assert filtered[1].route == "preserve"
+
+    # 2. No music or crosstalk risk -> keeps original regions unchanged
+    clean_evidence = AcousticEvidence(
+        speech_dominance=0.95,
+        music_risk=0.05,
+        crosstalk_risk=0.05,
+        rumble_confidence=0.0,
+        band_limited_confidence=0.0,
+        recorded_high_frequency_speech_confidence=0.0,
+        speaker_match_confidence=0.0,
+        speaker_match_verified=False,
+        reconstruction_consent=False,
+    )
+    filtered_clean = filter_region_routes_for_acoustics(regions, clean_evidence)
+    assert filtered_clean[0].route == "studio"
+    assert filtered_clean[1].route == "preserve"
+
+
+def test_render_and_stitch_regions_edge_branches() -> None:
+    sr = 48000
+    audio = np.ones(sr * 3, dtype=np.float32) * 0.1
+    engine = SmartSafePreviewEngine()
+
+    # 1. Route error returned as string (triggers line 176 route_error check)
+    def mock_route_error_render(
+        _route: Any, _aud: Any, _sample_r: Any, **_kwargs: Any
+    ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], str | None]:
+        return np.zeros(100, dtype=np.float32), "simulated backend solver failure"
+
+    engine.render_route_audio = mock_route_error_render  # type: ignore[assignment]
+    regions = [
+        RegionRecommendation(0.0, 2.0, "production", confidence=0.90, boundary_confidence=0.90),
+        # Micro-second region where int(round(start*sr)) == int(round(end*sr)) -> core_len == 0
+        RegionRecommendation(
+            2.0, 2.000001, "production", confidence=0.90, boundary_confidence=0.90
+        ),
+    ]
+    res = render_and_stitch_regions(audio, sr, regions, engine)
+    assert res.abstained_regions == 1
+    assert res.regions[0].route == "preserve"  # Demoted from error
+    assert res.regions[1].route == "production"  # core_len == 0 region preserved as-is
+
+    # 2. Oversized render result (triggers line 183 reg_wave[:core_len])
+    def mock_oversized_render(
+        _route: Any, aud: Any, _sample_r: Any, **_kwargs: Any
+    ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], str | None]:
+        # Return twice as many samples as passed
+        return np.ones(len(aud) * 2, dtype=np.float32) * 0.2, None
+
+    engine.render_route_audio = mock_oversized_render  # type: ignore[assignment]
+    regions2 = [
+        RegionRecommendation(0.0, 1.0, "production", confidence=0.90, boundary_confidence=0.90),
+        RegionRecommendation(1.0, 2.0, "production", confidence=0.90, boundary_confidence=0.90),
+    ]
+    # Pass acoustic evidence to trigger line 134
+    clean_ev = AcousticEvidence(
+        speech_dominance=0.90,
+        music_risk=0.01,
+        crosstalk_risk=0.01,
+        rumble_confidence=0.0,
+        band_limited_confidence=0.0,
+        recorded_high_frequency_speech_confidence=0.0,
+        speaker_match_confidence=0.0,
+        speaker_match_verified=False,
+        reconstruction_consent=False,
+    )
+    res2 = render_and_stitch_regions(
+        audio, sr, regions2, engine, crossfade_ms=30.0, acoustic_evidence=clean_ev
+    )
+    assert len(res2.audio) == len(audio)
+    assert res2.seam_count >= 1

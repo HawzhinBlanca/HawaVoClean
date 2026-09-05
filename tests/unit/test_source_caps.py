@@ -124,3 +124,31 @@ def test_resolve_native_selected_path_and_registry_branches(
     fail_source = _source("fail_open.wav")
     with pytest.raises(PathPolicyError, match="cannot be opened safely"):
         registry.register(str(fail_source))
+
+
+def test_source_caps_validation_edge_branches() -> None:
+    from hawavoclean.server.source_caps import NativeSource
+
+    registry = NativeSourceRegistry()
+    source = _source("caps_val.wav")
+    registered = registry.register(str(source))
+
+    # 1. Closed descriptor (< 0) fails validation
+    invalid_source = NativeSource(
+        source_id=registered.source_id,
+        path=registered.path,
+        device=registered.device,
+        inode=registered.inode,
+        descriptor=-1,
+    )
+    assert not registry._valid_locked(invalid_source)
+
+    # 2. Device/inode mismatch fails validation
+    mismatch_source = NativeSource(
+        source_id=registered.source_id,
+        path=registered.path,
+        device=registered.device + 1,
+        inode=registered.inode + 1,
+        descriptor=registered.descriptor,
+    )
+    assert not registry._valid_locked(mismatch_source)
