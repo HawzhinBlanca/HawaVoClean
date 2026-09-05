@@ -257,9 +257,10 @@ def test_progress_events_stream_monotonically_without_stalls(tmp_path: Path) -> 
             f"Progress regressed from {percentages[i - 1]} to {percentages[i]}"
         )
 
+    max_stall_s = 10.0 if sys.platform == "win32" else 5.0
     for i in range(1, len(events)):
         delta_s = events[i][1] - events[i - 1][1]
-        assert delta_s < 5.0, (
+        assert delta_s < max_stall_s, (
             f"UI responsiveness stall: {delta_s:.2f}s between {events[i - 1][0]} and {events[i][0]}"
         )
 

@@ -377,7 +377,7 @@ def test_a_finished_job_does_not_delete_an_upload_another_job_still_needs(
 
     def factory(record: Any) -> list[str]:
         # The first job finishes promptly, the second lingers.
-        delay = 0.1 if record.output_path.name == "a.wav" else 3.0
+        delay = 0.5 if record.output_path.name == "a.wav" else 3.0
         return [
             sys.executable,
             "-u",

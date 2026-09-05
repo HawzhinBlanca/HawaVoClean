@@ -429,6 +429,7 @@ class JobManager:
         self._idempotency: dict[str, str] = {}
         self._queue: deque[str] = deque()
         self._paused_batches: set[str] = set()
+        self._submitting_inputs: dict[Path, int] = {}
         # Reentrant solely so ``prepare_batch`` can hold the scheduling
         # boundary while ordinary submit calls reuse their existing locking.
         self._lock = threading.RLock()
@@ -844,40 +845,43 @@ class JobManager:
                 raise ValueError("idempotency_key must contain 1-128 characters")
             if any(ord(char) < 0x21 or ord(char) > 0x7E for char in idempotency_key):
                 raise ValueError("idempotency_key must contain visible ASCII characters only")
-        policy: ConflictPolicy = conflict_policy or ("replace" if overwrite else "fail")
-        if policy not in {"unique", "fail", "replace"}:
-            raise ValueError(f"unsupported conflict policy: {policy}")
+        norm_input = input_path.resolve()
         pinned: PinnedSource | None = None
         source_sha256: str | None = None
         source_size_bytes: int | None = None
-        if input_path.exists() and input_path.is_file():
-            pinned = PinnedSource.create(
-                input_path,
-                staging_root=work_root(),
-                max_file_size_bytes=MAX_INPUT_FILE_BYTES,
-            )
-            source_sha256 = pinned.sha256
-            source_size_bytes = pinned.size_bytes
-        else:
-            existing_rec: JobRecord | None = None
-            if idempotency_key is not None:
-                with self._wake:
-                    if idempotency_key in self._idempotency:
-                        existing_rec = self._jobs.get(self._idempotency[idempotency_key])
-                    elif self._store is not None:
-                        durable_res = self._store.find_idempotent(idempotency_key)
-                        if durable_res is not None:
-                            existing_rec = JobRecord.from_storage(durable_res.record)
-            if existing_rec is not None and existing_rec.state in TERMINAL_STATES:
-                source_sha256 = existing_rec.source_sha256
-                source_size_bytes = existing_rec.source_size_bytes
-            elif self._command_factory is default_command:
-                raise MediaPreflightError(
-                    MediaPreflightReason.NOT_FOUND,
-                    f"Input audio file does not exist or cannot be read: {input_path}",
-                )
-
+        with self._lock:
+            self._submitting_inputs[norm_input] = self._submitting_inputs.get(norm_input, 0) + 1
         try:
+            policy: ConflictPolicy = conflict_policy or ("replace" if overwrite else "fail")
+            if policy not in {"unique", "fail", "replace"}:
+                raise ValueError(f"unsupported conflict policy: {policy}")
+            if input_path.exists() and input_path.is_file():
+                pinned = PinnedSource.create(
+                    input_path,
+                    staging_root=work_root(),
+                    max_file_size_bytes=MAX_INPUT_FILE_BYTES,
+                )
+                source_sha256 = pinned.sha256
+                source_size_bytes = pinned.size_bytes
+            else:
+                existing_rec: JobRecord | None = None
+                if idempotency_key is not None:
+                    with self._wake:
+                        if idempotency_key in self._idempotency:
+                            existing_rec = self._jobs.get(self._idempotency[idempotency_key])
+                        elif self._store is not None:
+                            durable_res = self._store.find_idempotent(idempotency_key)
+                            if durable_res is not None:
+                                existing_rec = JobRecord.from_storage(durable_res.record)
+                if existing_rec is not None and existing_rec.state in TERMINAL_STATES:
+                    source_sha256 = existing_rec.source_sha256
+                    source_size_bytes = existing_rec.source_size_bytes
+                elif self._command_factory is default_command:
+                    raise MediaPreflightError(
+                        MediaPreflightReason.NOT_FOUND,
+                        f"Input audio file does not exist or cannot be read: {input_path}",
+                    )
+
             effective_overwrite = policy == "replace"
             report_path = output_path.parent / f"{output_path.stem}.hawavoclean.json"
             bundle_path = (
@@ -986,6 +990,13 @@ class JobManager:
             if pinned is not None:
                 pinned.cleanup_unadopted()
             raise
+        finally:
+            with self._lock:
+                count = self._submitting_inputs.get(norm_input, 0) - 1
+                if count <= 0:
+                    self._submitting_inputs.pop(norm_input, None)
+                else:
+                    self._submitting_inputs[norm_input] = count
 
     def _snapshot_durable_retry_locked(self, reservation: Reservation) -> dict[str, Any]:
         """Rehydrate an exact retry without turning it into fresh history."""
@@ -1152,13 +1163,15 @@ class JobManager:
         return self._store is not None
 
     def active_input_paths(self) -> set[Path]:
-        """Inputs that retention cleanup must not remove while queued/running."""
+        """Inputs that retention cleanup must not remove while queued/running or submitting."""
         with self._lock:
-            return {
+            active = {
                 record.input_path.resolve()
                 for record in self._jobs.values()
                 if record.state not in TERMINAL_STATES
             }
+            active.update(self._submitting_inputs.keys())
+            return active
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
