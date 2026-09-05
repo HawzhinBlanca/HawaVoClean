@@ -7,6 +7,10 @@ from typing import Any
 
 import numpy as np
 
+from hawavoclean.runtime import evict_memmap_pages
+
+HASH_ITERATOR_CHUNK_BYTES = 1 << 20
+
 
 def hash_bytes(data: bytes) -> str:
     """Compute SHA-256 hex digest of raw bytes."""
@@ -20,9 +24,42 @@ def hash_file(path: Path | str) -> str:
 
 
 def hash_numpy(arr: np.ndarray[Any, Any]) -> str:
-    """Compute SHA-256 hex digest of a contiguous numpy array."""
-    contiguous = np.ascontiguousarray(arr)
-    return hash_bytes(contiguous.tobytes())
+    """Compute SHA-256 in canonical C order without a file-length byte copy.
+
+    C-contiguous arrays (including planar ``memmap`` channel slices) can be
+    exposed directly as bytes. Non-contiguous arrays are folded through a
+    bounded C-order iterator; the byte order and digest remain the same as
+    ``np.ascontiguousarray(arr).tobytes()``.
+    """
+    value = np.asarray(arr)
+    digest = hashlib.sha256()
+    if value.flags.c_contiguous:
+        mv = memoryview(value).cast("B")
+        total = len(mv)
+        chunk_bytes = 16 * 1024 * 1024
+        for offset in range(0, total, chunk_bytes):
+            end = min(total, offset + chunk_bytes)
+            digest.update(mv[offset:end])
+            if isinstance(arr, np.memmap):
+                evict_memmap_pages(
+                    arr,
+                    offset // max(int(value.dtype.itemsize), 1),
+                    end // max(int(value.dtype.itemsize), 1),
+                )
+        return digest.hexdigest()
+
+    chunk_elements = max(HASH_ITERATOR_CHUNK_BYTES // max(int(value.dtype.itemsize), 1), 1)
+    with np.nditer(
+        value,
+        flags=("external_loop", "buffered", "zerosize_ok"),
+        op_flags=("readonly",),
+        order="C",
+        buffersize=chunk_elements,
+    ) as iterator:
+        for chunk in iterator:
+            contiguous = np.ascontiguousarray(chunk)
+            digest.update(memoryview(contiguous).cast("B"))
+    return digest.hexdigest()
 
 
 def hash_json_canonical(obj: Any) -> str:

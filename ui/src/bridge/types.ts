@@ -6,10 +6,12 @@ export type HawaHost = 'resolve' | 'electron' | 'web';
 export interface ResolveClip { mediaId: string; name: string; filePath: string; durationS?: number; }
 export interface HawaBridge {
   host: HawaHost;
-  engine: { getEndpoint(): Promise<{ baseUrl: string; token: string }> };
+  engine: { getEndpoint(): Promise<{ baseUrl: string }> };
   files: {
     pickAudio(): Promise<string | null>;            // native open dialog → absolute path
-    pathForFile(file: File): string | null;         // dropped File → absolute path (Electron webUtils)
+    pickAudioFiles?(): Promise<readonly string[] | string[] | null>;
+    registerDroppedFile?(file: File): Promise<{ sourceId: string; path: string } | string | null>; // main registers before returning
+    pathForFile(file: File): string | null;         // legacy shape; hardened shells return null
     revealInFinder(path: string): Promise<void>;
   };
   resolve?: {                                        // present only when host === 'resolve'

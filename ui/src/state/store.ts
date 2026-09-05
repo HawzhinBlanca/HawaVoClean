@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type { EngineClient } from '../api/client';
 import type {
   AudioAnalysis,
+  BatchSummary,
+  CapabilityStatusV1,
   HawaVoCleanReport,
   JobMode,
   JobStatus,
@@ -62,7 +64,8 @@ export interface SourceInfo {
   path: string;
   name: string;
   origin: SourceOrigin;
-  mediaId?: string;
+  mediaId?: string | undefined;
+  sourceId?: string | undefined;
 }
 
 export interface JobInfo {
@@ -205,6 +208,15 @@ export interface AppState {
   speakers: string[];
   restoreAvailable: boolean;
   /**
+   * Versioned runtime capabilities from `GET /api/v1/capabilities` (True-10 D4.11).
+   * Governs truthful route qualification, blocked reasons, and runtime providers.
+   */
+  capabilities: CapabilityStatusV1[] | null;
+  /**
+   * Explicit user consent required for generative reconstruction (HawaRestore-KD).
+   */
+  reconstructionConsent: boolean;
+  /**
    * The next run's mode and its restore parameters. Like `profile` these are
    * a control setting, not a property of any one run: they survive a new
    * source and are read once at submit time. Invariant the control and
@@ -256,6 +268,14 @@ export interface AppState {
    * a new report or a new source clears it.
    */
   selectedUnit: UnitDecisionRecord | null;
+
+  /**
+   * D2 · Click-drag selection range in seconds. `null` = no active selection.
+   * Set by click-drag on the waveform; cleared by Escape or a new source.
+   * `I` sets in-point, `O` sets out-point (NLE convention).
+   */
+  selectionRange: { start: number; end: number } | null;
+
   /** Keyboard-map overlay (`?`). */
   shortcutsOpen: boolean;
 
@@ -280,6 +300,8 @@ export interface AppState {
    */
   errorLabel: string | null;
   dragOver: boolean;
+  batch: BatchSummary | null;
+  activeInspectJobId: string | null;
 
   // actions
   setHost(host: HawaHost): void;
@@ -291,6 +313,8 @@ export interface AppState {
   setCleaned(a: AudioAnalysis | null, path: string | null): void;
   setProfile(p: Profile): void;
   setCapabilities(speakers: string[], restoreAvailable: boolean): void;
+  setCapabilitiesV1(capabilities: CapabilityStatusV1[]): void;
+  setReconstructionConsent(consent: boolean): void;
   setMode(m: JobMode): void;
   setSpeakerId(id: string | null): void;
   setCutoffHz(hz: number | null): void;
@@ -308,6 +332,7 @@ export interface AppState {
   setHoverUnit(h: HoverUnit | null): void;
   setHighlight(r: { start: number; end: number; channel?: number } | null): void;
   setSelectedUnit(u: UnitDecisionRecord | null): void;
+  setSelectionRange(r: { start: number; end: number } | null): void;
   setShortcutsOpen(v: boolean): void;
   setStatus(line: string): void;
   setError(msg: string | null, label?: string): void;
@@ -317,6 +342,9 @@ export interface AppState {
   pushHistory(entry: HistoryEntry): void;
   patchHistory(jobId: string, patch: Partial<HistoryEntry>): void;
   setCurrentRun(jobId: string | null): void;
+  setBatch(b: BatchSummary | null): void;
+  patchBatch(patch: Partial<BatchSummary>): void;
+  setActiveInspectJobId(id: string | null): void;
   resetForNewSource(): void;
 }
 
@@ -335,9 +363,11 @@ export const useStore = create<AppState>((set) => ({
   original: null,
   cleaned: null,
 
-  profile: 'studio',
+  profile: 'production',
   speakers: [],
   restoreAvailable: false,
+  capabilities: null,
+  reconstructionConsent: false,
   mode: 'natural',
   speakerId: null,
   cutoffHz: null,
@@ -358,6 +388,7 @@ export const useStore = create<AppState>((set) => ({
   highlightRange: null,
 
   selectedUnit: null,
+  selectionRange: null,
   shortcutsOpen: false,
 
   upload: null,
@@ -370,6 +401,8 @@ export const useStore = create<AppState>((set) => ({
   error: null,
   errorLabel: null,
   dragOver: false,
+  batch: null,
+  activeInspectJobId: null,
 
   setHost: (host) => set({ host }),
   // Losing the engine must not lose anything else: the client object is a URL
@@ -407,6 +440,20 @@ export const useStore = create<AppState>((set) => ({
           : (speakers[0] ?? null),
       mode: restoreAvailable ? s.mode : 'natural',
     })),
+  setCapabilitiesV1: (capabilities) =>
+    set((s) => {
+      const restoreCap = capabilities.find(
+        (c) => c.capability_id === 'restore_enrolled' || c.capability_id === 'restore_source',
+      );
+      const isRestoreBlocked = restoreCap
+        ? restoreCap.maturity === 'blocked' || !restoreCap.available
+        : false;
+      return {
+        capabilities,
+        mode: isRestoreBlocked && s.mode === 'restore' ? 'natural' : s.mode,
+      };
+    }),
+  setReconstructionConsent: (reconstructionConsent) => set({ reconstructionConsent }),
   setMode: (mode) => set({ mode }),
   setSpeakerId: (speakerId) => set({ speakerId }),
   setCutoffHz: (cutoffHz) => set({ cutoffHz }),
@@ -440,6 +487,7 @@ export const useStore = create<AppState>((set) => ({
         ? { start: selectedUnit.start_time_s, end: selectedUnit.end_time_s }
         : null,
     }),
+  setSelectionRange: (selectionRange) => set({ selectionRange }),
   setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
   setStatus: (statusLine) => set({ statusLine }),
   setError: (error, label) => set({ error, errorLabel: error ? (label ?? null) : null }),
@@ -476,6 +524,12 @@ export const useStore = create<AppState>((set) => ({
       history: s.history.map((h) => (h.jobId === jobId ? { ...h, ...patch } : h)),
     })),
   setCurrentRun: (currentRunId) => set({ currentRunId }),
+  setBatch: (batch) => set({ batch }),
+  patchBatch: (patch) =>
+    set((s) => ({
+      batch: s.batch ? { ...s.batch, ...patch } : null,
+    })),
+  setActiveInspectJobId: (activeInspectJobId) => set({ activeInspectJobId }),
   resetForNewSource: () =>
     set({
       original: null,
@@ -492,14 +546,39 @@ export const useStore = create<AppState>((set) => ({
       hoverUnit: null,
       highlightRange: null,
       selectedUnit: null,
+      selectionRange: null,
       error: null,
       errorLabel: null,
+      reconstructionConsent: false,
       view: { start: 0, end: 0 },
       // The run list survives a new clip — it is the session's memory — but
       // nothing in it is on screen any more.
       currentRunId: null,
     }),
 }));
+
+export function isRouteBlocked(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): boolean {
+  if (!capabilities) return false;
+  const cap = capabilities.find((c) => c.capability_id === routeOrCapId);
+  if (!cap) return false;
+  return cap.maturity === 'blocked' || !cap.available;
+}
+
+export function getRouteBlockedReason(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): string | null {
+  if (!capabilities) return null;
+  const cap = capabilities.find((c) => c.capability_id === routeOrCapId);
+  if (!cap) return null;
+  if (cap.maturity === 'blocked' || !cap.available) {
+    return cap.reason ?? `Capability ${routeOrCapId} is blocked`;
+  }
+  return null;
+}
 
 // Keep the store's `view` in step with the imperative controller without
 // re-rendering on every wheel event: one trailing update per burst.

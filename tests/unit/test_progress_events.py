@@ -69,6 +69,9 @@ def test_single_unit_run_emits_contract_sequence(tmp_path: Path) -> None:
         "guard",
         "finish",
         "finish",
+        "finish",
+        "finish",
+        "finish",
         "publish",
     ]
     by_stage = {e.stage: e for e in events}

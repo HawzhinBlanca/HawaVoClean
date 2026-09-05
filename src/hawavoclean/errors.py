@@ -1,6 +1,6 @@
 """Error hierarchy and exit code definitions for HawaVoClean."""
 
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 
 class ExitCode(IntEnum):
@@ -54,6 +54,36 @@ class InvalidUserInputError(HawaVoCleanError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, exit_code=ExitCode.INVALID_USER_INPUT)
+
+
+class MediaPreflightReason(StrEnum):
+    """Stable machine-readable reasons for refusing source media."""
+
+    NOT_FOUND = "not_found"
+    NOT_REGULAR_FILE = "not_regular_file"
+    EMPTY_FILE = "empty_file"
+    FILE_TOO_LARGE = "file_too_large"
+    NO_AUDIO_STREAM = "no_audio_stream"
+    UNSUPPORTED_FORMAT = "unsupported_format"
+    UNSUPPORTED_SAMPLE_RATE = "unsupported_sample_rate"
+    UNSUPPORTED_CHANNEL_LAYOUT = "unsupported_channel_layout"
+    DURATION_LIMIT = "duration_limit"
+    MALFORMED_METADATA = "malformed_metadata"
+    RESOURCE_BOMB = "resource_bomb"
+    SOURCE_CHANGED = "source_changed"
+    PROBE_FAILED = "probe_failed"
+
+
+class MediaPreflightError(InvalidUserInputError):
+    """Source media failed a production preflight boundary.
+
+    ``reason`` is deliberately stable so the CLI and desktop clients can
+    explain a refusal without parsing human prose.
+    """
+
+    def __init__(self, reason: MediaPreflightReason, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class AmbiguousStereoError(HawaVoCleanError):

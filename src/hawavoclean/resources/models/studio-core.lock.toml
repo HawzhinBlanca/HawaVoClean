@@ -16,19 +16,19 @@ wpe_upstream = "https://github.com/fgnt/nara_wpe"
 wpe_license = "MIT"
 expected_sample_rates = [48000]
 phase_coherent = false
-params_hash = "f20eb492ca9d39bc099382efa94f755f1157012a7efdadb165e5fca31859b1ac"
+params_hash = "aa892d84acfbfcc694dc6afd99ad739cb55933026432f1c455b05434af30de6d"
 
 [params]
 model = "DeepFilterNet3"
 internal_sample_rate = 48000
-wpe_dereverb = true
+wpe_dereverb = false
 wpe_n_fft = 1024
 wpe_hop = 256
 wpe_taps = 10
 wpe_delay = 3
 wpe_iterations = 3
 atten_lim_db = 0
-tail_suppress = true
+tail_suppress = false
 tail_rt60_s = 0.4
 tail_floor_db = -10.0
 tail_onset_protect_db = 3.0

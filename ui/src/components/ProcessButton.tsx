@@ -3,7 +3,7 @@ import { useEffect, useRef } from 'react';
 import type { JobStage, JobStatus } from '../api/types';
 import { cancelJob, startJob } from '../state/actions';
 import { useReducedMotion } from '../state/reducedMotion';
-import { useStore } from '../state/store';
+import { getRouteBlockedReason, isRouteBlocked, useStore } from '../state/store';
 import { IconBolt, IconCheck, IconWarn } from './Icons';
 import '../styles/process.css';
 
@@ -201,13 +201,41 @@ export function ProcessButton() {
   const engineReady = useStore((s) => s.engineStatus === 'ready');
   const job = useStore((s) => s.job);
   const analyzing = useStore((s) => s.analyzing);
+  const mode = useStore((s) => s.mode);
+  const profile = useStore((s) => s.profile);
+  const speakerId = useStore((s) => s.speakerId);
+  const capabilities = useStore((s) => s.capabilities);
+  const reconstructionConsent = useStore((s) => s.reconstructionConsent);
   const reduced = useReducedMotion() === true;
 
   const status = job?.status ?? null;
   const state = status?.state ?? (job ? 'queued' : null);
   const running = state === 'running' || state === 'queued';
   const progress = running || state === 'done' ? Math.max(0, Math.min(1, status?.progress ?? 0)) : 0;
-  const canStart = engineReady && !!source && !!original && !analyzing && !running;
+
+  const restoreCapId = speakerId ? 'restore_enrolled' : 'restore_source';
+  const isRestore = mode === 'restore';
+  const restoreBlocked = isRestore && isRouteBlocked(capabilities, restoreCapId);
+  const restoreBlockedReason = restoreBlocked ? getRouteBlockedReason(capabilities, restoreCapId) : null;
+  const restoreMissingConsent = isRestore && !reconstructionConsent;
+
+  const naturalBlocked = mode === 'natural' && isRouteBlocked(capabilities, profile);
+  const naturalBlockedReason = naturalBlocked ? getRouteBlockedReason(capabilities, profile) : null;
+
+  const smartSafeBlocked = mode === 'smart_safe' && isRouteBlocked(capabilities, 'smart_safe');
+  const smartSafeBlockedReason = smartSafeBlocked ? getRouteBlockedReason(capabilities, 'smart_safe') : null;
+
+  const routeBlocked = restoreBlocked || naturalBlocked || smartSafeBlocked;
+  const blockedReason = restoreBlockedReason || naturalBlockedReason || smartSafeBlockedReason;
+
+  const canStart =
+    engineReady &&
+    !!source &&
+    !!original &&
+    !analyzing &&
+    !running &&
+    !routeBlocked &&
+    !restoreMissingConsent;
 
   // Elapsed time. The engine's own timestamps win when they parse — they are
   // the job's real wall clock, and they survive a page reload mid-run — with a
@@ -331,7 +359,13 @@ export function ProcessButton() {
           ? 'Load a clip first — drop one on the strip above or press Open file'
           : analyzing
             ? 'Analysis is still running'
-            : 'This clip has no analysis to process';
+            : !original
+              ? 'This clip has no analysis to process'
+              : routeBlocked
+                ? `Processing blocked: ${blockedReason ?? 'route is not qualified'}`
+                : restoreMissingConsent
+                  ? 'Acknowledge generative reconstruction consent to proceed'
+                  : 'Cannot process clip';
 
   const onClick = (): void => {
     if (inert) return;

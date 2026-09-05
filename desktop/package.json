@@ -1,0 +1,33 @@
+{
+  "name": "hawavoclean-desktop",
+  "version": "3.3.0",
+  "private": true,
+  "description": "Hardened standalone desktop shell for the HawaVoClean engine and existing UI",
+  "license": "UNLICENSED",
+  "author": "Hawzhin",
+  "packageManager": "pnpm@11.22.0",
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:all": "pnpm run ui:build && pnpm run build",
+    "dev": "pnpm run build:all && electron .",
+    "package:dir": "pnpm run build:all && node scripts/package-dir.cjs",
+    "package:release:mac": "node scripts/package-release.cjs mac",
+    "package:release:win": "node scripts/package-release.cjs win",
+    "test": "pnpm run build && node --test tests/*.test.cjs",
+    "test:hard-crash": "pnpm run build:all && node scripts/hard-crash-selftest.cjs",
+    "test:shell": "pnpm run build:all && node scripts/shell-selftest.cjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "ui:build": "pnpm --dir ../ui build",
+    "verify:config": "node scripts/verify-config.cjs"
+  },
+  "devDependencies": {
+    "@electron/fuses": "2.1.3",
+    "@types/node": "24.13.3",
+    "electron": "43.4.1",
+    "electron-builder": "26.15.3",
+    "pnpm": "11.22.0",
+    "typescript": "6.0.2"
+  }
+}

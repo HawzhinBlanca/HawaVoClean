@@ -106,6 +106,21 @@ function isCleanedPath(p) {
   return Object.values(OUTPUT_SUFFIX).some((s) => b.includes(`_${s}`));
 }
 
+// Precomputed formant lookup table (0 Hz to 5000 Hz at 1 Hz resolution) and harmonic weights
+const MAX_FORMANT_HZ = 5000;
+const FORMANT_LUT = new Float32Array(MAX_FORMANT_HZ + 1);
+for (let f = 0; f <= MAX_FORMANT_HZ; f++) {
+  FORMANT_LUT[f] =
+    Math.exp(-((f - 600) ** 2) / (2 * 300 ** 2)) +
+    0.6 * Math.exp(-((f - 1700) ** 2) / (2 * 450 ** 2)) +
+    0.35 * Math.exp(-((f - 2700) ** 2) / (2 * 500 ** 2));
+}
+
+const H_INV_POW_07 = new Float32Array(15);
+for (let h = 1; h <= 14; h++) {
+  H_INV_POW_07[h] = 1 / (h ** 0.7);
+}
+
 /** Synthesize a speech-like mono signal. Cleaned variant: lower noise floor. */
 function synthesize(path) {
   const cleaned = isCleanedPath(path);
@@ -157,9 +172,9 @@ function synthesize(path) {
       // harmonic stack with formant-ish weighting
       let v = 0;
       for (let h = 1; h <= 14; h++) {
-        const fh = f0 * h;
-        const formant = Math.exp(-((fh - 600) ** 2) / (2 * 300 ** 2)) + 0.6 * Math.exp(-((fh - 1700) ** 2) / (2 * 450 ** 2)) + 0.35 * Math.exp(-((fh - 2700) ** 2) / (2 * 500 ** 2));
-        v += (Math.sin(phase * h) * (0.12 + formant)) / h ** 0.7;
+        const fh = Math.round(f0 * h);
+        const formant = fh <= MAX_FORMANT_HZ ? FORMANT_LUT[fh] : 0;
+        v += Math.sin(phase * h) * (0.12 + formant) * H_INV_POW_07[h];
       }
       // fricative bursts (high band noise) on syllable onsets
       const fric = Math.max(0, Math.sin(2 * Math.PI * 4.2 * t + ph.pitch + 1.3)) ** 8;
@@ -346,6 +361,7 @@ function getWav(path) {
 // Jobs
 
 const jobs = new Map();
+const sourceMap = new Map();
 const queue = [];
 let runningJob = null;
 
@@ -430,6 +446,64 @@ function makeRestoration(job) {
   };
 }
 
+function makeSmartSafeRestoration(job) {
+  return {
+    cutoff_hz: 8000,
+    speaker_id: null,
+    speaker_enrolled: false,
+    selected_route: 'production',
+    confidence: 0.94,
+    abstained: false,
+    reason: 'Production Wiener filter selected with high confidence',
+    fallback_route: 'production',
+    candidates: [
+      {
+        route: 'production',
+        score: 0.94,
+        confidence: 0.94,
+        rank: 1,
+        selected: true,
+        rejection_reason: null,
+      },
+      {
+        route: 'studio',
+        score: 0.72,
+        confidence: 0.72,
+        rank: 2,
+        selected: false,
+        rejection_reason: 'Phase coherence margin lower than production',
+      },
+      {
+        route: 'lowband',
+        score: 0.61,
+        confidence: 0.61,
+        rank: 3,
+        selected: false,
+        rejection_reason: 'High band bandwidth available, crossover unnecessary',
+      },
+    ],
+    detections: {
+      clipping_ratio: 0.0,
+      snr_estimate_db: 18.5,
+      bandwidth_hz: 16000,
+      reverberant: false,
+    },
+    passes: [],
+    segments: { restored: 0, reduced: 0, reverted: 0, bypassed: 0, errors: 0 },
+    guard_r: {
+      verdict: 'PASS',
+      accepted_strength: 0,
+      reason: 'Smart Safe routing selected production',
+      protected_band: {},
+      ctc: {},
+      highband_events: {},
+      harmonic: {},
+      speaker: {},
+    },
+    review_timecodes: [],
+  };
+}
+
 function makeReport(job) {
   const units = UNITS.map((u) => {
     const base = {
@@ -477,7 +551,11 @@ function makeReport(job) {
     review_timecodes: units.filter((u) => u.final_decision === 'original_reverted').map((u) => ({ unit_id: u.unit_id, start_time_s: u.start_time_s, end_time_s: u.end_time_s, channel: 0, verdict: 'REVERT', reason: u.decision_reason })),
     units,
     passes: [],
-    ...(job.mode === 'restore' ? { restoration: makeRestoration(job) } : {}),
+    ...(job.mode === 'restore'
+      ? { restoration: makeRestoration(job) }
+      : job.mode === 'smart_safe'
+        ? { restoration: makeSmartSafeRestoration(job) }
+        : {}),
   };
 }
 
@@ -781,7 +859,7 @@ const server = createServer(async (req, res) => {
       schedule();
       return json(res, 202, { job_id: job.id, output_path, report_path });
     }
-    const jm = /^\/api\/jobs\/([^/]+)(\/events|\/cancel)?$/.exec(p);
+    const jm = /^\/api\/(?:v1\/)?jobs\/([^/]+)(\/events|\/cancel)?$/.exec(p);
     if (jm) {
       const job = jobs.get(jm[1]);
       if (!job) return err(res, 404, 'not_found', `Unknown job ${jm[1]}`);
@@ -817,15 +895,129 @@ const server = createServer(async (req, res) => {
       }
       return serveBuffer(req, res, getWav(path), 'audio/wav');
     }
+    if (p === '/api/v1/capabilities' && req.method === 'GET') {
+      return json(res, 200, {
+        schemaVersion: 1,
+        capabilities: [
+          {
+            capabilityId: 'preserve',
+            available: false,
+            maturity: 'blocked',
+            reason: 'Preserve is a Smart Safe candidate, but qualified Smart Safe routing is not yet available through the versioned job API',
+          },
+          { capabilityId: 'production', available: true, maturity: 'qualified', providers: ['cpu'] },
+          { capabilityId: 'studio', available: true, maturity: 'qualified', providers: ['cpu'] },
+          { capabilityId: 'lowband', available: true, maturity: 'qualified', providers: ['cpu'] },
+          {
+            capabilityId: 'lowband_then_production',
+            available: false,
+            maturity: 'experimental',
+            reason: 'The route is not yet wired through the versioned job API',
+          },
+          {
+            capabilityId: 'smart_analysis',
+            available: true,
+            maturity: 'experimental',
+            reason: 'Bounded streaming acoustic proxies are available, but they are not a calibrated Sorani classifier and cannot qualify Smart Safe routing',
+            providers: ['cpu'],
+          },
+          {
+            capabilityId: 'smart_safe',
+            available: true,
+            maturity: 'qualified',
+            providers: ['cpu'],
+          },
+          {
+            capabilityId: 'restore_source',
+            available: false,
+            maturity: 'blocked',
+            reason: 'No qualified signed source-conditioned Sorani Restore pack is installed',
+          },
+          {
+            capabilityId: 'restore_enrolled',
+            available: false,
+            maturity: 'blocked',
+            reason: 'No qualified signed enrolled-speaker Sorani Restore pack is installed',
+          },
+          {
+            capabilityId: 'cloud',
+            available: false,
+            maturity: 'blocked',
+            reason: 'Invite-only UAE cloud execution is not deployed',
+          },
+        ],
+      });
+    }
+    if (p === '/api/v1/jobs' && req.method === 'POST') {
+      const body = JSON.parse((await readBody(req)).toString() || '{}');
+      const sourceIds = body.source_ids || body.sourceIds;
+      if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
+        return err(res, 422, 'bad_request', 'source_ids must be a non-empty array');
+      }
+      const strategy = body.strategy || {};
+      const stratType = strategy.strategy || strategy.type;
+      if (stratType === 'manual') {
+        const route = strategy.route;
+        if (route === 'restore_enrolled' || route === 'restore_source' || route === 'preserve') {
+          return err(res, 503, 'capability_blocked', `Route "${route}" is blocked and cannot be run`);
+        }
+      }
+      const jobItems = [];
+      for (const srcId of sourceIds) {
+        let inputPath = sourceMap.get(srcId) || (pathAllowed(srcId) ? srcId : null);
+        if (!inputPath) {
+          inputPath = join(WORK_DIR, 'uploads', `${srcId}.wav`);
+        }
+        const profile = stratType === 'smart_safe' ? 'production' : (['production', 'lowband'].includes(strategy.route) ? strategy.route : 'studio');
+        const dir = inputPath.slice(0, inputPath.lastIndexOf('/')) || WORK_DIR;
+        const stem = cleanStem(inputPath);
+        const output_path = `${dir}/${stem}_${OUTPUT_SUFFIX[profile] || 'clean'}.wav`;
+        const report_path = output_path.replace(/\.wav$/i, '') + '.hawavoclean.json';
+        const job = {
+          id: `j_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+          state: 'queued',
+          stage: 'preflight',
+          progress: 0,
+          message: 'Queued',
+          unit: null,
+          input_path: inputPath,
+          output_path,
+          report_path,
+          profile,
+          mode: stratType === 'smart_safe' ? 'smart_safe' : 'natural',
+          speaker_id: null,
+          cutoff_hz: null,
+          started_at: null,
+          finished_at: null,
+          error: null,
+          report: null,
+          listeners: new Set(),
+          version: 0,
+          timer: null,
+        };
+        jobs.set(job.id, job);
+        queue.push(job);
+        jobItems.push({
+          jobId: job.id,
+          sourceId: srcId,
+          outputPath: output_path,
+          reportPath: report_path,
+        });
+      }
+      schedule();
+      return json(res, 202, { schemaVersion: 1, jobs: jobItems });
+    }
     if (p === '/api/upload' && req.method === 'POST') {
       const buf = await readBody(req);
       const part = parseMultipart(buf, req.headers['content-type']);
       if (!part) return err(res, 400, 'bad_request', 'multipart field "file" missing');
-      const dir = join(WORK_DIR, 'uploads', randomUUID());
+      const sourceId = randomUUID().replace(/-/g, '');
+      const dir = join(WORK_DIR, 'uploads', sourceId);
       await mkdir(dir, { recursive: true });
       const dest = join(dir, basename(part.filename));
       await writeFile(dest, part.body);
-      return json(res, 200, { path: dest });
+      sourceMap.set(sourceId, dest);
+      return json(res, 200, { path: dest, source_id: sourceId });
     }
     if (p === '/api/shutdown' && req.method === 'POST') {
       json(res, 200, { ok: true });

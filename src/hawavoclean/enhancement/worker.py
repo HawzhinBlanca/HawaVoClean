@@ -17,6 +17,7 @@ import multiprocessing as mp
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -385,7 +386,33 @@ def physical_memory_bytes() -> int | None:
     try:
         return int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
     except (ValueError, OSError, AttributeError):  # pragma: no cover - non-POSIX
-        return None
+        pass
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        try:
+            import ctypes
+            from ctypes import Structure, byref, c_ulong, c_ulonglong, sizeof
+
+            class MEMORYSTATUSEX(Structure):
+                _fields_ = [
+                    ("dwLength", c_ulong),
+                    ("dwMemoryLoad", c_ulong),
+                    ("ullTotalPhys", c_ulonglong),
+                    ("ullAvailPhys", c_ulonglong),
+                    ("ullTotalPageFile", c_ulonglong),
+                    ("ullAvailPageFile", c_ulonglong),
+                    ("ullTotalVirtual", c_ulonglong),
+                    ("ullAvailVirtual", c_ulonglong),
+                    ("ullAvailExtendedVirtual", c_ulonglong),
+                ]
+
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = sizeof(MEMORYSTATUSEX)
+            windll = getattr(ctypes, "windll", None)
+            if windll is not None and windll.kernel32.GlobalMemoryStatusEx(byref(stat)):
+                return int(stat.ullTotalPhys)
+        except Exception:
+            pass
+    return None
 
 
 def cpu_worker_cap() -> int:

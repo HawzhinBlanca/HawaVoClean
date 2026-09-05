@@ -45,17 +45,32 @@ class SoraniLinguisticGuard:
         natural_audio: np.ndarray,
         restored_audio: np.ndarray,
         speech_mask: np.ndarray | None = None,  # noqa: ARG002
+        f0_statistics: dict[str, float] | None = None,
     ) -> LinguisticGuardResult:
-        """Evaluate acoustic phonetic divergence in the speech band (300 Hz - 4000 Hz).
+        """Evaluate acoustic phonetic divergence in the speech band.
 
         Args:
             natural_audio: Natural candidate waveform.
             restored_audio: Restored candidate waveform.
             speech_mask: Optional VAD speech activity mask.
+            f0_statistics: Optional F0 stats from enrolled profile (median_hz, p05_hz, p95_hz).
+                When provided, the bandpass filter adapts to the speaker's voice range.
 
         Returns:
             LinguisticGuardResult with measured divergence and pass/fail verdict.
         """
+        # Speaker-adaptive bandpass: anchor the filter to the speaker's F0 range.
+        # Default: 300–4000 Hz covers most speech. For enrolled speakers, we
+        # adapt: lower bound at ~2× median F0 (first formant region), upper
+        # bound at ~35× median F0 (covers F1–F3 formant area).
+        bp_low = 300.0
+        bp_high = 4000.0
+        if f0_statistics is not None:
+            median_f0 = f0_statistics.get("median_hz", 0.0)
+            if median_f0 > 50.0:
+                bp_low = max(150.0, min(500.0, median_f0 * 2.0))
+                bp_high = max(3000.0, min(6000.0, median_f0 * 35.0))
+
         nat_mono = np.mean(natural_audio, axis=0) if natural_audio.ndim == 2 else natural_audio
         rest_mono = np.mean(restored_audio, axis=0) if restored_audio.ndim == 2 else restored_audio
 
@@ -72,8 +87,10 @@ class SoraniLinguisticGuard:
         nat_mono = nat_mono[:min_len]
         rest_mono = rest_mono[:min_len]
 
-        # Bandpass filter to core speech phonetic range (300 Hz to 4000 Hz)
-        sos = signal.butter(4, [300.0, 4000.0], btype="bandpass", fs=self.sample_rate, output="sos")
+        # Bandpass filter to speech phonetic range (speaker-adaptive or default 300–4000 Hz)
+        sos = signal.butter(
+            4, [bp_low, bp_high], btype="bandpass", fs=self.sample_rate, output="sos"
+        )
         nat_speech = signal.sosfiltfilt(sos, nat_mono)
         rest_speech = signal.sosfiltfilt(sos, rest_mono)
 

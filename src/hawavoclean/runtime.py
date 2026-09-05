@@ -48,9 +48,12 @@ and would need one locked hash per device to say anything useful.
 """
 
 import os
-import resource
 import sys
+from ctypes import Structure, byref, c_size_t, c_ulong
 from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
 
 from hawavoclean.errors import ConfigError, WorkerOOMError
 
@@ -228,6 +231,41 @@ def apply_thread_budget(num_threads: int, cpu_count: int | None = None) -> int |
     return int(budget)
 
 
+def _windows_peak_rss_bytes() -> int:
+    """Peak working set from the native process counters on Windows."""
+
+    import ctypes
+
+    class ProcessMemoryCounters(Structure):
+        _fields_ = [
+            ("cb", c_ulong),
+            ("PageFaultCount", c_ulong),
+            ("PeakWorkingSetSize", c_size_t),
+            ("WorkingSetSize", c_size_t),
+            ("QuotaPeakPagedPoolUsage", c_size_t),
+            ("QuotaPagedPoolUsage", c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", c_size_t),
+            ("QuotaNonPagedPoolUsage", c_size_t),
+            ("PagefileUsage", c_size_t),
+            ("PeakPagefileUsage", c_size_t),
+        ]
+
+    counters = ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    windll = vars(ctypes)["windll"]
+    windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    windll.psapi.GetProcessMemoryInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ProcessMemoryCounters),
+        ctypes.c_ulong,
+    ]
+    windll.psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+    process = windll.kernel32.GetCurrentProcess()
+    if not windll.psapi.GetProcessMemoryInfo(process, byref(counters), counters.cb):
+        raise OSError("GetProcessMemoryInfo failed")
+    return int(counters.PeakWorkingSetSize)
+
+
 def process_peak_rss_bytes() -> int:
     """High-water resident set of *this* process, in bytes.
 
@@ -236,8 +274,101 @@ def process_peak_rss_bytes() -> int:
     that spike is gone from the instantaneous reading by the time anyone
     looks. ``ru_maxrss`` is bytes on macOS/BSD and kibibytes on Linux.
     """
+    if sys.platform == "win32":
+        return _windows_peak_rss_bytes()
+    # ``resource`` does not exist on Windows. Import it only inside the POSIX
+    # branch so a base Windows install can import the engine at all.
+    import resource
+
     peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     return peak if sys.platform == "darwin" else peak * 1024
+
+
+def evict_memmap_pages(
+    array: np.ndarray[Any, Any],
+    start_sample: int = 0,
+    end_sample: int | None = None,
+) -> None:
+    """Evict physical page frames for a processed slice of a memory-mapped array.
+
+    Keeps the resident set size bounded below process thresholds during long-audio
+    streaming passes. Invalidates page table entries back to the OS page cache.
+    No-op if the array is not backed by an mmap or on unsupported platforms.
+    """
+    if not isinstance(array, np.memmap):
+        return
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            windll = getattr(ctypes, "windll", None)
+            if windll is not None:
+                windll.kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+                process = windll.kernel32.GetCurrentProcess()
+                if hasattr(windll.psapi, "EmptyWorkingSet"):
+                    windll.psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+                    windll.psapi.EmptyWorkingSet.restype = ctypes.c_int
+                    windll.psapi.EmptyWorkingSet(process)
+                elif hasattr(windll.kernel32, "SetProcessWorkingSetSize"):
+                    windll.kernel32.SetProcessWorkingSetSize.argtypes = [
+                        ctypes.c_void_p,
+                        ctypes.c_size_t,
+                        ctypes.c_size_t,
+                    ]
+                    windll.kernel32.SetProcessWorkingSetSize.restype = ctypes.c_int
+                    windll.kernel32.SetProcessWorkingSetSize(
+                        process, ctypes.c_size_t(-1), ctypes.c_size_t(-1)
+                    )
+        except Exception:
+            pass
+        return
+
+    try:
+        import ctypes
+        import ctypes.util
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        pagesize = os.sysconf("SC_PAGESIZE") if hasattr(os, "sysconf") else 4096
+        buf_ptr = int(array.__array_interface__["data"][0])
+        itemsize = int(array.dtype.itemsize)
+        channels = int(array.shape[0]) if array.ndim > 1 else 1
+        samples = int(array.shape[-1])
+
+        actual_end = samples if end_sample is None else min(samples, max(start_sample, end_sample))
+        if actual_end <= start_sample:
+            return
+
+        madv_dontneed = 4
+        ms_invalidate = 2
+        has_madvise = hasattr(libc, "madvise")
+        if has_madvise:
+            libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            libc.madvise.restype = ctypes.c_int
+        has_posix_madvise = hasattr(libc, "posix_madvise")
+        if has_posix_madvise:
+            libc.posix_madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            libc.posix_madvise.restype = ctypes.c_int
+        has_msync = hasattr(libc, "msync")
+        if has_msync:
+            libc.msync.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            libc.msync.restype = ctypes.c_int
+
+        slice_len = actual_end - start_sample
+        for ch in range(channels):
+            addr = buf_ptr + (ch * samples + start_sample) * itemsize
+            size = slice_len * itemsize
+            page_addr = addr & ~(pagesize - 1)
+            page_size = ((addr + size + pagesize - 1) & ~(pagesize - 1)) - page_addr
+            p_addr = ctypes.c_void_p(page_addr)
+            p_size = ctypes.c_size_t(page_size)
+            if has_madvise:
+                libc.madvise(p_addr, p_size, madv_dontneed)
+            elif has_posix_madvise:
+                libc.posix_madvise(p_addr, p_size, madv_dontneed)
+            if has_msync:
+                libc.msync(p_addr, p_size, ms_invalidate)
+    except Exception:
+        pass
 
 
 def memory_budget_mb() -> int | None:

@@ -369,6 +369,7 @@ def _enrich_lock_metadata(components: list[dict[str, Any]]) -> None:
     lock_hashes: dict[str, list[dict[str, str]]] = {}
     for path in (
         ROOT / "ui" / "pnpm-lock.yaml",
+        ROOT / "desktop" / "pnpm-lock.yaml",
         ROOT / "resolve-plugin" / "com.hawavoclean.resolve" / "pnpm-lock.yaml",
     ):
         for purl, hashes in _pnpm_lock_hashes(path).items():
@@ -432,6 +433,7 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
     root = path.resolve()
     records: list[dict[str, Any]] = []
     regular_files = 0
+    symlinks = 0
     total_size = 0
     for current, raw_directories, raw_files in os.walk(root, topdown=True, followlinks=False):
         current_path = Path(current)
@@ -443,6 +445,7 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
                 target = os.readlink(entry)
                 _validate_tree_symlink(root, entry, target)
                 records.append({"path": relative, "target": target, "type": "symlink"})
+                symlinks += 1
             else:
                 mode = format(stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode), "04o")
                 records.append({"mode": mode, "path": relative, "type": "directory"})
@@ -455,6 +458,7 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
                 target = os.readlink(entry)
                 _validate_tree_symlink(root, entry, target)
                 records.append({"path": relative, "target": target, "type": "symlink"})
+                symlinks += 1
                 continue
             metadata = entry.stat(follow_symlinks=False)
             if not stat.S_ISREG(metadata.st_mode):
@@ -482,6 +486,7 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
         "digest": tree_digest.hexdigest(),
         "entries": len(records),
         "regular_files": regular_files,
+        "symlinks": symlinks,
         "total_size": total_size,
     }
 
@@ -565,6 +570,10 @@ def _artifact_component(name: str, path: Path) -> dict[str, Any]:
             {
                 "name": "hawavoclean:artifact-tree-regular-files",
                 "value": str(inventory["regular_files"]),
+            },
+            {
+                "name": "hawavoclean:artifact-tree-symlink-count",
+                "value": str(inventory["symlinks"]),
             },
             {
                 "name": "hawavoclean:artifact-tree-total-size",
@@ -766,6 +775,10 @@ def generate(image: str, artifact_values: list[str], output: Path) -> str:
                 {
                     "name": "hawavoclean:ui-lock-sha256",
                     "value": _sha256(ROOT / "ui" / "pnpm-lock.yaml"),
+                },
+                {
+                    "name": "hawavoclean:desktop-lock-sha256",
+                    "value": _sha256(ROOT / "desktop" / "pnpm-lock.yaml"),
                 },
                 {
                     "name": "hawavoclean:plugin-lock-sha256",

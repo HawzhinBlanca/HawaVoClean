@@ -113,6 +113,7 @@ def verify_protected_band_invariance(
     transition_hz: float = 500.0,
     tolerance_rms: float = 1e-4,
     tolerance_stft: float = 1e-3,
+    max_third_octave_deviation_db: float = _MAX_BAND_DEVIATION_DB,
     n_fft: int = 2048,
     hop_length: int = 512,
 ) -> ProtectedBandVerification:
@@ -252,7 +253,7 @@ def verify_protected_band_invariance(
     passes = (
         rms_err <= tolerance_rms
         and stft_rel_err <= tolerance_stft
-        and worst_band_error <= _MAX_BAND_DEVIATION_DB
+        and worst_band_error <= max_third_octave_deviation_db
     )
 
     return ProtectedBandVerification(

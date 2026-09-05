@@ -64,7 +64,9 @@ def test_an_unknown_speaker_names_the_directory_actually_searched(
     monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(staged))
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(InvalidUserInputError, match=str(staged.resolve())):
+    import re
+
+    with pytest.raises(InvalidUserInputError, match=re.escape(str(staged.resolve()))):
         run_pipeline(
             input_path=FIXTURE,
             output_path=tmp_path / "out.wav",

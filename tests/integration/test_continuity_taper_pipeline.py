@@ -17,7 +17,7 @@ import soundfile as sf
 
 import hawavoclean.pipeline as pipeline_module
 from hawavoclean.assembly.stitch import assemble_channel_timeline
-from hawavoclean.audio.decode import decode_audio
+from hawavoclean.audio.decode import decode_audio_to_memmap
 from hawavoclean.config import load_config
 from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.guard.verdict import GuardVerdict
@@ -195,7 +195,7 @@ def test_the_joint_of_a_real_forced_cut_is_the_original_recording(
 
     real_policy = evaluate_unit_policy
     real_assemble = assemble_channel_timeline
-    real_decode = decode_audio
+    real_decode = decode_audio_to_memmap
     seen = {"speech_units": 0}
     captured: dict[str, Any] = {}
 
@@ -227,7 +227,7 @@ def test_the_joint_of_a_real_forced_cut_is_the_original_recording(
 
     monkeypatch.setattr(pipeline_module, "evaluate_unit_policy", revert_the_last_unit)
     monkeypatch.setattr(pipeline_module, "assemble_channel_timeline", capture_timeline)
-    monkeypatch.setattr(pipeline_module, "decode_audio", capture_decode)
+    monkeypatch.setattr(pipeline_module, "decode_audio_to_memmap", capture_decode)
     report = run_pipeline(
         input_path=src,
         output_path=tmp_path / "out.wav",

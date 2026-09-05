@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from hawavoclean import __version__
 from hawavoclean.server.app import (
     PROFILES,
+    SESSION_PATH,
     create_app,
     default_output_path,
     parse_range,
@@ -61,7 +62,14 @@ time.sleep(60)
 
 
 def _fake_done_factory(record: JobRecord) -> list[str]:
-    report = {"schema_version": 1, "summary": {"units_total": 2, "enhanced": 1}}
+    report = {
+        "schema_version": 1,
+        "summary": {"units_total": 2, "enhanced": 1},
+        "units": [
+            {"unit_id": 0, "final_decision": "enhanced", "guard_a_verdict": "PASS"},
+            {"unit_id": 1, "final_decision": "reverted", "guard_a_verdict": "FAIL"},
+        ],
+    }
     return _py(
         f"""
         import json, sys, time
@@ -86,7 +94,7 @@ def client(work: Path) -> Iterator[TestClient]:
     assert work.is_dir()  # the allowed-root override is active for every client test
     manager = JobManager(command_factory=_fake_done_factory)
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
-    with TestClient(app) as c:
+    with TestClient(app, base_url="http://127.0.0.1") as c:
         yield c
     manager.shutdown()
 
@@ -105,7 +113,7 @@ def _wait_done(client: TestClient, job_id: str, timeout: float = 30.0) -> dict[s
 # ----------------------------------------------------------------- auth / health
 
 
-def test_missing_or_wrong_token_is_401(client: TestClient) -> None:
+def test_missing_or_wrong_header_is_401_and_url_tokens_are_rejected(client: TestClient) -> None:
     r = client.get("/api/health")
     assert r.status_code == 401
     assert r.json()["error"] == "unauthorized"
@@ -113,17 +121,17 @@ def test_missing_or_wrong_token_is_401(client: TestClient) -> None:
     r = client.get("/api/health", headers={"X-Hawa-Token": "wrong"})
     assert r.status_code == 401
     r = client.get("/api/health?token=wrong")
-    assert r.status_code == 401
-    r = client.get("/api/health?token=t%C3%A9ken")  # non-ASCII token: still a clean 401
-    assert r.status_code == 401
+    assert r.status_code == 400 and r.json()["error"] == "query_auth_forbidden"
+    r = client.get(f"/api/health?token={TOKEN}", headers=H)
+    assert r.status_code == 400  # URL credentials are refused even with a valid header
     r = client.post("/api/jobs", json={})
     assert r.status_code == 401
-    # 401 responses still carry CORS headers for a file:// (null) origin.
+    # Opaque/file origins are not trusted broker clients.
     r = client.get("/api/health", headers={"Origin": "null"})
-    assert r.status_code == 401 and r.headers["access-control-allow-origin"] == "*"
+    assert r.status_code == 403 and "access-control-allow-origin" not in r.headers
 
 
-def test_token_by_header_or_query(client: TestClient) -> None:
+def test_token_by_header_and_short_lived_session(client: TestClient) -> None:
     r = client.get("/api/health", headers=H)
     assert r.status_code == 200
     body = r.json()
@@ -139,15 +147,36 @@ def test_token_by_header_or_query(client: TestClient) -> None:
             "managed_upload_limit_bytes": 16 * 1024 * 1024 * 1024,
             "minimum_free_bytes": 512 * 1024 * 1024,
         },
+        "jobs": {
+            "durable": False,
+            "persistence_ok": True,
+            "persistence_error": None,
+        },
+        "legacy_sunset": {
+            "sunset_date": "2026-10-01",
+            "sunset_http_date": "Thu, 01 Oct 2026 00:00:00 GMT",
+            "removal_release": "v1.0.0",
+            "total_invocations": 0,
+        },
     }
     assert isinstance(body["engine_pid"], int)
-    assert client.get(f"/api/health?token={TOKEN}", headers={"Origin": "null"}).status_code == 200
+
+    session = client.post(SESSION_PATH, headers=H)
+    assert session.status_code == 200
+    assert session.headers["cache-control"] == "no-store"
+    assert "HttpOnly" in session.headers["set-cookie"]
+    capability = session.json()["sessionToken"]
+    client.cookies.clear()
+    assert (
+        client.get("/api/health", headers={"Authorization": f"Bearer {capability}"}).status_code
+        == 200
+    )
 
 
 def test_health_lists_speakers_from_the_profiles_root(client: TestClient, work: Path) -> None:
     """`speakers` = sorted ids with a profile.json under HAWAVOCLEAN_PROFILES_DIR;
-    `restore_available` follows it. Recomputed per request, so a profile trained
-    while the engine is up shows without restart."""
+    loose research profiles never make production Restore available. Recomputed
+    per request, so research diagnostics still see additions without restart."""
     body = client.get("/api/health", headers=H).json()
     assert body["speakers"] == [] and body["restore_available"] is False  # dir absent
     profiles = work / "profiles"
@@ -158,20 +187,165 @@ def test_health_lists_speakers_from_the_profiles_root(client: TestClient, work: 
     (profiles / "schema.json").write_text("{}")  # a stray file is not a speaker
     body = client.get("/api/health", headers=H).json()
     assert body["speakers"] == ["character_01", "character_02"]
-    assert body["restore_available"] is True
+    assert body["restore_available"] is False
+
+
+def test_v1_capabilities_are_maturity_bound_not_file_presence(
+    client: TestClient, work: Path
+) -> None:
+    profile = work / "profiles" / "speaker_1"
+    profile.mkdir(parents=True)
+    (profile / "profile.json").write_text("{}")
+
+    response = client.get("/api/v1/capabilities", headers=H)
+    assert response.status_code == 200
+    capabilities = {item["capabilityId"]: item for item in response.json()["capabilities"]}
+    assert capabilities["production"]["maturity"] == "qualified"
+    assert capabilities["preserve"]["available"] is False
+    assert capabilities["preserve"]["maturity"] == "blocked"
+    assert "Smart Safe candidate" in capabilities["preserve"]["reason"]
+    assert capabilities["smart_analysis"]["maturity"] == "experimental"
+    assert capabilities["smart_safe"]["maturity"] == "qualified"
+    assert capabilities["smart_safe"]["available"] is True
+    assert capabilities["restore_source"]["available"] is False
+    assert capabilities["restore_enrolled"]["available"] is False
+    assert client.get("/api/health", headers=H).json()["restore_available"] is False
+
+
+def test_v1_job_is_batch_idempotent_after_upload_retention(client: TestClient) -> None:
+    upload = client.post(
+        "/api/upload",
+        headers=H,
+        files={"file": ("source.wav", b"source", "audio/wav")},
+    )
+    assert upload.status_code == 200
+    source_id = upload.json()["source_id"]
+    source_path = Path(upload.json()["path"])
+    assert len(source_id) == 32
+
+    request = {
+        "schemaVersion": 1,
+        "sourceIds": [source_id],
+        "strategy": {
+            "kind": "manual",
+            "route": "production",
+            "allowGenerativeReconstruction": False,
+        },
+        "executionPolicy": "offline_only",
+        "conflictPolicy": "unique",
+        "recordBundle": False,
+        "idempotencyKey": "v1-desktop-request",
+    }
+    first = client.post("/api/v1/jobs", headers=H, json=request)
+    repeated = client.post("/api/v1/jobs", headers=H, json=request)
+    assert first.status_code == repeated.status_code == 202
+    assert repeated.json() == first.json()
+    job_id = first.json()["jobs"][0]["jobId"]
+    assert _wait_done(client, job_id)["state"] == "done"
+    status = client.get(f"/api/v1/jobs/{job_id}", headers=H)
+    assert status.status_code == 200
+    assert status.json()["state"] == "completed"
+    history = client.get("/api/v1/jobs", headers=H)
+    assert history.status_code == 200
+    assert any(job["jobId"] == job_id for job in history.json()["jobs"])
+
+    deadline = time.monotonic() + 5
+    while source_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not source_path.exists()  # retention has removed the source and marker
+    after_retention = client.post("/api/v1/jobs", headers=H, json=request)
+    assert after_retention.status_code == 202
+    assert after_retention.json() == first.json()
+
+    changed = client.post(
+        "/api/v1/jobs",
+        headers=H,
+        json={
+            **request,
+            "strategy": {
+                "kind": "manual",
+                "route": "studio",
+                "allowGenerativeReconstruction": False,
+            },
+        },
+    )
+    assert changed.status_code == 409 and "different request" in changed.json()["message"]
+
+
+def test_v1_unknown_job_and_cancel_are_explicit(client: TestClient) -> None:
+    assert client.get("/api/v1/jobs/j_missing", headers=H).status_code == 404
+    assert client.post("/api/v1/jobs/j_missing/cancel", headers=H).status_code == 404
+
+
+def test_v1_unqualified_routes_fail_closed_and_record_bundle_is_scheduled(
+    client: TestClient,
+) -> None:
+    base = {
+        "schemaVersion": 1,
+        "sourceIds": ["a" * 32],
+        "executionPolicy": "offline_only",
+        "conflictPolicy": "unique",
+        "recordBundle": False,
+        "idempotencyKey": "blocked-request",
+    }
+    blocked = client.post(
+        "/api/v1/jobs",
+        headers=H,
+        json={
+            **base,
+            "strategy": {
+                "kind": "manual",
+                "route": "restore_source",
+                "allowGenerativeReconstruction": True,
+            },
+        },
+    )
+    assert blocked.status_code == 503 and blocked.json()["error"] == "capability_blocked"
+    upload = client.post(
+        "/api/upload",
+        headers=H,
+        files={"file": ("bundle-source.wav", b"source", "audio/wav")},
+    )
+    assert upload.status_code == 200
+    bundle = client.post(
+        "/api/v1/jobs",
+        headers=H,
+        json={
+            **base,
+            "sourceIds": [upload.json()["source_id"]],
+            "recordBundle": True,
+            "strategy": {
+                "kind": "manual",
+                "route": "production",
+                "allowGenerativeReconstruction": False,
+            },
+        },
+    )
+    assert bundle.status_code == 202
+    item = bundle.json()["jobs"][0]
+    assert item["recordBundle"] is True
+    assert item["bundlePath"].endswith(".hawavoclean.zip")
+    # This fixture intentionally speaks only the old fake child protocol, so
+    # the broker must fail it rather than claim bundle completion.
+    job_id = item["jobId"]
+    assert _wait_done(client, job_id)["state"] == "failed"
+    status = client.get(f"/api/v1/jobs/{job_id}", headers=H).json()
+    assert status["state"] == "failed"
+    assert "bundle" not in status
 
 
 def test_cors_preflight_needs_no_token(client: TestClient) -> None:
     r = client.options(
         "/api/jobs",
         headers={
-            "Origin": "null",
+            "Origin": "hawa://app",
             "Access-Control-Request-Method": "POST",
             "Access-Control-Request-Headers": "x-hawa-token,content-type",
         },
     )
-    assert r.status_code == 200
-    assert r.headers["access-control-allow-origin"] == "*"
+    assert r.status_code == 204
+    assert r.headers["access-control-allow-origin"] == "hawa://app"
+    assert r.headers["access-control-allow-credentials"] == "true"
     allowed = r.headers["access-control-allow-headers"].lower()
     assert "x-hawa-token" in allowed and "content-type" in allowed
     assert "POST" in r.headers["access-control-allow-methods"]
@@ -221,7 +395,8 @@ def test_analyze_synthetic_wav(client: TestClient, work: Path) -> None:
 
 
 def test_analyze_path_policy_and_missing(client: TestClient, work: Path) -> None:
-    r = client.post("/api/analyze", headers=H, json={"path": "/etc/passwd"})
+    bad_passwd = str(Path(Path.cwd().anchor) / "etc" / "passwd")
+    r = client.post("/api/analyze", headers=H, json={"path": bad_passwd})
     assert r.status_code == 403 and r.json()["error"] == "forbidden"
     r = client.post("/api/analyze", headers=H, json={"path": "relative.wav"})
     assert r.status_code == 400 and r.json()["error"] == "bad_request"
@@ -316,7 +491,7 @@ def test_job_lifecycle_status_sse_and_report(client: TestClient, work: Path) -> 
 
     # SSE: first a status, then changes (>=50 ms apart), then end.
     events: list[tuple[str, dict[str, Any]]] = []
-    with client.stream("GET", f"/api/jobs/{job_id}/events?token={TOKEN}") as s:
+    with client.stream("GET", f"/api/jobs/{job_id}/events", headers=H) as s:
         assert s.status_code == 200
         assert s.headers["content-type"].startswith("text/event-stream")
         name = None
@@ -351,7 +526,7 @@ def test_job_lifecycle_status_sse_and_report(client: TestClient, work: Path) -> 
         assert key in snap
 
     # A finished job: SSE gives status then end immediately; cancel is a no-op 200.
-    with client.stream("GET", f"/api/jobs/{job_id}/events?token={TOKEN}") as s:
+    with client.stream("GET", f"/api/jobs/{job_id}/events", headers=H) as s:
         text = "".join(s.iter_text())
     assert text.count("event: status") == 1 and text.rstrip().endswith("event: end\ndata: {}")
     r = client.post(f"/api/jobs/{job_id}/cancel", headers=H)
@@ -383,22 +558,89 @@ def test_job_explicit_output_overwrite_and_production_default(
         _wait_done(client, job)
 
 
+def test_job_idempotency_conflicts_unique_names_and_history(client: TestClient, work: Path) -> None:
+    src = _tiny_wav(work / "durable.wav")
+    output = work / "master.wav"
+    request = {
+        "input_path": str(src),
+        "profile": "production",
+        "output_path": str(output),
+        "idempotency_key": "desktop-req-1",
+        "conflict_policy": "fail",
+    }
+    first = client.post("/api/jobs", headers=H, json=request)
+    repeated = client.post("/api/jobs", headers=H, json=request)
+    assert first.status_code == repeated.status_code == 202
+    assert repeated.json()["job_id"] == first.json()["job_id"]
+
+    changed = client.post(
+        "/api/jobs",
+        headers=H,
+        json={**request, "output_path": str(work / "changed.wav")},
+    )
+    assert changed.status_code == 409 and "different request" in changed.json()["message"]
+
+    collision = client.post(
+        "/api/jobs",
+        headers=H,
+        json={**request, "idempotency_key": "desktop-req-2"},
+    )
+    assert collision.status_code == 409
+
+    unique = client.post(
+        "/api/jobs",
+        headers=H,
+        json={
+            **request,
+            "idempotency_key": "desktop-req-3",
+            "conflict_policy": "unique",
+        },
+    )
+    assert unique.status_code == 202
+    assert Path(unique.json()["output_path"]).name == "master (2).wav"
+
+    history = client.get("/api/jobs", headers=H)
+    assert history.status_code == 200
+    ids = {job["job_id"] for job in history.json()["jobs"]}
+    assert {first.json()["job_id"], unique.json()["job_id"]}.issubset(ids)
+
+
+def test_overwrite_compatibility_cannot_contradict_conflict_policy(
+    client: TestClient, work: Path
+) -> None:
+    src = _tiny_wav(work / "conflict.wav")
+    response = client.post(
+        "/api/jobs",
+        headers=H,
+        json={
+            "input_path": str(src),
+            "profile": "production",
+            "overwrite": True,
+            "conflict_policy": "fail",
+        },
+    )
+    assert response.status_code == 422
+    assert "overwrite=true conflicts" in response.json()["message"]
+
+
 def test_job_request_validation(client: TestClient, work: Path) -> None:
     src = _tiny_wav(work / "take.wav")
     r = client.post("/api/jobs", headers=H, json={"input_path": str(src), "profile": "turbo"})
     assert r.status_code == 400 and r.json()["error"] == "bad_request"
     r = client.post("/api/jobs", headers=H, json={"profile": "studio"})
     assert r.status_code == 400
-    r = client.post("/api/jobs", headers=H, json={"input_path": "/etc/hosts", "profile": "studio"})
+    bad_hosts = str(Path(Path.cwd().anchor) / "etc" / "hosts")
+    r = client.post("/api/jobs", headers=H, json={"input_path": bad_hosts, "profile": "studio"})
     assert r.status_code == 403
     r = client.post(
         "/api/jobs", headers=H, json={"input_path": str(work / "nope.wav"), "profile": "studio"}
     )
     assert r.status_code == 404
+    bad_tmp = str(Path(Path.cwd().anchor) / "tmp" / "x.wav")
     r = client.post(
         "/api/jobs",
         headers=H,
-        json={"input_path": str(src), "profile": "studio", "output_path": "/tmp/x.wav"},
+        json={"input_path": str(src), "profile": "studio", "output_path": bad_tmp},
     )
     assert r.status_code == 403
     r = client.post(
@@ -409,7 +651,7 @@ def test_job_request_validation(client: TestClient, work: Path) -> None:
     assert r.status_code == 400 and ".wav" in r.json()["message"]
     assert client.get("/api/jobs/j_nope", headers=H).status_code == 404
     assert client.post("/api/jobs/j_nope/cancel", headers=H).status_code == 404
-    assert client.get(f"/api/jobs/j_nope/events?token={TOKEN}").status_code == 404
+    assert client.get("/api/jobs/j_nope/events", headers=H).status_code == 404
 
 
 def test_restore_job_request_validation(client: TestClient, work: Path) -> None:
@@ -464,7 +706,9 @@ def test_unknown_request_fields_are_422_not_silently_ignored(
     assert r.status_code == 422 and r.json()["error"] == "bad_request"
 
 
-def test_restore_job_submits_and_snapshots_its_mode(client: TestClient, work: Path) -> None:
+def test_legacy_restore_is_fail_closed_even_when_a_loose_profile_exists(
+    client: TestClient, work: Path
+) -> None:
     src = _tiny_wav(work / "take.wav")
     # Stage the speaker the job names. /api/health is the contract for which
     # speakers exist, and a job may not name one it does not list.
@@ -481,11 +725,10 @@ def test_restore_job_submits_and_snapshots_its_mode(client: TestClient, work: Pa
             "cutoff_hz": 7800.0,
         },
     )
-    assert r.status_code == 202, r.text
-    snap = client.get(f"/api/jobs/{r.json()['job_id']}", headers=H).json()
-    assert snap["mode"] == "restore"
-    assert snap["speaker_id"] == "character_01" and snap["cutoff_hz"] == 7800.0
-    _wait_done(client, r.json()["job_id"])
+    assert r.status_code == 503, r.text
+    assert r.json()["error"] == "capability_blocked"
+    assert "qualified signed Sorani Restore pack" in r.json()["message"]
+    assert client.get("/api/jobs", headers=H).json()["count"] == 0
     # A natural job's snapshot carries mode but no restore-only keys at all.
     r = client.post(
         "/api/jobs",
@@ -504,7 +747,7 @@ def test_job_cancel_running_child(work: Path) -> None:
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
     src = _tiny_wav(work / "slow.wav")
     try:
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             job_id = client.post(
                 "/api/jobs", headers=H, json={"input_path": str(src), "profile": "studio"}
             ).json()["job_id"]
@@ -538,7 +781,7 @@ def test_job_failure_surfaces_error(work: Path) -> None:
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
     src = _tiny_wav(work / "bad.wav")
     try:
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             job_id = client.post(
                 "/api/jobs", headers=H, json={"input_path": str(src), "profile": "studio"}
             ).json()["job_id"]
@@ -559,7 +802,7 @@ def test_job_real_child_end_to_end(work: Path) -> None:
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
     src = _tiny_wav(work / "real.wav")
     try:
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             r = client.post(
                 "/api/jobs",
                 headers=H,
@@ -586,7 +829,7 @@ def test_audio_range_requests(client: TestClient, work: Path) -> None:
     size = wav.stat().st_size
     data = wav.read_bytes()
 
-    r = client.get(f"/api/audio?path={wav}&token={TOKEN}")
+    r = client.get("/api/audio", params={"path": str(wav)}, headers=H)
     assert r.status_code == 200
     assert r.headers["accept-ranges"] == "bytes"
     assert r.headers["content-type"].startswith("audio/wav")
@@ -625,11 +868,12 @@ def test_audio_range_requests(client: TestClient, work: Path) -> None:
     assert r.status_code == 206 and r.content == b""
     assert r.headers["content-range"] == f"bytes 0-9/{size}"
 
-    r = client.get(f"/api/audio?path=/etc/hosts&token={TOKEN}")
+    bad_hosts = str(Path(Path.cwd().anchor) / "etc" / "hosts")
+    r = client.get("/api/audio", params={"path": bad_hosts}, headers=H)
     assert r.status_code == 403
-    r = client.get(f"/api/audio?path={work / 'missing.wav'}&token={TOKEN}")
+    r = client.get("/api/audio", params={"path": str(work / "missing.wav")}, headers=H)
     assert r.status_code == 404
-    r = client.get(f"/api/audio?token={TOKEN}")
+    r = client.get("/api/audio", headers=H)
     assert r.status_code == 400
 
 
@@ -710,7 +954,7 @@ def test_default_output_path_rule() -> None:
         "/a/Flute 09_studio.wav"
     )
     assert default_output_path(Path("/a/take.WAV"), "production") == Path("/a/take_clean.wav")
-    assert default_output_path(Path("/a/x.mov"), "development") == Path("/a/x_dev.wav")
+    assert default_output_path(Path("/a/x.mp4"), "development") == Path("/a/x_dev.wav")
     # Every offered profile needs its own suffix, or two profiles' masters
     # collide on one name and the second silently overwrites the first.
     assert default_output_path(Path("/a/take.wav"), "lowband") == Path("/a/take_lowband.wav")
@@ -725,7 +969,7 @@ def test_shutdown_responds_then_calls_hook(work: Path) -> None:
         TOKEN, None, job_manager=manager, on_shutdown=lambda: calls.append(time.time())
     )
     try:
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             t0 = time.time()
             r = client.post("/api/shutdown", headers=H)
             assert r.status_code == 200 and r.json() == {"ok": True}
@@ -754,7 +998,7 @@ def test_ui_dir_is_served_after_api_routes(work: Path) -> None:
     manager = JobManager(command_factory=_fake_done_factory)
     app = create_app(TOKEN, ui, job_manager=manager, on_shutdown=lambda: None)
     try:
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             r = client.get("/")
             assert r.status_code == 200 and "HawaVoClean" in r.text
             assert client.get("/index.html").status_code == 200
@@ -775,7 +1019,7 @@ def test_ui_dir_without_index_falls_back_to_api_only(work: Path) -> None:
     manager = JobManager(command_factory=_fake_done_factory)
     app = create_app(TOKEN, ui, job_manager=manager, on_shutdown=lambda: None)
     try:
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             r = client.get("/")
             assert r.status_code == 404 and r.json()["error"] == "not_found"
     finally:
@@ -796,10 +1040,14 @@ def test_unhandled_exception_is_json_500() -> None:
 
     manager.get_status = boom  # type: ignore[method-assign]
     try:
-        with TestClient(app, raise_server_exceptions=False) as client:
+        with TestClient(app, base_url="http://127.0.0.1", raise_server_exceptions=False) as client:
             r = client.get("/api/jobs/j_x", headers=H)
             assert r.status_code == 500
-            assert r.json()["error"] == "internal_error" and "kaboom" in r.json()["message"]
+            body = r.json()
+            assert body["error"] == "internal_error"
+            assert "kaboom" not in body["message"]
+            assert body["request_id"] == r.headers["x-hawa-request-id"]
+            assert body["request_id"].startswith("req_")
     finally:
         manager.shutdown()
 
@@ -814,7 +1062,7 @@ def test_sse_keepalive_ping_and_submit_after_shutdown(
     app = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
     src = _tiny_wav(work / "slow.wav")
     try:
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://127.0.0.1") as client:
             job_id = client.post(
                 "/api/jobs", headers=H, json={"input_path": str(src), "profile": "studio"}
             ).json()["job_id"]
@@ -823,14 +1071,14 @@ def test_sse_keepalive_ping_and_submit_after_shutdown(
             import threading
 
             threading.Timer(0.45, manager.cancel, args=(job_id,)).start()
-            with client.stream("GET", f"/api/jobs/{job_id}/events?token={TOKEN}") as s:
+            with client.stream("GET", f"/api/jobs/{job_id}/events", headers=H) as s:
                 joined = "".join(s.iter_text())
             assert joined.count(": ping") >= 2
             assert joined.rstrip().endswith("event: end\ndata: {}")
             assert '"state":"cancelled"' in joined
         # After lifespan shutdown the manager refuses new work -> 503 from the API.
         app2 = create_app(TOKEN, None, job_manager=manager, on_shutdown=lambda: None)
-        with TestClient(app2) as client2:
+        with TestClient(app2, base_url="http://127.0.0.1") as client2:
             r = client2.post(
                 "/api/jobs", headers=H, json={"input_path": str(src), "profile": "studio"}
             )
@@ -867,3 +1115,88 @@ def test_a_job_may_not_name_a_speaker_health_does_not_list(client: TestClient, w
     assert r.status_code == 422, r.text
     assert r.json()["error"] == "bad_request"
     assert "character_99" in r.json()["message"]
+
+
+def test_v1_override_unknown_job_returns_404(client: TestClient) -> None:
+    res = client.post(
+        "/api/v1/jobs/unknown-job-id-9999/override",
+        headers=H,
+        json={"unit_index": 0, "decision": "force_original"},
+    )
+    assert res.status_code == 404
+    assert res.json()["error"] == "not_found"
+
+
+def test_v1_override_workflow_lifecycle(client: TestClient, work: Path) -> None:
+    src = _tiny_wav(work / "override_source.wav")
+    upload = client.post(
+        "/api/upload",
+        headers=H,
+        files={"file": ("override.wav", src.read_bytes(), "audio/wav")},
+    )
+    assert upload.status_code == 200
+    source_id = upload.json()["source_id"]
+
+    res = client.post(
+        "/api/v1/jobs",
+        headers=H,
+        json={
+            "schemaVersion": 1,
+            "sourceIds": [source_id],
+            "strategy": {
+                "kind": "manual",
+                "route": "production",
+                "allowGenerativeReconstruction": False,
+            },
+            "executionPolicy": "offline_only",
+            "conflictPolicy": "unique",
+            "recordBundle": False,
+            "idempotencyKey": "test-override-key-1",
+        },
+    )
+    assert res.status_code == 202
+    job_id = res.json()["jobs"][0]["jobId"]
+    assert _wait_done(client, job_id)["state"] == "done"
+
+    # Out of range unit index -> 400
+    bad_idx = client.post(
+        f"/api/v1/jobs/{job_id}/override",
+        headers=H,
+        json={"unit_index": 999999, "decision": "force_original"},
+    )
+    assert bad_idx.status_code == 400
+    assert bad_idx.json()["error"] == "invalid_unit"
+
+    # Force original on unit 0
+    override1 = client.post(
+        f"/api/v1/jobs/{job_id}/override",
+        headers=H,
+        json={"unit_index": 0, "decision": "force_original"},
+    )
+    assert override1.status_code == 200
+    data1 = override1.json()
+    assert data1["job_id"] == job_id
+    assert data1["unit_index"] == 0
+    assert data1["new_decision"] == "reverted"
+    assert data1["override"] == "force_original"
+
+    # Force enhanced on unit 0
+    override2 = client.post(
+        f"/api/v1/jobs/{job_id}/override",
+        headers=H,
+        json={"unit_index": 0, "decision": "force_enhanced"},
+    )
+    assert override2.status_code == 200
+    data2 = override2.json()
+    assert data2["new_decision"] == "enhanced"
+    assert data2["override"] == "force_enhanced"
+
+    # Auto restore on unit 0
+    override3 = client.post(
+        f"/api/v1/jobs/{job_id}/override",
+        headers=H,
+        json={"unit_index": 0, "decision": "auto"},
+    )
+    assert override3.status_code == 200
+    data3 = override3.json()
+    assert data3["override"] == "auto"

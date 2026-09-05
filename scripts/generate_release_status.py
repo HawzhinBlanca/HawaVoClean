@@ -25,9 +25,14 @@ PROTOCOL = ROOT / "evidence" / "release" / "sorani-evaluation-protocol.json"
 SOURCE_ASSESSMENT = ROOT / "evidence" / "release" / "sorani-corpus-source-assessment.json"
 LEDGER = ROOT / "evidence" / "release" / "ledger.jsonl"
 PLAN = ROOT / "docs" / "true-10-plan.md"
+GOVERNANCE_CONTRACT = ROOT / "evidence" / "release" / "github-governance-contract.json"
+CURRENT_EVIDENCE_BINDINGS = {
+    "T3.2": GOVERNANCE_CONTRACT,
+    "T3.3": GOVERNANCE_CONTRACT,
+}
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-TASK = re.compile(r"^- \[(?P<done>[ x])\] \*\*T[0-9]+\.[0-9]+\b", re.MULTILINE)
+TASK = re.compile(r"^- \[(?P<done>[ x])\] \*\*(?P<task>T[0-9]+\.[0-9]+)\b", re.MULTILINE)
 
 
 class ReleaseStatusError(RuntimeError):
@@ -61,7 +66,43 @@ def _json(path: Path, label: str) -> dict[str, Any]:
         raise ReleaseStatusError(f"cannot read {label}: {exc}") from exc
 
 
-def _validate_ledger() -> None:
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise ReleaseStatusError(f"cannot hash current evidence input {path}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def _is_currently_bound(task_id: str, evidence: dict[str, Any]) -> bool:
+    """Require mutable governance tasks to prove the exact current contract.
+
+    Historical ledger passes remain immutable history, but a changed workflow
+    or governance contract cannot continue contributing to current readiness.
+    """
+
+    required_path = CURRENT_EVIDENCE_BINDINGS.get(task_id)
+    if required_path is None:
+        return True
+    inputs = evidence.get("inputs")
+    if not isinstance(inputs, list):
+        raise ReleaseStatusError(f"latest {task_id} evidence has no input inventory")
+    try:
+        relative = required_path.relative_to(ROOT).as_posix()
+    except ValueError:
+        relative = required_path.as_posix()
+    expected = _sha256(required_path)
+    for position, raw_input in enumerate(inputs):
+        item = _object(raw_input, f"latest {task_id} input {position}")
+        if item.get("path") == relative and item.get("sha256") == expected:
+            return True
+    return False
+
+
+def _validate_ledger() -> list[dict[str, Any]]:
     try:
         lines = [line for line in LEDGER.read_text(encoding="utf-8").splitlines() if line]
     except OSError as exc:
@@ -91,16 +132,49 @@ def _validate_ledger() -> None:
         actual = hashlib.sha256(canonical).hexdigest()
         if digest != actual:
             raise ReleaseStatusError(f"ledger entry {index} digest does not recompute")
+    return entries
 
 
-def _task_counts() -> tuple[int, int]:
+def _task_counts(entries: list[dict[str, Any]]) -> tuple[int, int]:
     try:
         matches = list(TASK.finditer(PLAN.read_text(encoding="utf-8")))
     except OSError as exc:
         raise ReleaseStatusError(f"cannot read true-10 plan: {exc}") from exc
     if not matches:
         raise ReleaseStatusError("true-10 plan contains no task checkboxes")
-    return sum(match.group("done") == "x" for match in matches), len(matches)
+    plan_tasks = [match.group("task") for match in matches]
+    if len(plan_tasks) != len(set(plan_tasks)):
+        raise ReleaseStatusError("true-10 plan contains duplicate task identifiers")
+
+    latest_by_task: dict[str, dict[str, Any]] = {}
+    for position, entry in enumerate(entries, 1):
+        task_id = _string(entry, "task_id", f"ledger entry {position} task_id")
+        if task_id not in plan_tasks:
+            raise ReleaseStatusError(f"evidence ledger contains unknown task {task_id}")
+        latest_by_task[task_id] = entry
+
+    # The append-only ledger is the sole completion authority. A later failed or
+    # blocked correction deliberately reopens a task even if an earlier entry passed.
+    completed = {
+        task_id
+        for task_id, evidence in latest_by_task.items()
+        if _object(evidence.get("result"), f"latest {task_id} result").get("status") == "passed"
+        and _is_currently_bound(task_id, evidence)
+    }
+
+    checked = {
+        task_id
+        for task_id, match in zip(plan_tasks, matches, strict=True)
+        if match.group("done") == "x"
+    }
+    if checked != completed:
+        missing = sorted(completed - checked)
+        unsupported = sorted(checked - completed)
+        raise ReleaseStatusError(
+            "plan checkboxes disagree with the latest ledger evidence "
+            f"(missing={missing}, unsupported={unsupported})"
+        )
+    return len(completed), len(plan_tasks)
 
 
 def _approval(value: dict[str, Any], label: str) -> tuple[str, str]:
@@ -125,8 +199,8 @@ def render_status() -> str:
     runtime = _json(RUNTIME_RISK_PROOF, "T4.6 runtime proof")
     protocol = _json(PROTOCOL, "Sorani protocol")
     sources = _json(SOURCE_ASSESSMENT, "Sorani source assessment")
-    _validate_ledger()
-    completed, total = _task_counts()
+    entries = _validate_ledger()
+    completed, total = _task_counts(entries)
 
     version = _string(identity, "version", "release version")
     report_schema = _integer(identity, "report_schema_version", "report schema version")
@@ -143,6 +217,7 @@ def render_status() -> str:
     if reproducibility.get("status") != "passed":
         raise ReleaseStatusError("the recorded T3.1 artifacts are not reproducible")
     artifacts = _object(reproducibility.get("artifact_sha256"), "T3.1 artifact identities")
+    gate_schema = _integer(full_gate, "schema_version", "T3.1 schema version")
     expected_artifacts = {
         "audio-regression",
         "container-audio",
@@ -155,6 +230,8 @@ def render_status() -> str:
         "wheel",
         "wheel-smoke-audio",
     }
+    if gate_schema == 2:
+        expected_artifacts.update({"desktop-app", "desktop-engine-smoke-audio"})
     if set(artifacts) != expected_artifacts or any(
         not isinstance(digest, str) or HEX64.fullmatch(digest) is None
         for digest in artifacts.values()
@@ -183,16 +260,21 @@ def render_status() -> str:
         "<!-- Generated by scripts/generate_release_status.py. Do not edit by hand. -->",
         "",
         "This is a deterministic snapshot of committed evidence, not a claim that the current HEAD",
-        "has completed the human, host, governance, or final-release gates.",
+        "has completed the human, host, or final-release gates.",
         "",
         "| Fact | Evidence-derived value |",
         "|---|---|",
         f"| Candidate identity | HawaVoClean {version}; report schema {report_schema} |",
-        f"| True-10 plan | {completed}/{total} tasks have committed completion proof |",
-        f"| Last full local gate | Passed on `{source_commit}`; {_integer(gate_result, 'isolated_clean_checkout_passes', 'isolated passes')} isolated passes × {_integer(gate_result, 'steps_per_pass', 'steps per pass')} steps |",
+        f"| True-10 plan | {completed}/{total} tasks have current completion proof |",
+        f"| Last full local gate | Historical schema {gate_schema} proof passed on `{source_commit}`; {_integer(gate_result, 'isolated_clean_checkout_passes', 'isolated passes')} isolated passes × {_integer(gate_result, 'steps_per_pass', 'steps per pass')} steps |",
         f"| Default suite in each full-gate pass | {_integer(suite, 'passed', 'default passed')} passed, {_integer(suite, 'skipped', 'default skipped')} skipped, {_integer(suite, 'fuzz_deselected', 'fuzz deselected')} fuzz-only deselected; {suite.get('branch_coverage_percent')}% branch coverage (floor {suite.get('required_branch_coverage_percent')}%) |",
         f"| Separate mutation/fuzz/UI gates | {gate_result.get('owner_scoped_mutations_caught_per_pass')} mutations; {_integer(gate_result, 'separate_fuzz_tests_per_pass', 'fuzz count')} fuzz cases; {_integer(gate_result, 'ui_tests_per_pass', 'UI test count')} UI tests per pass |",
-        "| Reproduced release identities | Wheel, sdist, UI, Resolve engine/plugin, container, SBOM and engineering-audio identities matched across both passes |",
+        (
+            "| Reproduced release identities | Wheel, sdist, UI, unsigned engine-bearing desktop app, "
+            "Resolve engine/plugin, container, SBOM and engineering-audio identities matched across both passes |"
+            if gate_schema == 2
+            else "| Reproduced release identities | Historical schema 1: wheel, sdist, UI, Resolve engine/plugin, container, SBOM and engineering-audio identities matched; no packaged desktop app identity was captured |"
+        ),
         f"| CPU container at the full gate | {container.get('exact_locked_packages')} packages; {_integer(container, 'high_or_critical_vulnerabilities', 'container vulnerabilities')} high/critical vulnerabilities; {_integer(container, 'high_or_critical_configuration_findings', 'container configuration findings')} high/critical configuration findings |",
         f"| Sorani protocol | `{protocol_status}`; design `{protocol_digest}` |",
         f"| Sorani source route | `{source_status}`; design `{source_digest}` |",
@@ -203,12 +285,22 @@ def render_status() -> str:
         "",
         "- The full two-pass proof is bound to the named source commit, not automatically to later",
         "  documentation, protocol, source-audit, or release commits. The final candidate must rerun it.",
+        *(
+            [
+                "- The retained schema-1 checkpoint predates packaged-desktop proof. The current schema-2 gate",
+                "  requires an unsigned engine-bearing app, package integrity and engine smoke in both passes;",
+                "  that current desktop proof remains pending until the exact gate is rerun.",
+            ]
+            if gate_schema == 1
+            else []
+        ),
         "- Protocol and source designs are structurally valid but unapproved; no held-out Sorani",
         "  corpus, dual-review verdict, listening score, or product-quality result exists yet.",
         "- The staged Resolve lifecycle is not the real in-host workflow, keyboard, VoiceOver, or",
         "  timeline matrix. Those require the user-authorized installation and DaVinci Resolve run.",
-        "- GitHub CI, branch protection, vendor-risk acceptance, final artifact signing, protected",
-        "  merge, tag, and publication remain open.",
+        "- GitHub CI and branch protection are evidenced for the prior governed commit, but the",
+        "  final candidate still needs exact-commit reruns, independent approval, signing, merge,",
+        "  tag, and publication. The newer UI pipe-failure regression also needs a remote proof run.",
         "",
     ]
     return "\n".join(lines)

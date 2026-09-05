@@ -22,6 +22,10 @@ class CoreRegistration:
     lock_filename: str
     implementation_params_hash: Callable[[], str]
     requires_modules: tuple[str, ...] = ()
+    #: ``module:function`` for a model-cold import/symbol contract.  The
+    #: readiness layer invokes it in an isolated interpreter so broken native
+    #: wheels cannot be advertised merely because import metadata exists.
+    dependency_probe: str | None = None
     #: Does this core's inference actually run on ``runtime.device``? A
     #: classical-DSP core is numpy on the CPU whatever the config asks for,
     #: and the report must name the device that ran, not the one requested.
@@ -39,6 +43,7 @@ CORE_REGISTRY: dict[str, CoreRegistration] = {
         lock_filename="studio-core.lock.toml",
         implementation_params_hash=studio_params_hash,
         requires_modules=("df", "torch", "nara_wpe"),
+        dependency_probe=("hawavoclean.enhancement.dependency_probe:probe_studio_runtime_contract"),
         device_aware=True,
     ),
     # Shares the studio core's vendored DFN3 weights; no WPE, so nara_wpe is
@@ -48,6 +53,9 @@ CORE_REGISTRY: dict[str, CoreRegistration] = {
         lock_filename="studio-lowband-core.lock.toml",
         implementation_params_hash=studio_lowband_params_hash,
         requires_modules=("df", "torch"),
+        dependency_probe=(
+            "hawavoclean.enhancement.dependency_probe:probe_lowband_runtime_contract"
+        ),
         device_aware=True,
     ),
 }

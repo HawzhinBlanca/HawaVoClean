@@ -19,7 +19,7 @@ import { getState, useStore } from '../state/store';
 import { Actions } from './Actions';
 
 vi.mock('../bridge', () => ({
-  getBridge: () => ({ host: 'web', engine: { getEndpoint: async () => ({ baseUrl: '', token: '' }) } }),
+  getBridge: () => ({ host: 'web', engine: { getEndpoint: async () => ({ baseUrl: '' }) } }),
 }));
 // Partial: `artifactsFor` is the pure function that builds the three URLs and
 // is exactly what this component's behaviour is made of — mocking it away
@@ -64,7 +64,7 @@ async function render(): Promise<void> {
 /** A finished run whose three artefacts the engine will serve. */
 async function finishedRun(): Promise<void> {
   await act(async () => {
-    getState().setEngine('ready', new EngineClient({ baseUrl: 'http://127.0.0.1:8765', token: 't' }), '3.3.0');
+    getState().setEngine('ready', new EngineClient({ baseUrl: 'http://127.0.0.1:8765' }), '3.3.0');
     getState().setCleaned(null, '/out/a_studio.wav');
     getState().setJob({
       id: 'j1',
@@ -142,7 +142,7 @@ describe('the artefact row while the engine is gone', () => {
 describe('the artefact row before there is a run', () => {
   it('says so, and does not pretend the engine is the problem', async () => {
     await act(async () => {
-      getState().setEngine('ready', new EngineClient({ baseUrl: 'http://127.0.0.1:8765', token: 't' }), '3.3.0');
+      getState().setEngine('ready', new EngineClient({ baseUrl: 'http://127.0.0.1:8765' }), '3.3.0');
     });
     await render();
     expect(links()).toHaveLength(0);

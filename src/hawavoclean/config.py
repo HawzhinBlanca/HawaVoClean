@@ -262,16 +262,24 @@ class HawaVoCleanConfig(BaseFrozenModel):
         return hash_json_canonical(self.canonical_dict())
 
 
-def load_config(path: Path | str | None = None, is_production: bool = True) -> HawaVoCleanConfig:
+def load_config(
+    path: Path | str | None = None,
+    is_production: bool = True,
+    *,
+    activate: bool = True,
+) -> HawaVoCleanConfig:
     """Load configuration from TOML file or return defaults with production constraints.
 
-    Loading a configuration also *arms* its ``[runtime]`` section — the device
-    is resolved and published, and a per-worker thread budget is set when the
-    config asks for a worker pool. That is deliberate: it is the one moment a
-    configuration stops being data and starts being the run, and it is what
-    lets the spawned enhancement worker and the report agree on the compute
-    device. An explicitly requested device this machine cannot provide fails
-    here, before any audio is touched.
+    By default loading also *arms* the ``[runtime]`` section — the device is
+    resolved and published, and a per-worker thread budget is set when the
+    config asks for a worker pool. That is deliberate for processing: it is
+    the moment a configuration stops being data and starts being the run.
+
+    Read-only inspectors pass ``activate=False`` so capability queries cannot
+    rewrite broker-wide device, memory, or BLAS thread environment. They must
+    still call :func:`hawavoclean.runtime.resolve_device` to prove the
+    requested provider is runnable; skipping activation is not permission to
+    skip runtime validation.
     """
     data: dict[str, Any] = {}
     if path is not None:
@@ -292,10 +300,11 @@ def load_config(path: Path | str | None = None, is_production: bool = True) -> H
     if is_production and config.runtime.development:
         raise ConfigError("Production mode refuses to run with runtime.development = true")
 
-    activate_runtime(
-        config.runtime.device,
-        core_id=config.enhancement.core_id,
-        num_threads=config.runtime.num_threads,
-        memory_limit_mb=config.runtime.worker_memory_limit_mb,
-    )
+    if activate:
+        activate_runtime(
+            config.runtime.device,
+            core_id=config.enhancement.core_id,
+            num_threads=config.runtime.num_threads,
+            memory_limit_mb=config.runtime.worker_memory_limit_mb,
+        )
     return config

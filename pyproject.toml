@@ -13,6 +13,7 @@ authors = [
     { name = "Hawzhin", email = "hawzhin88@gmail.com" }
 ]
 dependencies = [
+    "cryptography>=42.0.0",
     "numpy>=1.26.0",
     "scipy>=1.12.0",
     "soundfile>=0.12.1",
@@ -43,8 +44,13 @@ ui = [
 restoration = [
     "einops>=0.7.0",
     "python-box>=7.0.0",
+    "safetensors>=0.4.0",
     "timm>=0.9.0",
     "torchdiffeq>=0.2.4",
+]
+metrics = [
+    "pesq>=0.0.4",
+    "pystoi>=0.4.1",
 ]
 
 [tool.uv]
@@ -117,6 +123,8 @@ module = [
     "hypothesis.*",
     "df.*",
     "nara_wpe.*",
+    "pesq.*",
+    "pystoi.*",
 ]
 ignore_missing_imports = true
 

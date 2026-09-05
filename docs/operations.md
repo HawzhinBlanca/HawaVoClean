@@ -12,7 +12,7 @@ in [the generated release status](generated-release-status.md) and [STATUS.md](.
 | CPU container | Linux arm64, production profile, non-root, read-only root | Built, processed, verified, reproduced and scanned locally; final-commit rebuild is still required |
 | Studio/lowband CLI | macOS/Linux with the `studio` extra | Exercised on the release workstation; no GPU-container claim |
 | Resolve plugin | Apple-silicon macOS, Resolve Studio 21.0.3 | Installer and staged shell proven; real in-host workflow/accessibility acceptance is still open |
-| Windows | None for v3.3 | Unsupported; publication depends on POSIX symlink and replacement semantics |
+| Windows standalone | Unsupported in v3.3; future Windows 11 x64 target | Cross-platform publication and Job Object foundations exist, but native NTFS fault tests, offline NSIS packaging, Authenticode, DirectML/CUDA qualification and real-host QA are open |
 
 Do not convert a declared target into a release claim until its required CI/in-host gate is green.
 
@@ -20,7 +20,7 @@ Do not convert a declared target into a release claim until its required CI/in-h
 
 The committed GitHub workflow has one stable branch-protection context: `required`. It
 succeeds only when the source contract, all eight Linux/macOS and Python 3.11–3.14 jobs, the macOS
-web/Resolve-shell job, and the exact Apple-silicon release gate all succeed on the same commit. The
+web/desktop/Resolve-shell job, and the exact Apple-silicon release gate all succeed on the same commit. The
 hosted matrix builds a wheel, installs it with hash-locked runtime dependencies in a separate virtual
 environment, then runs `doctor`, `process`, and `verify` outside the source environment.
 
@@ -44,8 +44,9 @@ hawavoclean-release]` and the protected `release-candidate` environment. Before 
    `v*` tags against updates and deletion.
 
 Every third-party action is pinned to a full commit SHA, checkout credentials are not persisted, and
-the workflow has only `contents: read`. Successful evidence uploads are source-SHA-named and use the
-immutable artifact service: 30 days for hosted evidence and 90 days for the full release proof.
+the workflow has only `contents: read`. Evidence uploads fail the job when their expected path is
+absent; retained artifacts are source-SHA-named and use the immutable service for 30 days (hosted)
+or 90 days (full release proof).
 
 Validate the committed design and inspect the exact non-mutating API plan with:
 
@@ -92,6 +93,17 @@ uv run hawavoclean batch recordings/*.m4a \
 
 uv run hawavoclean verify interview_clean.wav \
   --report interview_clean.hawavoclean.json
+
+uv run hawavoclean record create interview_clean.wav \
+  --report interview_clean.hawavoclean.json \
+  --summary interview_clean.hawavoclean.txt \
+  --output interview_clean.record.zip
+
+uv run hawavoclean record verify interview_clean.record.zip --json
+
+# One supervised process: publish the master, then create and verify the ZIP.
+uv run hawavoclean process interview.m4a -o interview_clean.wav \
+  --profile production --record-bundle interview_clean.hawavoclean.zip
 ```
 
 `--passes` is process-only. It accepts `1`–`4` or `auto`; auto keeps a later pass only while measured
@@ -119,22 +131,41 @@ interview_clean.hawavoclean.txt
 .interview_clean.wav.hawavoclean/
 ```
 
-The three visible paths are relative aliases through the hidden bundle's single `current` pointer.
-Never copy, rename, or archive a visible alias alone. To relocate without changing the output name,
-archive all four paths from their parent directory and extract them together:
+The three visible paths are ordinary regular-file exports, while the hidden bundle's single
+`current` record is the authoritative generation. A hard interruption can occur while those three
+exports are being refreshed individually; broker/job artifact readers resolve and repair them from
+the immutable authority before serving. The WAV itself remains self-contained, while the Full
+Processing Record is the portable way to keep the master and both reports bound together.
 
-```bash
-tar -cf interview_clean.publication.tar \
-  interview_clean.wav \
-  interview_clean.hawavoclean.json \
-  interview_clean.hawavoclean.txt \
-  .interview_clean.wav.hawavoclean
-```
+Use `hawavoclean record create` for relocation or archival. Its ZIP contains ordinary `master.wav`,
+`report.json`, `summary.txt`, and canonical `manifest.json` entries; it never depends on the hidden
+generation store. The destination is created under an exclusive lock and published atomically. It
+fails if the ZIP already exists unless `--overwrite` is explicit.
 
-After extraction, run `hawavoclean verify` against the visible WAV and JSON report. Renaming a
-publication is not currently an exposed operation: process again to the new destination. The
-adjacent `.interview_clean.wav.hawavoclean.lock` is transient coordination state and is not part of
-the archived generation.
+Run `hawavoclean record verify RECORD.zip` after copying the archive. This verifies the closed
+inventory, every internal hash, and the report/master binding. It does **not** authenticate who made
+the archive: version 1 has no publisher signature, and reports `authenticated_publisher: false` in
+machine output. Preserve the printed archive SHA-256 in a separately trusted system when an external
+identity anchor is required.
+
+When `process --record-bundle ZIP` is used, ZIP construction runs in the same supervised child as
+the render. Cancellation therefore kills rendering and record creation as one process tree. The job
+does not become complete until the broker independently verifies the ZIP and binds its master,
+report, and summary hashes to the authoritative committed generation. The ZIP builder hashes the
+exact bytes it copies, verifies the temporary archive before atomic replacement, and preserves a
+valid prior ZIP if source mutation or verification fails.
+
+The master generation and portable ZIP are two atomic publication boundaries, not one filesystem
+transaction: the master commits first. A hard kill between those boundaries can leave a valid new
+master without a new ZIP. Such a job is explicitly `interrupted`/`failed`, never `completed`, and
+startup will not promote it merely because the derived ZIP path contains a valid older record from a
+replace operation. Retry with the intended conflict policy and a new idempotency key. This is the
+strongest safe behavior until publication stores the ZIP inside the same immutable generation before
+the single authority-pointer transition.
+
+Renaming a committed publication is not currently an exposed operation: process again to the new
+destination, or use a Full Processing Record when the goal is portable archival. The adjacent
+`.interview_clean.wav.hawavoclean.lock` is transient coordination state and is not part of a record.
 
 On interruption, retry the same command and destination. Startup publication recovery treats only a
 verified `current` target as authoritative, preserves the prior immutable generation, completes a
@@ -148,17 +179,20 @@ Use a fresh random secret and keep the server on loopback:
 
 ```bash
 HAWA_TOKEN="$(openssl rand -hex 32)"
-uv run hawavoclean serve --host 127.0.0.1 --port 0 --token "$HAWA_TOKEN" --ui-dir ui/dist
+printf '%s\n' "$HAWA_TOKEN" | \
+  uv run hawavoclean serve --host 127.0.0.1 --port 0 --token-stdin --ui-dir ui/dist
 ```
 
-The ready line reports the assigned port. Every `/api` request needs the token. Non-loopback binds,
-empty tokens, arbitrary output paths, and unauthenticated requests fail closed.
+The ready line reports the assigned port. Every `/api` request needs the token. Native shells use
+the one-shot stdin channel so the bootstrap secret is absent from the process command line. The
+legacy `--token` argv form remains for one compatibility release. Non-loopback binds, empty tokens,
+arbitrary output paths, and unauthenticated requests fail closed.
 
 Default bounds are finite:
 
 | Resource | Default |
 |---|---:|
-| Active jobs | 8 |
+| Active jobs | 128 |
 | Retained terminal jobs | 256 for at most 24 hours |
 | One upload | 8 GiB |
 | Concurrent uploads | 2 |
@@ -209,7 +243,7 @@ uv run --frozen python scripts/release_candidate.py assemble \
 ```
 
 The output is a closed inventory: `candidate-manifest.json`, `SHA256SUMS`, its OpenSSH `sshsig`, and
-the seven proof-matched files under `assets/`. The signed checksum file covers the manifest and every
+the eight proof-matched files under `assets/`. The signed checksum file covers the manifest and every
 asset. The manifest binds the source commit, full-gate file/canonical hashes, toolchain lock, tested
 tree/image identities, two-pass release-file identities, signing namespace, and signer identity.
 Unexpected files, symlinks, duplicate JSON keys, altered bytes, altered proof, wrong identity, or a
@@ -232,13 +266,18 @@ uv run --frozen python scripts/release_candidate.py smoke \
   --output build/candidates/hawavoclean-3.3.0-smoke.json
 ```
 
-The smoke reconstructs the normalized UI and plugin trees and compares them to the exact tested tree
-hashes; installs the candidate wheel with its candidate runtime lock into a fresh managed Python 3.11
-environment; runs `doctor`, `process`, and `verify`; loads the candidate container and requires the
-exact tested image ID; then repeats non-root/read-only `doctor`, `process`, and `verify`. Its proof is
-written outside the immutable candidate. Assembly without signing arguments is permitted only for
-local rehearsal and is labeled `unsigned_pending_signing`; verification then requires the explicit
-`--allow-unsigned` flag and does not complete T7.2.
+The smoke reconstructs the normalized UI, plugin and unsigned macOS app-proof trees and compares them
+to the exact tested tree hashes. It directly exercises the app's embedded engine, installs the
+candidate wheel with its candidate runtime lock into a fresh managed Python 3.11 environment, and
+runs `doctor`, `process`, and `verify`; it also loads the candidate container and requires the exact
+tested image ID before repeating the non-root/read-only flow. Its proof is written outside the
+immutable candidate. Assembly without signing arguments is permitted only for local rehearsal and
+is labeled `unsigned_pending_signing`; verification then requires the explicit `--allow-unsigned`
+flag and does not complete T7.2.
+
+Candidate schema 2 marks the macOS app proof as non-distributable qualification evidence. Signing
+the outer checksum inventory does not turn that inner ad-hoc app into a release: Developer ID
+signing, notarization/stapling and the final DMG/ZIP remain separate native gates.
 
 ## Resolve build, install, rollback
 

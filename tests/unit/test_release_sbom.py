@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +63,8 @@ def test_directory_artifact_is_path_independent_and_binds_the_complete_tree(
 
 
 def test_directory_artifact_binds_modes_and_symlink_targets(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Windows NTFS does not support POSIX permission bits or unprivileged symlinks")
     bundle = _artifact_tree(tmp_path)
     original = generate_sbom._artifact_component("plugin", bundle)
 
@@ -76,6 +79,8 @@ def test_directory_artifact_binds_modes_and_symlink_targets(tmp_path: Path) -> N
 
 
 def test_directory_artifact_rejects_escaping_and_dangling_symlinks(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Windows NTFS does not support POSIX permission bits or unprivileged symlinks")
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     outside = tmp_path / "outside"

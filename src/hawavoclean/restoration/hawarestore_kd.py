@@ -21,12 +21,20 @@ from scipy import signal
 
 from hawavoclean.errors import ModelProvenanceError
 from hawavoclean.hashing import hash_file
+from hawavoclean.logging import get_logger
 from hawavoclean.paths import restoration_checkpoint_path
-from hawavoclean.restoration.base import RestorationCandidate, Restorer
+from hawavoclean.restoration.base import (
+    RestorationCandidate,
+    RestorationRenderResult,
+    Restorer,
+)
+from hawavoclean.restoration.checkpoint import load_safe_checkpoint
 from hawavoclean.restoration.protected_band import (
     compute_transition_mask,
     merge_protected_spectrum,
 )
+
+logger = get_logger("restoration.hawarestore_kd")
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -96,10 +104,13 @@ class HawaRestoreKDNet(nn.Module):
         prototype_dim: int = 192,
         cond_dim: int = 256,
         n_fft: int = 1024,
+        use_f0_cond: bool = True,
+        **_kwargs: object,
     ) -> None:
         super().__init__()
         self.n_fft = n_fft
         self.num_freq_bins = n_fft // 2 + 1
+        self.use_f0_cond = use_f0_cond
 
         # Embeddings
         self.time_embed = SinusoidalEmbedding(64)
@@ -107,10 +118,15 @@ class HawaRestoreKDNet(nn.Module):
         self.speaker_embedding = nn.Embedding(num_speakers, speaker_embed_dim)
         self.proto_proj = nn.Linear(prototype_dim, 64)
 
+        cond_in_dim = 64 + 64 + speaker_embed_dim + 64
+        if use_f0_cond:
+            self.f0_embed = SinusoidalEmbedding(32)
+            self.vuv_proj = nn.Linear(1, 32)
+            cond_in_dim += 64
+
         # Total condition projector
-        # time(64) + cutoff(64) + spk_id(64) + proto(64) = 256
         self.cond_mlp = nn.Sequential(
-            nn.Linear(64 + 64 + speaker_embed_dim + 64, cond_dim),
+            nn.Linear(cond_in_dim, cond_dim),
             nn.GELU(),
             nn.Linear(cond_dim, cond_dim),
         )
@@ -142,8 +158,15 @@ class HawaRestoreKDNet(nn.Module):
         cutoff_hz: torch.Tensor,  # (B,)
         speaker_idx: torch.Tensor | None = None,  # (B,)
         speaker_prototype: torch.Tensor | None = None,  # (B, 192)
+        x_obs: torch.Tensor | None = None,  # (B, 2, F, T)
+        f0_hz: torch.Tensor | None = None,  # (B,)
+        vuv: torch.Tensor | None = None,  # (B,) or (B, 1)
+        speaker_proto: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Predict velocity field v_t(x_t)."""
+        if speaker_prototype is None and speaker_proto is not None:
+            speaker_prototype = speaker_proto
+
         B = x_t.shape[0]
         device = x_t.device
 
@@ -161,10 +184,26 @@ class HawaRestoreKDNet(nn.Module):
         else:
             proto_emb = torch.zeros(B, 64, device=device)
 
-        cond = self.cond_mlp(torch.cat([t_emb, c_emb, spk_emb, proto_emb], dim=-1))
+        cond_parts = [t_emb, c_emb, spk_emb, proto_emb]
+        if self.use_f0_cond:
+            if f0_hz is not None:
+                f0_e = self.f0_embed(f0_hz / 100.0)
+            else:
+                f0_e = torch.zeros(B, 32, device=device)
+            if vuv is not None:
+                vuv_in = vuv.view(B, 1) if vuv.dim() <= 1 else vuv
+                vuv_e = self.vuv_proj(vuv_in)
+            else:
+                vuv_e = torch.zeros(B, 32, device=device)
+            cond_parts.extend([f0_e, vuv_e])
 
-        # 2. Forward through vector field network
+        cond = self.cond_mlp(torch.cat(cond_parts, dim=-1))
+
+        # 2. Forward through vector field network with low-band observed conditioning
         h = self.in_proj(x_t)
+        if x_obs is not None:
+            # Low-band observed guidance injection
+            h = h + 0.5 * self.in_proj(x_obs)
         h = self.film1(self.block1(h), cond)
 
         h_down = self.down1(h)
@@ -199,6 +238,7 @@ class HawaRestoreKD(Restorer):
         checkpoint_path: Path | str | None = None,
         chunk_seconds: float = 1.0,
         chunk_overlap_seconds: float = 0.25,
+        solver: str = "midpoint",
     ) -> None:
         self.sample_rate = sample_rate
         self.n_fft = n_fft
@@ -207,6 +247,7 @@ class HawaRestoreKD(Restorer):
         self.transition_hz = transition_hz
         self.chunk_seconds = chunk_seconds
         self.chunk_overlap_seconds = chunk_overlap_seconds
+        self.solver = solver
 
         # CPU by default, deliberately. torch.manual_seed does not give the same
         # stream on CUDA/MPS as on CPU, and the ODE solver starts from randn, so
@@ -214,9 +255,6 @@ class HawaRestoreKD(Restorer):
         # between a dev machine and CI while the report claims a fixed seed
         # policy. An explicit device is honoured for callers who accept that.
         self.device = device or "cpu"
-
-        self.speaker_ids = [f"character_{i:02d}" for i in range(1, 11)]
-        self.net = HawaRestoreKDNet(n_fft=n_fft).to(self.device).eval()
 
         ckpt_path = (
             Path(checkpoint_path) if checkpoint_path is not None else restoration_checkpoint_path()
@@ -228,11 +266,44 @@ class HawaRestoreKD(Restorer):
                 "on untrained weights; set HAWAVOCLEAN_RESTORATION_CHECKPOINT or install the model."
             )
         try:
-            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
-            if not isinstance(ckpt, dict) or "model_state_dict" not in ckpt:
-                raise ModelProvenanceError(
-                    f"HawaRestore-KD checkpoint {ckpt_path} has no 'model_state_dict' entry."
+            ckpt = load_safe_checkpoint(ckpt_path, map_location=self.device)
+
+            # Dynamic config from checkpoint (real-data trained) or legacy defaults.
+            net_config = ckpt.get("config", {})
+            num_speakers = int(net_config.get("num_speakers", 10))
+            ckpt_n_fft = int(net_config.get("n_fft", n_fft))
+            if "win_length" in net_config:
+                self.win_length = int(net_config["win_length"])
+                self.n_fft = ckpt_n_fft
+                self.hop_length = int(net_config.get("hop_length", self.win_length // 4))
+            else:
+                self.n_fft = n_fft
+                self.win_length = win_length
+                self.hop_length = hop_length
+            self.chunk_seconds = float(net_config.get("chunk_seconds", self.chunk_seconds))
+            self.chunk_overlap_seconds = float(
+                net_config.get("chunk_overlap_seconds", self.chunk_overlap_seconds)
+            )
+            self.solver = str(net_config.get("solver", self.solver))
+            use_f0_cond = bool(net_config.get("use_f0_cond", False))
+
+            # Speaker table: from checkpoint metadata or legacy character_XX list.
+            train_speakers = ckpt.get("train_speakers", [])
+            val_speakers = ckpt.get("val_speakers", [])
+            if train_speakers or val_speakers:
+                self.speaker_ids = sorted(set(train_speakers + val_speakers))
+            else:
+                self.speaker_ids = [f"character_{i:02d}" for i in range(1, num_speakers + 1)]
+
+            self.net = (
+                HawaRestoreKDNet(
+                    n_fft=ckpt_n_fft,
+                    num_speakers=num_speakers,
+                    use_f0_cond=use_f0_cond,
                 )
+                .to(self.device)
+                .eval()
+            )
             self.net.load_state_dict(ckpt["model_state_dict"])
         except ModelProvenanceError:
             raise
@@ -242,6 +313,14 @@ class HawaRestoreKD(Restorer):
             raise ModelProvenanceError(
                 f"Failed to load HawaRestore-KD checkpoint {ckpt_path}: {e}"
             ) from e
+
+        from hawavoclean.restoration.f0 import F0Extractor
+
+        self.f0_extractor = F0Extractor(
+            sample_rate=self.sample_rate,
+            hop_length=self.hop_length,
+            frame_length=self.win_length,
+        )
 
         #: SHA-256 of the checkpoint that was actually loaded into ``self.net``.
         #: Reports must quote this rather than re-hashing a path they assume exists.
@@ -279,9 +358,11 @@ class HawaRestoreKD(Restorer):
         speaker_idx: torch.Tensor | None,
         speaker_proto: torch.Tensor | None,
         generator: torch.Generator,
+        f0_hz: torch.Tensor | None = None,
+        vuv: torch.Tensor | None = None,
         steps: int = 4,
     ) -> torch.Tensor:
-        """Midpoint flow-matching ODE solver for missing-band trajectory integration."""
+        """Midpoint or Heun flow-matching ODE solver with low-band guidance."""
         dt = 1.0 / steps
         # An explicit generator, not torch.manual_seed: seeding the global RNG
         # from inside inference would reach every other torch consumer in the
@@ -297,13 +378,62 @@ class HawaRestoreKD(Restorer):
         for step in range(steps):
             t_val = step * dt
             t_curr = torch.tensor([t_val], device=self.device, dtype=torch.float32)
-            t_mid = torch.tensor([t_val + dt / 2.0], device=self.device, dtype=torch.float32)
 
             with torch.no_grad():
-                v_curr = self.net(x_t, t_curr, cutoff_t, speaker_idx, speaker_proto)
-                x_mid = x_t + v_curr * (dt / 2.0)
-                v_mid = self.net(x_mid, t_mid, cutoff_t, speaker_idx, speaker_proto)
-                x_t = x_t + v_mid * dt
+                if self.solver == "heun":
+                    # Heun 2nd-order predictor-corrector
+                    t_next = torch.tensor(
+                        [min(1.0, t_val + dt)], device=self.device, dtype=torch.float32
+                    )
+                    v_0 = self.net(
+                        x_t,
+                        t_curr,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
+                    )
+                    x_pred = x_t + v_0 * dt
+                    v_1 = self.net(
+                        x_pred,
+                        t_next,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
+                    )
+                    x_t = x_t + 0.5 * (v_0 + v_1) * dt
+                else:
+                    # Midpoint 2nd-order solver
+                    t_mid = torch.tensor(
+                        [t_val + dt / 2.0], device=self.device, dtype=torch.float32
+                    )
+                    v_curr = self.net(
+                        x_t,
+                        t_curr,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
+                    )
+                    x_mid = x_t + v_curr * (dt / 2.0)
+                    v_mid = self.net(
+                        x_mid,
+                        t_mid,
+                        cutoff_t,
+                        speaker_idx,
+                        speaker_proto,
+                        x_obs=Z_obs_real,
+                        f0_hz=f0_hz,
+                        vuv=vuv,
+                    )
+                    x_t = x_t + v_mid * dt
 
         return x_t
 
@@ -354,6 +484,9 @@ class HawaRestoreKD(Restorer):
         spk_idx_t: torch.Tensor | None,
         proto_t: torch.Tensor | None,
         generator: torch.Generator,
+        f0_t: torch.Tensor | None = None,
+        vuv_t: torch.Tensor | None = None,
+        solver_errors: list[str] | None = None,
     ) -> dict[float, np.ndarray]:
         """Restore one block, returning one waveform per active strength."""
         n_block = len(block)
@@ -375,23 +508,23 @@ class HawaRestoreKD(Restorer):
                 speaker_idx=spk_idx_t,
                 speaker_proto=proto_t,
                 generator=generator,
+                f0_hz=f0_t,
+                vuv=vuv_t,
                 steps=4,
             )
             flow_np = Z_flow.squeeze(0).cpu().numpy()
             Z_gen = flow_np[0] + 1j * flow_np[1]
-        except Exception:
-            freqs = np.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate)
-            cutoff_bin = int(np.argmin(np.abs(freqs - effective_cutoff_hz)))
-            Z_gen = np.zeros_like(Z_obs)
-            if cutoff_bin > 10:
-                low_band = Z_obs[10:cutoff_bin, :]
-                n_rep = (n_freqs - cutoff_bin + len(low_band) - 1) // len(low_band)
-                tiled = np.tile(low_band, (n_rep + 1, 1))[: n_freqs - cutoff_bin, :]
-                hf_freqs = freqs[cutoff_bin:]
-                tilt = np.exp(-0.00015 * (hf_freqs - effective_cutoff_hz))[:, np.newaxis]
-                Z_gen[cutoff_bin:, :] = tiled * tilt
+        except Exception as exc:
+            # Explicit fail-closed Natural fallback: on solver error, do not fabricate fake DSP frequencies
+            logger.warning(
+                "ODE flow solver failed: %s; falling back to 0.0-strength Natural passthrough", exc
+            )
+            if solver_errors is not None:
+                solver_errors.append(str(exc))
+            x_rec = block[:n_block].copy()
+            return {0.0: x_rec.astype(np.float32)}
 
-        freqs = np.fft.rfftfreq(self.n_fft, d=1.0 / self.sample_rate)
+        freqs = np.fft.rfftfreq(self.win_length, d=1.0 / self.sample_rate)
         cutoff_bin = max(1, int(np.argmin(np.abs(freqs - effective_cutoff_hz))))
 
         # Acoustic envelope matching and energy gating
@@ -412,31 +545,30 @@ class HawaRestoreKD(Restorer):
 
         out: dict[float, np.ndarray] = {}
         for s in strengths:
+            if s <= 0.0:
+                continue
             Z_merged = merge_protected_spectrum(Z_obs, Z_gen_scaled, mask, strength=s)
             x_rec = self._istft(Z_merged)
             if len(x_rec) < n_block:
                 x_rec = np.pad(x_rec, (0, n_block - len(x_rec)))
             else:
                 x_rec = x_rec[:n_block]
-            # Deliberately not clipped to ±1: hard-clipping here would guarantee
-            # a peak below Guard R's 1.05 rejection threshold, hiding an
-            # overshoot from the guard and distorting the protected band with it.
             out[s] = x_rec.astype(np.float32)
         return out
 
-    def restore(
+    def render(
         self,
         audio_48k: np.ndarray,
         sample_rate: int,  # noqa: ARG002
         effective_cutoff_hz: float,
         speaker_id: str | None = None,
         speaker_embedding: np.ndarray | None = None,
-        f0_trajectory: np.ndarray | None = None,  # noqa: ARG002
-        vuv_mask: np.ndarray | None = None,  # noqa: ARG002
+        f0_trajectory: np.ndarray | None = None,
+        vuv_mask: np.ndarray | None = None,
         strengths: list[float] | None = None,
         seed: int = 42,
-    ) -> list[RestorationCandidate]:
-        """Generate restored candidate waveforms across candidate high-band strengths."""
+    ) -> RestorationRenderResult:
+        """Generate typed render result carrying telemetry and candidates."""
         if strengths is None:
             strengths = [1.0, 0.75, 0.5, 0.25, 0.0]
 
@@ -444,12 +576,21 @@ class HawaRestoreKD(Restorer):
         effective_cutoff_hz = float(np.clip(effective_cutoff_hz, 500.0, nyquist - 100.0))
 
         if audio_48k.size == 0:
-            return [
+            cands = [
                 RestorationCandidate(
                     strength=s, audio=audio_48k.copy(), cutoff_hz=effective_cutoff_hz
                 )
                 for s in strengths
             ]
+            return RestorationRenderResult(
+                success=False,
+                fallback_status="empty_input",
+                model_name="hawarestore-kd",
+                provider=self.device,
+                solver="midpoint",
+                candidates=cands,
+                error_message="Input audio is empty",
+            )
 
         is_multichannel = audio_48k.ndim == 2
         channels = audio_48k if is_multichannel else audio_48k[np.newaxis, :]
@@ -458,25 +599,66 @@ class HawaRestoreKD(Restorer):
 
         candidates: list[RestorationCandidate] = []
         restored_channels_by_strength: dict[float, list[np.ndarray]] = {s: [] for s in strengths}
+        active_strengths_failed: set[float] = set()
+        solver_errors: list[str] = []
 
         spk_idx_t: torch.Tensor | None = None
         if speaker_id is not None and speaker_id in self.speaker_ids:
             idx = self.speaker_ids.index(speaker_id)
             spk_idx_t = torch.tensor([idx], device=self.device, dtype=torch.long)
 
+        # Auto-load enrolled profile embedding when available.
+        if speaker_embedding is None and speaker_id is not None:
+            try:
+                from hawavoclean.paths import profiles_root
+                from hawavoclean.restoration.profiles import load_speaker_profile
+
+                prof = load_speaker_profile(speaker_id, profiles_root=profiles_root())
+                if prof.embedding_vector is not None:
+                    speaker_embedding = prof.embedding_vector
+            except Exception:
+                pass  # Profile not found or not enrolled — proceed without prototype.
+
         proto_t: torch.Tensor | None = None
         if speaker_embedding is not None and len(speaker_embedding) == 192:
-            proto_t = torch.from_numpy(speaker_embedding).float().unsqueeze(0).to(self.device)
+            proto_t = (
+                torch.from_numpy(speaker_embedding.astype(np.float32)).unsqueeze(0).to(self.device)
+            )
+
+        # F0 and Voicing conditioning extraction
+        f0_t: torch.Tensor | None = None
+        vuv_t: torch.Tensor | None = None
+        if f0_trajectory is not None and len(f0_trajectory) > 0:
+            valid_f0 = f0_trajectory[f0_trajectory > 0.0]
+            median_f0 = float(np.median(valid_f0)) if len(valid_f0) > 0 else 0.0
+            voiced_frac = (
+                float(np.mean(vuv_mask > 0.5))
+                if vuv_mask is not None and len(vuv_mask) > 0
+                else (1.0 if median_f0 > 0.0 else 0.0)
+            )
+            f0_t = torch.tensor([median_f0], device=self.device, dtype=torch.float32)
+            vuv_t = torch.tensor([[voiced_frac]], device=self.device, dtype=torch.float32)
+        elif getattr(self.net, "use_f0_cond", False):
+            f0_traj = self.f0_extractor.extract(audio_48k)
+            f0_t = torch.tensor(
+                [f0_traj.statistics.median_hz], device=self.device, dtype=torch.float32
+            )
+            vuv_t = torch.tensor(
+                [[f0_traj.statistics.voiced_fraction]], device=self.device, dtype=torch.float32
+            )
 
         active_strengths = [s for s in strengths if s > 0.0]
 
+        short_input = False
         for ch_idx in range(n_channels):
             ch_audio = channels[ch_idx]
-            # Too short to analyse, or nothing to generate: pass the channel
-            # through rather than running the network for a discarded result.
+            # Too short to analyse, or nothing to generate: fail closed to 0.0 Natural.
+            # Never emit Natural as active-strength (s > 0.0) candidates! (R2.2)
             if len(ch_audio) < self.win_length or not active_strengths:
-                for s in strengths:
-                    restored_channels_by_strength[s].append(ch_audio)
+                short_input = len(ch_audio) < self.win_length
+                restored_channels_by_strength[0.0].append(ch_audio)
+                for s in active_strengths:
+                    active_strengths_failed.add(s)
                 continue
 
             blocks = self._block_positions(n_samples)
@@ -490,19 +672,29 @@ class HawaRestoreKD(Restorer):
                 gen = torch.Generator(device=self.device)
                 gen.manual_seed((seed + 10007 * ch_idx + 65537 * block_idx) % (2**63 - 1))
 
+                block = ch_audio[p0:p1]
                 block_out = self._restore_block(
-                    ch_audio[p0:p1],
+                    block,
                     effective_cutoff_hz=effective_cutoff_hz,
                     strengths=active_strengths,
                     spk_idx_t=spk_idx_t,
                     proto_t=proto_t,
                     generator=gen,
+                    f0_t=f0_t,
+                    vuv_t=vuv_t,
+                    solver_errors=solver_errors,
                 )
+
+                for s in active_strengths:
+                    if s not in block_out:
+                        active_strengths_failed.add(s)
 
                 # Blocks overlap; cross-fade the seam so no click is introduced
                 # at a boundary the listener never chose.
                 xfade = max(0, min(covered - p0, p1 - p0)) if block_idx > 0 else 0
                 for s, y in block_out.items():
+                    if s not in chan_out:
+                        continue
                     dst = chan_out[s]
                     if xfade > 0:
                         ramp = np.linspace(0.0, 1.0, xfade, endpoint=False, dtype=np.float32)
@@ -516,11 +708,15 @@ class HawaRestoreKD(Restorer):
             for s in strengths:
                 if s == 0.0:
                     restored_channels_by_strength[s].append(ch_audio)
-                else:
+                elif s not in active_strengths_failed:
                     restored_channels_by_strength[s].append(chan_out[s])
 
         for s in strengths:
-            arr_list = restored_channels_by_strength[s]
+            if s > 0.0 and s in active_strengths_failed:
+                continue
+            arr_list = restored_channels_by_strength.get(s, [])
+            if not arr_list or len(arr_list) != n_channels:
+                continue
             merged_audio = np.stack(arr_list, axis=0) if is_multichannel else arr_list[0]
             final_audio = np.asarray(merged_audio, dtype=np.float32)
             if np.any(~np.isfinite(final_audio)):
@@ -533,4 +729,67 @@ class HawaRestoreKD(Restorer):
                 )
             )
 
-        return candidates
+        if not any(c.strength == 0.0 for c in candidates):
+            candidates.append(
+                RestorationCandidate(
+                    strength=0.0,
+                    audio=audio_48k.copy(),
+                    cutoff_hz=effective_cutoff_hz,
+                )
+            )
+
+        has_active = any(c.strength > 0.0 for c in candidates)
+        if has_active:
+            success = True
+            fallback_status = "none"
+            error_msg: str | None = None
+        else:
+            success = False
+            if solver_errors:
+                fallback_status = "solver_failure"
+                error_msg = "; ".join(solver_errors)
+            elif short_input:
+                fallback_status = "input_too_short"
+                error_msg = f"Audio length ({n_samples} samples) is less than analysis window ({self.win_length} samples)"
+            elif not active_strengths:
+                fallback_status = "no_active_strengths"
+                error_msg = None
+            else:
+                fallback_status = "generation_failed"
+                error_msg = "All active candidate strengths failed"
+
+        return RestorationRenderResult(
+            success=success,
+            fallback_status=fallback_status,
+            model_name="hawarestore-kd",
+            provider=self.device,
+            solver="midpoint",
+            candidates=candidates,
+            error_message=error_msg,
+        )
+
+    def restore(
+        self,
+        audio_48k: np.ndarray,
+        sample_rate: int,
+        effective_cutoff_hz: float,
+        speaker_id: str | None = None,
+        speaker_embedding: np.ndarray | None = None,
+        f0_trajectory: np.ndarray | None = None,
+        vuv_mask: np.ndarray | None = None,
+        strengths: list[float] | None = None,
+        seed: int = 42,
+    ) -> list[RestorationCandidate]:
+        """Generate restored candidate waveforms across candidate high-band strengths."""
+        render_res = self.render(
+            audio_48k=audio_48k,
+            sample_rate=sample_rate,
+            effective_cutoff_hz=effective_cutoff_hz,
+            speaker_id=speaker_id,
+            speaker_embedding=speaker_embedding,
+            f0_trajectory=f0_trajectory,
+            vuv_mask=vuv_mask,
+            strengths=strengths,
+            seed=seed,
+        )
+        return render_res.candidates

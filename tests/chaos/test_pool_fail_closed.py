@@ -16,6 +16,7 @@ pipeline, with a real SIGKILL inside a real worker process:
 import dataclasses
 import os
 import signal
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,16 @@ import soundfile as sf
 from hawavoclean.enhancement.protocol import EnhancementResult, EnhancerMetadata
 from hawavoclean.enhancement.worker import POOL_SIZE_ENV
 from hawavoclean.pipeline import run_pipeline
+
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+pytestmark = [
+    pytest.mark.chaos,
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process hierarchy tests (Windows covered by test_process_supervisor.py)",
+    ),
+]
 
 SR = 48000
 KILL_MARKER_ENV = "HAWAVOCLEAN_TEST_POOL_KILL_MARKER"
@@ -60,7 +71,7 @@ class _KillsOnceThenIdentity:
             pass
         else:
             os.close(fd)
-            os.kill(os.getpid(), signal.SIGKILL)
+            os.kill(os.getpid(), SIGKILL)
         out = np.array(waveform, dtype=np.float32, copy=True)
         return EnhancementResult(out, sample_rate, 1.0, len(waveform), len(out))
 

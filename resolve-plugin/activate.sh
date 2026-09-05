@@ -58,7 +58,7 @@ remove_transaction_tree() {
 verify_tree() {
   local root="$1" listed actual target rel actual_files listed_files
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  for rel in PLUGIN_ID VERSION SHA256SUMS SYMLINKS manifest.xml package.json main.js preload.js engine.json index.html engine/hawavoclean-engine; do
+  for rel in PLUGIN_ID VERSION SHA256SUMS SYMLINKS manifest.xml package.json main.js preload.js session-auth.js engine.json index.html engine/hawavoclean-engine; do
     [ -e "$root/$rel" ] || { printf 'missing staged file: %s\n' "$rel" >&2; return 1; }
   done
   [ -x "$root/engine/hawavoclean-engine" ] || { printf 'engine launcher is not executable\n' >&2; return 1; }

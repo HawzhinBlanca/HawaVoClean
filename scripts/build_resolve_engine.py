@@ -47,6 +47,9 @@ set -eu
 engine_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 export PYTHONNOUSERSITE=1
 export PYTHONDONTWRITEBYTECODE=1
+if [ -d "$engine_dir/bin" ]; then
+    export PATH="$engine_dir/bin:$PATH"
+fi
 exec "$engine_dir/python/bin/python3.11" -I -B "$engine_dir/launcher.py" "$@"
 """
 
@@ -267,6 +270,16 @@ def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
         # Carry the product's generated third-party inventory inside the
         # self-contained runtime. It is covered by ENGINE-SHA256SUMS below.
         shutil.copy2(ROOT / "THIRD_PARTY_LICENSES.md", stage / "THIRD_PARTY_LICENSES.md")
+
+        # Bundle pinned FFmpeg and ffprobe binaries into engine bin/
+        bin_dir = stage / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for tool_name in ("ffmpeg", "ffprobe"):
+            tool_path = shutil.which(tool_name)
+            if tool_path:
+                dest_tool = bin_dir / tool_name
+                shutil.copy2(tool_path, dest_tool)
+                dest_tool.chmod(0o755)
 
         _write_launchers(stage)
         launcher = stage / "hawavoclean-engine"

@@ -30,23 +30,30 @@ def _get(url: str, token: str | None = "t") -> tuple[int, Any]:
         with urllib.request.urlopen(req, timeout=5) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode())
+        with e:
+            return e.code, json.loads(e.read().decode())
 
 
 def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
     proc = subprocess.Popen(
-        [sys.executable, "-m", "hawavoclean.cli", "serve", "--port", "0", "--token", "t"],
+        [sys.executable, "-m", "hawavoclean.cli", "serve", "--port", "0", "--token-stdin"],
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         cwd=REPO,
     )
-    assert proc.stdout is not None and proc.stderr is not None
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    proc.stdin.write("t\n")
+    proc.stdin.close()
     try:
         line = proc.stdout.readline()
         ready = json.loads(line)
         assert ready["event"] == "ready"
-        assert ready["pid"] == proc.pid
+        if sys.platform != "win32":
+            assert ready["pid"] == proc.pid
+        else:
+            assert isinstance(ready["pid"], int) and ready["pid"] > 0
         assert ready["version"] == __version__
         port = ready["port"]
         assert isinstance(port, int) and 1024 <= port <= 65535
@@ -55,7 +62,8 @@ def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
         status, body = _get(f"{base}/api/health", token=None)
         assert status == 401 and body["error"] == "unauthorized"
         status, body = _get(f"{base}/api/health")
-        assert status == 200 and body["ok"] is True and body["engine_pid"] == proc.pid
+        expected_pid = proc.pid if sys.platform != "win32" else ready["pid"]
+        assert status == 200 and body["ok"] is True and body["engine_pid"] == expected_pid
         # Loopback only: the port is not reachable on a non-loopback interface
         # (socket bound to 127.0.0.1 specifically).
         hostname_ip = None
@@ -79,6 +87,10 @@ def test_serve_prints_one_ready_line_then_exits_on_shutdown() -> None:
         err = proc.stderr.read()
         assert "listening on" in err
     finally:
+        if proc.stdout is not None:
+            proc.stdout.close()
+        if proc.stderr is not None:
+            proc.stderr.close()
         if proc.poll() is None:
             proc.kill()
             proc.wait()
@@ -145,6 +157,37 @@ def test_cmd_serve_requires_token_and_checks_ui_dir(
     assert exc.value.code == int(ExitCode.INVALID_USER_INPUT)  # no index.html
 
     monkeypatch.setattr(sys, "argv", ["hawavoclean", "serve", "--port", "0", "--token", ""])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == int(ExitCode.INVALID_USER_INPUT)
+
+
+def test_cmd_serve_reads_bounded_token_from_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hawavoclean.server.app as app_mod
+
+    observed: dict[str, object] = {}
+
+    def fake_run_server(host: str, port: int, token: str, ui_dir: Path | None) -> int:
+        observed.update(host=host, port=port, token=token, ui_dir=ui_dir)
+        return 0
+
+    monkeypatch.setattr(app_mod, "run_server", fake_run_server)
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO("pipe-secret\n"))
+    monkeypatch.setattr(sys, "argv", ["hawavoclean", "serve", "--token-stdin"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+    assert observed == {
+        "host": "127.0.0.1",
+        "port": 0,
+        "token": "pipe-secret",
+        "ui_dir": None,
+    }
+
+    monkeypatch.setattr(sys, "stdin", __import__("io").StringIO("x" * 258))
+    monkeypatch.setattr(sys, "argv", ["hawavoclean", "serve", "--token-stdin"])
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == int(ExitCode.INVALID_USER_INPUT)

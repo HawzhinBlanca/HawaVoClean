@@ -5,11 +5,12 @@
 #   resolve-plugin/dev/selftest.sh ok crash   # runs a subset
 #
 # Scenarios (FAKE_ENGINE_MODE):
-#   ok        engine starts; the renderer gets the endpoint through window.hawa, calls
-#             /api/health with the token, gets 401 without it; engine is gone after quit.
+#   ok        engine starts; main mints a session; renderer gets a credential-free endpoint;
+#             exact-origin Authorization injection reaches /api/health; engine is gone after quit.
 #   crash     engine dies before ready -> error page (fast fail, no 60 s wait).
 #   hang      engine never reports ready -> ready timeout (shortened to 2 s) -> error page.
 #   stubborn  engine ignores /api/shutdown and SIGTERM -> shell must SIGKILL it on quit.
+#   hard-crash SIGKILL the Electron host; the engine's parent watchdog must end it.
 #
 # Requires: the exact pnpm install performed by resolve-plugin/install.sh (Electron 43.4.1).
 # Creates a temporary engine.json + index.html next to main.js and removes them afterwards
@@ -21,13 +22,15 @@ PLUGIN_DIR="$(cd "$HERE/../com.hawavoclean.resolve" && pwd)"
 FAKE_ENGINE="$HERE/fake-engine.mjs"
 NODE_BIN="$(command -v node)"
 ELECTRON_BIN="$PLUGIN_DIR/node_modules/.bin/electron"
+ELECTRON_APP_BIN="$(cd "$PLUGIN_DIR" && "$NODE_BIN" -e 'process.stdout.write(require("electron"))')"
 SCENARIOS=("$@")
-[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(ok crash hang stubborn)
+[ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=(ok crash hang stubborn hard-crash)
 
 if [ ! -x "$ELECTRON_BIN" ]; then
   echo "electron not installed; run the locked resolve-plugin/install.sh assembler first" >&2
   exit 1
 fi
+[ -x "$ELECTRON_APP_BIN" ] || { echo "Electron application binary is unavailable" >&2; exit 1; }
 
 ENGINE_JSON="$PLUGIN_DIR/engine.json"
 INDEX_HTML="$PLUGIN_DIR/index.html"
@@ -91,7 +94,7 @@ EOF
 # run_electron <timeout_s> <logfile> [ENV=VAL ...]
 run_electron() {
   local timeout_s="$1" logfile="$2"; shift 2
-  ( cd "$PLUGIN_DIR" && env "$@" HAWA_SELFTEST=1 ELECTRON_ENABLE_LOGGING=0 "$ELECTRON_BIN" . >"$logfile" 2>&1 ) &
+  ( cd "$PLUGIN_DIR" && exec env "$@" HAWA_SELFTEST=1 ELECTRON_ENABLE_LOGGING=0 "$ELECTRON_BIN" . >"$logfile" 2>&1 ) &
   local pid=$! waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$timeout_s" ]; then
@@ -103,6 +106,49 @@ run_electron() {
   done
   wait "$pid" 2>/dev/null || true
   return 0
+}
+
+# run_hard_crash <logfile>
+run_hard_crash() {
+  local logfile="$1" pid waited=0 line epid
+  ( cd "$PLUGIN_DIR" && exec env FAKE_ENGINE_MODE=ok HAWA_SELFTEST=1 HAWA_SELFTEST_HARD_CRASH=1 ELECTRON_ENABLE_LOGGING=0 "$ELECTRON_APP_BIN" . >"$logfile" 2>&1 ) &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    line="$(grep '^HAWA_SELFTEST_RESULT ' "$logfile" | head -1 | sed 's/^HAWA_SELFTEST_RESULT //' || true)"
+    if [ -n "$line" ]; then
+      epid="$(json_field "$line" 'o.enginePid')"
+      if [ -z "$epid" ]; then
+        failmsg "hard-crash result omitted engine pid"
+        kill -9 "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+        return
+      fi
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      waited=0
+      while kill -0 "$epid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+      done
+      if kill -0 "$epid" 2>/dev/null; then
+        failmsg "engine $epid survived hard-crashed Electron host"
+        kill -9 "$epid" 2>/dev/null || true
+      else
+        pass "engine $epid stopped after hard-crashed Electron host"
+      fi
+      return
+    fi
+    if [ "$waited" -ge 600 ]; then
+      failmsg "hard-crash scenario emitted no result within 60 seconds"
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null || true
+  failmsg "Electron exited before the hard-crash harness could kill it"
 }
 
 json_field() { # json_field <json> <js-expr-on-o>
@@ -132,11 +178,11 @@ for sc in "${SCENARIOS[@]}"; do
         [ "$(json_field "$line" 'o.hasResolve')" = "false" ] && pass "no resolve bridge in electron host" || failmsg "resolve bridge unexpectedly present"
         [ "$(json_field "$line" 'o.keys')" = '["engine","files","host"]' ] && pass "bridge keys = engine,files,host" || failmsg "bridge keys = $(json_field "$line" 'o.keys')"
         [ "$(json_field "$line" 'o.pathForFileNull')" = "true" ] && pass "pathForFile(in-memory File) -> null" || failmsg "pathForFile did not return null"
-        base="$(json_field "$line" 'o.endpoint.baseUrl')"; tok="$(json_field "$line" 'o.endpoint.token')"
+        base="$(json_field "$line" 'o.endpoint.baseUrl')"
         [[ "$base" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] && pass "endpoint baseUrl $base" || failmsg "bad baseUrl: $base"
-        [[ "$tok" =~ ^[0-9a-f]{32}$ ]] && pass "token is 32 hex" || failmsg "bad token: $tok"
-        [ "$(json_field "$line" 'o.health.status')" = "200" ] && [ "$(json_field "$line" 'o.health.body.ok')" = "true" ] && pass "renderer fetched /api/health with token (200 ok)" || failmsg "health: $(json_field "$line" 'o.health')"
-        [ "$(json_field "$line" 'o.unauthStatus')" = "401" ] && pass "no token -> 401" || failmsg "unauth status $(json_field "$line" 'o.unauthStatus')"
+        [ "$(json_field "$line" 'Object.keys(o.endpoint).join(",")')" = "baseUrl" ] && [ "$(json_field "$line" 'o.endpointHasCredential')" = "false" ] && pass "renderer endpoint contains no credential" || failmsg "endpoint exposed credential material: $(json_field "$line" 'o.endpoint')"
+        [ "$(json_field "$line" 'o.health.status')" = "200" ] && [ "$(json_field "$line" 'o.health.body.ok')" = "true" ] && pass "main-injected session authenticated /api/health" || failmsg "health: $(json_field "$line" 'o.health')"
+        [ "$(json_field "$line" 'o.sessionBootstrapBlocked')" = "true" ] && pass "renderer cannot mint sessions" || failmsg "renderer reached /api/session"
         [ "$(json_field "$line" 'o.runtime.electron')" = "43.4.1" ] && pass "runtime evidence is exact Electron 43.4.1" || failmsg "runtime = $(json_field "$line" 'o.runtime')"
         [ "$(json_field "$line" 'o.page.inlineScriptBlocked')" = "true" ] && pass "CSP blocked inline script" || failmsg "inline CSP probe failed"
         [ "$(json_field "$line" 'o.page.remoteFetchBlocked')" = "true" ] && pass "CSP blocked remote fetch" || failmsg "remote fetch was not blocked"
@@ -182,6 +228,9 @@ for sc in "${SCENARIOS[@]}"; do
         grep -q 'ignored SIGTERM; sending SIGKILL' "$log" && pass "shell escalated to SIGKILL" || failmsg "no SIGKILL escalation logged"
         if [ -n "$epid" ] && ! kill -0 "$epid" 2>/dev/null; then pass "stubborn engine pid $epid is gone after quit"; else failmsg "stubborn engine $epid survived"; pkill -9 -f "fake-engine.mjs serve" || true; fi
       fi
+      ;;
+    hard-crash)
+      run_hard_crash "$log"
       ;;
     *) failmsg "unknown scenario $sc" ;;
   esac

@@ -70,7 +70,9 @@ jobs:
           git diff --exit-code
 
       - name: Run adversarial and mutation gates
+        shell: bash
         run: |
+          set -Eeuo pipefail
           mkdir -p build/ci-evidence/source-contract
           uv run --frozen pytest -q -m fuzz tests/fuzz \
             --junitxml=build/ci-evidence/source-contract/fuzz-junit.xml
@@ -83,7 +85,7 @@ jobs:
         with:
           name: source-contract-${{ github.sha }}
           path: build/ci-evidence/source-contract/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
 
   core-support:
@@ -93,9 +95,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-15, windows-2025]
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
+      - name: Disable Windows git autocrlf
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
       - name: Check out the exact source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -124,10 +130,23 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ffmpeg libsndfile
 
+      - name: Install Windows audio libraries
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --no-progress
+
       - name: Synchronize the frozen dependency graph
-        run: uv sync --frozen --all-extras --python "${{ matrix.python }}"
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ] && [ "${{ matrix.python }}" = "3.14" ]; then
+            uv venv --python "${{ matrix.python }}"
+            uv pip install maturin setuptools numpy --python "${{ matrix.python }}"
+            uv sync --frozen --all-extras --python "${{ matrix.python }}" --no-build-isolation-package deepfilterlib
+          else
+            uv sync --frozen --all-extras --python "${{ matrix.python }}"
+          fi
 
       - name: Run the complete default suite at the release coverage floor
+        shell: bash
         run: |
           EVIDENCE_DIR="build/ci-evidence/${{ matrix.os }}-py${{ matrix.python }}"
           mkdir -p "$EVIDENCE_DIR"
@@ -140,6 +159,7 @@ jobs:
             --junitxml="$EVIDENCE_DIR/default-junit.xml"
 
       - name: Build and smoke the wheel outside the repository environment
+        shell: bash
         run: |
           EVIDENCE_DIR="build/ci-evidence/${{ matrix.os }}-py${{ matrix.python }}"
           DIST_DIR="$EVIDENCE_DIR/dist"
@@ -148,18 +168,25 @@ jobs:
           uv export --quiet --frozen --no-dev --no-emit-project \
             --output-file "$EVIDENCE_DIR/smoke-requirements.txt"
           uv venv --python "${{ matrix.python }}" "$SMOKE_ROOT/venv"
-          uv pip sync --python "$SMOKE_ROOT/venv/bin/python" --require-hashes \
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            BIN_DIR="$SMOKE_ROOT/venv/Scripts"
+            EXE=".exe"
+          else
+            BIN_DIR="$SMOKE_ROOT/venv/bin"
+            EXE=""
+          fi
+          uv pip sync --python "$BIN_DIR/python$EXE" --require-hashes \
             "$EVIDENCE_DIR/smoke-requirements.txt"
           WHEEL="$(find "$DIST_DIR" -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$WHEEL"
-          uv pip install --python "$SMOKE_ROOT/venv/bin/python" --no-deps "$WHEEL"
-          "$SMOKE_ROOT/venv/bin/hawavoclean" doctor
+          uv pip install --python "$BIN_DIR/python$EXE" --no-deps "$WHEEL"
+          "$BIN_DIR/hawavoclean$EXE" doctor
           mkdir -p "$EVIDENCE_DIR/smoke"
-          "$SMOKE_ROOT/venv/bin/hawavoclean" process \
+          "$BIN_DIR/hawavoclean$EXE" process \
             tests/fixtures/sample_sorani_podcast.wav \
             --output "$EVIDENCE_DIR/smoke/output.wav" \
             --profile production
-          "$SMOKE_ROOT/venv/bin/hawavoclean" verify \
+          "$BIN_DIR/hawavoclean$EXE" verify \
             "$EVIDENCE_DIR/smoke/output.wav" \
             --report "$EVIDENCE_DIR/smoke/output.hawavoclean.json"
 
@@ -169,12 +196,12 @@ jobs:
         with:
           name: core-${{ matrix.os }}-py${{ matrix.python }}-${{ github.sha }}
           path: build/ci-evidence/${{ matrix.os }}-py${{ matrix.python }}/
-          if-no-files-found: warn
+          if-no-files-found: error
           include-hidden-files: true
           retention-days: 30
 
   web-resolve:
-    name: web and Resolve shell
+    name: web, desktop, and Resolve shell
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -191,29 +218,40 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Bootstrap the lockfile-pinned package manager
-        run: npm --prefix resolve-plugin/toolchain ci --ignore-scripts --audit=false --fund=false
+        run: |
+          npm --prefix resolve-plugin/toolchain ci --ignore-scripts --audit=false --fund=false
+          echo "$PWD/resolve-plugin/toolchain/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Install frozen JavaScript dependency graphs
         run: |
           PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
           node "$PNPM" --dir ui install --frozen-lockfile
+          node "$PNPM" --dir desktop install --frozen-lockfile
           node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve install --frozen-lockfile
 
       - name: Test and build the web surface
+        shell: bash
         run: |
+          set -Eeuo pipefail
           PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
           mkdir -p build/ci-evidence/web-resolve
           node "$PNPM" --dir ui typecheck
           node "$PNPM" --dir ui test:run \
             | tee build/ci-evidence/web-resolve/ui-tests.log
           node "$PNPM" --dir ui build
+          node "$PNPM" --dir desktop typecheck
+          node "$PNPM" --dir desktop test \
+            | tee build/ci-evidence/web-resolve/desktop-tests.log
+          node "$PNPM" --dir desktop verify:config
 
       - name: Audit all JavaScript dependency graphs
         run: |
           PNPM="$PWD/resolve-plugin/toolchain/node_modules/pnpm/bin/pnpm.mjs"
-          node "$PNPM" --dir ui audit --audit-level low --json \
+          node "$PNPM" --dir ui audit --audit-level low --ignore-registry-errors --json \
             > build/ci-evidence/web-resolve/ui-audit.json
-          node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve audit --audit-level low --json \
+          node "$PNPM" --dir desktop audit --audit-level low --ignore-registry-errors --json \
+            > build/ci-evidence/web-resolve/desktop-audit.json
+          node "$PNPM" --dir resolve-plugin/com.hawavoclean.resolve audit --audit-level low --ignore-registry-errors --json \
             > build/ci-evidence/web-resolve/plugin-audit.json
           npm --prefix resolve-plugin/toolchain audit --audit-level=low --json \
             > build/ci-evidence/web-resolve/toolchain-audit.json
@@ -224,6 +262,29 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
 
+      - name: Synchronize Python dependencies
+        run: |
+          uv python install ${{ env.PYTHON_RELEASE_VERSION }}
+          uv sync --frozen --all-extras
+
+      - name: Package and validate the unsigned desktop shell proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PROOF_ROOT="$RUNNER_TEMP/hawavoclean-desktop-shell-proof"
+          EVIDENCE_DIR=build/ci-evidence/web-resolve
+          node desktop/scripts/package-proof.cjs \
+            --shell-only \
+            --source-sha "$GITHUB_SHA" \
+            --output "$PROOF_ROOT"
+          uv run --frozen python scripts/validate_desktop_app.py \
+            "$PROOF_ROOT/mac-arm64/HawaVoClean.app" \
+            --source-sha "$GITHUB_SHA" \
+            --shell-only \
+            --output-json "$EVIDENCE_DIR/desktop-shell-package-proof.json"
+          cp "$PROOF_ROOT/mac-arm64/HawaVoClean.app/Contents/Resources/HAWAVOCLEAN-PACKAGE-PROVENANCE.json" \
+            "$EVIDENCE_DIR/desktop-shell-package-provenance.json"
+
       # The Resolve engine is a shipped surface that, until this step existed,
       # only the self-hosted release gate ever assembled. A bundle that could
       # not start — or could start and not run — was therefore invisible to
@@ -233,7 +294,9 @@ jobs:
       # numeric stack and every packaged profile and core lock, and
       # process/verify proves the runtime end to end against its own digests.
       - name: Build and smoke the shipped Resolve engine
+        shell: bash
         run: |
+          set -Eeuo pipefail
           EVIDENCE_DIR=build/ci-evidence/web-resolve
           SMOKE_DIR="$RUNNER_TEMP/hawavoclean-engine-smoke"
           mkdir -p "$EVIDENCE_DIR" "$SMOKE_DIR"
@@ -264,7 +327,8 @@ jobs:
           path: |
             build/ci-evidence/web-resolve/
             ui/dist/
-          if-no-files-found: warn
+            desktop/dist/
+          if-no-files-found: error
           retention-days: 30
 
   exact-release-gate:
@@ -309,7 +373,7 @@ jobs:
         with:
           name: exact-release-gate-${{ github.sha }}-${{ github.run_attempt }}
           path: build/release-gate/
-          if-no-files-found: warn
+          if-no-files-found: error
           include-hidden-files: true
           compression-level: 0
           retention-days: 90
@@ -327,7 +391,9 @@ jobs:
           CORE_SUPPORT: ${{ needs.core-support.result }}
           WEB_RESOLVE: ${{ needs.web-resolve.result }}
           EXACT_RELEASE_GATE: ${{ needs.exact-release-gate.result }}
+        shell: bash
         run: |
+          set -Eeuo pipefail
           test "$SOURCE_CONTRACT" = success
           test "$CORE_SUPPORT" = success
           test "$WEB_RESOLVE" = success

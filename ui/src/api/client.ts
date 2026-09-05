@@ -1,16 +1,20 @@
 import type {
   ApiError,
   AudioAnalysis,
+  BatchSummary,
+  CapabilitiesResponseV1,
   CreateJobRequest,
   CreateJobResponse,
+  CreateV1JobResponse,
   HealthResponse,
   JobStatus,
   PeaksWindow,
+  ProcessingRequestV1,
+  UploadResponse,
 } from './types';
 
 export interface Endpoint {
   baseUrl: string;
-  token: string;
 }
 
 /**
@@ -78,11 +82,9 @@ async function parseBody<T>(res: Response): Promise<T> {
 
 export class EngineClient {
   readonly baseUrl: string;
-  readonly token: string;
 
   constructor(endpoint: Endpoint) {
     this.baseUrl = endpoint.baseUrl.replace(/\/+$/, '');
-    this.token = endpoint.token;
   }
 
   /**
@@ -116,20 +118,19 @@ export class EngineClient {
     }
   }
 
-  private headers(extra?: Record<string, string>): HeadersInit {
-    return { 'X-Hawa-Token': this.token, ...(extra ?? {}) };
-  }
-
   private async json<T>(path: string, init: RequestInit = {}, signal?: AbortSignal): Promise<T> {
-    const res = await this.fetchOrOffline(`${this.baseUrl}${path}`, {
+    const request: RequestInit = {
       ...init,
-      headers: this.headers(
-        init.body !== undefined && !(init.body instanceof FormData)
-          ? { 'Content-Type': 'application/json' }
-          : undefined,
-      ),
+      // Same-origin web mode authenticates with its HttpOnly session cookie.
+      // The custom-scheme desktop shell injects a short-lived Authorization
+      // header in main; renderer code never receives either credential.
+      credentials: 'same-origin',
       signal: signal ?? null,
-    });
+    };
+    if (init.body !== undefined && !(init.body instanceof FormData)) {
+      request.headers = { 'Content-Type': 'application/json' };
+    }
+    const res = await this.fetchOrOffline(`${this.baseUrl}${path}`, request);
     if (!res.ok) throw await parseError(res);
     return await parseBody<T>(res);
   }
@@ -164,6 +165,41 @@ export class EngineClient {
     );
   }
 
+  async capabilities(signal?: AbortSignal): Promise<CapabilitiesResponseV1> {
+    const res = await this.json<any>('/api/v1/capabilities', { method: 'GET' }, signal);
+    const caps = (res.capabilities ?? []).map((c: any) => ({
+      capability_id: c.capability_id ?? c.capabilityId,
+      available: Boolean(c.available),
+      maturity: c.maturity,
+      reason: c.reason ?? null,
+      manifest_sha256: c.manifest_sha256 ?? c.manifestSha256 ?? null,
+      providers: c.providers ?? [],
+    }));
+    return {
+      schema_version: res.schema_version ?? res.schemaVersion ?? 1,
+      capabilities: caps,
+    };
+  }
+
+  async createV1Jobs(req: ProcessingRequestV1, signal?: AbortSignal): Promise<CreateV1JobResponse> {
+    const res = await this.json<any>(
+      '/api/v1/jobs',
+      { method: 'POST', body: JSON.stringify(req) },
+      signal,
+    );
+    const jobs = (res.jobs ?? []).map((j: any) => ({
+      jobId: j.jobId ?? j.job_id,
+      sourceId: j.sourceId ?? j.source_id,
+      outputPath: j.outputPath ?? j.output_path,
+      reportPath: j.reportPath ?? j.report_path,
+    }));
+    return {
+      schemaVersion: res.schemaVersion ?? res.schema_version ?? 1,
+      jobs,
+    };
+  }
+
+  /** @deprecated Use createV1Jobs (/api/v1/jobs) with source IDs. Scheduled for removal 2026-10-01 (v1.0.0). */
   createJob(req: CreateJobRequest, signal?: AbortSignal): Promise<CreateJobResponse> {
     return this.json<CreateJobResponse>(
       '/api/jobs',
@@ -172,20 +208,32 @@ export class EngineClient {
     );
   }
 
+  /** @deprecated Use getV1Job (/api/v1/jobs/{jobId}). Scheduled for removal 2026-10-01 (v1.0.0). */
   getJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
     return this.json<JobStatus>(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, signal);
   }
 
+  getV1Job(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+    return this.json<JobStatus>(`/api/v1/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, signal);
+  }
+
+  /** @deprecated Use cancelV1Job (/api/v1/jobs/{jobId}/cancel). Scheduled for removal 2026-10-01 (v1.0.0). */
   cancelJob(jobId: string): Promise<{ ok: boolean }> {
     return this.json<{ ok: boolean }>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
       method: 'POST',
     });
   }
 
-  async upload(file: File, signal?: AbortSignal): Promise<{ path: string }> {
+  cancelV1Job(jobId: string): Promise<{ ok: boolean }> {
+    return this.json<{ ok: boolean }>(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  async upload(file: File, signal?: AbortSignal): Promise<UploadResponse> {
     const form = new FormData();
     form.append('file', file, file.name);
-    return this.json<{ path: string }>('/api/upload', { method: 'POST', body: form }, signal);
+    return this.json<UploadResponse>('/api/upload', { method: 'POST', body: form }, signal);
   }
 
   /**
@@ -204,11 +252,10 @@ export class EngineClient {
       onProgress?: (loaded: number, total: number) => void;
       onCancelHandle?: (cancel: () => void) => void;
     } = {},
-  ): Promise<{ path: string }> {
-    return new Promise<{ path: string }>((resolve, reject) => {
+  ): Promise<UploadResponse> {
+    return new Promise<UploadResponse>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${this.baseUrl}/api/upload`, true);
-      xhr.setRequestHeader('X-Hawa-Token', this.token);
       xhr.responseType = 'text';
       let cancelled = false;
       opts.onCancelHandle?.(() => {
@@ -235,7 +282,8 @@ export class EngineClient {
           // 100%, but the engine still has to write them out; hold the bar at
           // full until the response lands so the two never disagree.
           opts.onProgress?.(file.size, file.size);
-          resolve({ path: body.path });
+          const sourceId = typeof body.source_id === 'string' && body.source_id ? body.source_id : undefined;
+          resolve({ path: body.path, ...(sourceId ? { source_id: sourceId } : {}) });
           return;
         }
         const code = typeof body.error === 'string' ? body.error : `http_${xhr.status}`;
@@ -276,6 +324,7 @@ export class EngineClient {
     const res = await this.fetchOrOffline(this.fileUrl(path), {
       headers: { Range: 'bytes=0-0' },
       cache: 'no-store',
+      credentials: 'same-origin',
       signal: signal ?? null,
     });
     let delivered = false;
@@ -300,7 +349,10 @@ export class EngineClient {
 
   /** Plain text of a served file (the human-readable report sidecar). */
   async fetchText(path: string, signal?: AbortSignal): Promise<string> {
-    const res = await this.fetchOrOffline(this.fileUrl(path), { signal: signal ?? null });
+    const res = await this.fetchOrOffline(this.fileUrl(path), {
+      credentials: 'same-origin',
+      signal: signal ?? null,
+    });
     if (!res.ok) throw await parseError(res);
     return await res.text();
   }
@@ -313,17 +365,67 @@ export class EngineClient {
    * URL for any file the engine will serve under its path policy: the audio a
    * deck plays, and equally the JSON report and its .txt sidecar (`/api/audio`
    * types the response from the file's own extension, so it serves all three).
-   * The token must travel as a query parameter — an `<audio src>` and a
-   * download anchor cannot carry a header.
+   * Authentication is deliberately absent from this URL. Same-origin web
+   * mode uses an HttpOnly cookie; the hardened shell injects Authorization at
+   * its network boundary for `<audio>`, downloads and ordinary fetches.
    */
   fileUrl(path: string): string {
-    const q = new URLSearchParams({ path, token: this.token });
+    const q = new URLSearchParams({ path });
     return `${this.baseUrl}/api/audio?${q.toString()}`;
   }
 
-  /** URL for the job's `EventSource` stream. */
+  /** @deprecated Use v1EventsUrl (/api/v1/jobs/{jobId}/events). Scheduled for removal 2026-10-01 (v1.0.0). */
   eventsUrl(jobId: string): string {
-    const q = new URLSearchParams({ token: this.token });
-    return `${this.baseUrl}/api/jobs/${encodeURIComponent(jobId)}/events?${q.toString()}`;
+    return `${this.baseUrl}/api/jobs/${encodeURIComponent(jobId)}/events`;
+  }
+
+  /** Credential-free URL for the job's v1 `EventSource` stream. */
+  v1EventsUrl(jobId: string): string {
+    return `${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/events`;
+  }
+
+  listBatches(limit = 50): Promise<{ schemaVersion: number; batches: BatchSummary[] }> {
+    return this.json<{ schemaVersion: number; batches: BatchSummary[] }>(
+      `/api/v1/batches?limit=${encodeURIComponent(limit)}`,
+    );
+  }
+
+  getBatch(batchId: string): Promise<BatchSummary> {
+    return this.json<BatchSummary>(`/api/v1/batches/${encodeURIComponent(batchId)}`);
+  }
+
+  pauseBatch(batchId: string): Promise<{ ok: boolean; batchId: string; state: string }> {
+    return this.json<{ ok: boolean; batchId: string; state: string }>(
+      `/api/v1/batches/${encodeURIComponent(batchId)}/pause`,
+      { method: 'POST' },
+    );
+  }
+
+  resumeBatch(batchId: string): Promise<{ ok: boolean; batchId: string; state: string }> {
+    return this.json<{ ok: boolean; batchId: string; state: string }>(
+      `/api/v1/batches/${encodeURIComponent(batchId)}/resume`,
+      { method: 'POST' },
+    );
+  }
+
+  cancelBatch(
+    batchId: string,
+    wait = false,
+  ): Promise<{ ok: boolean; batchId: string; state: string }> {
+    return this.json<{ ok: boolean; batchId: string; state: string }>(
+      `/api/v1/batches/${encodeURIComponent(batchId)}/cancel?wait=${wait ? 'true' : 'false'}`,
+      { method: 'POST' },
+    );
+  }
+
+  retryJob(jobId: string): Promise<Record<string, unknown>> {
+    return this.json<Record<string, unknown>>(
+      `/api/v1/jobs/${encodeURIComponent(jobId)}/retry`,
+      { method: 'POST' },
+    );
+  }
+
+  v1BatchEventsUrl(batchId: string): string {
+    return `${this.baseUrl}/api/v1/batches/${encodeURIComponent(batchId)}/events`;
   }
 }

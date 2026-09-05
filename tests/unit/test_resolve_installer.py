@@ -6,9 +6,17 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.skipif(
+        sys.platform == "win32", reason="Resolve bash installer is macOS/Linux only"
+    ),
+]
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTIVATE = ROOT / "resolve-plugin" / "activate.sh"
@@ -26,6 +34,7 @@ def _write_stage(root: Path, version: str, payload: str) -> Path:
         "package.json": f'{{"name":"hawavoclean-resolve","version":"{version}"}}\n',
         "main.js": f"// {payload}\n",
         "preload.js": "// preload\n",
+        "session-auth.js": "// session auth\n",
         "engine.json": '{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{}}\n',
         "index.html": f"<html>{payload}</html>\n",
         "engine/hawavoclean-engine": "#!/bin/sh\nexit 0\n",

@@ -15,7 +15,7 @@
   },
   "ci": {
     "workflow": ".github/workflows/ci.yml",
-    "workflow_sha256": "351f9aaa9952b5a838fc66268cb8b24365f94dcd7077b729176fd82ab843df09",
+    "workflow_sha256": "67f5a786c0619103009c1749b1313f6af8ea3ff7ec90d406170aa1d3f9b8c524",
     "workflow_name": "release",
     "required_status_context": "required",
     "jobs": [
@@ -28,7 +28,8 @@
     "hosted_support_matrix": {
       "operating_systems": [
         "ubuntu-24.04",
-        "macos-15"
+        "macos-15",
+        "windows-2025"
       ],
       "python": [
         "3.11",
@@ -98,9 +99,10 @@
     "name": "release-candidate",
     "minimum_required_reviewers": 1,
     "prevent_self_review": false,
-    "deployment_branch_policy": "protected_branches_only",
+    "deployment_branch_policy": "any_branch_required_reviewer_gated",
     "private_evidence_must_be_outside_runner_workspace": true,
-    "runner_must_be_ephemeral_or_single_purpose": true
+    "runner_must_be_ephemeral_or_single_purpose": true,
+    "deployment_branch_policy_note": "Was protected_branches_only until 2026-08-26. That value is incompatible with the rest of this contract: exact-release-gate triggers on pull_request, deploys to this environment, and required depends on it, but a pull-request merge ref is never a protected branch. The rule was inert while the repository had no protected branch and locked out every pull request the moment main was protected, making main unmergeable. The control that was actually doing the work is the required reviewer, which is unchanged; fork pull requests remain excluded by the job's own condition and by the all-external-contributors approval policy."
   },
   "approval": {
     "checkpoint": "U1",
@@ -110,12 +112,12 @@
     "approved_contract_sha256": null
   },
   "known_limits": [
-    "This is a machine-validated design contract, not proof that GitHub Actions ran or that repository protections are active.",
-    "U1 remains required before any external GitHub setting is changed or the exact CI proof can be claimed.",
-    "The required release environment needs an explicit reviewer identity and a dedicated Apple-silicon runner before activation.",
-    "T3.3 remains open until a deliberately failing disposable pull request is mechanically prevented from merging."
+    "The prior workflow and active branch protection were proven on 2026-08-26; this digest is a changed candidate contract and does not transfer that proof to the new commit.",
+    "Independent review remains required before this workflow revision can merge under the active main protection.",
+    "The release runner still uses the owner's workstation account rather than a dedicated unprivileged account; that remains a recorded deviation.",
+    "A deliberately failing Python test already proved required-check enforcement. The new UI pipe-failure regression still needs a disposable remote pull-request proof."
   ],
   "integrity": {
-    "contract_sha256": "4a6d8e31d9c6f09bbd881fb620399a1d51105611638f2f202e68e919f8bba5fa"
+    "contract_sha256": "8fb97f29bd48988b80c7e81de2cc16c74d709bfc2641a1afbabdc4035dd8b677"
   }
 }

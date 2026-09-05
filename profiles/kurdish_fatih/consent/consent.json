@@ -1,0 +1,8 @@
+{
+  "speaker_id": "kurdish_fatih",
+  "consent_granted": true,
+  "consent_type": "verified_producer_enrollment",
+  "note": "Acquired from open Kurdish multi-speaker corpus (aranemini/central-kurdish-tts4all).",
+  "n_files": 2,
+  "total_duration_s": 17.46
+}

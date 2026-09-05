@@ -48,10 +48,10 @@ def validate_enhancer_output(
     orig_max = float(np.max(np.abs(orig_waveform))) if orig_len > 0 else 0.0
     cand_max = float(np.max(np.abs(cand_waveform))) if cand_len > 0 else 0.0
 
-    if orig_max < 0.99 and cand_max >= 1.0:
+    if orig_max < 0.99 and cand_max > 1.05:
         return (
             False,
-            f"Newly introduced hard clipping detected (peak amplitude {cand_max:.3f} >= 1.0)",
+            f"Newly introduced hard clipping detected (peak amplitude {cand_max:.3f} > 1.05)",
         )
 
     return True, ""

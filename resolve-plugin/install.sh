@@ -109,7 +109,7 @@ done
 [ -x "$ENGINE_BUNDLE/hawavoclean-engine" ] || die "engine launcher is not executable"
 verify_engine_bundle "$ENGINE_BUNDLE"
 
-for f in manifest.xml package.json main.js preload.js; do
+for f in manifest.xml package.json main.js preload.js session-auth.js; do
   [ -f "$SRC_DIR/$f" ] || die "missing shell source $SRC_DIR/$f"
 done
 [ -f "$TOOLCHAIN_DIR/package-lock.json" ] || die "Resolve build-tool lock is missing"
@@ -157,7 +157,7 @@ cleanup_assembly() {
 trap cleanup_assembly EXIT
 
 say "Assembling a relocatable plugin"
-for f in manifest.xml package.json main.js preload.js; do cp "$SRC_DIR/$f" "$STAGE/$f"; done
+for f in manifest.xml package.json main.js preload.js session-auth.js; do cp "$SRC_DIR/$f" "$STAGE/$f"; done
 cp -R "$UI_DIR/dist/." "$STAGE/"
 cp -R "$ENGINE_BUNDLE" "$STAGE/engine"
 chmod a+rx "$STAGE/engine/hawavoclean-engine"

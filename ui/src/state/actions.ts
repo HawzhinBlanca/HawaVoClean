@@ -2,8 +2,18 @@
 // together. Components call these; nothing here renders.
 
 import { EngineClient, EngineError } from '../api/client';
-import { followJob, isTerminal } from '../api/sse';
-import type { AudioAnalysis, JobStatus, Profile } from '../api/types';
+import { followBatch, followJob, isTerminal } from '../api/sse';
+import type {
+  AudioAnalysis,
+  BatchItem,
+  BatchSummary,
+  HawaVoCleanReport,
+  JobStatus,
+  ManualRoute,
+  ProcessingRequestV1,
+  ProcessingStrategyV1,
+  Profile,
+} from '../api/types';
 import { reportTxtPath } from '../api/types';
 import { getPlayer, type DeckFault } from '../audio/player';
 import { getBridge } from '../bridge';
@@ -17,7 +27,9 @@ import {
   type UiFailure,
 } from './errors';
 import {
+  getRouteBlockedReason,
   getState,
+  isRouteBlocked,
   jobInFlight,
   useStore,
   type ArtifactState,
@@ -288,6 +300,18 @@ async function probeEngine(): Promise<void> {
     // up without a restart. A revision-1 engine sends neither field; that
     // reads as "no restore", which is exactly what such an engine can do.
     getState().setCapabilities(health.speakers ?? [], health.restore_available === true);
+
+    // True-10 D4.11: Probe versioned capabilities
+    if (typeof client.capabilities === 'function') {
+      try {
+        const caps = await client.capabilities(probeTimeout.signal);
+        if (caps && Array.isArray(caps.capabilities)) {
+          getState().setCapabilitiesV1(caps.capabilities);
+        }
+      } catch {
+        /* Graceful fallback for mock engines / older versions */
+      }
+    }
     if (!everConnected) {
       everConnected = true;
       getState().setStatus(`Engine ready · v${health.version}`);
@@ -302,6 +326,7 @@ async function probeEngine(): Promise<void> {
     }
     autoloadFromQuery();
     if (wasDown || restarted) await resumeAfterReconnect(client);
+    void rehydrateBatchQueue(client);
     scheduleProbe(HEALTH_OK_MS);
   } catch (e) {
     markOffline(describeError(e));
@@ -401,7 +426,9 @@ async function resumeAfterReconnect(client: EngineClient): Promise<void> {
     const resumeTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
     let status;
     try {
-      status = await client.getJob(job.id, resumeTimeout.signal);
+      status = typeof client.getV1Job === 'function'
+        ? await client.getV1Job(job.id, resumeTimeout.signal)
+        : await client.getJob(job.id, resumeTimeout.signal);
     } finally {
       resumeTimeout.done();
     }
@@ -902,6 +929,19 @@ export async function useResolveClip(): Promise<void> {
 export async function openFileDialog(): Promise<void> {
   const bridge = getBridge();
   try {
+    if (bridge.files.pickAudioFiles) {
+      const paths = await bridge.files.pickAudioFiles();
+      if (!paths || paths.length === 0) return;
+      if (paths.length > 1) {
+        await submitBatch([...paths]);
+        return;
+      }
+      const path = paths[0];
+      if (path) {
+        await loadSource({ path, name: baseName(path), origin: 'file' });
+      }
+      return;
+    }
     const path = await bridge.files.pickAudio();
     if (!path) return;
     await loadSource({ path, name: baseName(path), origin: 'file' });
@@ -921,26 +961,18 @@ export async function openFileDialog(): Promise<void> {
  */
 export const ACCEPTED_EXTENSIONS = [
   'wav',
-  'aiff',
+  'wave',
   'aif',
+  'aiff',
   'aifc',
-  'mp3',
   'flac',
+  'mp3',
   'm4a',
   'mp4',
-  'mov',
-  'aac',
-  'ogg',
-  'oga',
-  'opus',
-  'caf',
-  'w64',
-  'mkv',
-  'webm',
 ] as const;
 
 /** The short version, for the one line the drop well has room for. */
-export const ACCEPTED_SHORTLIST = 'wav · aiff · mp3 · flac · m4a · mp4 · mov';
+export const ACCEPTED_SHORTLIST = 'wav · aiff · flac · mp3 · m4a · mp4';
 
 export function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -949,9 +981,7 @@ export function extensionOf(name: string): string {
 
 export function isAcceptedFile(file: File): boolean {
   const ext = extensionOf(file.name);
-  if ((ACCEPTED_EXTENSIONS as readonly string[]).includes(ext)) return true;
-  // A file with no extension but an honest media MIME type is still media.
-  return file.type.startsWith('audio/') || file.type.startsWith('video/');
+  return (ACCEPTED_EXTENSIONS as readonly string[]).includes(ext);
 }
 
 /**
@@ -1006,6 +1036,38 @@ export async function ingestDataTransfer(dt: DataTransfer): Promise<void> {
     return;
   }
 
+  const acceptedFiles = files.filter(isAcceptedFile);
+  if (acceptedFiles.length > 1) {
+    const bridge = getBridge();
+    const sourcesToSubmit: Array<{ path: string; name: string; sourceId?: string }> = [];
+    for (const file of acceptedFiles) {
+      if (file.size === 0) continue;
+      let local: { sourceId: string; path: string } | string | null = null;
+      try {
+        local = bridge.files.registerDroppedFile
+          ? await bridge.files.registerDroppedFile(file)
+          : null;
+      } catch {
+        local = null;
+      }
+      if (local) {
+        if (typeof local === 'object' && local !== null) {
+          sourcesToSubmit.push({ path: local.path, name: file.name, sourceId: local.sourceId });
+        } else {
+          sourcesToSubmit.push({ path: local, name: file.name });
+        }
+      } else {
+        const client = requireClient();
+        const res = await client.upload(file);
+        sourcesToSubmit.push({ path: res.path, name: file.name });
+      }
+    }
+    if (sourcesToSubmit.length > 1) {
+      await submitBatch(sourcesToSubmit);
+      return;
+    }
+  }
+
   if (files.length > 1) {
     // Take the first one that can be opened, and say so rather than silently
     // dropping the rest on the floor.
@@ -1039,9 +1101,26 @@ export async function ingestFile(file: File): Promise<void> {
     });
     return;
   }
-  const local = bridge.files.pathForFile(file);
+  // A native drop is not authority by itself. The preload asks main to bind
+  // its OS path through the broker's root-only registration route; if that
+  // cannot complete, send the File bytes through the managed upload path.
+  // A host without the registration bridge is not allowed to turn a raw
+  // renderer path into authority; it takes the same managed-upload fallback
+  // as a failed registration.
+  let local: { sourceId: string; path: string } | string | null = null;
+  try {
+    local = bridge.files.registerDroppedFile
+      ? await bridge.files.registerDroppedFile(file)
+      : null;
+  } catch {
+    local = null;
+  }
   if (local) {
-    await loadSource({ path: local, name: file.name, origin: 'drop' });
+    if (typeof local === 'object' && local !== null) {
+      await loadSource({ path: local.path, name: file.name, origin: 'drop', sourceId: local.sourceId });
+    } else {
+      await loadSource({ path: local, name: file.name, origin: 'drop' });
+    }
     return;
   }
   await uploadFile(file);
@@ -1072,7 +1151,7 @@ async function uploadFile(file: File): Promise<void> {
   st.setStatus(`Uploading ${file.name}`);
   try {
     const client = requireClient();
-    const { path } = await client.uploadWithProgress(file, {
+    const res = await client.uploadWithProgress(file, {
       onProgress: (loaded, total) => {
         const cur = getState();
         if (!cur.upload) return;
@@ -1089,7 +1168,12 @@ async function uploadFile(file: File): Promise<void> {
     });
     cancelUploadHandle = null;
     getState().setUpload(null);
-    await loadSource({ path, name: file.name, origin: 'upload' });
+    await loadSource({
+      path: res.path,
+      name: file.name,
+      origin: 'upload',
+      ...(res.source_id ? { sourceId: res.source_id } : {}),
+    });
   } catch (e) {
     cancelUploadHandle = null;
     getState().setUpload(null);
@@ -1269,8 +1353,10 @@ function followFrom(client: EngineClient, jobId: string): void {
       if (cur.job && cur.job.id === jobId) {
         cur.patchJob({ streamConnected: false });
         if (!cur.job.status || !isTerminal(cur.job.status.state)) {
-          void client
-            .getJob(jobId)
+          const fetchStatus = typeof client.getV1Job === 'function'
+            ? client.getV1Job(jobId)
+            : client.getJob(jobId);
+          void fetchStatus
             .then(onJobStatus)
             .catch((e: unknown) => {
               // This `.catch` used to be `() => undefined`. If the stream ended
@@ -1377,10 +1463,28 @@ function uniqueOutputPath(inputPath: string, profile: Profile): string | null {
   return bumpOutputPath(prior.outputPath, new Set(done.map((h) => h.outputPath)));
 }
 
+/**
+ * A run is being created right now, before any job id exists to look at.
+ *
+ * `jobInFlight(st.job)` cannot cover this window: `setJob` only happens after
+ * `createJob` has come back, so every press between the click and the response
+ * read the *previous* job — a terminal one — and passed the guard. Six presses
+ * in a burst posted six runs; the store kept the last and the other five ran to
+ * completion on the engine with nothing on screen referring to them and no id
+ * to cancel them by. On a real engine each is a full DSP pass publishing its
+ * own output generation, because `uniqueOutputPath` gives every one of them a
+ * private destination.
+ *
+ * Module scope rather than store state on purpose: this has to be readable and
+ * writable synchronously, in the same tick as the click, which a React state
+ * update is not.
+ */
+let creatingJob = false;
+
 export async function startJob(): Promise<void> {
   const st = getState();
   if (!st.source) return;
-  if (jobInFlight(st.job)) return;
+  if (creatingJob || jobInFlight(st.job)) return;
   // The engine has to be there before anything on screen is thrown away.
   // Without this, pressing PROCESS with the engine gone wiped the finished run
   // — report, cleaned deck, artefacts, the A/B — and *then* discovered there
@@ -1393,6 +1497,7 @@ export async function startJob(): Promise<void> {
     return;
   }
   const profile: Profile = st.profile;
+  creatingJob = true;
   try {
     const client = requireClient();
     // B5 · a second run of the same profile must not land on the first run's
@@ -1400,32 +1505,104 @@ export async function startJob(): Promise<void> {
     // and the older history row then shows its own cached report beside
     // download links that hand over the newer run's bytes.
     const output = uniqueOutputPath(st.source.path, profile);
-    // Contract addendum 2: the engine pins this request `extra="forbid"` and
-    // natural mode must stay byte-compatible with revision 1, so the three
-    // restore fields are attached only when a restore run is actually being
-    // asked for — never as null placeholders. The speaker check is belt and
-    // braces: the store keeps a speaker selected whenever restore is offered,
-    // and a restore submit without one would only earn the engine's 422.
-    const restore =
-      st.mode === 'restore' && st.speakerId
-        ? {
-            mode: 'restore' as const,
-            speaker_id: st.speakerId,
-            ...(st.cutoffHz !== null ? { cutoff_hz: st.cutoffHz } : {}),
-          }
-        : {};
-    const res = await client.createJob({
-      input_path: st.source.path,
-      profile,
-      overwrite: true,
-      ...(output ? { output_path: output } : {}),
-      ...restore,
-    });
+
+    // Fail-closed capability & reconstruction consent checks (True-10 D4.11)
+    let strategy: ProcessingStrategyV1;
+    if (st.mode === 'smart_safe') {
+      if (isRouteBlocked(st.capabilities, 'smart_safe')) {
+        const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
+        st.setStatus(`Smart Safe is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Smart Safe capability is blocked', 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+      };
+    } else if (st.mode === 'restore') {
+      const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
+      if (isRouteBlocked(st.capabilities, restoreCapId)) {
+        const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
+        st.setStatus(`Restore is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Restore capability is blocked', 'Capability blocked');
+        return;
+      }
+      if (!st.reconstructionConsent) {
+        st.setStatus('Restore requires explicit generative reconstruction consent');
+        st.setError('Acknowledge generative reconstruction consent to proceed with Restore', 'Consent required');
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: restoreCapId as ManualRoute,
+        speaker_profile_id: st.speakerId,
+        expert_cutoff_hz: st.cutoffHz,
+        allow_generative_reconstruction: true,
+      };
+    } else {
+      if (isRouteBlocked(st.capabilities, profile)) {
+        const reason = getRouteBlockedReason(st.capabilities, profile);
+        st.setStatus(`Route ${profile} is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || `Route ${profile} is blocked`, 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: profile as ManualRoute,
+        allow_generative_reconstruction: false,
+      };
+    }
+
+    const sourceId = st.source.sourceId || st.source.path;
+    const idempotencyKey = `v1-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    let jobItem: { jobId: string; outputPath: string; reportPath: string };
+
+    if (typeof client.createV1Jobs === 'function') {
+      const v1Req: ProcessingRequestV1 = {
+        schema_version: 1,
+        source_ids: [sourceId],
+        strategy,
+        execution_policy: 'offline_only',
+        conflict_policy: 'unique',
+        record_bundle: false,
+        idempotency_key: idempotencyKey,
+      };
+      const v1Res = await client.createV1Jobs(v1Req);
+      const item = v1Res.jobs[0];
+      if (!item) {
+        throw new EngineError(500, 'bad_response', 'The engine returned an empty job batch');
+      }
+      jobItem = { jobId: item.jobId, outputPath: item.outputPath, reportPath: item.reportPath };
+    } else {
+      // Contract addendum 2: the engine pins this request `extra="forbid"` and
+      // natural mode must stay byte-compatible with revision 1, so the three
+      // restore fields are attached only when a restore run is actually being
+      // asked for — never as null placeholders.
+      const restore =
+        st.mode === 'restore' && st.speakerId
+          ? {
+              mode: 'restore' as const,
+              speaker_id: st.speakerId,
+              ...(st.cutoffHz !== null ? { cutoff_hz: st.cutoffHz } : {}),
+            }
+          : {};
+      const res = await client.createJob({
+        input_path: st.source.path,
+        profile,
+        overwrite: true,
+        ...(output ? { output_path: output } : {}),
+        ...restore,
+      });
+      jobItem = { jobId: res.job_id, outputPath: res.output_path, reportPath: res.report_path };
+    }
+
     // Only now, with a job id in hand, is the previous run's result really
     // superseded. Doing this before `createJob` meant any refusal — a 4xx, a
     // dead socket, a path the engine will not take — destroyed a finished run
     // to start one that never began.
-    reconcileTries.delete(res.job_id);
+    reconcileTries.delete(jobItem.jobId);
     const cur = useStore.getState();
     cur.setError(null);
     cur.setCleaned(null, null);
@@ -1437,18 +1614,22 @@ export async function startJob(): Promise<void> {
     getPlayer().setActive('original');
     cur.setAbMode('original');
     const job = {
-      id: res.job_id,
-      outputPath: res.output_path,
-      reportPath: res.report_path,
+      id: jobItem.jobId,
+      outputPath: jobItem.outputPath,
+      reportPath: jobItem.reportPath,
       status: null,
       streamConnected: false,
     };
     useStore.getState().setJob(job);
     useStore.getState().setStatus('Job queued');
-    followFrom(client, res.job_id);
+    followFrom(client, jobItem.jobId);
   } catch (e) {
     probeSoon(e);
     failed(e, st.source.name, 'Could not start');
+  } finally {
+    // Cleared on both paths. On success `jobInFlight` has taken over by now; on
+    // failure nothing was created, so the next press must be let through.
+    creatingJob = false;
   }
 }
 
@@ -1464,10 +1645,351 @@ export async function cancelJob(): Promise<void> {
   }
   try {
     st.setStatus('Cancelling');
-    await requireClient().cancelJob(st.job.id);
+    const c = requireClient();
+    if (typeof c.cancelV1Job === 'function') {
+      await c.cancelV1Job(st.job.id);
+    } else {
+      await c.cancelJob(st.job.id);
+    }
   } catch (e) {
     probeSoon(e);
     reportFailure(classifyFailure(e, st.source?.name), 'Cancel failed');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// True-10 D4.1 · Multi-file batch queue lifecycle & actions
+
+let stopBatchFollow: (() => void) | null = null;
+
+export function clearBatchSubscription(): void {
+  stopBatchFollow?.();
+  stopBatchFollow = null;
+}
+
+export function startBatchEventSubscription(batchId: string, client?: EngineClient): void {
+  const c = client ?? requireClient();
+  stopBatchFollow?.();
+  stopBatchFollow = followBatch(c, batchId, {
+    onBatchStatus: (summary) => {
+      const st = getState();
+      st.setBatch(summary);
+      const pct = Math.round(summary.progress * 100);
+      st.setStatus(
+        `Batch ${summary.state} · ${summary.completed_items}/${summary.total_items} complete (${pct}%)`,
+      );
+      if (st.activeInspectJobId) {
+        const item = summary.jobs.find((j) => j.job_id === st.activeInspectJobId);
+        if (item && item.state === 'done') {
+          const player = getPlayer();
+          if (!player.hasDeck('cleaned') && item.output_path) {
+            player.load('cleaned', c.fileUrl(item.output_path));
+          }
+        }
+      }
+    },
+    onEnd: () => {
+      stopBatchFollow = null;
+      void c
+        .getBatch(batchId)
+        .then((finalSummary) => {
+          getState().setBatch(finalSummary);
+          getState().setStatus(
+            `Batch ${finalSummary.state} · ${finalSummary.completed_items}/${finalSummary.total_items} complete`,
+          );
+        })
+        .catch(() => {});
+    },
+    onError: (err) => {
+      probeSoon(err);
+    },
+  });
+}
+
+export async function submitBatch(
+  sources: Array<{ path: string; name: string; sourceId?: string } | string>,
+): Promise<void> {
+  const st = getState();
+  if (sources.length === 0) return;
+  if (st.engineStatus !== 'ready') {
+    st.setStatus('Cannot start a batch while the engine is offline — waiting for it to come back');
+    return;
+  }
+  try {
+    const client = requireClient();
+    let strategy: ProcessingStrategyV1;
+    if (st.mode === 'smart_safe') {
+      if (isRouteBlocked(st.capabilities, 'smart_safe')) {
+        const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
+        st.setStatus(`Smart Safe is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Smart Safe capability is blocked', 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+      };
+    } else if (st.mode === 'restore') {
+      const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
+      if (isRouteBlocked(st.capabilities, restoreCapId)) {
+        const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
+        st.setStatus(`Restore is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || 'Restore capability is blocked', 'Capability blocked');
+        return;
+      }
+      if (!st.reconstructionConsent) {
+        st.setStatus('Restore requires explicit generative reconstruction consent');
+        st.setError(
+          'Acknowledge generative reconstruction consent to proceed with Restore',
+          'Consent required',
+        );
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: restoreCapId as ManualRoute,
+        speaker_profile_id: st.speakerId,
+        expert_cutoff_hz: st.cutoffHz,
+        allow_generative_reconstruction: true,
+      };
+    } else {
+      if (isRouteBlocked(st.capabilities, st.profile)) {
+        const reason = getRouteBlockedReason(st.capabilities, st.profile);
+        st.setStatus(`Route ${st.profile} is blocked: ${reason || 'unqualified'}`);
+        st.setError(reason || `Route ${st.profile} is blocked`, 'Capability blocked');
+        return;
+      }
+      strategy = {
+        kind: 'manual',
+        route: st.profile as ManualRoute,
+        allow_generative_reconstruction: false,
+      };
+    }
+
+    const sourceIds = sources.map((s) => (typeof s === 'string' ? s : s.sourceId || s.path));
+    const idempotencyKey = `v1-batch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    const v1Req: ProcessingRequestV1 = {
+      schema_version: 1,
+      source_ids: sourceIds,
+      strategy,
+      execution_policy: 'offline_only',
+      conflict_policy: 'unique',
+      record_bundle: false,
+      idempotency_key: idempotencyKey,
+    };
+
+    const res = await client.createV1Jobs(v1Req);
+    if (!res.batchId) {
+      throw new EngineError(500, 'bad_response', 'The engine did not return a batch identifier');
+    }
+
+    st.setStatus(`Batch queued · ${res.jobs.length} items`);
+    const initialSummary: BatchSummary = await client.getBatch(res.batchId).catch(() => ({
+      batch_id: res.batchId!,
+      state: 'queued',
+      total_items: res.jobs.length,
+      completed_items: 0,
+      failed_items: 0,
+      cancelled_items: 0,
+      running_items: 0,
+      queued_items: res.jobs.length,
+      progress: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      jobs: res.jobs.map((j, idx) => ({
+        job_id: j.jobId,
+        seq: idx + 1,
+        state: 'queued',
+        stage: 'queued',
+        progress: 0,
+        message: 'Queued',
+        input_path: sourceIds[idx] ?? '',
+        output_path: j.outputPath,
+        report_path: j.reportPath,
+        profile: st.profile,
+        mode: st.mode === 'restore' ? 'restore' : 'natural',
+        created_at: new Date().toISOString(),
+        started_at: null,
+        finished_at: null,
+      })),
+    }));
+
+    st.setBatch(initialSummary);
+    startBatchEventSubscription(res.batchId, client);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Could not start batch');
+  }
+}
+
+export async function pauseCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.pauseBatch(st.batch.batch_id);
+    st.patchBatch({ state: 'paused' });
+    st.setStatus(`Batch paused · ${st.batch.completed_items}/${st.batch.total_items} complete`);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Pause batch');
+  }
+}
+
+export async function resumeCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.resumeBatch(st.batch.batch_id);
+    st.patchBatch({ state: 'running' });
+    st.setStatus(`Batch resumed · ${st.batch.completed_items}/${st.batch.total_items} complete`);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Resume batch');
+  }
+}
+
+export async function cancelCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.cancelBatch(st.batch.batch_id, false);
+    st.patchBatch({ state: 'cancelled' });
+    st.setStatus('Batch cancelled');
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Cancel batch');
+  }
+}
+
+export async function cancelBatchItem(jobId: string): Promise<void> {
+  try {
+    const client = requireClient();
+    if (typeof client.cancelV1Job === 'function') {
+      await client.cancelV1Job(jobId);
+    } else {
+      await client.cancelJob(jobId);
+    }
+    const st = getState();
+    if (st.batch) {
+      const updatedJobs = st.batch.jobs.map((j) =>
+        j.job_id === jobId ? { ...j, state: 'cancelled' as const, stage: 'cancelled' } : j,
+      );
+      st.patchBatch({ jobs: updatedJobs });
+    }
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Cancel item');
+  }
+}
+
+export async function retryBatchItem(jobId: string): Promise<void> {
+  try {
+    const client = requireClient();
+    await client.retryJob(jobId);
+    const st = getState();
+    if (st.batch) {
+      const updatedJobs = st.batch.jobs.map((j) =>
+        j.job_id === jobId ? { ...j, state: 'queued' as const, stage: 'queued', progress: 0 } : j,
+      );
+      st.patchBatch({ jobs: updatedJobs });
+      if (
+        st.batch.state === 'done' ||
+        st.batch.state === 'failed' ||
+        st.batch.state === 'cancelled'
+      ) {
+        startBatchEventSubscription(st.batch.batch_id, client);
+      }
+    }
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Retry item');
+  }
+}
+
+export async function inspectBatchItem(item: BatchItem): Promise<void> {
+  const st = getState();
+  st.setActiveInspectJobId(item.job_id);
+  const client = requireClient();
+  const player = getPlayer();
+
+  st.setSource({ path: item.input_path, name: baseName(item.input_path), origin: 'file' });
+
+  const originalUrl = client.fileUrl(item.input_path);
+  player.load('original', originalUrl);
+
+  if (item.state === 'done' && item.output_path) {
+    const cleanedUrl = client.fileUrl(item.output_path);
+    player.load('cleaned', cleanedUrl);
+    player.setActive('cleaned');
+    st.setAbMode('cleaned');
+    st.setCleaned(null, item.output_path);
+    void client
+      .analyze(item.output_path, envelopeBuckets())
+      .then((analysis) => {
+        if (getState().activeInspectJobId === item.job_id) {
+          getState().setCleaned(analysis, item.output_path);
+        }
+      })
+      .catch(() => {});
+  } else {
+    player.load('cleaned', null);
+    player.setActive('original');
+    st.setAbMode('original');
+    st.setCleaned(null, null);
+  }
+
+  if (item.report) {
+    st.setReport(item.report);
+  } else if (item.report_path && item.state === 'done') {
+    void fetch(client.fileUrl(item.report_path))
+      .then((res) => res.json())
+      .then((rep: HawaVoCleanReport) => {
+        if (getState().activeInspectJobId === item.job_id) {
+          getState().setReport(rep);
+        }
+      })
+      .catch(() => {});
+  }
+
+  try {
+    const analysis = await client.analyze(item.input_path, envelopeBuckets());
+    if (getState().activeInspectJobId === item.job_id) {
+      st.setOriginal(analysis);
+      st.setStatus(`Inspecting: ${baseName(item.input_path)} (${item.state})`);
+    }
+  } catch {
+    st.setStatus(`Inspecting: ${baseName(item.input_path)} (${item.state})`);
+  }
+}
+
+export async function rehydrateBatchQueue(client?: EngineClient): Promise<void> {
+  const c = client ?? getState().client;
+  if (!c) return;
+  try {
+    const res = await c.listBatches(5);
+    if (!res || !Array.isArray(res.batches) || res.batches.length === 0) return;
+    const active =
+      res.batches.find(
+        (b) => b.state === 'running' || b.state === 'queued' || b.state === 'paused',
+      ) ?? res.batches[0];
+    if (active) {
+      const summary = await c.getBatch(active.batch_id);
+      getState().setBatch(summary);
+      if (
+        summary.state === 'running' ||
+        summary.state === 'queued' ||
+        summary.state === 'paused'
+      ) {
+        startBatchEventSubscription(summary.batch_id, c);
+      }
+    }
+  } catch {
+    /* ignore if engine does not support batches */
   }
 }
 
@@ -2088,3 +2610,34 @@ export function togglePlay(): void {
 export function seekTo(time: number): void {
   getPlayer().seek(time);
 }
+
+/** D2 · Plays only the current selection range. Auto-pauses at the end. */
+export function playSelection(loop = false): void {
+  const sel = getState().selectionRange;
+  if (!sel || sel.end <= sel.start) return;
+
+  const player = getPlayer();
+  player.seek(sel.start);
+  void player.play();
+
+  // Poll transport time and stop/loop when we pass the end
+  let handle = 0;
+  const check = (): void => {
+    if (!getState().playing) {
+      cancelAnimationFrame(handle);
+      return;
+    }
+    if (player.time >= sel.end) {
+      if (loop) {
+        player.seek(sel.start);
+      } else {
+        player.pause();
+        cancelAnimationFrame(handle);
+        return;
+      }
+    }
+    handle = requestAnimationFrame(check);
+  };
+  handle = requestAnimationFrame(check);
+}
+

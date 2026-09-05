@@ -36,11 +36,7 @@ function fmtBytes(n: number): string {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
-const ACCEPT_ATTR = [
-  'audio/*',
-  'video/*',
-  ...ACCEPTED_EXTENSIONS.map((e) => `.${e}`),
-].join(',');
+const ACCEPT_ATTR = ACCEPTED_EXTENSIONS.map((extension) => `.${extension}`).join(',');
 
 /**
  * B2 · the transfer, while it is happening. An upload is the only thing in

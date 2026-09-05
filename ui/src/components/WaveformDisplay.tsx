@@ -90,6 +90,7 @@ export function WaveformDisplay() {
   const ovCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const ovWinRef = useRef<HTMLDivElement | null>(null);
   const ovRef = useRef<HTMLDivElement | null>(null);
+  const selOverlayRef = useRef<HTMLDivElement | null>(null);
 
   const dragging = useRef(false);
   const panBase = useRef<{ x: number; start: number; end: number } | null>(null);
@@ -111,6 +112,7 @@ export function WaveformDisplay() {
   const highlight = useStore((s) => s.highlightRange);
   const analyzing = useStore((s) => s.analyzing);
   const source = useStore((s) => s.source);
+  const selectionRange = useStore((s) => s.selectionRange);
   const setError = useStore((s) => s.setError);
 
   // A7/B4 · which channels this report decided on. A split-speakers run emits
@@ -304,6 +306,21 @@ export function WaveformDisplay() {
       }
     }
     syncSelTag();
+
+    // D2: position selection overlay
+    const selOv = selOverlayRef.current;
+    if (selOv) {
+      const sel = getState().selectionRange;
+      if (sel && dur > 0 && span > 0) {
+        const left = ((sel.start - v.start) / span) * 100;
+        const right = ((sel.end - v.start) / span) * 100;
+        selOv.style.display = '';
+        selOv.style.left = `${Math.max(0, left)}%`;
+        selOv.style.width = `${Math.min(100, right) - Math.max(0, left)}%`;
+      } else {
+        selOv.style.display = 'none';
+      }
+    }
   }, [syncSelTag]);
 
   // ------------------------------------------------------------ detail fetch
@@ -580,6 +597,11 @@ export function WaveformDisplay() {
     host.setUnits(arr);
   }, [report]);
 
+  // D2: re-sync selection overlay when the range changes
+  useEffect(() => {
+    updateChrome();
+  }, [selectionRange, updateChrome]);
+
   // Width changes move the deepest useful zoom (one bucket per device column).
   //
   // This used to be a `useEffect` on a `width` useState that the JSX never
@@ -662,16 +684,29 @@ export function WaveformDisplay() {
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
 
+  // D2 · Shift-drag starts/extends a selection range instead of seeking.
+  const selDragStart = useRef<number | null>(null);
+  const setSelectionRange = useStore((s) => s.setSelectionRange);
+
   const onPointerDown = useCallback(
     (e: PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
       const t = timeAt(e.clientX);
       if (t === null) return;
-      dragging.current = true;
       capture(e.currentTarget, e.pointerId);
-      seekTo(t);
+
+      if (e.shiftKey) {
+        // D2: start selection range
+        selDragStart.current = t;
+        setSelectionRange({ start: t, end: t });
+        dragging.current = false;
+      } else {
+        selDragStart.current = null;
+        dragging.current = true;
+        seekTo(t);
+      }
     },
-    [timeAt],
+    [timeAt, setSelectionRange],
   );
 
   const onPointerMove = useCallback(
@@ -682,15 +717,29 @@ export function WaveformDisplay() {
       const x = e.clientX - r.left;
       if (x >= 0 && x <= r.width) hostRef.current?.setHover(x);
       else hostRef.current?.setHover(null);
-      if (dragging.current) {
-        const t = timeAt(e.clientX);
-        if (t !== null) seekTo(t);
+
+      const t = timeAt(e.clientX);
+
+      // D2: extending a selection range
+      if (selDragStart.current !== null && t !== null) {
+        const s = selDragStart.current;
+        setSelectionRange({ start: Math.min(s, t), end: Math.max(s, t) });
+        return;
+      }
+
+      if (dragging.current && t !== null) {
+        seekTo(t);
       }
     },
-    [timeAt],
+    [timeAt, setSelectionRange],
   );
 
   const onPointerUp = useCallback((e: PointerEvent<HTMLDivElement>) => {
+    if (selDragStart.current !== null) {
+      selDragStart.current = null;
+      release(e.currentTarget, e.pointerId);
+      return;
+    }
     if (dragging.current) {
       dragging.current = false;
       release(e.currentTarget, e.pointerId);
@@ -750,12 +799,34 @@ export function WaveformDisplay() {
         case 'PageDown':
           panBy(1);
           break;
+        case 'Escape':
+          // D2: clear selection range
+          setSelectionRange(null);
+          break;
+        case 'i':
+        case 'I':
+          // D2: NLE in-point — set selection start to current time
+          {
+            const t = getState().currentTime;
+            const sel = getState().selectionRange;
+            setSelectionRange({ start: t, end: sel?.end ?? t });
+          }
+          break;
+        case 'o':
+        case 'O':
+          // D2: NLE out-point — set selection end to current time
+          {
+            const t = getState().currentTime;
+            const sel = getState().selectionRange;
+            setSelectionRange({ start: sel?.start ?? t, end: t });
+          }
+          break;
         default:
           return;
       }
       e.preventDefault();
     },
-    [panBy],
+    [panBy, setSelectionRange],
   );
 
   /**
@@ -948,6 +1019,13 @@ export function WaveformDisplay() {
                 <span ref={timeRef} className="wave-time">
                   00:00.000
                 </span>
+                {/* D2: selection range overlay */}
+                <div
+                  ref={selOverlayRef}
+                  className="wave-sel-overlay"
+                  style={{ display: 'none' }}
+                  aria-hidden="true"
+                />
                 {selName ? (
                   /* A7/B4 · the selection band is channel-scoped on a
                      multi-channel report, and this is what says so in words.

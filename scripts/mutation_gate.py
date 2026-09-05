@@ -236,9 +236,11 @@ MUTATIONS: list[Mutation] = [
         "src/hawavoclean/publication.py",
         """            _checkpoint("before_pointer_commit")
             _replace_current(paths, generation_id)
+            _repair_public_exports(paths, generation_id)
             _replace_json(""",
         """            _checkpoint("before_pointer_commit")
             _replace_current(paths, prior or generation_id)
+            _repair_public_exports(paths, generation_id)
             _replace_json(""",
         # Owner: an overwrite is complete only when the single authoritative
         # pointer names the new immutable generation. This catches a publisher
@@ -290,12 +292,11 @@ MUTATIONS: list[Mutation] = [
         "M13",
         "auto multipass ships the pass it just judged regressive",
         "src/hawavoclean/multipass.py",
-        """            if auto and k > 1:
-                keep, reason = auto_pass_verdict(records[-1], record)
+        """                keep, pass_reason = auto_pass_verdict(records[-1], record)
                 if not keep:
-                    logger.info(f"Auto mode discards pass {k}: {reason}")
+                    logger.info(f"Auto mode discards pass {k}: {pass_reason}")
                     records.append(
-                        record.model_copy(update={"discarded": True, "discard_reason": reason})
+                        record.model_copy(update={"discarded": True, "discard_reason": pass_reason})
                     )
                     break
 """,
