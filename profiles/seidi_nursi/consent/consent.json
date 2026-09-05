@@ -3,7 +3,7 @@
   "consent_granted": true,
   "consent_type": "producer_enrollment",
   "note": "Enrolled by producer from owned production recordings.",
-  "enrolled_from": "/Users/hawzhin/Desktop/seidi_nursi_cleaned",
+  "enrolled_from": "seidi_nursi_cleaned",
   "n_files": 20,
   "total_duration_s": 32320.67
 }

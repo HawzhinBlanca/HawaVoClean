@@ -3,7 +3,7 @@
   "consent_granted": true,
   "consent_type": "producer_enrollment",
   "note": "Enrolled by producer from owned production recordings.",
-  "enrolled_from": "/Users/hawzhin/Desktop/sekuchkey_baban_cleaned",
+  "enrolled_from": "sekuchkey_baban_cleaned",
   "n_files": 8,
   "total_duration_s": 6918.59
 }
