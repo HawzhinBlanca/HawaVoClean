@@ -14,6 +14,7 @@ import scipy.ndimage
 import scipy.signal
 
 Float32Array = np.ndarray[Any, np.dtype[np.float32]]
+_F32_MAX = float(np.finfo(np.float32).max)
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,12 @@ class ProRepairOptions:
     room_tone_blend_ratio: float = 0.0
 
 
+def _to_finite_float32(arr: np.ndarray[Any, Any]) -> Float32Array:
+    """Clamp finite values into float32 representable bounds and cast without warnings."""
+    clipped = np.clip(arr, -_F32_MAX, _F32_MAX)
+    return np.ascontiguousarray(clipped, dtype=np.float32)
+
+
 def _validate_waveform(
     waveform: np.ndarray[Any, Any],
     sample_rate: int,
@@ -40,7 +47,7 @@ def _validate_waveform(
     name: str = "waveform",
 ) -> tuple[Float32Array, bool]:
     """Validate waveform shape/finiteness and normalize to contiguous 2D float32."""
-    if sample_rate <= 0:
+    if isinstance(sample_rate, bool) or sample_rate <= 0:
         raise ValueError(f"sample_rate must be positive, got {sample_rate}")
     arr = np.asarray(waveform)
     if arr.ndim not in (1, 2):
@@ -48,7 +55,10 @@ def _validate_waveform(
     if arr.size > 0 and not np.all(np.isfinite(arr)):
         raise ValueError(f"{name} contains NaN or Inf values")
     was_1d = arr.ndim == 1
-    f32 = np.ascontiguousarray(arr, dtype=np.float32)
+    with np.errstate(over="ignore", invalid="ignore"):
+        f32 = np.ascontiguousarray(arr, dtype=np.float32)
+    if f32.size > 0 and not np.all(np.isfinite(f32)):
+        raise ValueError(f"{name} contains NaN or Inf values after float32 conversion")
     if was_1d:
         f32 = f32[np.newaxis, :]
     return f32, was_1d
@@ -100,9 +110,7 @@ def _deplosive_channel(
         return channel.copy(), 0
 
     low_hz = 20.0
-    high_hz = min(160.0, 0.45 * float(sample_rate))
-    if high_hz <= low_hz + 5.0:
-        return channel.copy(), 0
+    high_hz = 160.0
 
     x64 = channel.astype(np.float64, copy=False)
     sos_bp = scipy.signal.butter(
@@ -118,8 +126,9 @@ def _deplosive_channel(
     env_rms = np.sqrt(np.maximum(energy, 0.0) + 1e-12)
     env_db = 20.0 * np.log10(env_rms)
 
+    eff_max_reduction = min(max_reduction_db, 300.0)
     excess_db = np.maximum(0.0, env_db - threshold_db)
-    raw_gr_db = np.minimum(max_reduction_db, excess_db * 0.85)
+    raw_gr_db = np.minimum(eff_max_reduction, excess_db * 0.85)
     if float(np.max(raw_gr_db)) <= 0.1:
         return channel.copy(), 0
 
@@ -128,7 +137,7 @@ def _deplosive_channel(
     smooth_win = max(5, int(round(sample_rate * 0.018)))
     anticipated = scipy.ndimage.maximum_filter1d(raw_gr_db, size=attack_win, mode="nearest")
     smooth_gr_db = scipy.ndimage.uniform_filter1d(anticipated, size=smooth_win, mode="nearest")
-    smooth_gr_db = np.clip(smooth_gr_db, 0.0, max_reduction_db)
+    smooth_gr_db = np.clip(smooth_gr_db, 0.0, eff_max_reduction)
 
     active_runs = _find_true_runs(smooth_gr_db > 0.5)
     merge_gap = max(1, int(round(sample_rate * 0.040)))
@@ -136,7 +145,7 @@ def _deplosive_channel(
 
     gain = np.power(10.0, -smooth_gr_db / 20.0)
     repaired = residual + plosive_band * gain
-    return np.ascontiguousarray(repaired, dtype=np.float32), event_count
+    return _to_finite_float32(repaired), event_count
 
 
 def apply_dynamic_deplosive(
@@ -242,27 +251,35 @@ def _reconstruct_click_span(
     a_fwd = _fit_ar_coefficients(left_ctx, order)
     a_bwd = _fit_ar_coefficients(right_ctx[::-1], order)
 
+    ctx_peak = max(
+        float(np.max(np.abs(left_ctx))),
+        float(np.max(np.abs(right_ctx))),
+        1e-4,
+    )
+    step_limit = 10.0 * ctx_peak
+
     fwd_buf = np.empty(order + span_len, dtype=np.float64)
     fwd_buf[:order] = left_ctx[-order:]
     for k in range(span_len):
-        fwd_buf[order + k] = float(np.dot(a_fwd, fwd_buf[k : k + order][::-1]))
+        val = float(np.dot(a_fwd, fwd_buf[k : k + order][::-1]))
+        if not math.isfinite(val) or abs(val) > step_limit:
+            return hermite
+        fwd_buf[order + k] = val
     fwd_pred = fwd_buf[order:]
 
     bwd_buf = np.empty(order + span_len, dtype=np.float64)
     bwd_buf[:order] = right_ctx[:order][::-1]
     for k in range(span_len):
-        bwd_buf[order + k] = float(np.dot(a_bwd, bwd_buf[k : k + order][::-1]))
+        val = float(np.dot(a_bwd, bwd_buf[k : k + order][::-1]))
+        if not math.isfinite(val) or abs(val) > step_limit:
+            return hermite
+        bwd_buf[order + k] = val
     bwd_pred = bwd_buf[order:][::-1]
 
     t = np.linspace(0.0, math.pi, span_len + 2, dtype=np.float64)[1:-1]
     w_fwd = 0.5 * (1.0 + np.cos(t))
     ar_interp = w_fwd * fwd_pred + (1.0 - w_fwd) * bwd_pred
 
-    ctx_peak = max(
-        float(np.max(np.abs(left_ctx))),
-        float(np.max(np.abs(right_ctx))),
-        1e-4,
-    )
     if not np.all(np.isfinite(ar_interp)) or float(np.max(np.abs(ar_interp))) > 1.25 * ctx_peak:
         return hermite
     return np.asarray(ar_interp, dtype=np.float64)
@@ -304,7 +321,8 @@ def _declick_channel(
         frames = padded.reshape(n_frames, frame_len)
     frame_scale = np.mean(frames, axis=1)
 
-    med_frames = max(41, int(round(max_click_ms * 3.5)) | 1)
+    max_click_ms_capped = min(max_click_ms, (float(n) * 1000.0) / float(sample_rate) + 1.0)
+    med_frames = max(41, int(round(min(max_click_ms_capped, float(n_frames)) * 3.5)) | 1)
     med_frames = min(med_frames, n_frames if n_frames % 2 == 1 else max(1, n_frames - 1))
     local_frame_base = scipy.ndimage.median_filter(frame_scale, size=med_frames, mode="nearest")
     local_base = np.repeat(local_frame_base, frame_len)[:n]
@@ -322,7 +340,7 @@ def _declick_channel(
     merge_gap = max(2, int(round(sample_rate * 0.0015)))
     merged = _merge_runs(raw_runs, merge_gap)
 
-    max_click_samples = max(2, int(round(sample_rate * max_click_ms / 1000.0)))
+    max_click_samples = max(2, int(round(sample_rate * max_click_ms_capped / 1000.0)))
     pad_samples = min(max(1, int(round(sample_rate * 0.0005))), max(1, max_click_samples // 6))
 
     repaired = x64.copy()
@@ -342,7 +360,7 @@ def _declick_channel(
         repaired[rep_start:rep_end] = _reconstruct_click_span(repaired, rep_start, rep_end)
         repaired_count += 1
 
-    return np.ascontiguousarray(repaired, dtype=np.float32), repaired_count
+    return _to_finite_float32(repaired), repaired_count
 
 
 def apply_mouth_declick(
@@ -450,7 +468,7 @@ def apply_declip(
         if peak > 0.99:
             out64 *= 0.99 / peak
 
-    out32 = np.ascontiguousarray(out64, dtype=np.float32)
+    out32 = _to_finite_float32(out64)
     return _restore_shape(out32, was_1d), total_clips
 
 
@@ -466,15 +484,6 @@ def _extract_ambient_profile(
 
     frame_len = max(32, min(int(round(sample_rate * 0.020)), n // 2))
     n_frames = n // frame_len
-    if n_frames < 2:
-        single_rms_o = float(np.sqrt(np.mean(orig * orig)))
-        single_rms_c = float(np.sqrt(np.mean(clean * clean)))
-        if single_rms_o < 1e-6:
-            return None
-        n_fft = 1 << max(5, min(10, int(math.floor(math.log2(n)))))
-        win = np.hanning(n_fft)
-        mag = np.abs(np.fft.rfft(orig[:n_fft] * win))
-        return mag, single_rms_o, single_rms_c
 
     trimmed = n_frames * frame_len
     o_frames = orig[:trimmed].reshape(n_frames, frame_len)
@@ -632,7 +641,7 @@ def apply_room_tone_floor(
             target_rms = blend_ratio * ambient_rms
         else:
             assert target_floor_db is not None
-            target_rms = float(10.0 ** (target_floor_db / 20.0))
+            target_rms = float(10.0 ** (max(target_floor_db, -300.0) / 20.0))
 
         if cleaned_floor_rms >= target_rms:
             continue
@@ -646,7 +655,7 @@ def apply_room_tone_floor(
         bed = _synthesize_room_tone(mag_profile, samples, fill_rms, seed_keys[ch])
         out[ch] += bed
 
-    out32 = np.ascontiguousarray(out, dtype=np.float32)
+    out32 = _to_finite_float32(out)
     return _restore_shape(out32, clean_1d)
 
 
@@ -755,8 +764,13 @@ def _spectral_box_repair_channel(
 ) -> Float32Array:
     """Apply a smooth 2D STFT attenuation box on one channel with bit-identical exterior."""
     n = int(channel.shape[0])
-    start_idx = max(0, int(round(start_s * sample_rate)))
-    end_idx = min(n, int(round(end_s * sample_rate)))
+    duration_s = float(n) / float(sample_rate)
+    if start_s >= duration_s:
+        return channel.copy()
+    clamped_start_s = max(0.0, start_s)
+    clamped_end_s = min(end_s, duration_s)
+    start_idx = max(0, int(round(clamped_start_s * sample_rate)))
+    end_idx = min(n, int(round(clamped_end_s * sample_rate)))
     if end_idx <= start_idx:
         return channel.copy()
 
@@ -812,8 +826,8 @@ def _spectral_box_repair_channel(
         f_mask[nearest_bin] = 1.0
 
     t_abs = (ctx_start / float(sample_rate)) + times_arr
-    stft_lo = max(0.0, start_s - taper_s) if start_idx > 0 else start_s
-    stft_hi = min(n / float(sample_rate), end_s + taper_s) if end_idx < n else end_s
+    stft_lo = max(0.0, clamped_start_s - taper_s) if start_idx > 0 else clamped_start_s
+    stft_hi = min(duration_s, clamped_end_s + taper_s) if end_idx < n else clamped_end_s
     t_mask = _raised_cosine_box_1d(
         t_abs,
         stft_lo,
@@ -823,7 +837,7 @@ def _spectral_box_repair_channel(
         taper_hi=end_idx < n,
     )
     if not bool(np.any(t_mask > 0.0)) and times_arr.size > 0:
-        nearest_frame = int(np.argmin(np.abs(t_abs - 0.5 * (start_s + end_s))))
+        nearest_frame = int(np.argmin(np.abs(t_abs - 0.5 * (clamped_start_s + clamped_end_s))))
         t_mask[nearest_frame] = 1.0
 
     mask_2d = f_mask[:, np.newaxis] * t_mask[np.newaxis, :]
@@ -861,7 +875,7 @@ def _spectral_box_repair_channel(
     orig_seg = channel[splice_start:splice_end].astype(np.float64, copy=False)
     rep_seg = repaired_slice[local_start:local_end]
     blended = orig_seg * (1.0 - blend) + rep_seg * blend
-    out[splice_start:splice_end] = blended.astype(np.float32)
+    out[splice_start:splice_end] = _to_finite_float32(blended)
     return out
 
 

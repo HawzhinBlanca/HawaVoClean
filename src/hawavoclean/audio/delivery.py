@@ -45,6 +45,11 @@ _WAV_HEADER_RESERVE_BYTES = 1 << 20
 _STREAM_COPY_BYTES = 1 << 20
 _STREAM_AUDIO_FRAMES = 1 << 18
 _MAX_STATIC_GAIN_DB = 36.0
+MAX_METADATA_CHUNK_BYTES = 4 * 1024 * 1024  # 4 MiB DoS cap per BWF/iXML chunk
+_MAX_DS64_CHUNK_BYTES = 1 * 1024 * 1024  # 1 MiB DoS cap for RF64 ds64 chunk
+_MAX_WAV_CHUNKS = 4096
+_MAX_RF64_SIZE = (1 << 63) - 1
+_F32_MAX = float(np.finfo(np.float32).max)
 
 _LRA_BLOCK_SIZE_S = 3.0
 _LRA_HOP_SIZE_S = 0.1
@@ -117,7 +122,7 @@ def _validate_audio(
     sample_rate: int,
 ) -> tuple[Float32Array, bool]:
     """Validate audio array and normalize to contiguous 2D (channels, samples) float32."""
-    if sample_rate <= 0:
+    if isinstance(sample_rate, bool) or sample_rate <= 0:
         raise ValueError(f"sample_rate must be positive, got {sample_rate}")
     arr = np.asarray(waveform)
     if arr.ndim not in (1, 2):
@@ -125,10 +130,19 @@ def _validate_audio(
     if arr.size > 0 and not np.all(np.isfinite(arr)):
         raise ValueError("waveform contains NaN or Inf values")
     was_1d = arr.ndim == 1
-    f32 = np.ascontiguousarray(arr, dtype=np.float32)
+    with np.errstate(over="ignore", invalid="ignore"):
+        f32 = np.ascontiguousarray(arr, dtype=np.float32)
+    if f32.size > 0 and not np.all(np.isfinite(f32)):
+        raise ValueError("waveform contains NaN or Inf values after float32 conversion")
     if was_1d:
         f32 = f32[np.newaxis, :]
     return f32, was_1d
+
+
+def _scale_to_finite_float32(wave_2d: Float32Array, gain_linear: float) -> Float32Array:
+    """Scale float32 audio in float64 and clamp to finite float32 bounds without warnings."""
+    scaled = wave_2d.astype(np.float64, copy=False) * gain_linear
+    return np.ascontiguousarray(np.clip(scaled, -_F32_MAX, _F32_MAX), dtype=np.float32)
 
 
 def _restore_shape(wave_2d: Float32Array, was_1d: bool) -> Float32Array:
@@ -258,10 +272,8 @@ def apply_delivery_loudness(
                 gain_db = 0.0
                 processed = wave_2d.copy()
             else:
-                gain_linear = np.float32(10.0 ** (gain_db / 20.0))
-                processed = np.ascontiguousarray(
-                    np.multiply(wave_2d, gain_linear, dtype=np.float32), dtype=np.float32
-                )
+                gain_linear = float(10.0 ** (gain_db / 20.0))
+                processed = _scale_to_finite_float32(wave_2d, gain_linear)
 
         post = measure_loudness_and_peaks(processed, sample_rate)
         lra = compute_loudness_range_lu(processed, sample_rate)
@@ -291,10 +303,8 @@ def apply_delivery_loudness(
         gain_db = float(
             np.clip(target - pre.integrated_lufs, -_MAX_STATIC_GAIN_DB, _MAX_STATIC_GAIN_DB)
         )
-        gain_linear = np.float32(10.0 ** (gain_db / 20.0))
-        gained = np.ascontiguousarray(
-            np.multiply(wave_2d, gain_linear, dtype=np.float32), dtype=np.float32
-        )
+        gain_linear = float(10.0 ** (gain_db / 20.0))
+        gained = _scale_to_finite_float32(wave_2d, gain_linear)
 
     limiter_res = apply_lookahead_limiter(gained, sample_rate, ceiling_dbtp=ceiling)
     processed = np.ascontiguousarray(limiter_res.limited_waveform, dtype=np.float32)
@@ -332,6 +342,8 @@ def _parse_ds64_sizes(payload: bytes) -> tuple[int, int, dict[bytes, int]]:
     if len(payload) < 28:
         raise ValueError(f"Malformed RF64 ds64 chunk: expected >=28 bytes, got {len(payload)}")
     riff_size, data_size, _sample_count, table_len = struct.unpack_from("<QQQI", payload, 0)
+    if riff_size > _MAX_RF64_SIZE or data_size > _MAX_RF64_SIZE:
+        raise ValueError("RF64 ds64 chunk size overflow")
     expected_min = 28 + table_len * 12
     if len(payload) < expected_min:
         raise ValueError(
@@ -342,6 +354,8 @@ def _parse_ds64_sizes(payload: bytes) -> tuple[int, int, dict[bytes, int]]:
     for _ in range(table_len):
         cid = payload[offset : offset + 4]
         csize = struct.unpack_from("<Q", payload, offset + 4)[0]
+        if csize > _MAX_RF64_SIZE:
+            raise ValueError(f"RF64 ds64 size table overflow for chunk {cid!r}")
         extra[cid] = int(csize)
         offset += 12
     return int(riff_size), int(data_size), extra
@@ -363,15 +377,25 @@ def _scan_wav_chunks(
 
     pos = 12
     while pos < file_size:
+        if len(records) >= _MAX_WAV_CHUNKS:
+            raise ValueError(
+                f"WAV container exceeds maximum allowed chunk count ({_MAX_WAV_CHUNKS})"
+            )
         if file_size - pos < 8:
             raise ValueError(f"Truncated WAV chunk header at offset {pos}")
         handle.seek(pos)
         chunk_hdr = handle.read(8)
+        if len(chunk_hdr) < 8:
+            raise ValueError(f"Truncated WAV chunk header at offset {pos}")
         chunk_id = chunk_hdr[:4]
         raw_size = int.from_bytes(chunk_hdr[4:8], "little")
         payload_offset = pos + 8
 
         actual_size = raw_size
+        if magic == b"RIFF" and raw_size == 0xFFFFFFFF:
+            raise ValueError(
+                f"Classic RIFF chunk {chunk_id!r} uses invalid 0xFFFFFFFF size sentinel"
+            )
         if magic == b"RF64" and raw_size == 0xFFFFFFFF:
             if chunk_id == b"data" and ds64_data_size is not None:
                 actual_size = ds64_data_size
@@ -388,9 +412,20 @@ def _scan_wav_chunks(
                 f"need {actual_size} bytes, only {file_size - payload_offset} available"
             )
 
-        if magic == b"RF64" and chunk_id == b"ds64" and not records:
+        if magic == b"RF64" and chunk_id == b"ds64":
+            if records:
+                raise ValueError("RF64 ds64 chunk must be the first chunk")
+            if actual_size > _MAX_DS64_CHUNK_BYTES:
+                raise ValueError(f"RF64 ds64 chunk exceeds {_MAX_DS64_CHUNK_BYTES} byte safety cap")
             ds64_bytes = handle.read(actual_size)
+            if len(ds64_bytes) < actual_size:
+                raise ValueError("Truncated RF64 ds64 chunk payload")
             _, ds64_data_size, ds64_extra = _parse_ds64_sizes(ds64_bytes)
+            if ds64_data_size > file_size:
+                raise ValueError("RF64 ds64 data_size exceeds file size")
+            for extra_cid, extra_size in ds64_extra.items():
+                if extra_size > file_size:
+                    raise ValueError(f"RF64 ds64 size for chunk {extra_cid!r} exceeds file size")
 
         records.append(_WavChunkRecord(chunk_id, payload_offset, actual_size, raw_size))
         pos = payload_offset + actual_size + (actual_size & 1)
@@ -403,7 +438,8 @@ def extract_wav_metadata_chunks(wav_path: Path) -> dict[bytes, bytes]:
 
     Returns an empty dict for non-WAV containers (e.g. MP4/FLAC). Raises
     ``FileNotFoundError`` if ``wav_path`` does not exist and ``ValueError`` if a
-    RIFF/RF64 WAVE file is structurally truncated or corrupt.
+    RIFF/RF64 WAVE file is structurally truncated, corrupt, or exceeds metadata
+    safety caps.
     """
     path = Path(wav_path)
     if not path.is_file():
@@ -422,8 +458,16 @@ def extract_wav_metadata_chunks(wav_path: Path) -> dict[bytes, bytes]:
         extracted: dict[bytes, bytes] = {}
         for rec in records:
             if rec.chunk_id in PRESERVED_WAV_METADATA_CHUNKS:
+                if rec.payload_size > MAX_METADATA_CHUNK_BYTES:
+                    raise ValueError(
+                        f"WAV metadata chunk {rec.chunk_id!r} exceeds "
+                        f"{MAX_METADATA_CHUNK_BYTES} byte safety cap (got {rec.payload_size})"
+                    )
                 handle.seek(rec.payload_offset)
-                extracted[rec.chunk_id] = handle.read(rec.payload_size)
+                payload = handle.read(rec.payload_size)
+                if len(payload) < rec.payload_size:
+                    raise ValueError(f"Truncated WAV metadata chunk {rec.chunk_id!r}")
+                extracted[rec.chunk_id] = payload
         return extracted
 
 
@@ -461,8 +505,10 @@ def inject_wav_metadata_chunks(wav_path: Path, chunks: dict[bytes, bytes]) -> bo
             raise ValueError(f"Cannot inject protected structural WAV chunk {chunk_id!r}")
         if not isinstance(payload, bytes):
             raise ValueError(f"WAV chunk payload for {chunk_id!r} must be bytes")
-        if len(payload) > _WAV_CLASSIC_LIMIT_BYTES:
-            raise ValueError(f"WAV metadata chunk {chunk_id!r} exceeds 32-bit chunk size limit")
+        if len(payload) > MAX_METADATA_CHUNK_BYTES:
+            raise ValueError(
+                f"WAV metadata chunk {chunk_id!r} exceeds {MAX_METADATA_CHUNK_BYTES} byte safety cap"
+            )
 
     path = Path(wav_path).resolve()
     if not path.is_file():

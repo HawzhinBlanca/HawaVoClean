@@ -11,6 +11,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import struct
 import threading
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -25,9 +26,23 @@ import soundfile as sf
 from hawavoclean.audio.encode import _finalize_deterministic_wav, _wav_container_format
 
 MAX_POLY_WAV_CHANNELS = 16
+MAX_IXML_CHUNK_BYTES = 1 << 20  # 1 MiB DoS cap for BWF iXML chunks
+_MAX_IXML_SCAN_CHUNKS = 4096
+_MAX_DS64_CHUNK_BYTES = 1 << 20
 POLY_STREAM_BLOCK_FRAMES = 48000
 FLOOR_DBFS = -120.0
+_F32_MAX = float(np.finfo(np.float32).max)
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_FORBIDDEN_XML_RE = re.compile(rb"<!(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
+_CTRL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _validate_finite_f32_range(arr: np.ndarray[Any, np.dtype[np.float64]], label: str) -> None:
+    """Reject NaN/Inf or values outside finite float32 bounds without warnings."""
+    if arr.size == 0:
+        return
+    if not np.all(np.isfinite(arr)) or float(np.max(np.abs(arr))) > _F32_MAX:
+        raise ValueError(f"{label} must contain only finite values within float32 range")
 
 
 def encode_mid_side(
@@ -48,11 +63,15 @@ def encode_mid_side(
         )
     if l_arr.shape[0] != r_arr.shape[0]:
         raise ValueError(f"left and right length mismatch: {l_arr.shape[0]} != {r_arr.shape[0]}")
-    if not (np.all(np.isfinite(l_arr)) and np.all(np.isfinite(r_arr))):
-        raise ValueError("left and right channels must contain only finite values")
+    _validate_finite_f32_range(l_arr, "left and right channels")
+    _validate_finite_f32_range(r_arr, "left and right channels")
 
-    mid = np.ascontiguousarray(0.5 * (l_arr + r_arr), dtype=np.float32)
-    side = np.ascontiguousarray(0.5 * (l_arr - r_arr), dtype=np.float32)
+    mid = np.ascontiguousarray(
+        np.clip(0.5 * (l_arr + r_arr), -_F32_MAX, _F32_MAX), dtype=np.float32
+    )
+    side = np.ascontiguousarray(
+        np.clip(0.5 * (l_arr - r_arr), -_F32_MAX, _F32_MAX), dtype=np.float32
+    )
     return mid, side
 
 
@@ -69,11 +88,11 @@ def decode_mid_side(
         )
     if m_arr.shape[0] != s_arr.shape[0]:
         raise ValueError(f"mid and side length mismatch: {m_arr.shape[0]} != {s_arr.shape[0]}")
-    if not (np.all(np.isfinite(m_arr)) and np.all(np.isfinite(s_arr))):
-        raise ValueError("mid and side channels must contain only finite values")
+    _validate_finite_f32_range(m_arr, "mid and side channels")
+    _validate_finite_f32_range(s_arr, "mid and side channels")
 
-    left = np.ascontiguousarray(m_arr + s_arr, dtype=np.float32)
-    right = np.ascontiguousarray(m_arr - s_arr, dtype=np.float32)
+    left = np.ascontiguousarray(np.clip(m_arr + s_arr, -_F32_MAX, _F32_MAX), dtype=np.float32)
+    right = np.ascontiguousarray(np.clip(m_arr - s_arr, -_F32_MAX, _F32_MAX), dtype=np.float32)
     return left, right
 
 
@@ -92,35 +111,39 @@ def enhance_true_stereo_ms(
     to the Side channel so stereo imaging stays coherent without L/R phase
     decorrelation.
     """
-    arr = np.asarray(stereo_2d, dtype=np.float32)
-    if arr.ndim != 2 or arr.shape[0] != 2:
-        raise ValueError(f"stereo_2d must have shape (2, samples), got {arr.shape}")
-    if not math.isfinite(side_attenuation) or not 0.0 <= side_attenuation <= 1.0:
+    raw = np.asarray(stereo_2d, dtype=np.float64)
+    if raw.ndim != 2 or raw.shape[0] != 2:
+        raise ValueError(f"stereo_2d must have shape (2, samples), got {raw.shape}")
+    if (
+        isinstance(side_attenuation, bool)
+        or not math.isfinite(side_attenuation)
+        or not 0.0 <= side_attenuation <= 1.0
+    ):
         raise ValueError(
             f"side_attenuation must be finite and in [0.0, 1.0], got {side_attenuation!r}"
         )
 
-    n_samples = int(arr.shape[1])
+    n_samples = int(raw.shape[1])
     if n_samples == 0:
         return np.empty((2, 0), dtype=np.float32)
 
-    mid, side = encode_mid_side(arr[0], arr[1])
-    enhanced_mid = np.ascontiguousarray(enhance_mono_fn(mid), dtype=np.float32)
-    if enhanced_mid.ndim != 1:
-        raise ValueError(f"enhance_mono_fn must return a 1D array, got shape {enhanced_mid.shape}")
-    if enhanced_mid.shape[0] < n_samples:
-        enhanced_mid = np.ascontiguousarray(
-            np.pad(enhanced_mid, (0, n_samples - enhanced_mid.shape[0]), mode="constant"),
-            dtype=np.float32,
-        )
-    elif enhanced_mid.shape[0] > n_samples:
-        enhanced_mid = np.ascontiguousarray(enhanced_mid[:n_samples], dtype=np.float32)
+    mid, side = encode_mid_side(raw[0], raw[1])
+    enhanced_raw = np.asarray(enhance_mono_fn(mid), dtype=np.float64)
+    if enhanced_raw.ndim != 1:
+        raise ValueError(f"enhance_mono_fn must return a 1D array, got shape {enhanced_raw.shape}")
+    if enhanced_raw.shape[0] < n_samples:
+        enhanced_raw = np.pad(enhanced_raw, (0, n_samples - enhanced_raw.shape[0]), mode="constant")
+    elif enhanced_raw.shape[0] > n_samples:
+        enhanced_raw = enhanced_raw[:n_samples]
 
-    if not np.all(np.isfinite(enhanced_mid)):
+    if not np.all(np.isfinite(enhanced_raw)) or float(np.max(np.abs(enhanced_raw))) > _F32_MAX:
         raise ValueError("enhance_mono_fn produced NaN or Inf samples")
+    enhanced_mid = np.ascontiguousarray(enhanced_raw, dtype=np.float32)
 
     side_scale = 1.0 - float(side_attenuation)
-    attenuated_side = np.ascontiguousarray(side.astype(np.float64) * side_scale, dtype=np.float32)
+    attenuated_side = np.ascontiguousarray(
+        np.clip(side.astype(np.float64) * side_scale, -_F32_MAX, _F32_MAX), dtype=np.float32
+    )
     left_out, right_out = decode_mid_side(enhanced_mid, attenuated_side)
     return np.ascontiguousarray(np.vstack((left_out, right_out)), dtype=np.float32)
 
@@ -154,40 +177,92 @@ class TrackInfo:
         }
 
 
+def _parse_ixml_xml(raw_bytes: bytes) -> dict[int, str]:
+    """Parse sanitized BWF iXML bytes into 0-based track names without DTD/entity expansion."""
+    stripped = raw_bytes.rstrip(b"\x00")
+    if not stripped or _FORBIDDEN_XML_RE.search(stripped) is not None:
+        return {}
+    raw_xml = stripped.decode("utf-8", "replace")
+    root = ET.fromstring(raw_xml)
+    names: dict[int, str] = {}
+    for track in root.findall(".//TRACK_LIST/TRACK"):
+        idx_text = track.findtext("CHANNEL_INDEX")
+        name_text = track.findtext("NAME")
+        if not idx_text or not name_text:
+            continue
+        cleaned_name = _CTRL_CHARS_RE.sub("", name_text).strip()
+        if not cleaned_name:
+            continue
+        try:
+            idx = int(idx_text.strip()) - 1
+        except ValueError:
+            continue
+        if 0 <= idx < MAX_POLY_WAV_CHANNELS:
+            names[idx] = cleaned_name
+    return names
+
+
 def _read_ixml_track_names(path: Path) -> dict[int, str]:
     """Best-effort extraction of 0-based track names from a BWF ``iXML`` chunk."""
-    names: dict[int, str] = {}
     try:
+        file_size = path.stat().st_size
+        if file_size < 12:
+            return {}
         with open(path, "rb") as handle:
             header = handle.read(12)
             if len(header) != 12 or header[:4] not in (b"RIFF", b"RF64") or header[8:12] != b"WAVE":
-                return names
-            while True:
+                return {}
+            magic = header[:4]
+            ds64_data_size: int | None = None
+            ds64_extra: dict[bytes, int] = {}
+            pos = 12
+            chunks_seen = 0
+            while pos + 8 <= file_size and chunks_seen < _MAX_IXML_SCAN_CHUNKS:
+                handle.seek(pos)
                 chunk_hdr = handle.read(8)
                 if len(chunk_hdr) < 8:
                     break
                 chunk_id = chunk_hdr[:4]
-                chunk_size = int.from_bytes(chunk_hdr[4:8], "little")
-                if chunk_id == b"iXML":
-                    # Bound XML payload read to 1 MiB to avoid hostile headers.
-                    if 0 < chunk_size <= 1 << 20:
-                        raw_xml = handle.read(chunk_size).rstrip(b"\x00").decode("utf-8", "replace")
-                        root = ET.fromstring(raw_xml)
-                        for track in root.findall(".//TRACK_LIST/TRACK"):
-                            idx_text = track.findtext("CHANNEL_INDEX")
-                            name_text = track.findtext("NAME")
-                            if idx_text and name_text and name_text.strip():
-                                idx = int(idx_text.strip()) - 1
-                                if idx >= 0:
-                                    names[idx] = name_text.strip()
+                raw_size = int.from_bytes(chunk_hdr[4:8], "little")
+                payload_offset = pos + 8
+
+                actual_size = raw_size
+                if magic == b"RF64" and raw_size == 0xFFFFFFFF:
+                    if chunk_id == b"data" and ds64_data_size is not None:
+                        actual_size = ds64_data_size
+                    elif chunk_id in ds64_extra:
+                        actual_size = ds64_extra[chunk_id]
+                    else:
+                        break
+                elif magic == b"RIFF" and raw_size == 0xFFFFFFFF:
                     break
-                # Skip chunk payload (+ RIFF pad byte).
-                if chunk_id == b"data" and chunk_size == 0xFFFFFFFF:
+
+                if payload_offset + actual_size > file_size:
                     break
-                handle.seek(chunk_size + (chunk_size & 1), os.SEEK_CUR)
+
+                if magic == b"RF64" and chunk_id == b"ds64" and chunks_seen == 0:
+                    if 28 <= actual_size <= _MAX_DS64_CHUNK_BYTES:
+                        ds64_raw = handle.read(actual_size)
+                        _, data_sz, _, table_len = struct.unpack_from("<QQQI", ds64_raw, 0)
+                        ds64_data_size = int(data_sz)
+                        if len(ds64_raw) >= 28 + table_len * 12:
+                            off = 28
+                            for _ in range(table_len):
+                                cid = ds64_raw[off : off + 4]
+                                ds64_extra[cid] = int(
+                                    struct.unpack_from("<Q", ds64_raw, off + 4)[0]
+                                )
+                                off += 12
+                elif chunk_id == b"iXML":
+                    if 0 < actual_size <= MAX_IXML_CHUNK_BYTES:
+                        return _parse_ixml_xml(handle.read(actual_size))
+                    return {}
+
+                pos = payload_offset + actual_size + (actual_size & 1)
+                chunks_seen += 1
     except Exception:
         return {}
-    return names
+    return {}
 
 
 def _build_speech_band_sos(sample_rate: int) -> np.ndarray[Any, np.dtype[np.float64]] | None:
@@ -352,30 +427,32 @@ def extract_polywav_tracks(
     target_dir = Path(out_dir).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    with sf.SoundFile(str(file_path)) as reader:
-        channels = int(reader.channels)
-        sample_rate = int(reader.samplerate)
-        total_frames = int(reader.frames)
-        if not 1 <= channels <= MAX_POLY_WAV_CHANNELS:
-            raise ValueError(
-                f"Poly-WAV track count {channels} outside supported range 1..{MAX_POLY_WAV_CHANNELS}"
-            )
-        for idx in track_indices:
-            if isinstance(idx, bool) or not 0 <= idx < channels:
+    final_by_idx: dict[int, Path] = {}
+    tmp_by_idx: dict[int, Path] = {}
+    writers: dict[int, sf.SoundFile] = {}
+    unique_indices: list[int] = list(dict.fromkeys(track_indices))
+
+    try:
+        with sf.SoundFile(str(file_path)) as reader:
+            channels = int(reader.channels)
+            sample_rate = int(reader.samplerate)
+            total_frames = int(reader.frames)
+            if not 1 <= channels <= MAX_POLY_WAV_CHANNELS:
                 raise ValueError(
-                    f"Track index {idx!r} out of range 0..{channels - 1} for {file_path}"
+                    f"Poly-WAV track count {channels} outside supported range 1..{MAX_POLY_WAV_CHANNELS}"
                 )
+            if sample_rate <= 0:
+                raise ValueError(f"Invalid sample_rate {sample_rate} in {file_path}")
+            for idx in track_indices:
+                if isinstance(idx, bool) or not 0 <= idx < channels:
+                    raise ValueError(
+                        f"Track index {idx!r} out of range 0..{channels - 1} for {file_path}"
+                    )
 
-        subtype: Literal["PCM_24", "FLOAT"] = "FLOAT" if reader.subtype == "FLOAT" else "PCM_24"
-        container = _wav_container_format(1, total_frames, subtype)
+            subtype: Literal["PCM_24", "FLOAT"] = "FLOAT" if reader.subtype == "FLOAT" else "PCM_24"
+            container = _wav_container_format(1, total_frames, subtype)
 
-        unique_indices: list[int] = list(dict.fromkeys(track_indices))
-        stem = _sanitize_track_slug(file_path.stem)
-        final_by_idx: dict[int, Path] = {}
-        tmp_by_idx: dict[int, Path] = {}
-        writers: dict[int, sf.SoundFile] = {}
-
-        try:
+            stem = _sanitize_track_slug(file_path.stem)
             for idx in unique_indices:
                 raw_name = ixml_names.get(idx)
                 if raw_name:
@@ -410,14 +487,17 @@ def extract_polywav_tracks(
 
             for idx in unique_indices:
                 writers[idx].close()
-                _finalize_deterministic_wav(tmp_by_idx[idx])
-                os.replace(tmp_by_idx[idx], final_by_idx[idx])
-        except Exception:
-            for writer in writers.values():
-                if not writer.closed:
-                    writer.close()
-            for tmp_path in tmp_by_idx.values():
-                tmp_path.unlink(missing_ok=True)
-            raise
+
+        # All file handles (reader and all writers) are closed before atomic replace (Windows-safe).
+        for idx in unique_indices:
+            _finalize_deterministic_wav(tmp_by_idx[idx])
+            os.replace(tmp_by_idx[idx], final_by_idx[idx])
+    except Exception:
+        for writer in writers.values():
+            if not writer.closed:
+                writer.close()
+        for tmp_path in tmp_by_idx.values():
+            tmp_path.unlink(missing_ok=True)
+        raise
 
     return [final_by_idx[idx] for idx in track_indices]
