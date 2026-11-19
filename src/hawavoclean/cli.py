@@ -22,6 +22,7 @@ import scipy
 import soundfile as sf
 
 from hawavoclean import __version__
+from hawavoclean.audio.delivery import DELIVERY_PRESETS, DeliveryPreset
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.config import load_config
 from hawavoclean.enhancement.factory import CORE_REGISTRY
@@ -511,6 +512,49 @@ def cmd_process(args: argparse.Namespace) -> int:
     )
     strength = getattr(args, "strength", None)
     raw_time_range = getattr(args, "time_range", None)
+    raw_ambience_floor_db = getattr(args, "ambience_floor_db", None)
+    ambience_floor_db: float | None = None
+    if raw_ambience_floor_db is not None:
+        val_floor = float(raw_ambience_floor_db)
+        if not math.isfinite(val_floor) or not -120.0 <= val_floor <= -12.0:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "--ambience-floor-db must be a finite number between -120.0 and -12.0",
+            )
+        ambience_floor_db = val_floor
+    raw_delivery_preset = getattr(args, "delivery_preset", None)
+    delivery_preset: DeliveryPreset | None = None
+    if raw_delivery_preset is not None:
+        if raw_delivery_preset not in DELIVERY_PRESETS:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                f"Unsupported --delivery-preset: {raw_delivery_preset!r}",
+            )
+        delivery_preset = raw_delivery_preset
+    raw_pro_repair = getattr(args, "pro_repair", None)
+    pro_repair: dict[str, bool] | None = None
+    if raw_pro_repair is not None:
+        allowed_repair = {
+            "declip",
+            "deplosive",
+            "declick",
+            "mouthDeclick",
+            "mouth_declick",
+            "deess",
+            "tonalRestoration",
+            "tonal_restoration",
+            "levelRider",
+            "level_rider",
+        }
+        tokens = [tok.strip() for tok in str(raw_pro_repair).split(",") if tok.strip()]
+        bad_tokens = [tok for tok in tokens if tok not in allowed_repair]
+        if bad_tokens:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                f"Unsupported --pro-repair flag(s): {', '.join(bad_tokens)}",
+            )
+        if tokens:
+            pro_repair = dict.fromkeys(tokens, True)
     time_range: tuple[float, float] | None = None
     if strength is not None and (
         not math.isfinite(float(strength)) or not 0.1 <= float(strength) <= 1.0
@@ -594,6 +638,9 @@ def cmd_process(args: argparse.Namespace) -> int:
                 clean_only=clean_only,
                 on_progress=on_progress,
                 allow_research_restore=allow_research_restore,
+                ambience_floor_db=ambience_floor_db,
+                delivery_preset=delivery_preset,
+                pro_repair=pro_repair,
             )
         elif passes == 1:
             # The default path: byte-identical to a run before --passes
@@ -613,6 +660,9 @@ def cmd_process(args: argparse.Namespace) -> int:
                 clean_only=clean_only,
                 original_input_path=getattr(args, "original_input_path", None),
                 allow_research_restore=allow_research_restore,
+                ambience_floor_db=ambience_floor_db,
+                delivery_preset=delivery_preset,
+                pro_repair=pro_repair,
             )
         else:
             run_multipass(
@@ -760,9 +810,13 @@ def _run_natural_edit_blend(
     clean_only: bool,
     on_progress: Any,
     allow_research_restore: bool,
+    ambience_floor_db: float | None = None,
+    delivery_preset: DeliveryPreset | None = None,
+    pro_repair: dict[str, bool] | None = None,
 ) -> None:
     """Run single-pass natural cleanup with wet/dry strength and/or surgical time_range."""
     from hawavoclean.audio.decode import decode_audio
+    from hawavoclean.audio.delivery import apply_delivery_loudness
     from hawavoclean.audio.encode import encode_audio
     from hawavoclean.audio.resample import resample_audio
     from hawavoclean.audio.types import AudioBuffer
@@ -808,6 +862,8 @@ def _run_natural_edit_blend(
                 clean_only=clean_only,
                 original_input_path=getattr(args, "original_input_path", None) or str(source),
                 allow_research_restore=allow_research_restore,
+                ambience_floor_db=ambience_floor_db,
+                pro_repair=pro_repair,
             )
             enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
             enh_window = resample_audio(enh_raw.T, enh_sr, sr, pad_end - pad_start)
@@ -838,6 +894,8 @@ def _run_natural_edit_blend(
                 clean_only=clean_only,
                 original_input_path=getattr(args, "original_input_path", None),
                 allow_research_restore=allow_research_restore,
+                ambience_floor_db=ambience_floor_db,
+                pro_repair=pro_repair,
             )
             enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
             enh_full = resample_audio(enh_raw.T, enh_sr, sr, original.samples)
@@ -848,7 +906,11 @@ def _run_natural_edit_blend(
                 ],
                 axis=0,
             )
-            result = apply_lookahead_limiter(result, sr).limited_waveform
+            if delivery_preset is not None:
+                in_lufs = measure_loudness_and_peaks(orig_data, sr).integrated_lufs
+                result, _ = apply_delivery_loudness(result, sr, delivery_preset, input_lufs=in_lufs)
+            else:
+                result = apply_lookahead_limiter(result, sr).limited_waveform
 
         tmp_final = work / "final.wav"
         output_bit_depth, use_dither = _surgical_encode_params(source, time_range)
@@ -2672,6 +2734,23 @@ def _main() -> None:
         metavar=("START_S", "END_S"),
         default=None,
         help="Optional surgical edit range in seconds (samples outside remain bit-identical)",
+    )
+    p_proc.add_argument(
+        "--ambience-floor-db",
+        type=float,
+        default=None,
+        help="Optional target room-tone ambience floor in dBFS ([-120.0, -12.0])",
+    )
+    p_proc.add_argument(
+        "--delivery-preset",
+        choices=sorted(DELIVERY_PRESETS.keys()),
+        default=None,
+        help="Optional broadcast/streaming loudness delivery preset",
+    )
+    p_proc.add_argument(
+        "--pro-repair",
+        default=None,
+        help="Optional comma-separated surgical dialogue repair flags (declip,deplosive,declick)",
     )
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"

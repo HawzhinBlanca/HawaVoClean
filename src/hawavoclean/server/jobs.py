@@ -60,6 +60,7 @@ from hawavoclean.server.job_store import (
     unique_candidate,
     user_artifact_paths,
 )
+from hawavoclean.server.unit_restitch import UnitSliceStore
 from hawavoclean.source_pin import PinnedSource, remove_source_snapshot_tree
 from hawavoclean.watchdog import child_env
 
@@ -171,6 +172,9 @@ class JobRecord:
     separation_options: dict[str, Any] | None = None
     strength: float | None = None
     time_range: tuple[float, float] | None = None
+    ambience_floor_db: float | None = None
+    delivery_preset: str | None = None
+    pro_repair: dict[str, bool] | None = None
     speaker_id: str | None = None
     cutoff_hz: float | None = None
     record_bundle: bool = False
@@ -227,6 +231,12 @@ class JobRecord:
             out["strength"] = self.strength
         if self.time_range is not None:
             out["time_range"] = [self.time_range[0], self.time_range[1]]
+        if self.ambience_floor_db is not None:
+            out["ambience_floor_db"] = self.ambience_floor_db
+        if self.delivery_preset is not None:
+            out["delivery_preset"] = self.delivery_preset
+        if self.pro_repair is not None:
+            out["pro_repair"] = dict(self.pro_repair)
         if self.unit is not None:
             out["unit"] = dict(self.unit)
         if self.idempotency_key is not None:
@@ -267,6 +277,9 @@ class JobRecord:
             "separation_options": self.separation_options,
             "strength": self.strength,
             "time_range": list(self.time_range) if self.time_range is not None else None,
+            "ambience_floor_db": self.ambience_floor_db,
+            "delivery_preset": self.delivery_preset,
+            "pro_repair": dict(self.pro_repair) if self.pro_repair is not None else None,
             "speaker_id": self.speaker_id,
             "cutoff_hz": self.cutoff_hz,
             "record_bundle": self.record_bundle,
@@ -333,6 +346,19 @@ class JobRecord:
                 (float(value["time_range"][0]), float(value["time_range"][1]))
                 if isinstance(value.get("time_range"), (list, tuple))
                 and len(value["time_range"]) == 2
+                else None
+            ),
+            ambience_floor_db=(
+                float(value["ambience_floor_db"])
+                if value.get("ambience_floor_db") is not None
+                else None
+            ),
+            delivery_preset=(
+                str(value["delivery_preset"]) if value.get("delivery_preset") is not None else None
+            ),
+            pro_repair=(
+                {str(k): bool(v) for k, v in value["pro_repair"].items()}
+                if isinstance(value.get("pro_repair"), dict)
                 else None
             ),
             speaker_id=(str(value["speaker_id"]) if value.get("speaker_id") is not None else None),
@@ -435,6 +461,14 @@ def default_command(record: JobRecord) -> list[str]:
             cmd += ["--strength", str(record.strength)]
         if record.time_range is not None:
             cmd += ["--time-range", str(record.time_range[0]), str(record.time_range[1])]
+        if record.ambience_floor_db is not None:
+            cmd += ["--ambience-floor-db", str(record.ambience_floor_db)]
+        if record.delivery_preset is not None:
+            cmd += ["--delivery-preset", str(record.delivery_preset)]
+        if record.pro_repair:
+            enabled_repairs = sorted(k for k, v in record.pro_repair.items() if v)
+            if enabled_repairs:
+                cmd += ["--pro-repair", ",".join(enabled_repairs)]
     if record.overwrite:
         cmd.append("--overwrite")
     if record.record_bundle:
@@ -920,6 +954,9 @@ class JobManager:
         separation_options: dict[str, Any] | None = None,
         strength: float | None = None,
         time_range: tuple[float, float] | None = None,
+        ambience_floor_db: float | None = None,
+        delivery_preset: str | None = None,
+        pro_repair: dict[str, bool] | None = None,
         speaker_id: str | None = None,
         cutoff_hz: float | None = None,
         idempotency_key: str | None = None,
@@ -1008,6 +1045,12 @@ class JobManager:
                 request_payload["strength"] = strength
             if time_range is not None:
                 request_payload["time_range"] = [time_range[0], time_range[1]]
+            if ambience_floor_db is not None:
+                request_payload["ambience_floor_db"] = ambience_floor_db
+            if delivery_preset is not None:
+                request_payload["delivery_preset"] = delivery_preset
+            if pro_repair is not None:
+                request_payload["pro_repair"] = dict(pro_repair)
             request_hash = canonical_request_hash(request_payload)
 
             with self._wake:
@@ -1052,6 +1095,9 @@ class JobManager:
                 separation_options=separation_options,
                 strength=strength,
                 time_range=time_range,
+                ambience_floor_db=ambience_floor_db,
+                delivery_preset=delivery_preset,
+                pro_repair=dict(pro_repair) if pro_repair is not None else None,
                 speaker_id=speaker_id,
                 cutoff_hz=cutoff_hz,
                 record_bundle=record_bundle,
@@ -1257,6 +1303,24 @@ class JobManager:
         with self._lock:
             self._prune_locked()
             return [r.snapshot() for r in self._jobs.values()]
+
+    def update_completed_override(
+        self,
+        job_id: str,
+        updated_report: dict[str, Any],
+        *,
+        recapture_artifacts: bool = False,
+    ) -> dict[str, Any] | None:
+        """Persist an updated report (and refreshed artifact hashes after live re-stitch)."""
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None or record.state != "done":
+                return None
+            record.report = updated_report
+            if recapture_artifacts and not record.record_bundle:
+                self._capture_nonbundle_artifacts(record)
+            self._notify_locked(record)
+            return record.snapshot()
 
     @property
     def persistence_error(self) -> str | None:
@@ -1865,6 +1929,11 @@ class JobManager:
             self._subscribers.pop(job_id, None)
             if removed is not None and removed.idempotency_key is not None:
                 self._idempotency.pop(removed.idempotency_key, None)
+            with contextlib.suppress(Exception):
+                UnitSliceStore(work_root()).delete_job(job_id)
+        if expired:
+            with contextlib.suppress(Exception):
+                UnitSliceStore(work_root()).cleanup()
 
     def _run_loop(self) -> None:
         while True:
@@ -1902,7 +1971,7 @@ class JobManager:
                         record.error = {"code": "INTERNAL", "message": str(e)}
                         self._finish_locked(record, "failed", str(e))
 
-    def _child_env(self) -> dict[str, str]:
+    def _child_env(self, record: JobRecord | None = None) -> dict[str, str]:
         """The child's environment, always carrying this engine's pid.
 
         ``shutdown()`` only runs when the engine exits *gracefully*. An engine
@@ -1913,7 +1982,12 @@ class JobManager:
         written". So the child watches the engine itself:
         ``hawavoclean.watchdog``.
         """
-        return child_env(self._env)
+        env = child_env(self._env)
+        if record is not None:
+            env["HAWAVOCLEAN_UNIT_SLICE_DIR"] = str(
+                UnitSliceStore(work_root()).job_dir(record.job_id)
+            )
+        return env
 
     def _run_job(self, record: JobRecord) -> None:
         cmd = self._command_factory(record)
@@ -1927,7 +2001,7 @@ class JobManager:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
-                env=self._child_env(),
+                env=self._child_env(record),
             )
             proc = supervisor.process
         except OSError as e:

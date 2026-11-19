@@ -22,6 +22,10 @@ from hawavoclean.pipeline import run_pipeline
 
 if sys.platform == "win32" and "CI" in os.environ:
     CI_CEILING = 1.75
+elif "CI" in os.environ and sys.version_info < (3, 12) and sys.gettrace() is not None:
+    # Python 3.11 coverage relies on sys.settrace CTracer (vs PEP 669
+    # sys.monitoring on 3.12+), adding ~25-40% overhead on CPU-bound DSP.
+    CI_CEILING = 0.85
 elif "CI" in os.environ:
     CI_CEILING = 0.60
 else:

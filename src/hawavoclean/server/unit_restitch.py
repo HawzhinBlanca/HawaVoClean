@@ -439,7 +439,7 @@ def restitch_master_with_overrides(
             )
             prev_strength = float(rec.get("chosen_strength", 0.0))
             if (
-                prev_decision in ("ENHANCED", "CONTINUITY_CROSSFADED")
+                prev_decision.upper() in ("ENHANCED", "CONTINUITY_CROSSFADED")
                 and cand is not None
                 and prev_strength > 0.0
             ):

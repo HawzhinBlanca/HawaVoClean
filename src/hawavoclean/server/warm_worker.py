@@ -36,6 +36,7 @@ from hawavoclean.config import load_config
 from hawavoclean.enhancement.factory import CORE_REGISTRY, resolve_core
 from hawavoclean.enhancement.protocol import Enhancer
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks
+from hawavoclean.finishing.pro_repair import apply_room_tone_floor
 from hawavoclean.guard.perceptual_mos import PerceptualQualityScorer
 from hawavoclean.paths import profile_config_path, work_root
 from hawavoclean.runtime import memory_budget_mb, process_peak_rss_bytes
@@ -297,6 +298,7 @@ class RegionPreviewRequest:
     profile: str = "production"
     core_id: str | None = None
     strength: float = 1.0
+    ambience_floor_db: float | None = None
     include_perceptual_mos: bool = False
     output_dir: Path | None = None
 
@@ -525,6 +527,13 @@ def render_region_preview(
             out_channels.append(blended)
 
     after_data = np.ascontiguousarray(np.vstack(out_channels), dtype=np.float32)
+    if request.ambience_floor_db is not None:
+        after_data = apply_room_tone_floor(
+            orig_data,
+            after_data,
+            target_sr,
+            target_floor_db=float(request.ambience_floor_db),
+        )
 
     before_lufs_m = measure_loudness_and_peaks(orig_data, target_sr)
     after_lufs_m = measure_loudness_and_peaks(after_data, target_sr)

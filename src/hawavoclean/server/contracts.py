@@ -44,6 +44,25 @@ class ContractModel(BaseModel):
 
 
 RestorePolicy = Literal["disabled", "source_allowed", "enrolled_only", "auto"]
+DeliveryPresetV1 = Literal["match_input", "ebu_r128", "atsc_a85", "podcast", "streaming"]
+ExportFormatV1 = Literal["wav24", "wav32f", "flac", "aac", "video_mux"]
+SpectrogramModeV1 = Literal["original", "cleaned", "delta"]
+SpectrogramScaleV1 = Literal["log", "mel", "linear"]
+
+_ALLOWED_PRO_REPAIR_KEYS: frozenset[str] = frozenset(
+    {
+        "declip",
+        "deplosive",
+        "declick",
+        "mouthDeclick",
+        "mouth_declick",
+        "deess",
+        "tonalRestoration",
+        "tonal_restoration",
+        "levelRider",
+        "level_rider",
+    }
+)
 ManualRoute = Literal[
     "production",
     "studio",
@@ -92,11 +111,29 @@ class ManualStrategyV1(ContractModel):
     allow_generative_reconstruction: bool = False
     strength: float | None = Field(default=None, ge=0.1, le=1.0, allow_inf_nan=False)
     time_range: tuple[float, float] | None = None
+    ambience_floor_db: float | None = Field(default=None, ge=-120.0, le=-12.0, allow_inf_nan=False)
+    delivery_preset: DeliveryPresetV1 | None = None
+    pro_repair: dict[str, bool] | None = None
 
-    @field_validator("strength", mode="before")
+    @field_validator("strength", "ambience_floor_db", mode="before")
     @classmethod
-    def _validate_strength_type(cls, value: Any) -> Any:
+    def _validate_numeric_not_bool(cls, value: Any) -> Any:
         return _reject_bool_number(value)
+
+    @field_validator("pro_repair", mode="before")
+    @classmethod
+    def _validate_pro_repair(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("proRepair must be an object mapping repair flag names to booleans")
+        unknown = sorted(str(k) for k in value if k not in _ALLOWED_PRO_REPAIR_KEYS)
+        if unknown:
+            raise ValueError(f"Unsupported proRepair flag(s): {', '.join(unknown)}")
+        for key, flag in value.items():
+            if not isinstance(flag, bool):
+                raise ValueError(f"proRepair[{key!r}] must be a boolean")
+        return value
 
     @field_validator("time_range", mode="before")
     @classmethod
@@ -310,15 +347,144 @@ class JobStatusResponseV1(ContractModel):
 class UnitOverrideRequestV1(ContractModel):
     """Request to manually override a guard decision on a single unit."""
 
-    unit_index: int = Field(ge=0, description="Zero-based unit index in the report's units list")
-    decision: Literal["force_original", "force_enhanced", "auto"] = Field(
+    unit_index: int | None = Field(
+        default=None,
+        ge=0,
+        description="Zero-based unit index in the report's units list",
+    )
+    unit_id: int | None = Field(
+        default=None,
+        ge=0,
+        description="Unit ID in the report's units list",
+    )
+    decision: Literal["force_original", "force_enhanced", "auto", "custom_strength"] = Field(
         description="Override the guard decision for this unit"
     )
+    strength: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Custom wet/dry strength in [0.0, 1.0] when decision is 'custom_strength'",
+    )
+
+    @field_validator("unit_index", "unit_id", "strength", mode="before")
+    @classmethod
+    def _reject_bool_fields(cls, value: Any) -> Any:
+        return _reject_bool_number(value)
+
+    @model_validator(mode="after")
+    def validate_override(self) -> UnitOverrideRequestV1:
+        if self.unit_index is None and self.unit_id is None:
+            raise ValueError("unitIndex or unitId is required")
+        if self.decision == "custom_strength" and self.strength is None:
+            raise ValueError("strength is required when decision is 'custom_strength'")
+        return self
+
+
+class RegionPreviewRequestV1(ContractModel):
+    """Request for a sub-second warm-worker windowed enhancement preview."""
+
+    path: str = Field(min_length=1, max_length=32_768)
+    start_s: float = Field(ge=0.0, allow_inf_nan=False)
+    end_s: float = Field(gt=0.0, allow_inf_nan=False)
+    profile: str = Field(default="production", min_length=1, max_length=64)
+    strength: float = Field(default=1.0, ge=0.0, le=1.0, allow_inf_nan=False)
+    ambience_floor_db: float | None = Field(default=None, ge=-120.0, le=-12.0, allow_inf_nan=False)
+    include_perceptual_mos: bool = False
+
+    @field_validator("start_s", "end_s", "strength", "ambience_floor_db", mode="before")
+    @classmethod
+    def _reject_bool_fields(cls, value: Any) -> Any:
+        return _reject_bool_number(value)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> RegionPreviewRequestV1:
+        if self.end_s <= self.start_s:
+            raise ValueError("endS must be greater than startS")
+        return self
+
+
+class SpectrogramRequestV1(ContractModel):
+    """Request for a 2D STFT or delta spectrogram tile."""
+
+    path: str = Field(min_length=1, max_length=32_768)
+    cleaned_path: str | None = Field(default=None, min_length=1, max_length=32_768)
+    mode: SpectrogramModeV1 = "original"
+    start_s: float = Field(ge=0.0, allow_inf_nan=False)
+    end_s: float = Field(gt=0.0, allow_inf_nan=False)
+    width_cols: int = Field(default=512, ge=1, le=4096)
+    n_bins: int = Field(default=128, ge=1, le=1024)
+    n_fft: int = Field(default=2048, ge=64, le=16384)
+    scale: SpectrogramScaleV1 = "log"
+    db_floor: float | None = Field(default=None, allow_inf_nan=False)
+    db_ceil: float | None = Field(default=None, allow_inf_nan=False)
+
+    @field_validator(
+        "start_s",
+        "end_s",
+        "width_cols",
+        "n_bins",
+        "n_fft",
+        "db_floor",
+        "db_ceil",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_fields(cls, value: Any) -> Any:
+        return _reject_bool_number(value)
+
+    @model_validator(mode="after")
+    def validate_spectrogram(self) -> SpectrogramRequestV1:
+        if self.end_s <= self.start_s:
+            raise ValueError("endS must be greater than startS")
+        if self.mode == "delta" and self.cleaned_path is None:
+            raise ValueError("cleanedPath is required when mode is 'delta'")
+        if self.db_floor is not None and self.db_ceil is not None and self.db_floor >= self.db_ceil:
+            raise ValueError("dbFloor must be less than dbCeil")
+        return self
+
+
+class DeliveryExportRequestV1(ContractModel):
+    """Request to export a master WAV with optional broadcast loudness and metadata preservation."""
+
+    master_path: str = Field(min_length=1, max_length=32_768)
+    dest_path: str | None = Field(default=None, min_length=1, max_length=32_768)
+    format: ExportFormatV1 = "wav24"
+    delivery_preset: DeliveryPresetV1 | None = None
+    source_media_path: str | None = Field(default=None, min_length=1, max_length=32_768)
+    preserve_metadata: bool = True
+
+
+class TrackInspectRequestV1(ContractModel):
+    """Request to inspect tracks inside a multi-channel Poly-WAV/BWF file."""
+
+    path: str = Field(min_length=1, max_length=32_768)
+
+
+class TrackExtractRequestV1(ContractModel):
+    """Request to extract selected 0-based tracks from a Poly-WAV/BWF file."""
+
+    path: str = Field(min_length=1, max_length=32_768)
+    track_indices: list[int] = Field(min_length=1, max_length=16)
+    out_dir: str | None = Field(default=None, min_length=1, max_length=32_768)
+
+    @field_validator("track_indices", mode="before")
+    @classmethod
+    def _validate_track_indices(cls, value: Any) -> Any:
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                    raise ValueError("trackIndices must contain non-negative integers")
+        return value
 
 
 __all__ = [
     "CapabilitiesResponseV1",
     "CapabilityStatusV1",
+    "DeliveryExportRequestV1",
+    "DeliveryPresetV1",
+    "ExportFormatV1",
     "JobLifecycleStateV1",
     "JobStatusResponseV1",
     "ManualStrategyV1",
@@ -326,9 +492,15 @@ __all__ = [
     "ProcessingRequestV1",
     "ProcessingStrategyV1",
     "ProbabilityEstimateV1",
+    "RegionPreviewRequestV1",
     "SeparationStrategyV1",
     "SmartAnalysisRequestV1",
     "SmartAnalysisResponseV1",
     "SmartSafeStrategyV1",
+    "SpectrogramModeV1",
+    "SpectrogramRequestV1",
+    "SpectrogramScaleV1",
+    "TrackExtractRequestV1",
+    "TrackInspectRequestV1",
     "UnitOverrideRequestV1",
 ]

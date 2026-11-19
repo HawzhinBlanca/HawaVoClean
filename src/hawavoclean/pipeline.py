@@ -29,6 +29,7 @@ from hawavoclean.audio.channels import (
     handle_channel_layout,
 )
 from hawavoclean.audio.decode import decode_audio, decode_audio_to_memmap
+from hawavoclean.audio.delivery import DeliveryPreset, apply_delivery_loudness
 from hawavoclean.audio.encode import encode_audio, encode_audio_streaming
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.audio.types import AudioBuffer, AudioProbeResult
@@ -136,6 +137,7 @@ logger = get_logger("pipeline")
 MAX_INPUT_FILE_BYTES = 8 * 1024**3
 MAX_INPUT_DURATION_S = 6 * 60 * 60.0
 MAX_INPUT_CHANNELS = 2
+UNIT_SLICE_DIR_ENV = "HAWAVOCLEAN_UNIT_SLICE_DIR"
 
 # Every Natural job decodes through the independently bounded, disk-backed
 # decoder. Above 64 MiB of *actual* decoded PCM, later file-length stages and
@@ -373,6 +375,9 @@ def run_pipeline(
     clean_only: bool = False,
     original_input_path: Path | str | None = None,
     allow_research_restore: bool = False,
+    ambience_floor_db: float | None = None,
+    delivery_preset: DeliveryPreset | None = None,
+    pro_repair: dict[str, bool] | None = None,
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
@@ -523,6 +528,9 @@ def run_pipeline(
             profiles_dir=profiles_dir,
             clean_only=clean_only,
             allow_research_restore=allow_research_restore,
+            ambience_floor_db=ambience_floor_db,
+            delivery_preset=delivery_preset,
+            pro_repair=pro_repair,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
@@ -650,6 +658,9 @@ def _run_after_preflight(
     profiles_dir: str | Path = "profiles",
     clean_only: bool = False,
     allow_research_restore: bool = False,
+    ambience_floor_db: float | None = None,
+    delivery_preset: DeliveryPreset | None = None,
+    pro_repair: dict[str, bool] | None = None,
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
     # Probe metadata is not trusted to choose the decoder: a damaged container
@@ -833,6 +844,8 @@ def _run_after_preflight(
         )
 
     # 7. Guard-A decisions for every unit (finishing comes after continuity)
+    slice_dir_env = os.environ.get(UNIT_SLICE_DIR_ENV, "").strip()
+    unit_slice_dir: Path | None = Path(slice_dir_env).resolve() if slice_dir_env else None
     decisions: list[UnitPolicyDecision] = []
     cand_hashes: list[str | None] = []
     unit_runtimes: list[float] = []
@@ -902,6 +915,32 @@ def _run_after_preflight(
             t_unit_start = time.perf_counter()
 
             if not u.is_speech:
+                if unit_slice_dir is not None:
+                    try:
+                        from hawavoclean.server.unit_restitch import save_unit_slice_to_dir
+
+                        save_unit_slice_to_dir(
+                            unit_slice_dir,
+                            unit_id=u.unit_id,
+                            original=core_orig,
+                            candidate=None,
+                            unit_meta={
+                                "unit_id": u.unit_id,
+                                "channel": u.channel_id,
+                                "start_sample": u.start_sample,
+                                "end_sample": u.end_sample,
+                                "is_speech": False,
+                                "forced_boundary": u.forced_boundary,
+                                "sample_rate": audio_buf.sample_rate,
+                                "channels": media.channels,
+                                "duplicate_to_stereo": duplicate_to_stereo,
+                            },
+                            channel=u.channel_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to cache non-speech slice for unit {u.unit_id}: {exc}"
+                        )
                 decisions.append(
                     persist_decision(
                         u,
@@ -983,6 +1022,30 @@ def _run_after_preflight(
             )
             decisions.append(persist_decision(u, pol_dec))
             cand_hashes.append(cand_sha256)
+            if unit_slice_dir is not None:
+                try:
+                    from hawavoclean.server.unit_restitch import save_unit_slice_to_dir
+
+                    save_unit_slice_to_dir(
+                        unit_slice_dir,
+                        unit_id=u.unit_id,
+                        original=core_orig,
+                        candidate=enh_core,
+                        unit_meta={
+                            "unit_id": u.unit_id,
+                            "channel": u.channel_id,
+                            "start_sample": u.start_sample,
+                            "end_sample": u.end_sample,
+                            "is_speech": True,
+                            "forced_boundary": u.forced_boundary,
+                            "sample_rate": audio_buf.sample_rate,
+                            "channels": media.channels,
+                            "duplicate_to_stereo": duplicate_to_stereo,
+                        },
+                        channel=u.channel_id,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to cache speech slice for unit {u.unit_id}: {exc}")
             # Per-unit WORK, not per-unit wall clock: under a pool the two
             # stop being the same number, and the report is about the unit.
             unit_runtimes.append(enh.elapsed_ms + (time.perf_counter() - t_guard_start) * 1000.0)
@@ -1150,7 +1213,8 @@ def _run_after_preflight(
         context_items.clear()
         channels_to_process.clear()
         assert selected_stage is not None and isinstance(audio_buf.data, np.memmap)
-        _release_audio_memmap(audio_buf.data, disk_mappings)
+        if ambience_floor_db is None:
+            _release_audio_memmap(audio_buf.data, disk_mappings)
 
     # 10. Assembly
     emit_progress(
@@ -1296,154 +1360,230 @@ def _run_after_preflight(
             channel_mode=channel_mode,
         )
 
+    # 10.75. Opt-in surgical dialogue repair and room-tone ambience floor.
+    # Strictly skipped when unrequested so default production/studio runs stay bit-identical.
+    has_surgical_repair = bool(
+        pro_repair
+        and (
+            pro_repair.get("declip")
+            or pro_repair.get("deplosive")
+            or pro_repair.get("declick")
+            or pro_repair.get("mouthDeclick")
+            or pro_repair.get("mouth_declick")
+        )
+    )
+    if has_surgical_repair and pro_repair is not None:
+        from hawavoclean.finishing.pro_repair import ProRepairOptions, apply_pro_repair_chain
+
+        repair_opts = ProRepairOptions(
+            declip=bool(pro_repair.get("declip", False)),
+            deplosive=bool(pro_repair.get("deplosive", False)),
+            declick=bool(
+                pro_repair.get(
+                    "declick",
+                    pro_repair.get("mouthDeclick", pro_repair.get("mouth_declick", False)),
+                )
+            ),
+            room_tone_floor=False,
+        )
+        repaired_data, repair_actions = apply_pro_repair_chain(
+            assembled_buffer.data,
+            assembled_buffer.sample_rate,
+            repair_opts,
+        )
+        if repair_actions:
+            logger.info(f"Pro surgical repair applied: {', '.join(repair_actions)}")
+        assembled_buffer = AudioBuffer(
+            data=repaired_data,
+            sample_rate=assembled_buffer.sample_rate,
+            channel_mode=channel_mode,
+        )
+
+    if ambience_floor_db is not None:
+        from hawavoclean.finishing.pro_repair import apply_room_tone_floor
+
+        orig_for_floor = audio_buf.data
+        if orig_for_floor.shape == assembled_buffer.data.shape:
+            floored_data = apply_room_tone_floor(
+                orig_for_floor,
+                assembled_buffer.data,
+                assembled_buffer.sample_rate,
+                target_floor_db=float(ambience_floor_db),
+            )
+            assembled_buffer = AudioBuffer(
+                data=floored_data,
+                sample_rate=assembled_buffer.sample_rate,
+                channel_mode=channel_mode,
+            )
+        if streaming_natural and isinstance(audio_buf.data, np.memmap):
+            _release_audio_memmap(audio_buf.data, disk_mappings)
+
     # 11. Loudness normalization and true-peak limiting
-    premaster_loudness = (
-        measure_loudness_and_peaks_streaming(assembled_buffer.data, assembled_buffer.sample_rate)
-        if streaming_natural
-        else measure_loudness_and_peaks(assembled_buffer.data, assembled_buffer.sample_rate)
-    )
-    target_lufs = (
-        config.loudness.target_lufs_stereo
-        if media.channels > 1
-        else config.loudness.target_lufs_mono
-    )
-
-    static_gain_db = compute_static_master_gain(
-        measured_lufs=premaster_loudness.integrated_lufs,
-        target_lufs=target_lufs,
-        current_true_peak_dbtp=premaster_loudness.true_peak_dbtp,
-        true_peak_ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
-        max_limiter_reduction_db=config.loudness.max_limiter_reduction_db,
-    )
-
-    gain_linear = 10.0 ** (static_gain_db / 20.0)
-    emit_progress(
-        on_progress,
-        ProgressEvent("finish", PROGRESS_FINISH_LIMITER, "Applying lookahead limiter"),
-    )
-    if streaming_natural:
-
-        def on_limiter_progress(fraction: float) -> None:
-            pct = (
-                PROGRESS_FINISH_LIMITER
-                + fraction * (PROGRESS_FINISH_ENCODE - PROGRESS_FINISH_LIMITER) * 0.95
-            )
-            emit_progress(
-                on_progress,
-                ProgressEvent("finish", round(pct, 3), "Applying lookahead limiter"),
-            )
-
-        limited_res = apply_lookahead_limiter_to_memmap(
-            waveform=assembled_buffer.data,
-            sample_rate=assembled_buffer.sample_rate,
-            output_path=workspace.root / "mastered-natural.f32",
-            input_gain_linear=gain_linear,
-            ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
-            on_progress=on_limiter_progress if on_progress is not None else None,
+    if delivery_preset is not None and mode == "natural":
+        emit_progress(
+            on_progress,
+            ProgressEvent(
+                "finish",
+                PROGRESS_FINISH_LIMITER,
+                f"Applying delivery preset ({delivery_preset})",
+            ),
         )
-        disk_mappings.append(limited_res.limited_waveform)
+        final_mastered_data, _delivery_metrics = apply_delivery_loudness(
+            assembled_buffer.data,
+            assembled_buffer.sample_rate,
+            delivery_preset,
+            input_lufs=source_loudness.integrated_lufs,
+        )
     else:
-        gained_data = assembled_buffer.data * gain_linear
-        limited_res = apply_lookahead_limiter(
-            waveform=gained_data,
-            sample_rate=assembled_buffer.sample_rate,
-            ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
-        )
-    if limited_res.max_gain_reduction_db > config.loudness.max_limiter_reduction_db:
-        logger.warning(
-            f"Limiter reduced peaks by {limited_res.max_gain_reduction_db:.2f} dB, "
-            f"beyond the static-gain headroom budget of "
-            f"{config.loudness.max_limiter_reduction_db:.2f} dB — transient-heavy material."
-        )
-
-    if mode == "restore":
-        # Master the Natural reference identically for post-mastering verification
-        nat_gained = current_data * gain_linear
-        nat_limited_res = apply_lookahead_limiter(
-            waveform=nat_gained,
-            sample_rate=target_sr,
-            ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
-        )
-        mastered_natural = nat_limited_res.limited_waveform
-        mastered_restored = limited_res.limited_waveform
-
-        post_master_result = guard_r.verify_post_mastering(
-            mastered_natural=mastered_natural,
-            mastered_restored=mastered_restored,
-            segment_records=segment_records,
-            starts=seg_starts,
-            seg_len=seg_len,
-            cutoff_hz=float(bw_est.effective_cutoff_hz),
-            transition_hz=500.0,
-            tolerance_rms=1e-4,
-            tolerance_stft=1e-3,
-            tolerance_third_octave_db=0.25,
-            canonical_embedding=speaker_profile.embedding_vector if speaker_profile else None,
-            variance_vector=speaker_profile.variance_vector if speaker_profile else None,
-        )
-
-        if post_master_result.fallback_applied:
-            logger.warning(
-                f"Post-mastering Guard R failed ({post_master_result.reason}) — "
-                "reverting to mastered Natural audio."
+        premaster_loudness = (
+            measure_loudness_and_peaks_streaming(
+                assembled_buffer.data, assembled_buffer.sample_rate
             )
-            final_mastered_data = mastered_natural
-            reconstructed_count = counts.get("restored", 0) + counts.get("reduced", 0)
-            rep_segments = RestorationSegmentCounts(
-                restored=0,
-                reduced=0,
-                reverted=counts.get("reverted", 0) + reconstructed_count,
-                bypassed=counts.get("bypassed", 0),
-                errors=counts.get("error", 0),
+            if streaming_natural
+            else measure_loudness_and_peaks(assembled_buffer.data, assembled_buffer.sample_rate)
+        )
+        target_lufs = (
+            config.loudness.target_lufs_stereo
+            if media.channels > 1
+            else config.loudness.target_lufs_mono
+        )
+
+        static_gain_db = compute_static_master_gain(
+            measured_lufs=premaster_loudness.integrated_lufs,
+            target_lufs=target_lufs,
+            current_true_peak_dbtp=premaster_loudness.true_peak_dbtp,
+            true_peak_ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+            max_limiter_reduction_db=config.loudness.max_limiter_reduction_db,
+        )
+
+        gain_linear = 10.0 ** (static_gain_db / 20.0)
+        emit_progress(
+            on_progress,
+            ProgressEvent("finish", PROGRESS_FINISH_LIMITER, "Applying lookahead limiter"),
+        )
+        if streaming_natural:
+
+            def on_limiter_progress(fraction: float) -> None:
+                pct = (
+                    PROGRESS_FINISH_LIMITER
+                    + fraction * (PROGRESS_FINISH_ENCODE - PROGRESS_FINISH_LIMITER) * 0.95
+                )
+                emit_progress(
+                    on_progress,
+                    ProgressEvent("finish", round(pct, 3), "Applying lookahead limiter"),
+                )
+
+            limited_res = apply_lookahead_limiter_to_memmap(
+                waveform=assembled_buffer.data,
+                sample_rate=assembled_buffer.sample_rate,
+                output_path=workspace.root / "mastered-natural.f32",
+                input_gain_linear=gain_linear,
+                ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+                on_progress=on_limiter_progress if on_progress is not None else None,
             )
-            for ev in post_master_result.segments_evidence:
-                if not ev.passes:
-                    review_segments.append(
-                        {
-                            "segment_index": ev.segment_index,
-                            "start_time_s": ev.start_time_s,
-                            "action": "post_mastering_reverted",
-                            "verdict": "FAIL",
-                            "reason": ev.reason,
-                        }
-                    )
+            disk_mappings.append(limited_res.limited_waveform)
         else:
-            final_mastered_data = mastered_restored
-            rep_segments = RestorationSegmentCounts(
-                restored=counts.get("restored", 0),
-                reduced=counts.get("reduced", 0),
-                reverted=counts.get("reverted", 0),
-                bypassed=counts.get("bypassed", 0),
-                errors=counts.get("error", 0),
+            gained_data = assembled_buffer.data * gain_linear
+            limited_res = apply_lookahead_limiter(
+                waveform=gained_data,
+                sample_rate=assembled_buffer.sample_rate,
+                ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+            )
+        if limited_res.max_gain_reduction_db > config.loudness.max_limiter_reduction_db:
+            logger.warning(
+                f"Limiter reduced peaks by {limited_res.max_gain_reduction_db:.2f} dB, "
+                f"beyond the static-gain headroom budget of "
+                f"{config.loudness.max_limiter_reduction_db:.2f} dB — transient-heavy material."
             )
 
-        rest_rep = RestorationReport(
-            mode="restore",
-            speaker_id=speaker_id,
-            profile_hash=speaker_profile.compute_hash() if speaker_profile else None,
-            natural_output_hash=hash_bytes(assembled_data.tobytes()),
-            bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
-            restorer={
-                "name": "hawarestore-kd",
-                "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
-                "weights_sha256": restorer.weights_sha256,
-                "checkpoint_path": str(restorer.checkpoint_path),
-                "device": restorer.device,
-                "seed_policy": "deterministic_job_id",
-                "solver": "midpoint",
-                "steps": 4,
-                "guidance_scale": 0.0,
-                "research_quarantine": True,
-                "production_qualified": False,
-            },
-            segments=rep_segments,
-            guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
-            review_timecodes=review_segments,
-            post_mastering_verification=post_master_result.to_dict(),
-        )
-        restoration_report = rest_rep.to_dict()
-    else:
-        final_mastered_data = limited_res.limited_waveform
+        if mode == "restore":
+            # Master the Natural reference identically for post-mastering verification
+            nat_gained = current_data * gain_linear
+            nat_limited_res = apply_lookahead_limiter(
+                waveform=nat_gained,
+                sample_rate=target_sr,
+                ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp,
+            )
+            mastered_natural = nat_limited_res.limited_waveform
+            mastered_restored = limited_res.limited_waveform
+
+            post_master_result = guard_r.verify_post_mastering(
+                mastered_natural=mastered_natural,
+                mastered_restored=mastered_restored,
+                segment_records=segment_records,
+                starts=seg_starts,
+                seg_len=seg_len,
+                cutoff_hz=float(bw_est.effective_cutoff_hz),
+                transition_hz=500.0,
+                tolerance_rms=1e-4,
+                tolerance_stft=1e-3,
+                tolerance_third_octave_db=0.25,
+                canonical_embedding=speaker_profile.embedding_vector if speaker_profile else None,
+                variance_vector=speaker_profile.variance_vector if speaker_profile else None,
+            )
+
+            if post_master_result.fallback_applied:
+                logger.warning(
+                    f"Post-mastering Guard R failed ({post_master_result.reason}) — "
+                    "reverting to mastered Natural audio."
+                )
+                final_mastered_data = mastered_natural
+                reconstructed_count = counts.get("restored", 0) + counts.get("reduced", 0)
+                rep_segments = RestorationSegmentCounts(
+                    restored=0,
+                    reduced=0,
+                    reverted=counts.get("reverted", 0) + reconstructed_count,
+                    bypassed=counts.get("bypassed", 0),
+                    errors=counts.get("error", 0),
+                )
+                for ev in post_master_result.segments_evidence:
+                    if not ev.passes:
+                        review_segments.append(
+                            {
+                                "segment_index": ev.segment_index,
+                                "start_time_s": ev.start_time_s,
+                                "action": "post_mastering_reverted",
+                                "verdict": "FAIL",
+                                "reason": ev.reason,
+                            }
+                        )
+            else:
+                final_mastered_data = mastered_restored
+                rep_segments = RestorationSegmentCounts(
+                    restored=counts.get("restored", 0),
+                    reduced=counts.get("reduced", 0),
+                    reverted=counts.get("reverted", 0),
+                    bypassed=counts.get("bypassed", 0),
+                    errors=counts.get("error", 0),
+                )
+
+            rest_rep = RestorationReport(
+                mode="restore",
+                speaker_id=speaker_id,
+                profile_hash=speaker_profile.compute_hash() if speaker_profile else None,
+                natural_output_hash=hash_bytes(assembled_data.tobytes()),
+                bandwidth={**bw_est.to_dict(), "cutoff_mode": cutoff},
+                restorer={
+                    "name": "hawarestore-kd",
+                    "commit": "26dc21c44e11f9f19e823f02b0d4641dd5ea5af2",
+                    "weights_sha256": restorer.weights_sha256,
+                    "checkpoint_path": str(restorer.checkpoint_path),
+                    "device": restorer.device,
+                    "seed_policy": "deterministic_job_id",
+                    "solver": "midpoint",
+                    "steps": 4,
+                    "guidance_scale": 0.0,
+                    "research_quarantine": True,
+                    "production_qualified": False,
+                },
+                segments=rep_segments,
+                guard_r=rest_dec.guard_result.to_dict() if rest_dec.guard_result else {},
+                review_timecodes=review_segments,
+                post_mastering_verification=post_master_result.to_dict(),
+            )
+            restoration_report = rest_rep.to_dict()
+        else:
+            final_mastered_data = limited_res.limited_waveform
 
     mastered_buffer = AudioBuffer(
         data=final_mastered_data,

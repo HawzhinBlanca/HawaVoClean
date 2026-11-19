@@ -18,6 +18,7 @@ import re
 import secrets
 import socket
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -25,8 +26,10 @@ from dataclasses import asdict
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Literal, cast
-from urllib.parse import unquote_plus, urlsplit
+from urllib.parse import unquote_plus, urlencode, urlsplit
 
+import numpy as np
+import soundfile as sf
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -39,17 +42,43 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from hawavoclean import __version__
 from hawavoclean.audio.decode import iter_decode_audio
+from hawavoclean.audio.delivery import (
+    DeliveryPreset,
+    ExportFormat,
+    apply_delivery_loudness,
+    compute_loudness_range_lu,
+    export_delivery_artifact,
+    extract_wav_metadata_chunks,
+    inject_wav_metadata_chunks,
+)
+from hawavoclean.audio.encode import encode_audio
+from hawavoclean.audio.multitrack import extract_polywav_tracks, inspect_polywav_tracks
 from hawavoclean.audio.probe import probe_audio
+from hawavoclean.audio.types import AudioBuffer
 from hawavoclean.cli import _clean_stem
-from hawavoclean.errors import HawaVoCleanError, InvalidUserInputError, MediaPreflightError
+from hawavoclean.errors import (
+    HawaVoCleanError,
+    InvalidUserInputError,
+    MediaPreflightError,
+    OutputValidationError,
+    PreflightError,
+)
+from hawavoclean.finishing.loudness import measure_loudness_and_peaks
+from hawavoclean.hashing import hash_file
 from hawavoclean.logging import get_logger
 from hawavoclean.natural_contract import load_natural_route_contract
 from hawavoclean.paths import config_dir, job_store_path, models_dir, profiles_root, work_root
+from hawavoclean.platform_fs import is_reparse_or_symlink
 from hawavoclean.publication import (
     public_output_path,
+    publication_paths,
+    publish_output_generation,
     resolve_immutable_publication_generation,
 )
 from hawavoclean.record_bundle import verify_processing_record
+from hawavoclean.report.schema import HawaVoCleanReport
+from hawavoclean.report.summary import generate_human_summary
+from hawavoclean.report.writer import serialize_json_report
 from hawavoclean.server.analysis import (
     DEFAULT_BUCKETS,
     MAX_BUCKETS,
@@ -60,14 +89,19 @@ from hawavoclean.server.analysis import (
 from hawavoclean.server.contracts import (
     CapabilitiesResponseV1,
     CapabilityStatusV1,
+    DeliveryExportRequestV1,
     JobLifecycleStateV1,
     JobStatusResponseV1,
     ManualStrategyV1,
     ProcessingRequestV1,
+    RegionPreviewRequestV1,
     SeparationStrategyV1,
     SmartAnalysisRequestV1,
     SmartAnalysisResponseV1,
     SmartSafeStrategyV1,
+    SpectrogramRequestV1,
+    TrackExtractRequestV1,
+    TrackInspectRequestV1,
     UnitOverrideRequestV1,
 )
 from hawavoclean.server.health_signals import HealthSignalsService
@@ -89,6 +123,22 @@ from hawavoclean.server.retention import (
     UploadStore,
 )
 from hawavoclean.server.source_caps import NativeSourceRegistry
+from hawavoclean.server.spectrogram import (
+    DELTA_DEFAULT_DB_CEIL,
+    DELTA_DEFAULT_DB_FLOOR,
+    compute_delta_spectrogram_tile,
+    compute_spectrogram_tile,
+)
+from hawavoclean.server.unit_restitch import (
+    UnitOverrideAction,
+    UnitSliceStore,
+    load_unit_slice,
+    restitch_master_with_overrides,
+)
+from hawavoclean.server.warm_worker import (
+    RegionPreviewRequest,
+    render_region_preview,
+)
 from hawavoclean.smart_safe import analyze_audio_stream
 
 logger = get_logger("server")
@@ -1354,6 +1404,367 @@ def _session_output_path(input_path: Path, profile: str, raw_output: str) -> Pat
     return output
 
 
+def _is_managed_preview_file(raw: str, resolved: Path) -> bool:
+    """Return True iff ``resolved`` is a regular managed preview WAV inside ``work_root/previews``."""
+    preview_dir = (work_root() / "previews").resolve()
+    return (
+        resolved.parent == preview_dir
+        and resolved.is_file()
+        and not is_reparse_or_symlink(Path(raw))
+        and not is_reparse_or_symlink(resolved)
+        and resolved.name.startswith("preview_")
+        and resolved.suffix == ".wav"
+    )
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    """Atomically write a JSON file beside ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    encoded = json.dumps(payload, indent=2) + "\n"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _default_export_dest_path(
+    master_raw: str,
+    master_resolved: Path,
+    fmt: ExportFormat,
+    preset: DeliveryPreset,
+    source_resolved: Path | None,
+) -> Path:
+    """Derive a safe sibling destination path for ``POST /api/v1/export`` when omitted."""
+    public_master = public_output_path(master_raw)
+    ext_map: dict[ExportFormat, str] = {
+        "wav24": ".wav",
+        "wav32f": ".wav",
+        "flac": ".flac",
+        "aac": ".m4a",
+        "video_mux": (
+            source_resolved.suffix
+            if source_resolved is not None and source_resolved.suffix
+            else ".mp4"
+        ),
+    }
+    ext = ext_map[fmt]
+    preset_tag = f"_{preset}" if preset != "match_input" else ""
+    fmt_tag = f"_{fmt}" if fmt in ("wav24", "wav32f") else ""
+    base_stem = public_master.stem
+    candidate = public_master.parent / f"{base_stem}{preset_tag}{fmt_tag}{ext}"
+    if candidate.resolve() == master_resolved or (
+        source_resolved is not None and candidate.resolve() == source_resolved
+    ):
+        candidate = public_master.parent / f"{base_stem}{preset_tag}_{fmt}_export{ext}"
+    return resolve_client_output_path(str(candidate))
+
+
+def _run_delivery_export(
+    *,
+    master_resolved: Path,
+    dest_resolved: Path,
+    fmt: ExportFormat,
+    delivery_preset: DeliveryPreset,
+    source_resolved: Path | None,
+    preserve_metadata: bool,
+) -> dict[str, Any]:
+    """Apply optional delivery loudness and export the master artifact synchronously."""
+    raw_audio, sr = sf.read(str(master_resolved), dtype="float32", always_2d=True)
+    wave_2d = np.ascontiguousarray(raw_audio.T, dtype=np.float32)
+
+    if delivery_preset != "match_input":
+        processed, metrics = apply_delivery_loudness(wave_2d, int(sr), delivery_preset)
+        dest_resolved.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".hawa-export-", dir=dest_resolved.parent
+        ) as tmp_dir:
+            tmp_master = Path(tmp_dir) / "delivered.wav"
+            bit_depth: Literal["pcm24", "float32"] = "float32" if fmt == "wav32f" else "pcm24"
+            encode_audio(
+                AudioBuffer(data=processed, sample_rate=int(sr)),
+                tmp_master,
+                output_bit_depth=bit_depth,
+                dither=bit_depth != "float32",
+                seed_context=f"export:{delivery_preset}",
+            )
+            if preserve_metadata and fmt in ("wav24", "wav32f"):
+                master_meta = extract_wav_metadata_chunks(master_resolved)
+                if master_meta:
+                    inject_wav_metadata_chunks(tmp_master, master_meta)
+            out_path = export_delivery_artifact(
+                tmp_master,
+                dest_resolved,
+                fmt=fmt,
+                source_media_path=source_resolved,
+                preserve_metadata=preserve_metadata,
+            )
+        lra_lu = round(float(metrics["loudness_range_lu"]), 2)
+        integrated_lufs = round(float(metrics["integrated_lufs"]), 2)
+        true_peak_dbtp = round(float(metrics["true_peak_dbtp"]), 2)
+    else:
+        out_path = export_delivery_artifact(
+            master_resolved,
+            dest_resolved,
+            fmt=fmt,
+            source_media_path=source_resolved,
+            preserve_metadata=preserve_metadata,
+        )
+        meas = measure_loudness_and_peaks(wave_2d, int(sr))
+        lra_lu = round(float(compute_loudness_range_lu(wave_2d, int(sr))), 2)
+        integrated_lufs = round(float(meas.integrated_lufs), 2)
+        true_peak_dbtp = round(float(meas.true_peak_dbtp), 2)
+
+    return {
+        "outputPath": str(out_path),
+        "format": fmt,
+        "deliveryPreset": delivery_preset,
+        "lraLu": lra_lu,
+        "integratedLufs": integrated_lufs,
+        "truePeakDbtp": true_peak_dbtp,
+    }
+
+
+def _normalize_restitch_decision(
+    restitched_decision: str,
+    *,
+    auto_decision: str,
+    manual_override: str | None,
+    is_speech: bool,
+) -> str:
+    """Map ``unit_restitch`` decision tokens into lowercase report vocabulary."""
+    if manual_override is None:
+        return auto_decision
+    upper = restitched_decision.upper()
+    if upper == "ENHANCED":
+        return "enhanced"
+    if upper == "NO_SPEECH" or not is_speech:
+        return "original_no_speech"
+    return "reverted"
+
+
+def _has_complete_unit_slices(job_slice_dir: Path, units: list[dict[str, Any]]) -> bool:
+    """Return True when every report unit has a cached ``.npz`` slice on disk."""
+    if not units or not job_slice_dir.is_dir():
+        return False
+    for rec in units:
+        if "unit_id" not in rec or "start_sample" not in rec or "end_sample" not in rec:
+            return False
+        unit_id = int(rec["unit_id"])
+        channel = int(rec.get("channel", 0))
+        if not (job_slice_dir / f"unit_{unit_id:06d}_ch{channel}.npz").is_file():
+            return False
+    return True
+
+
+def _live_restitch_unit_override(
+    *,
+    job_id: str,
+    snapshot: dict[str, Any],
+    report: dict[str, Any],
+    units: list[dict[str, Any]],
+    target_idx: int,
+    req: UnitOverrideRequestV1,
+    job_slice_dir: Path,
+    manager: JobManager,
+) -> dict[str, Any]:
+    """Apply a unit override via sub-100ms cached-slice re-stitching and atomic republication."""
+    t0 = time.perf_counter()
+    target_unit = units[target_idx]
+    target_unit_id = int(target_unit["unit_id"])
+    old_decision = str(target_unit.get("final_decision", "unknown"))
+
+    auto_units_path = job_slice_dir / "auto_units.json"
+    if auto_units_path.is_file():
+        auto_units: list[dict[str, Any]] = json.loads(auto_units_path.read_text(encoding="utf-8"))
+    else:
+        auto_units = [dict(u) for u in units]
+        _atomic_write_json(auto_units_path, auto_units)
+    auto_by_id = {int(u["unit_id"]): u for u in auto_units}
+
+    overrides_path = job_slice_dir / "overrides.json"
+    overrides_map: dict[str, dict[str, Any]] = {}
+    if overrides_path.is_file():
+        loaded = json.loads(overrides_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            overrides_map = {str(k): dict(v) for k, v in loaded.items() if isinstance(v, dict)}
+
+    if req.decision == "auto":
+        overrides_map.pop(str(target_unit_id), None)
+    else:
+        overrides_map[str(target_unit_id)] = {
+            "decision": req.decision,
+            "strength": req.strength,
+        }
+
+    overrides_arg: dict[int, tuple[UnitOverrideAction, float | None]] = {}
+    for uid_str, entry in overrides_map.items():
+        action = cast(UnitOverrideAction, str(entry["decision"]))
+        raw_strength = entry.get("strength")
+        strength_val = float(raw_strength) if raw_strength is not None else None
+        overrides_arg[int(uid_str)] = (action, strength_val)
+
+    raw_output_meta = report.get("output")
+    output_meta: dict[str, Any] = raw_output_meta if isinstance(raw_output_meta, dict) else {}
+    sample_rate = int(output_meta.get("sample_rate", 48000))
+    output_channels = int(output_meta.get("channels", 1))
+    first_slice = load_unit_slice(
+        job_slice_dir,
+        unit_id=int(auto_units[0]["unit_id"]),
+        channel=int(auto_units[0].get("channel", 0)),
+    )
+    duplicate_to_stereo = bool(first_slice.unit_meta.get("duplicate_to_stereo", False))
+    present_channels = {int(u.get("channel", 0)) for u in auto_units}
+    restitch_channels = (
+        1
+        if (duplicate_to_stereo or (output_channels > 1 and present_channels == {0}))
+        else output_channels
+    )
+
+    out_path = public_output_path(str(snapshot["output_path"]))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".hawa-restitch-", dir=out_path.parent) as tmp_dir:
+        tmp_master = Path(tmp_dir) / "restitched.wav"
+        restitch_res = restitch_master_with_overrides(
+            job_slice_dir,
+            auto_units,
+            overrides_arg,
+            tmp_master,
+            sample_rate=sample_rate,
+            channels=restitch_channels,
+            seed_context=f"restitch:{job_id}",
+        )
+        master_sha256 = str(restitch_res["master_sha256"])
+
+        if restitch_channels == 1 and output_channels == 2:
+            mono_wave, mono_sr = sf.read(str(tmp_master), dtype="float32", always_2d=True)
+            stereo_data = np.ascontiguousarray(
+                np.vstack((mono_wave[:, 0], mono_wave[:, 0])), dtype=np.float32
+            )
+            tmp_stereo = Path(tmp_dir) / "restitched_stereo.wav"
+            encode_audio(
+                AudioBuffer(data=stereo_data, sample_rate=int(mono_sr)),
+                tmp_stereo,
+                output_bit_depth="pcm24",
+                dither=False,
+                seed_context=f"restitch:{job_id}",
+            )
+            tmp_master = tmp_stereo
+            master_sha256 = hash_file(tmp_master)
+
+        final_audio, final_sr = sf.read(str(tmp_master), dtype="float32", always_2d=True)
+        final_meas = measure_loudness_and_peaks(
+            np.ascontiguousarray(final_audio.T, dtype=np.float32), int(final_sr)
+        )
+
+        updated_by_id = {int(u["unit_id"]): u for u in restitch_res["units"]}
+        new_units: list[dict[str, Any]] = []
+        for idx_u, orig_rec in enumerate(units):
+            uid = int(orig_rec["unit_id"])
+            auto_rec = auto_by_id.get(uid, orig_rec)
+            restitched_rec = updated_by_id.get(uid, orig_rec)
+            merged = dict(orig_rec)
+            manual_ov = restitched_rec.get("manual_override")
+            is_speech = bool(merged.get("is_speech", True))
+            norm_decision = _normalize_restitch_decision(
+                str(restitched_rec.get("final_decision", merged.get("final_decision", "reverted"))),
+                auto_decision=str(auto_rec.get("final_decision", "reverted")),
+                manual_override=manual_ov if isinstance(manual_ov, str) else None,
+                is_speech=is_speech,
+            )
+            merged["final_decision"] = norm_decision
+            merged["chosen_strength"] = float(
+                restitched_rec.get("chosen_strength", merged.get("chosen_strength", 0.0))
+            )
+            merged["manual_override"] = manual_ov
+            if idx_u == target_idx:
+                if req.decision == "auto":
+                    merged["decision_reason"] = str(
+                        auto_rec.get("decision_reason", "auto restored")
+                    )
+                elif req.decision == "custom_strength":
+                    merged["decision_reason"] = (
+                        f"manual override: custom_strength={req.strength} (was {old_decision})"
+                    )
+                else:
+                    merged["decision_reason"] = (
+                        f"manual override: {req.decision} (was {old_decision})"
+                    )
+            new_units.append(merged)
+
+        updated_report = dict(report)
+        updated_report["units"] = new_units
+        if isinstance(updated_report.get("output"), dict):
+            updated_output = dict(updated_report["output"])
+            updated_output["sha256"] = master_sha256
+            updated_output["integrated_lufs"] = float(final_meas.integrated_lufs)
+            updated_output["true_peak_dbtp"] = float(final_meas.true_peak_dbtp)
+            updated_report["output"] = updated_output
+        if isinstance(updated_report.get("summary"), dict):
+            updated_summary = dict(updated_report["summary"])
+            updated_summary["enhanced"] = sum(
+                1 for u in new_units if u.get("final_decision") == "enhanced"
+            )
+            updated_summary["reverted"] = sum(
+                1 for u in new_units if u.get("final_decision") in ("reverted", "original_reverted")
+            )
+            updated_summary["no_speech"] = sum(
+                1 for u in new_units if u.get("final_decision") == "original_no_speech"
+            )
+            updated_report["summary"] = updated_summary
+
+        try:
+            validated_rep = HawaVoCleanReport.model_validate(updated_report)
+            json_str = serialize_json_report(validated_rep)
+            txt_str = generate_human_summary(validated_rep)
+            updated_report = json.loads(json_str)
+        except Exception:
+            json_str = json.dumps(updated_report, indent=2) + "\n"
+            txt_path = out_path.parent / f"{out_path.stem}.hawavoclean.txt"
+            txt_str = txt_path.read_text(encoding="utf-8") if txt_path.is_file() else ""
+
+        pub = publication_paths(out_path)
+        if pub.bundle.is_dir():
+            publish_output_generation(
+                tmp_master,
+                out_path,
+                json_str,
+                txt_str,
+                overwrite=True,
+            )
+        else:
+            os.replace(tmp_master, out_path)
+            raw_report_path = snapshot.get("report_path")
+            if isinstance(raw_report_path, str) and raw_report_path:
+                _atomic_write_json(Path(raw_report_path), updated_report)
+
+    _atomic_write_json(overrides_path, overrides_map)
+    manager.update_completed_override(
+        job_id,
+        updated_report,
+        recapture_artifacts=not bool(snapshot.get("record_bundle", False)),
+    )
+
+    new_decision = str(new_units[target_idx]["final_decision"])
+    restitch_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+    return {
+        "job_id": job_id,
+        "unit_index": target_idx,
+        "unit_id": target_unit_id,
+        "old_decision": old_decision,
+        "new_decision": new_decision,
+        "override": req.decision,
+        "restitched": True,
+        "restitchMs": restitch_ms,
+        "masterSha256": master_sha256,
+    }
+
+
 def create_app(
     token: str,
     ui_dir: Path | None = None,
@@ -1444,6 +1855,7 @@ def create_app(
     app.state.sessions = sessions
     app.state.native_sources = native_sources
     app.state.analysis_slots = asyncio.Semaphore(max_concurrent_analyses)
+    app.state.preview_slots = asyncio.Semaphore(2)
     app.state.assistant_slots = asyncio.Semaphore(1)
     app.state.legacy_telemetry = {
         "total_invocations": 0,
@@ -1488,7 +1900,7 @@ def create_app(
                 return artifact
 
         resolved = resolve_client_path(raw, must_exist=True)
-        if upload_store.authorizes(resolved):
+        if upload_store.authorizes(resolved) or _is_managed_preview_file(raw, resolved):
             return resolved
         raise PathPolicyError(
             403,
@@ -1809,14 +2221,221 @@ def create_app(
             },
         )
 
+    @app.post("/api/v1/preview")
+    async def preview_region_v1(request: Request, req: RegionPreviewRequestV1) -> dict[str, Any]:
+        """Render a sub-second windowed enhancement preview using the persistent warm core cache."""
+        source_path = _resolve_read_path(request, req.path)
+        preview_req = RegionPreviewRequest(
+            source_path=source_path,
+            start_s=req.start_s,
+            end_s=req.end_s,
+            profile=req.profile,
+            strength=req.strength,
+            ambience_floor_db=req.ambience_floor_db,
+            include_perceptual_mos=req.include_perceptual_mos,
+        )
+        try:
+            async with app.state.preview_slots:
+                result = await asyncio.to_thread(render_region_preview, preview_req)
+        except ValueError as exc:
+            raise ApiError(400, "bad_request", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+
+        metrics_before: dict[str, Any] = {
+            "lufs": result.before_lufs,
+            "noiseFloorDb": result.before_noise_floor_db,
+        }
+        metrics_after: dict[str, Any] = {
+            "lufs": result.after_lufs,
+            "noiseFloorDb": result.after_noise_floor_db,
+        }
+        if result.before_mos is not None:
+            metrics_before["mos"] = result.before_mos
+        if result.after_mos is not None:
+            metrics_after["mos"] = result.after_mos
+
+        preview_path_str = str(result.preview_path)
+        audio_url = f"/api/audio?{urlencode({'path': preview_path_str})}"
+        return {
+            "previewPath": preview_path_str,
+            "audioUrl": audio_url,
+            "renderMs": result.render_ms,
+            "warmHit": result.warm_hit,
+            "metricsBefore": metrics_before,
+            "metricsAfter": metrics_after,
+            "durationS": result.duration_s,
+        }
+
+    @app.post("/api/v1/spectrogram")
+    async def spectrogram_tile_v1(request: Request, req: SpectrogramRequestV1) -> dict[str, Any]:
+        """Compute a 2D STFT or energy-removed delta spectrogram tile over ``[startS, endS]``."""
+        orig_path = _resolve_read_path(request, req.path)
+        cleaned_path = (
+            _resolve_read_path(request, req.cleaned_path) if req.cleaned_path is not None else None
+        )
+        try:
+            async with app.state.analysis_slots:
+                if req.mode == "delta":
+                    assert cleaned_path is not None
+                    db_floor = req.db_floor if req.db_floor is not None else DELTA_DEFAULT_DB_FLOOR
+                    db_ceil = req.db_ceil if req.db_ceil is not None else DELTA_DEFAULT_DB_CEIL
+                    tile = await asyncio.to_thread(
+                        compute_delta_spectrogram_tile,
+                        orig_path,
+                        cleaned_path,
+                        start_s=req.start_s,
+                        end_s=req.end_s,
+                        width_cols=req.width_cols,
+                        n_bins=req.n_bins,
+                        n_fft=req.n_fft,
+                        scale=req.scale,
+                        db_floor=db_floor,
+                        db_ceil=db_ceil,
+                    )
+                else:
+                    target_path = (
+                        cleaned_path if (req.mode == "cleaned" and cleaned_path) else orig_path
+                    )
+                    db_floor = req.db_floor if req.db_floor is not None else -90.0
+                    db_ceil = req.db_ceil if req.db_ceil is not None else 0.0
+                    tile = await asyncio.to_thread(
+                        compute_spectrogram_tile,
+                        target_path,
+                        start_s=req.start_s,
+                        end_s=req.end_s,
+                        width_cols=req.width_cols,
+                        n_bins=req.n_bins,
+                        n_fft=req.n_fft,
+                        scale=req.scale,
+                        db_floor=db_floor,
+                        db_ceil=db_ceil,
+                    )
+        except ValueError as exc:
+            raise ApiError(400, "bad_request", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+        return tile.to_dict()
+
+    @app.post("/api/v1/export")
+    async def export_delivery_v1(request: Request, req: DeliveryExportRequestV1) -> dict[str, Any]:
+        """Export a master WAV to broadcast/streaming loudness and target delivery format."""
+        master_resolved = _resolve_read_path(request, req.master_path)
+        source_resolved = (
+            _resolve_read_path(request, req.source_media_path)
+            if req.source_media_path is not None
+            else None
+        )
+        effective_preset: DeliveryPreset = req.delivery_preset or "match_input"
+        if req.dest_path is not None:
+            dest_resolved = resolve_client_output_path(req.dest_path)
+            if _auth_kind(request) != "root":
+                exports_root = (work_root() / "exports").resolve()
+                allowed_parents = {
+                    master_resolved.parent,
+                    public_output_path(req.master_path).parent,
+                }
+                if source_resolved is not None:
+                    allowed_parents.add(source_resolved.parent)
+                if dest_resolved.parent not in allowed_parents and not (
+                    dest_resolved.parent == exports_root
+                    or dest_resolved.parent.is_relative_to(exports_root)
+                ):
+                    raise PathPolicyError(
+                        403,
+                        "forbidden",
+                        "renderer export destination must remain beside the master/source or under exports",
+                    )
+        else:
+            dest_resolved = _default_export_dest_path(
+                req.master_path,
+                master_resolved,
+                req.format,
+                effective_preset,
+                source_resolved,
+            )
+
+        try:
+            async with app.state.analysis_slots:
+                return await asyncio.to_thread(
+                    _run_delivery_export,
+                    master_resolved=master_resolved,
+                    dest_resolved=dest_resolved,
+                    fmt=req.format,
+                    delivery_preset=effective_preset,
+                    source_resolved=source_resolved,
+                    preserve_metadata=req.preserve_metadata,
+                )
+        except ValueError as exc:
+            raise ApiError(400, "bad_request", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+        except PreflightError as exc:
+            raise ApiError(503, "unavailable", str(exc)) from exc
+        except OutputValidationError as exc:
+            raise ApiError(422, "export_failed", str(exc)) from exc
+
+    @app.post("/api/v1/tracks/inspect")
+    async def inspect_tracks_v1(request: Request, req: TrackInspectRequestV1) -> dict[str, Any]:
+        """Inspect tracks inside a 1-16 channel Poly-WAV/BWF file."""
+        resolved = _resolve_read_path(request, req.path)
+        try:
+            async with app.state.analysis_slots:
+                tracks = await asyncio.to_thread(inspect_polywav_tracks, resolved)
+        except ValueError as exc:
+            raise ApiError(400, "bad_request", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+        return {
+            "path": str(resolved),
+            "trackCount": len(tracks),
+            "tracks": [track.to_dict() for track in tracks],
+        }
+
+    @app.post("/api/v1/tracks/extract")
+    async def extract_tracks_v1(request: Request, req: TrackExtractRequestV1) -> dict[str, Any]:
+        """Stream-extract selected 0-based tracks from a Poly-WAV/BWF file into mono WAVs."""
+        resolved = _resolve_read_path(request, req.path)
+        extracted_root = (work_root() / "extracted_tracks").resolve()
+        if req.out_dir is not None:
+            target_dir = resolve_client_path(req.out_dir, must_exist=False)
+            if _auth_kind(request) != "root" and not (
+                target_dir == resolved.parent
+                or target_dir.is_relative_to(resolved.parent)
+                or target_dir == extracted_root
+                or target_dir.is_relative_to(extracted_root)
+            ):
+                raise PathPolicyError(
+                    403,
+                    "forbidden",
+                    "renderer track extraction outDir must remain beside the source or under extracted_tracks",
+                )
+        else:
+            target_dir = extracted_root / f"{resolved.stem}_{secrets.token_hex(4)}"
+
+        try:
+            async with app.state.analysis_slots:
+                extracted = await asyncio.to_thread(
+                    extract_polywav_tracks, resolved, req.track_indices, target_dir
+                )
+        except ValueError as exc:
+            raise ApiError(400, "bad_request", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+        return {
+            "path": str(resolved),
+            "outDir": str(target_dir),
+            "extractedPaths": [str(p) for p in extracted],
+        }
+
     @app.post("/api/v1/jobs/{job_id}/override")
     async def override_v1_unit(job_id: str, req: UnitOverrideRequestV1) -> dict[str, Any]:
         """Manually override a guard decision on a single unit.
 
-        The override is recorded in the report's audit trail so it is
-        transparent — never silent.  The published WAV is NOT regenerated
-        (that would require re-decoding and re-assembling); only the report
-        metadata changes.  A future version may regenerate the master.
+        When cached per-unit slices exist for ``job_id``, atomically re-stitches
+        the actual master WAV in <100 ms and updates the report and immutable
+        artifact hashes. When slices are absent (legacy or mock jobs), falls back
+        to metadata-only report override with ``restitched: false``.
         """
         snapshot = manager.get_status(job_id)
         if snapshot is None:
@@ -1840,14 +2459,65 @@ def create_app(
             raise ApiError(409, "invalid_state", f"job {job_id} has no report")
 
         units = report.get("units", [])
-        if req.unit_index >= len(units):
-            raise ApiError(
-                400,
-                "invalid_unit",
-                f"unit_index {req.unit_index} out of range (0..{len(units) - 1})",
-            )
+        if not isinstance(units, list):
+            raise ApiError(409, "invalid_state", f"job {job_id} report has no units list")
 
-        unit = units[req.unit_index]
+        target_idx: int | None = None
+        if req.unit_index is not None:
+            if req.unit_index >= len(units):
+                raise ApiError(
+                    400,
+                    "invalid_unit",
+                    f"unit_index {req.unit_index} out of range (0..{len(units) - 1})",
+                )
+            target_idx = req.unit_index
+        elif req.unit_id is not None:
+            for idx_u, candidate_u in enumerate(units):
+                if isinstance(candidate_u, dict) and candidate_u.get("unit_id") == req.unit_id:
+                    target_idx = idx_u
+                    break
+            if target_idx is None:
+                raise ApiError(
+                    400,
+                    "invalid_unit",
+                    f"unit_id {req.unit_id} not found in job {job_id}",
+                )
+        assert target_idx is not None
+
+        job_slice_dir: Path | None = None
+        with contextlib.suppress(ValueError):
+            candidate_dir = UnitSliceStore(work_root()).job_dir(job_id)
+            if _has_complete_unit_slices(candidate_dir, units):
+                job_slice_dir = candidate_dir
+
+        if job_slice_dir is not None:
+            try:
+                result = await asyncio.to_thread(
+                    _live_restitch_unit_override,
+                    job_id=job_id,
+                    snapshot=snapshot,
+                    report=report,
+                    units=units,
+                    target_idx=target_idx,
+                    req=req,
+                    job_slice_dir=job_slice_dir,
+                    manager=manager,
+                )
+            except ValueError as exc:
+                raise ApiError(400, "invalid_override", str(exc)) from exc
+            logger.info(
+                "Unit %d of job %s live-restitched: %s -> %s (override=%s, %.1f ms)",
+                target_idx,
+                job_id,
+                result["old_decision"],
+                result["new_decision"],
+                req.decision,
+                result["restitchMs"],
+            )
+            return result
+
+        unit = units[target_idx]
+        unit_id_val = int(unit.get("unit_id", target_idx))
         old_decision = unit.get("final_decision", "unknown")
 
         if req.decision == "auto":
@@ -1869,6 +2539,14 @@ def create_app(
             unit["final_decision"] = "enhanced"
             unit["manual_override"] = "force_enhanced"
             unit["decision_reason"] = f"manual override: force_enhanced (was {old_decision})"
+        elif req.decision == "custom_strength":
+            assert req.strength is not None
+            unit["chosen_strength"] = round(float(req.strength), 4)
+            unit["final_decision"] = "reverted" if req.strength == 0.0 else "enhanced"
+            unit["manual_override"] = f"custom_strength:{req.strength:.3f}"
+            unit["decision_reason"] = (
+                f"manual override: custom_strength={req.strength} (was {old_decision})"
+            )
 
         # Update the summary counts
         enhanced_count = sum(1 for u in units if u.get("final_decision") == "enhanced")
@@ -1883,9 +2561,11 @@ def create_app(
             except Exception as e:
                 logger.warning(f"Could not persist updated report to {report_file}: {e}")
 
+        manager.update_completed_override(job_id, report, recapture_artifacts=False)
+
         logger.info(
             "Unit %d of job %s: %s → %s (override=%s)",
-            req.unit_index,
+            target_idx,
             job_id,
             old_decision,
             unit["final_decision"],
@@ -1894,10 +2574,12 @@ def create_app(
 
         return {
             "job_id": job_id,
-            "unit_index": req.unit_index,
+            "unit_index": target_idx,
+            "unit_id": unit_id_val,
             "old_decision": old_decision,
             "new_decision": unit["final_decision"],
             "override": req.decision,
+            "restitched": False,
         }
 
     @app.get("/api/v1/assistant/status")
@@ -1931,6 +2613,9 @@ def create_app(
         submit_cutoff_hz: float | None = None
         submit_strength: float | None = None
         submit_time_range: tuple[float, float] | None = None
+        submit_ambience_floor_db: float | None = None
+        submit_delivery_preset: str | None = None
+        submit_pro_repair: dict[str, bool] | None = None
         if isinstance(req.strategy, SmartSafeStrategyV1):
             smart_cap = next(
                 (c for c in capabilities_v1().capabilities if c.capability_id == "smart_safe"),
@@ -1992,6 +2677,9 @@ def create_app(
                 submit_cutoff_hz = req.strategy.expert_cutoff_hz
                 submit_strength = req.strategy.strength
                 submit_time_range = req.strategy.time_range
+                submit_ambience_floor_db = req.strategy.ambience_floor_db
+                submit_delivery_preset = req.strategy.delivery_preset
+                submit_pro_repair = req.strategy.pro_repair
                 output_profile = "restore_source"
             elif req.strategy.route in {
                 "production",
@@ -2013,6 +2701,9 @@ def create_app(
                 submit_speaker_id = req.strategy.speaker_profile_id
                 submit_strength = req.strategy.strength
                 submit_time_range = req.strategy.time_range
+                submit_ambience_floor_db = req.strategy.ambience_floor_db
+                submit_delivery_preset = req.strategy.delivery_preset
+                submit_pro_repair = req.strategy.pro_repair
                 output_profile = req.strategy.route
             else:
                 raise ApiError(
@@ -2101,6 +2792,9 @@ def create_app(
                             separation_options=separation_options,
                             strength=submit_strength,
                             time_range=submit_time_range,
+                            ambience_floor_db=submit_ambience_floor_db,
+                            delivery_preset=submit_delivery_preset,
+                            pro_repair=submit_pro_repair,
                             speaker_id=submit_speaker_id,
                             cutoff_hz=submit_cutoff_hz,
                             idempotency_key=item_keys[index],
