@@ -1685,11 +1685,15 @@ def _run_smart_safe(
     else:
         mono_raw = raw_data.astype(np.float32)
 
-    # 1. Bounded Streaming Acoustic Analysis
+    # 1. Bounded Streaming Acoustic Analysis (preserve original channel layout so
+    # stereo coherence/crosstalk analysis sees both channels when stereo, and
+    # mono audio is analyzed natively as mono).
+    analysis_data = raw_data if raw_data.ndim == 2 else raw_data.reshape(1, -1)
+    analysis_mode = audio_buf.channel_mode if analysis_data.shape[0] == 2 else ChannelMode.MONO
     input_chunk = AudioBuffer(
-        data=mono_raw.reshape(1, -1),
+        data=analysis_data.astype(np.float32, copy=False),
         sample_rate=sr,
-        channel_mode=ChannelMode.MONO,
+        channel_mode=analysis_mode,
     )
     acoustic_rep = analyze_audio_stream([input_chunk])
     evidence = acoustic_rep.decision_evidence(reconstruction_consent=allow_research_restore)
@@ -1702,6 +1706,7 @@ def _run_smart_safe(
     engine = SmartSafePreviewEngine(
         sample_rate=sr,
         allow_research_restore=allow_research_restore,
+        include_studio_pro=True,
     )
     speaker_profile = None
     if speaker_id is not None:
@@ -1756,12 +1761,16 @@ def _run_smart_safe(
             allow_research_restore=allow_research_restore,
         )
 
-    # 6. True-Peak Limiting (mastering)
-    limiter_in = master_audio if master_audio.ndim == 2 else master_audio.reshape(1, -1)
-    res = apply_lookahead_limiter(
-        limiter_in, sr, ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp
-    )
-    master_final = res.limited_waveform if master_audio.ndim == 2 else res.limited_waveform[0]
+    # 6. True-Peak Limiting (mastering) — bypass when abstaining to preserve
+    # so clean speech passes through unmodified without unnecessary peak reduction.
+    if selected_route == "preserve":
+        master_final = master_audio
+    else:
+        limiter_in = master_audio if master_audio.ndim == 2 else master_audio.reshape(1, -1)
+        res = apply_lookahead_limiter(
+            limiter_in, sr, ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp
+        )
+        master_final = res.limited_waveform if master_audio.ndim == 2 else res.limited_waveform[0]
 
     # 7. Write temp audio and serialize report
     tmp_out = workspace.root / "master.wav"
@@ -1781,6 +1790,7 @@ def _run_smart_safe(
         "selected_route": selected_route,
         "abstained": decision.abstained,
         "confidence": decision.confidence,
+        "perceptual_backend": engine.perceptual_backend,
         "decision_sha256": decision.decision_sha256,
         "acoustic_evidence": asdict(evidence),
         "candidates": [

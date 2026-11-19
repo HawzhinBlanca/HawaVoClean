@@ -302,15 +302,18 @@ async function probeEngine(): Promise<void> {
     // reads as "no restore", which is exactly what such an engine can do.
     getState().setCapabilities(health.speakers ?? [], health.restore_available === true);
 
-    // True-10 D4.11: Probe versioned capabilities
+    // True-10 D4.11: Probe versioned capabilities with its own live timeout
     if (typeof client.capabilities === 'function') {
+      const capsTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
       try {
-        const caps = await client.capabilities(probeTimeout.signal);
+        const caps = await client.capabilities(capsTimeout.signal);
         if (caps && Array.isArray(caps.capabilities)) {
           getState().setCapabilitiesV1(caps.capabilities);
         }
       } catch {
         /* Graceful fallback for mock engines / older versions */
+      } finally {
+        capsTimeout.done();
       }
     }
     if (!everConnected) {
@@ -1264,17 +1267,26 @@ function onJobStatus(status: JobStatus): void {
     const unit = status.unit ? ` (${status.unit.index}/${status.unit.total})` : '';
     st.setStatus(`${status.message || status.stage}${unit}`);
   }
-  if (status.state === 'failed') {
+  if (status.state === 'failed' || status.state === 'interrupted') {
     // C5 · a run's own failure gets the same treatment as a call's. The
     // engine reports `INVALID_USER_INPUT` plus a message written for a log;
     // neither an enum nor a subprocess repr belongs in front of a person, so
     // the pair is re-classified through the same table as everything else.
+    const defaultCode = status.state === 'interrupted' ? 'ENGINE_RESTARTED' : 'job_failed';
+    const defaultMessage =
+      status.state === 'interrupted'
+        ? status.error?.message || status.message || 'The engine stopped while this run was in flight'
+        : jobFailureMessage(status);
     const f = classifyFailure(
-      new EngineError(400, status.error?.code ?? 'job_failed', jobFailureMessage(status)),
+      new EngineError(400, status.error?.code ?? defaultCode, defaultMessage),
       st.source?.name ?? baseName(status.input_path || ''),
     );
     st.setError(f.detail, failureSource(f));
-    st.setStatus(`Processing failed · ${f.headline}`);
+    st.setStatus(
+      status.state === 'interrupted'
+        ? `Processing interrupted · ${f.headline}`
+        : `Processing failed · ${f.headline}`,
+    );
     recordRun(status, 'failed');
   } else if (status.state === 'cancelled') {
     st.setStatus('Processing cancelled');
@@ -2804,10 +2816,11 @@ export async function saveCleanedMaster(): Promise<void> {
       });
       if (chosen) {
         st.setStatus(`Master exported: ${baseName(chosen)}`);
-        return;
       }
+      // `null` means the user cancelled the Save dialog; do not fall through to Finder.
+      return;
     } catch {
-      /* fall back to reveal */
+      /* fall back to reveal if native export fails */
     }
     await revealOutput();
     return;
@@ -2835,27 +2848,31 @@ export async function saveProcessingRecord(): Promise<void> {
   const reportPath = st.job?.reportPath;
   const bundlePath = st.job?.bundlePath ?? (reportPath ? reportPath.replace(/\.json$/i, '.zip') : null);
 
+  if (!bundlePath) {
+    st.setStatus('No processing record bundle is available for this run');
+    return;
+  }
+
   if (bridge.host === 'electron' && typeof bridge.files.chooseExportPath === 'function') {
     try {
-      const suggested = bundlePath
-        ? baseName(bundlePath)
-        : `${baseName(st.cleanedPath).replace(/\.wav$/i, '')}.hawavoclean.zip`;
+      const suggested = baseName(bundlePath);
       const chosen = await bridge.files.chooseExportPath({
         kind: 'record_bundle',
         suggestedName: suggested,
-        ...(bundlePath ? { sourcePath: bundlePath } : {}),
+        sourcePath: bundlePath,
       });
       if (chosen) {
         st.setStatus(`Processing record exported: ${baseName(chosen)}`);
-        return;
       }
+      // `null` means the user cancelled the Save dialog; do not fall through to Finder.
+      return;
     } catch {
-      /* fall back to reveal */
+      /* fall back to reveal if native export fails */
     }
     await revealOutput();
     return;
   }
-  if (bridge.host === 'web' && bundlePath) {
+  if (bridge.host === 'web') {
     const client = requireClient();
     const url = client.fileUrl(bundlePath);
     const a = document.createElement('a');

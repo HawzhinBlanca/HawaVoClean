@@ -4,6 +4,7 @@ Pinned to commit: 26dc21c44e11f9f19e823f02b0d4641dd5ea5af2 (MIT License).
 Paper: arXiv 2510.00771.
 """
 
+import importlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -89,7 +90,7 @@ class UniverSRBaseline(Restorer):
         would carry a provenance hash that nothing ever compared against, so an
         upstream re-upload would go unnoticed.
         """
-        from huggingface_hub import hf_hub_download
+        hf_hub_download = importlib.import_module("huggingface_hub").hf_hub_download
 
         for filename, expected_key in (
             ("pytorch_model.bin", "sha256"),

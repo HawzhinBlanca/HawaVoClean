@@ -76,4 +76,28 @@ test('build-pkg.sh generates package and packages postinstall/preinstall lifecyc
 
   assert.ok(fs.existsSync(outputPkg), 'Package artifact must be generated');
   assert.ok(fs.statSync(outputPkg).size > 0, 'Package must not be empty');
+
+  if (process.platform === 'darwin') {
+    const payload = execFileSync('pkgutil', ['--payload-files', outputPkg], { encoding: 'utf8' });
+    const appleDouble = payload.split('\n').filter((line) => /(^|\/)\._/.test(line.trim()));
+    assert.deepEqual(appleDouble, [], 'PKG payload must not contain macOS AppleDouble ._* files');
+  }
+});
+
+test('install.sh and activate.sh stage and verify every sibling JS module required by main.js', () => {
+  const mainSource = fs.readFileSync(
+    path.join(__dirname, '..', 'com.hawavoclean.resolve', 'main.js'),
+    'utf8'
+  );
+  const installSource = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
+  const activateSource = fs.readFileSync(path.join(__dirname, '..', 'activate.sh'), 'utf8');
+  const requiredModules = [...mainSource.matchAll(/require\(['"]\.\/([A-Za-z0-9._-]+\.js)['"]\)/g)].map(
+    (m) => m[1]
+  );
+  assert.ok(requiredModules.includes('engine-discovery.js'), 'main.js must require engine-discovery.js');
+  assert.ok(requiredModules.includes('timeline-transactions.js'), 'main.js must require timeline-transactions.js');
+  for (const mod of requiredModules) {
+    assert.ok(installSource.includes(mod), `install.sh must stage required module ${mod}`);
+    assert.ok(activateSource.includes(mod), `activate.sh must verify required module ${mod}`);
+  }
 });

@@ -9,7 +9,7 @@ Python engine (`hawavoclean serve`). It is the "Resolve / desktop shell" part of
 resolve-plugin/
   com.hawavoclean.resolve/    shell sources — what gets copied into the plugin directory
     manifest.xml              Resolve plugin manifest (id com.hawavoclean.resolve, entry main.js)
-    package.json              name/main/scripts; exact Electron 43.4.1 for controlled standalone tests
+    package.json              name/main/scripts; exact Electron 43.8.10 for controlled standalone tests
     main.js                   main process: security boundary, engine, IPC, Resolve bridge, shutdown
     preload.js                sandboxed preload: exposes window.hawa (HawaBridge) via contextBridge
     session-auth.js           exact-origin session bootstrap and Authorization-header policy
@@ -32,7 +32,7 @@ lives under `build/` (gitignored).
 1. **Resolve launches the plugin** in the Electron/Chromium runtime owned and shipped by the installed
    DaVinci Resolve version, using `manifest.xml` → `main.js`. HawaVoClean does not infer that vendor
    runtime's version from its standalone test dependency. The controlled test runtime is exact
-   Electron 43.4.1; real-host version evidence is captured separately during Resolve acceptance.
+   Electron 43.8.10; real-host version evidence is captured separately during Resolve acceptance.
 2. **`main.js` reads `engine.json`** (next to itself):
    `{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{"PYTHONNOUSERSITE":"1","PYTHONDONTWRITEBYTECODE":"1"}}`
    and spawns
@@ -81,7 +81,7 @@ lives under `build/` (gitignored).
    after 3 s; finally
    `WorkflowIntegration.CleanUp()`. A 10 s hard deadline forces `app.exit`.
 
-Checked empirically with exact standalone Electron 43.4.1 (see `dev/selftest.sh`): from the `file://` page,
+Checked empirically with exact standalone Electron 43.8.10 (see `dev/selftest.sh`): from the `file://` page,
 `<script type="module">`, dynamic `import()`, ES-module workers (with imports), classic workers,
 `OffscreenCanvas` and WebGL2 inside a worker all work, and `fetch` to `http://127.0.0.1:<port>`
 succeeds with the engine's CORS headers.
@@ -175,7 +175,7 @@ renderer traffic is filtered to those files and the one authenticated loopback e
 sandboxing, context isolation, exact-sender IPC checks, synchronous permission denial and total
 navigation/popup/webview denial are exercised by the lifecycle self-tests.
 
-The exact standalone test runtime (Electron 43.4.1) is HawaVoClean-owned and lock-audited. Resolve's
+The exact standalone test runtime (Electron 43.8.10) is HawaVoClean-owned and lock-audited. Resolve's
 embedded runtime is Blackmagic-owned and must be captured separately; the installed Resolve 21.0.3
 currently contains Electron 36.3.2 with known advisories. See
 [`docs/resolve-runtime-risk.md`](../docs/resolve-runtime-risk.md). That vendor risk remains pending

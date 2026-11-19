@@ -36,7 +36,7 @@ function usePhase(): Phase {
   const state = useStore((s) => s.job?.status?.state ?? (s.job ? 'queued' : null));
   if (state === 'running' || state === 'queued') return 'running';
   if (analyzing) return 'analyzing';
-  if (state === 'failed') return 'failed';
+  if (state === 'failed' || state === 'interrupted') return 'failed';
   if (state === 'done') return 'done';
   if (!source || !original) return 'idle';
   return 'ready';

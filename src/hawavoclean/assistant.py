@@ -13,6 +13,7 @@ faithfully.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import urllib.error
@@ -114,6 +115,13 @@ class AudioPlanRequest(_ClosedModel):
     history: list[ChatMessage] = Field(default_factory=list, max_length=12)
     allow_cloud_text: bool = Field(default=False, strict=True)
     acoustic_context: AcousticContext | None = None
+
+    @field_validator("message")
+    @classmethod
+    def reject_control_characters(cls, value: str) -> str:
+        if any(ord(char) < 32 and char not in {"\t", "\n", "\r"} for char in value):
+            raise ValueError("Use plain text without control characters")
+        return value
 
 
 class PlanPayload(_ClosedModel):
@@ -603,6 +611,18 @@ def _extract_time_range(
             start_unit = end_unit = None
         start_s = round(_parse_timestamp_s(start_tok, start_unit), 3)
         end_s = round(_parse_timestamp_s(end_tok, end_unit), 3)
+        if not (math.isfinite(start_s) and math.isfinite(end_s)):
+            return (
+                None,
+                text,
+                "Please specify a valid start and end time within the recording.",
+            )
+        if start_s < 0.0 or start_s > 86400.0 or end_s <= 0.0 or end_s > 86400.0:
+            return (
+                None,
+                text,
+                "Please specify times within a 24-hour recording (between 0:00 and 24:00:00).",
+            )
         if end_s <= start_s:
             return (
                 None,
@@ -1146,7 +1166,7 @@ def plan_audio(request: AudioPlanRequest) -> AudioPlan:
         request.message.lower(),
     )
     if wanted_alone and payload.operation == "remove":
-        target = wanted_alone.group(1).strip()
+        target = re.sub(r"\s+", " ", wanted_alone.group(1)).strip()
         if not re.search(r"\b(remove|delete|without|not|except|and|but)\b", target):
             target = (
                 "speech" if target in {"conversation", "dialogue", "voice", "speech"} else target

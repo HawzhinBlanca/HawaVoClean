@@ -15,6 +15,7 @@ test('resolve main enforces strict Content-Security-Policy with zero unsafe-eval
   assert.ok(mainSource.includes('STRICT_CSP ='), 'main.js must define STRICT_CSP');
   assert.ok(mainSource.includes("default-src 'none'"), 'CSP must deny by default');
   assert.ok(mainSource.includes("connect-src http://127.0.0.1:* ws://127.0.0.1:*"), 'CSP must restrict connect-src to loopback');
+  assert.ok(mainSource.includes("worker-src 'self' blob:"), 'CSP must permit dedicated self/blob workers');
   assert.ok(!mainSource.includes("'unsafe-eval'"), 'CSP must strictly disallow unsafe-eval');
   assert.ok(mainSource.includes("frame-src 'none'"), 'CSP must disallow framing');
   assert.ok(mainSource.includes("object-src 'none'"), 'CSP must disallow plugins/objects');

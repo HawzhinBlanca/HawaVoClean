@@ -107,7 +107,7 @@ export function deriveWorkspacePhase(
   if (state.analyzing) return 'analyzing';
   if (!state.source) return 'empty';
   const jobState = state.job?.status?.state ?? null;
-  if (jobState === 'failed') return 'failed';
+  if (jobState === 'failed' || jobState === 'interrupted') return 'failed';
   if (jobState === 'done' || (state.cleanedPath !== null && state.report !== null)) {
     return 'reviewed';
   }

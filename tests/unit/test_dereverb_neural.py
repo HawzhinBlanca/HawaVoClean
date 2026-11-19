@@ -437,3 +437,12 @@ def test_neural_dereverb_core_protocol_and_validation(
     assert res.output_samples == len(sig)
     assert bool(np.all(np.isfinite(res.waveform)))
     assert "dereverb" in budget_calls
+
+    # Extreme finite amplitudes (>= 1e20) must not emit float32 overflow warnings or NaNs.
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        res_ext = core.enhance((sig * 1e35).astype(np.float32), 48000)
+    assert bool(np.all(np.isfinite(res_ext.waveform)))
+    assert float(np.max(np.abs(res_ext.waveform))) <= 0.9901

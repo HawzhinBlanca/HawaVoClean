@@ -236,6 +236,8 @@ class StreamingAcousticAnalyzer:
 
         self._samples = 0
         self._frames = 0
+        self._active_frames = 0
+        self._active_speech_sum = 0.0
         self._speech_sum = 0.0
         self._speech_weight = 0.0
         self._music_weighted_sum = 0.0
@@ -393,7 +395,7 @@ class StreamingAcousticAnalyzer:
         self._psd_sum += power
 
         total_mask = (self._freqs >= 50.0) & (self._freqs <= min(10_000.0, self._sample_rate / 2.0))
-        voice_mask = (self._freqs >= 250.0) & (self._freqs <= 4_000.0)
+        voice_mask = (self._freqs >= 85.0) & (self._freqs <= 4_500.0)
         total_power = float(np.sum(power[total_mask])) + 1e-24
         voice_ratio = float(np.sum(power[voice_mask])) / total_power
         active_power = power[total_mask]
@@ -407,18 +409,22 @@ class StreamingAcousticAnalyzer:
             if valid_samples > 1
             else 0.0
         )
+        zcr_hz = zcr * (self._sample_rate / 2.0)
 
         energy_score = _clip_probability((rms_db + 62.0) / 22.0)
-        voice_score = _clip_probability((voice_ratio - 0.20) / 0.65)
-        centroid_score = _clip_probability(1.0 - abs(centroid - 1_700.0) / 2_800.0)
-        zcr_score = _clip_probability(1.0 - abs(zcr - 0.10) / 0.22)
-        flatness_score = _clip_probability(1.0 - abs(flatness - 0.16) / 0.38)
-        speech_score = energy_score * (
-            0.45 * voice_score + 0.20 * centroid_score + 0.15 * zcr_score + 0.20 * flatness_score
+        voice_score = _clip_probability((voice_ratio - 0.25) / 0.55)
+        centroid_score = _clip_probability(1.0 - abs(centroid - 1_200.0) / 2_600.0)
+        zcr_score = _clip_probability(1.0 - abs(zcr_hz - 1_200.0) / 2_600.0)
+        flatness_score = _clip_probability(1.0 - abs(flatness - 0.12) / 0.40)
+        speech_quality = (
+            0.50 * voice_score + 0.20 * centroid_score + 0.15 * zcr_score + 0.15 * flatness_score
         )
-        speech_score = _clip_probability(speech_score)
+        speech_score = _clip_probability(energy_score * speech_quality)
         self._speech_sum += speech_score
         self._speech_weight += speech_score
+        if rms_db > -52.0:
+            self._active_frames += 1
+            self._active_speech_sum += speech_quality
         self._speech_psd_sum += power * speech_score
 
         normalized = power / float(np.sum(power))
@@ -532,13 +538,26 @@ class StreamingAcousticAnalyzer:
         assert self._speech_psd_sum is not None
         duration = self._samples / self._sample_rate
         duration_conf = _clip_probability(duration / self.config.min_analysis_s)
-        speech_raw = self._speech_sum / self._frames
         q10, q90 = self._energy_quantiles()
         dynamic_conf = _clip_probability((q90 - q10) / 24.0)
-        speech_conf = min(0.72, duration_conf * (0.35 + 0.65 * dynamic_conf))
+        speech_dynamic_conf = _clip_probability((q90 - q10) / 14.0)
 
         speech_denom = max(self._speech_weight, 1e-12)
         music_raw = self._music_weighted_sum / speech_denom
+        active_s = self._active_frames * (self.config.frame_samples / float(self._sample_rate))
+        frame_conf = _clip_probability(active_s / 2.0)
+        active_quality = (
+            self._active_speech_sum / self._active_frames if self._active_frames > 0 else 0.0
+        )
+        active_coverage = _clip_probability((self._active_frames / max(self._frames, 1)) / 0.15)
+        speech_raw = _clip_probability(
+            active_quality * active_coverage * (1.0 - 0.8 * max(0.0, music_raw - 0.15))
+        )
+        speech_conf = min(0.92, frame_conf * (0.25 + 0.75 * speech_dynamic_conf))
+        music_conf = (
+            min(0.86, frame_conf * min(1.0, speech_raw / 0.45)) if self._active_frames > 0 else 0.0
+        )
+
         noise_flat = self._noise_weighted_sum / self._frames
         floor_close = _clip_probability(1.0 - (q90 - q10) / 30.0)
         noise_raw = 0.65 * noise_flat + 0.35 * floor_close
@@ -557,10 +576,13 @@ class StreamingAcousticAnalyzer:
         coherence_raw, coherence_conf = self._channel_coherence(duration_conf)
 
         if self._channels == 1:
-            crosstalk_raw, crosstalk_conf = 0.50, 0.0
+            # Single-channel mono cannot exhibit stereo inter-channel crosstalk.
+            # Keep pure silence/very short clips conservative via frame_conf.
+            crosstalk_raw = 0.0
+            crosstalk_conf = min(0.86, frame_conf) if self._active_frames > 0 else 0.0
         else:
             crosstalk_raw = _clip_probability((0.82 - coherence_raw) / 0.72)
-            crosstalk_conf = min(0.45, duration_conf * coherence_conf)
+            crosstalk_conf = min(0.86, frame_conf * coherence_conf)
 
         reverb_raw = self._decay_sum / max(self._decay_opportunities, 1)
         reverb_conf = min(0.40, duration_conf * self._decay_opportunities / 40.0)
@@ -579,7 +601,7 @@ class StreamingAcousticAnalyzer:
             )
         if self._channels == 1:
             reasons.append(
-                "single-channel audio cannot establish whether overlapping speakers are present"
+                "single-channel audio has no stereo channel pair for cross-channel overlap checks"
             )
         if self._sample_rate < 32_000:
             reasons.append(
@@ -599,11 +621,11 @@ class StreamingAcousticAnalyzer:
                 speech_raw,
                 speech_conf,
                 "lower",
-                "energy, voice-band ratio, centroid, ZCR and flatness",
+                "active-frame speech energy, voice-band ratio, centroid, ZCR and flatness",
             ),
             music_risk=_estimate(
                 music_raw,
-                min(0.50, duration_conf * speech_raw),
+                music_conf,
                 "upper",
                 "stable tonality and low spectral flux; no learned music classifier",
             ),
@@ -611,7 +633,7 @@ class StreamingAcousticAnalyzer:
                 crosstalk_raw,
                 crosstalk_conf,
                 "upper",
-                "zero-lag stereo coherence only; speaker separation is unavailable",
+                "zero-lag stereo coherence (single-channel mono has no stereo channel crosstalk)",
             ),
             band_limited_confidence=_estimate(
                 band_raw,

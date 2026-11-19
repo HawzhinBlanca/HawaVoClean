@@ -58,6 +58,10 @@ export function useJobAnnouncer(): string {
       setMsg(`Processing failed: ${errCode ?? 'unknown error'}`);
       return;
     }
+    if (state === 'interrupted') {
+      setMsg(`Processing interrupted: ${errCode ?? 'ENGINE_RESTARTED'}`);
+      return;
+    }
     if (state === 'cancelled') {
       setMsg('Processing cancelled');
       return;

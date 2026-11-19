@@ -261,10 +261,11 @@ export function ProcessButton() {
   let barCls = 'bar';
   if (!running) {
     if (state === 'done') barCls += ' done';
-    else if (state === 'failed') barCls += ' err';
+    else if (state === 'failed' || state === 'interrupted') barCls += ' err';
     else barCls += ' idle';
   }
-  const shown = running ? progress : state === 'done' ? 1 : state === 'failed' ? 1 : 0;
+  const shown =
+    running ? progress : state === 'done' ? 1 : state === 'failed' || state === 'interrupted' ? 1 : 0;
   const face = useFaceLoop(shown, running, reduced, startedMs);
   // While the loop is live it owns the attribute; otherwise React does.
   const dashOffset = running ? C * (1 - face.initial) : C * (1 - shown);
@@ -298,15 +299,15 @@ export function ProcessButton() {
         : { k: 'Units', v: s ? `${s.enhanced ?? 0} / ${s.units_total ?? 0}` : '—', num: true },
       { k: 'Took', v: fmtElapsed(finalSec), num: true },
     ];
-  } else if (state === 'failed') {
+  } else if (state === 'failed' || state === 'interrupted') {
     title = 'RETRY';
-    const code = status?.error?.code ?? '';
+    const code = status?.error?.code ?? (state === 'interrupted' ? 'ENGINE_RESTARTED' : '');
     cells = [
-      { k: 'Result', v: 'Failed' },
+      { k: 'Result', v: state === 'interrupted' ? 'Interrupted' : 'Failed' },
       {
         k: 'Reason',
         v: FAIL_REASON[code] ?? (code || status?.message || 'unknown'),
-        title: status?.error?.message ?? code ?? undefined,
+        title: status?.error?.message ?? status?.message ?? code ?? undefined,
       },
       { k: 'Took', v: fmtElapsed(finalSec), num: true },
     ];
@@ -382,12 +383,18 @@ export function ProcessButton() {
   let phaseCls = '';
   if (running) phaseCls = ' running';
   else if (state === 'done') phaseCls = ' done';
-  else if (state === 'failed') phaseCls = ' failed';
+  else if (state === 'failed' || state === 'interrupted') phaseCls = ' failed';
   else if (state === 'cancelled') phaseCls = ' cancelled';
 
   const si = stageIndex(status);
   const railCls =
-    state === 'done' ? 'rail done' : state === 'failed' ? 'rail failed' : running ? 'rail run' : 'rail';
+    state === 'done'
+      ? 'rail done'
+      : state === 'failed' || state === 'interrupted'
+        ? 'rail failed'
+        : running
+          ? 'rail run'
+          : 'rail';
 
   // The button's accessible name is the *action* (what pressing it does). The
   // readout is the *state*, and an aria-label on a button suppresses its own

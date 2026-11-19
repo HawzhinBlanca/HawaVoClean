@@ -38,7 +38,7 @@ if (value.host !== 'electron') throw new Error(`unexpected standalone host ${val
 if (Object.keys(value.endpoint ?? {}).join(',') !== 'baseUrl' || value.endpointHasCredential !== false) throw new Error('renderer endpoint exposed credential material');
 if (value.health?.status !== 200 || value.health?.body?.ok !== true) throw new Error('authenticated health check failed');
 if (value.sessionBootstrapBlocked !== true) throw new Error('renderer could reach session bootstrap');
-if (value.runtime?.electron !== '43.4.1') throw new Error(`unexpected Electron runtime ${value.runtime?.electron}`);
+if (value.runtime?.electron !== '43.8.10') throw new Error(`unexpected Electron runtime ${value.runtime?.electron}`);
 for (const probe of ['inlineScriptBlocked', 'remoteFetchBlocked', 'popupBlocked', 'geolocationDenied', 'pathTraversalBlocked', 'serviceWorkerBlocked', 'blobWorkerRan']) {
   if (value.security?.[probe] !== true) throw new Error(`security probe failed: ${probe}`);
 }

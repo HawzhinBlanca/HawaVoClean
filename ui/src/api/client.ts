@@ -10,11 +10,99 @@ import type {
   CreateJobResponse,
   CreateV1JobResponse,
   HealthResponse,
+  JobStage,
+  JobState,
   JobStatus,
   PeaksWindow,
   ProcessingRequestV1,
+  Profile,
   UploadResponse,
 } from './types';
+
+const V1_STATE_MAP: Readonly<Record<string, JobState>> = Object.freeze({
+  queued: 'queued',
+  running: 'running',
+  analyzing: 'running',
+  rendering: 'running',
+  guarding: 'running',
+  publishing: 'running',
+  done: 'done',
+  completed: 'done',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  interrupted: 'interrupted',
+});
+
+/**
+ * Normalize either a camelCase v1 `JobStatusResponseV1` or a snake_case
+ * `JobStatus` payload into the UI's canonical `JobStatus` shape.
+ */
+export function normalizeJobStatus(raw: Record<string, unknown>): JobStatus {
+  const rawState = typeof raw.state === 'string' ? raw.state : 'failed';
+  const state: JobState = V1_STATE_MAP[rawState] ?? 'failed';
+  const jobId =
+    typeof raw.job_id === 'string'
+      ? raw.job_id
+      : typeof raw.jobId === 'string'
+        ? raw.jobId
+        : '';
+  const outputPath =
+    typeof raw.output_path === 'string'
+      ? raw.output_path
+      : typeof raw.outputPath === 'string'
+        ? raw.outputPath
+        : '';
+  const reportPath =
+    typeof raw.report_path === 'string'
+      ? raw.report_path
+      : typeof raw.reportPath === 'string'
+        ? raw.reportPath
+        : '';
+  const inputPath =
+    typeof raw.input_path === 'string'
+      ? raw.input_path
+      : typeof raw.inputPath === 'string'
+        ? raw.inputPath
+        : '';
+  const startedAt =
+    raw.started_at !== undefined
+      ? (raw.started_at as string | null)
+      : raw.startedAt !== undefined
+        ? (raw.startedAt as string | null)
+        : null;
+  const finishedAt =
+    raw.finished_at !== undefined
+      ? (raw.finished_at as string | null)
+      : raw.finishedAt !== undefined
+        ? (raw.finishedAt as string | null)
+        : null;
+  const fallbackStage: JobStage =
+    state === 'done' ? 'done' : state === 'failed' || state === 'interrupted' ? 'error' : 'preflight';
+  const stage = (typeof raw.stage === 'string' ? raw.stage : fallbackStage) as JobStage;
+  const progress =
+    typeof raw.progress === 'number' && Number.isFinite(raw.progress)
+      ? raw.progress
+      : state === 'done'
+        ? 1
+        : 0;
+  const message = typeof raw.message === 'string' ? raw.message : '';
+  const profile = (typeof raw.profile === 'string' ? raw.profile : 'production') as Profile;
+
+  return {
+    ...(raw as Partial<JobStatus>),
+    job_id: jobId,
+    state,
+    stage,
+    progress,
+    message,
+    input_path: inputPath,
+    output_path: outputPath,
+    report_path: reportPath,
+    profile,
+    started_at: startedAt,
+    finished_at: finishedAt,
+  };
+}
 
 export interface Endpoint {
   baseUrl: string;
@@ -272,12 +360,22 @@ export class EngineClient {
   }
 
   /** @deprecated Use getV1Job (/api/v1/jobs/{jobId}). Scheduled for removal 2026-10-01 (v1.0.0). */
-  getJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
-    return this.json<JobStatus>(`/api/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, signal);
+  async getJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+    const raw = await this.json<Record<string, unknown>>(
+      `/api/jobs/${encodeURIComponent(jobId)}`,
+      { method: 'GET' },
+      signal,
+    );
+    return normalizeJobStatus(raw);
   }
 
-  getV1Job(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
-    return this.json<JobStatus>(`/api/v1/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, signal);
+  async getV1Job(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+    const raw = await this.json<Record<string, unknown>>(
+      `/api/v1/jobs/${encodeURIComponent(jobId)}`,
+      { method: 'GET' },
+      signal,
+    );
+    return normalizeJobStatus(raw);
   }
 
   /** @deprecated Use cancelV1Job (/api/v1/jobs/{jobId}/cancel). Scheduled for removal 2026-10-01 (v1.0.0). */

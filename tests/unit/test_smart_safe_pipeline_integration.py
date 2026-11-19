@@ -77,8 +77,12 @@ def test_smart_safe_pipeline_mono_end_to_end(tmp_path: Path) -> None:
     restoration = report_data.get("restoration", {})
     assert restoration.get("strategy") == "smart_safe"
     assert "selected_route" in restoration
+    assert restoration.get("perceptual_backend") in {"nisqa_v2", "dnsmos", "acoustic_proxy"}
     assert isinstance(restoration.get("candidates"), list)
     assert len(restoration["candidates"]) >= 1
+    candidate_routes = {c["route"] for c in restoration["candidates"]}
+    assert "studio_pro" in candidate_routes
+    assert "dereverb" in candidate_routes
     assert "acoustic_evidence" in restoration
     assert "decision_sha256" in restoration
 
@@ -281,6 +285,43 @@ def test_smart_safe_server_job_submission(tmp_path: Path) -> None:
     assert status.get("mode") == "smart_safe"
 
     mgr.shutdown()
+
+
+@pytest.mark.unit
+def test_smart_safe_preserve_abstention_skips_peak_limiter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When Smart Safe abstains to preserve, hot input peaks pass through un-limited."""
+    sr = 48000
+    t = np.linspace(0, 0.5, int(0.5 * sr), endpoint=False, dtype=np.float32)
+    hot = (0.98 * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+    in_wav = tmp_path / "hot.wav"
+    out_wav = tmp_path / "hot_out.wav"
+    sf.write(str(in_wav), hot, sr, subtype="PCM_24")
+
+    import hawavoclean.smart_safe.preview as preview_module
+
+    def force_preserve_fallback(
+        _master_audio: np.ndarray, _reference_audio: np.ndarray, _route: str, _sr: int
+    ) -> tuple[bool, str]:
+        return (False, "force preserve fallback")
+
+    monkeypatch.setattr(preview_module, "verify_post_master_invariants", force_preserve_fallback)
+    monkeypatch.setattr(
+        preview_module, "abstain_to_least_intervention", lambda *_a, **_k: "preserve"
+    )
+
+    report = run_pipeline(
+        input_path=in_wav,
+        output_path=out_wav,
+        profile="production",
+        mode="smart_safe",
+        overwrite=True,
+    )
+    assert report.restoration is not None
+    assert report.restoration["selected_route"] == "preserve"
+    out_audio, _ = sf.read(str(out_wav), dtype="float32")
+    assert float(np.max(np.abs(out_audio))) == pytest.approx(0.98, abs=1e-3)
 
 
 @pytest.mark.unit

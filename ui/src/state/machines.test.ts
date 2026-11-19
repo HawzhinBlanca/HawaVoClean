@@ -155,6 +155,21 @@ describe('deriveWorkspacePhase & deriveProcessingReadiness', () => {
       },
     };
     expect(deriveWorkspacePhase(failed)).toBe('failed');
+    expect(deriveProcessingReadiness(failed).canStart).toBe(true);
+
+    const interrupted = {
+      ...ready,
+      job: {
+        id: 'j1',
+        outputPath: '/out.wav',
+        reportPath: '/out.json',
+        status: { state: 'interrupted' } as JobStatus,
+        streamConnected: false,
+      },
+    };
+    expect(deriveWorkspacePhase(interrupted)).toBe('failed');
+    expect(deriveProcessingReadiness(interrupted).running).toBe(false);
+    expect(deriveProcessingReadiness(interrupted).canStart).toBe(true);
     expect(WORKSPACE_PHASE_TRANSITIONS.processing).toContain('reviewed');
   });
 });

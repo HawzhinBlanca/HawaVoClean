@@ -169,13 +169,13 @@ def _normalize_rms(
     mono: np.ndarray[Any, np.dtype[np.float32]],
     target_rms: float,
 ) -> np.ndarray[Any, np.dtype[np.float32]]:
-    rms = float(np.sqrt(np.mean(mono**2) + 1e-12))
+    rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float64)) + 1e-12))
     if rms < 1e-6:
         return mono.copy()
-    scaled = mono * (target_rms / rms)
+    scaled = (mono.astype(np.float64) * (target_rms / rms)).astype(np.float32)
     peak = float(np.max(np.abs(scaled)))
     if peak > 0.95:
-        scaled = scaled * (0.95 / peak)
+        scaled = (scaled.astype(np.float64) * (0.95 / peak)).astype(np.float32)
     return np.ascontiguousarray(scaled, dtype=np.float32)
 
 
@@ -201,7 +201,7 @@ def _score_acoustic_proxy(
     hop_len = max(8, frame_len // 2)
     if n_samples >= frame_len:
         frames = np.lib.stride_tricks.sliding_window_view(mono, frame_len)[::hop_len]
-        frame_rms = np.sqrt(np.mean(frames**2, axis=1) + 1e-12)
+        frame_rms = np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1) + 1e-12)
         speech_rms = float(np.percentile(frame_rms, 90))
         floor_rms = float(np.percentile(frame_rms, 15))
     else:
@@ -226,7 +226,7 @@ def _score_acoustic_proxy(
 
     # 3. Coloration via spectral balance (rumble, bandwidth fullness, speech-band flatness)
     nperseg = min(2048, n_samples)
-    freqs, psd = signal.welch(mono, fs=sample_rate, nperseg=nperseg)
+    freqs, psd = signal.welch(mono.astype(np.float64), fs=sample_rate, nperseg=nperseg)
     psd = np.maximum(psd, 1e-18)
     core_mask = (freqs >= 300.0) & (freqs <= 3400.0)
     rumble_mask = freqs < 90.0
@@ -433,7 +433,7 @@ class PerceptualQualityScorer:
                 calibrated=False,
             )
 
-        raw_rms = float(np.sqrt(np.mean(mono**2)))
+        raw_rms = float(np.sqrt(np.mean(np.square(mono, dtype=np.float64))))
         if raw_rms < 1e-4:
             return PerceptualQualityScore(
                 mos=3.0,

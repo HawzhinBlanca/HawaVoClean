@@ -249,4 +249,15 @@ describe('the button itself', () => {
     expect(button()?.getAttribute('aria-label')).toBe('PROCESS AGAIN');
     expect(button()?.getAttribute('aria-describedby')).toBe('process-readout');
   });
+
+  it('offers RETRY and reads Interrupted when a run is interrupted after engine restart', async () => {
+    await armed();
+    await withStatus(status('interrupted', { stage: 'error', error: null, message: 'Engine restarted' }));
+    await render();
+    expect(button()?.getAttribute('aria-label')).toBe('RETRY');
+    expect(button()?.hasAttribute('aria-disabled')).toBe(false);
+    expect(face()).toContain('RETRY');
+    expect(face()).toContain('Interrupted');
+    expect(face()).toContain('Engine gone');
+  });
 });

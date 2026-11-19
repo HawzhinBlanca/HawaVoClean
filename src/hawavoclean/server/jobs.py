@@ -1512,11 +1512,12 @@ class JobManager:
                 raise RuntimeError("job manager is shut down")
             self._prune_locked()
             record = self._jobs.get(job_id)
+            loaded_from_store = False
             if record is None and self._store is not None:
                 resource = self._store.find_job(job_id)
                 if resource is not None:
                     record = JobRecord.from_storage(resource.record)
-                    self._jobs[record.job_id] = record
+                    loaded_from_store = True
             if record is None:
                 raise KeyError(f"job {job_id} not found")
             if record.state not in TERMINAL_STATES:
@@ -1526,6 +1527,17 @@ class JobManager:
             if active >= self._max_active_jobs:
                 raise QueueFullError(
                     f"job queue is full ({active}/{self._max_active_jobs} active jobs)"
+                )
+
+            target_key = output_key(record.output_path)
+            if any(
+                r.job_id != record.job_id
+                and r.state not in TERMINAL_STATES
+                and output_key(r.output_path) == target_key
+                for r in self._jobs.values()
+            ):
+                raise OutputConflictError(
+                    f"output is reserved by an active job: {record.output_path}"
                 )
 
             if not record.input_path.exists() or not record.input_path.is_file():
@@ -1539,27 +1551,78 @@ class JobManager:
                 staging_root=work_root(),
                 max_file_size_bytes=MAX_INPUT_FILE_BYTES,
             )
-            record.source_snapshot_path = pinned.path
-            record.source_snapshot_dir = pinned.directory
-            record.source_sha256 = pinned.sha256
-            record.source_size_bytes = pinned.size_bytes
+            previous = (
+                record.source_snapshot_path,
+                record.source_snapshot_dir,
+                record.source_sha256,
+                record.source_size_bytes,
+                record.state,
+                record.stage,
+                record.progress,
+                record.message,
+                record.unit,
+                record.started_at,
+                record.finished_at,
+                record.terminal_at,
+                record.error,
+                record.report,
+                record.bundle,
+                record.artifact_evidence,
+                record.cancel_requested,
+                record.seq,
+            )
+            try:
+                record.source_snapshot_path = pinned.path
+                record.source_snapshot_dir = pinned.directory
+                record.source_sha256 = pinned.sha256
+                record.source_size_bytes = pinned.size_bytes
 
-            transition_job_state(record, "queued")
-            record.stage = "preflight"
-            record.progress = 0.0
-            record.message = "Queued (retry)"
-            record.started_at = None
-            record.finished_at = None
-            record.terminal_at = None
-            record.error = None
-            record.cancel_requested = False
-            record.seq += 1
+                transition_job_state(record, "queued")
+                record.stage = "preflight"
+                record.progress = 0.0
+                record.message = "Queued (retry)"
+                record.unit = None
+                record.started_at = None
+                record.finished_at = None
+                record.terminal_at = None
+                record.error = None
+                record.report = None
+                record.bundle = None
+                record.artifact_evidence = None
+                record.cancel_requested = False
+                record.seq += 1
 
-            if self._store is not None:
-                self._store.update(record.storage_record(), terminal=False)
-                if record.batch_id is not None and record.batch_id not in self._paused_batches:
-                    self._store.update_batch_state(record.batch_id, "running")
+                if self._store is not None:
+                    self._store.update(record.storage_record(), terminal=False)
+                    if record.batch_id is not None and record.batch_id not in self._paused_batches:
+                        self._store.update_batch_state(record.batch_id, "running")
+            except BaseException:
+                (
+                    record.source_snapshot_path,
+                    record.source_snapshot_dir,
+                    record.source_sha256,
+                    record.source_size_bytes,
+                    record.state,
+                    record.stage,
+                    record.progress,
+                    record.message,
+                    record.unit,
+                    record.started_at,
+                    record.finished_at,
+                    record.terminal_at,
+                    record.error,
+                    record.report,
+                    record.bundle,
+                    record.artifact_evidence,
+                    record.cancel_requested,
+                    record.seq,
+                ) = previous
+                pinned.cleanup_unadopted()
+                raise
 
+            if loaded_from_store:
+                self._jobs[record.job_id] = record
+            record.stderr_tail.clear()
             self._queue.append(record.job_id)
             running = any(r.state == "running" for r in self._jobs.values())
             position = queue_position(len(self._queue), running)

@@ -1734,6 +1734,8 @@ def create_app(
             snapshot = manager.retry_job(job_id)
         except KeyError as exc:
             raise ApiError(404, "not_found", f"unknown job: {job_id}") from exc
+        except OutputConflictError as exc:
+            raise ApiError(409, "conflict", str(exc)) from exc
         except QueueFullError as exc:
             raise ApiError(503, "queue_full", str(exc)) from exc
         except MediaPreflightError as exc:

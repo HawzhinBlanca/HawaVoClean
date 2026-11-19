@@ -99,7 +99,11 @@ export function WaveformDisplay() {
   const ovRef = useRef<HTMLDivElement | null>(null);
   const selOverlayRef = useRef<HTMLDivElement | null>(null);
 
-  const dragging = useRef(false);
+  const dragRef = useRef<
+    | { readonly mode: 'idle' }
+    | { readonly mode: 'seeking'; readonly pointerId: number }
+    | { readonly mode: 'selecting'; readonly pointerId: number; readonly anchorS: number }
+  >({ mode: 'idle' });
   const panBase = useRef<{ x: number; start: number; end: number } | null>(null);
   const ovGrab = useRef<{ offset: number } | null>(null);
   const bucketsRef = useRef(1200);
@@ -698,7 +702,6 @@ export function WaveformDisplay() {
   }, []);
 
   // D2 · Shift-drag starts/extends a selection range instead of seeking.
-  const selDragStart = useRef<number | null>(null);
   const setSelectionRange = useStore((s) => s.setSelectionRange);
 
   const onPointerDown = useCallback(
@@ -709,13 +712,10 @@ export function WaveformDisplay() {
       capture(e.currentTarget, e.pointerId);
 
       if (e.shiftKey) {
-        // D2: start selection range
-        selDragStart.current = t;
+        dragRef.current = { mode: 'selecting', pointerId: e.pointerId, anchorS: t };
         setSelectionRange({ start: t, end: t });
-        dragging.current = false;
       } else {
-        selDragStart.current = null;
-        dragging.current = true;
+        dragRef.current = { mode: 'seeking', pointerId: e.pointerId };
         seekTo(t);
       }
     },
@@ -731,16 +731,14 @@ export function WaveformDisplay() {
       if (x >= 0 && x <= r.width) hostRef.current?.setHover(x);
       else hostRef.current?.setHover(null);
 
+      const drag = dragRef.current;
+      if (drag.mode === 'idle' || drag.pointerId !== e.pointerId) return;
       const t = timeAt(e.clientX);
+      if (t === null) return;
 
-      // D2: extending a selection range
-      if (selDragStart.current !== null && t !== null) {
-        const s = selDragStart.current;
-        setSelectionRange({ start: Math.min(s, t), end: Math.max(s, t) });
-        return;
-      }
-
-      if (dragging.current && t !== null) {
+      if (drag.mode === 'selecting') {
+        setSelectionRange({ start: Math.min(drag.anchorS, t), end: Math.max(drag.anchorS, t) });
+      } else {
         seekTo(t);
       }
     },
@@ -749,19 +747,16 @@ export function WaveformDisplay() {
 
   const onPointerUp = useCallback(
     (e: PointerEvent<HTMLDivElement>) => {
-      if (selDragStart.current !== null) {
-        selDragStart.current = null;
+      const drag = dragRef.current;
+      if (drag.mode === 'idle' || drag.pointerId !== e.pointerId) return;
+      dragRef.current = { mode: 'idle' };
+      if (drag.mode === 'selecting') {
         const sel = getState().selectionRange;
         if (sel && sel.end - sel.start < 0.05) {
           setSelectionRange(null);
         }
-        release(e.currentTarget, e.pointerId);
-        return;
       }
-      if (dragging.current) {
-        dragging.current = false;
-        release(e.currentTarget, e.pointerId);
-      }
+      release(e.currentTarget, e.pointerId);
     },
     [setSelectionRange],
   );

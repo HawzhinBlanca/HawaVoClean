@@ -247,7 +247,7 @@ function configureSessionSecurity() {
     requestAuthorization.delete(details.id);
   });
 
-  const STRICT_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: http://127.0.0.1:*; connect-src http://127.0.0.1:* ws://127.0.0.1:*; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none';";
+  const STRICT_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: http://127.0.0.1:*; connect-src http://127.0.0.1:* ws://127.0.0.1:*; font-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none';";
   appSession.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...(details.responseHeaders || {}) };
     responseHeaders['Content-Security-Policy'] = [STRICT_CSP];
@@ -261,7 +261,17 @@ function configureSessionSecurity() {
 // Engine process management
 // ---------------------------------------------------------------------------------------------
 
+const ALLOWED_RESOLVE_ENGINE_TRANSITIONS = Object.freeze({
+  idle: Object.freeze(['discovering', 'stopped']),
+  discovering: Object.freeze(['bootstrapping', 'failed', 'stopped']),
+  bootstrapping: Object.freeze(['ready', 'discovering', 'failed', 'stopped']),
+  ready: Object.freeze(['failed', 'stopped']),
+  failed: Object.freeze(['stopped']),
+  stopped: Object.freeze([]),
+});
+
 const engine = {
+  phase: 'idle', // 'idle' | 'discovering' | 'bootstrapping' | 'ready' | 'failed' | 'stopped'
   config: null, // {command: string[], cwd: string, env: object}
   child: null,
   token: crypto.randomBytes(16).toString('hex'), // fresh random 32-hex token per run
@@ -278,12 +288,23 @@ const engine = {
   exitInfo: null, // {code, signal}
   settled: false,
   bootstrapping: false,
+  shared: false,
 };
+
+function transitionEnginePhase(next) {
+  if (engine.phase === next) return;
+  const allowed = ALLOWED_RESOLVE_ENGINE_TRANSITIONS[engine.phase] || [];
+  if (!allowed.includes(next)) {
+    throw new Error(`Illegal Resolve engine transition: ${engine.phase} -> ${next}`);
+  }
+  engine.phase = next;
+}
 
 let resolveReady = null; // resolve() of engine.ready
 let rejectReady = null; // reject() of engine.ready
 
 function engineOrigin() {
+  if (engine.phase !== 'ready' && engine.phase !== 'bootstrapping') return null;
   return engine.endpoint ? exactEngineOrigin(engine.endpoint.baseUrl) : null;
 }
 
@@ -399,8 +420,12 @@ function signalEngineTree(child, signal) {
 }
 
 function failEngine(message) {
-  if (engine.settled) return;
+  if (engine.settled || engine.phase === 'stopped') return;
   engine.settled = true;
+  engine.bootstrapping = false;
+  engine.endpoint = null;
+  engine.session = null;
+  transitionEnginePhase('failed');
   const err = new Error(message);
   engine.failure = err;
   if (rejectReady) rejectReady(err);
@@ -419,12 +444,13 @@ function failEngine(message) {
 }
 
 function handleReadyLine(obj) {
-  if (engine.settled || engine.bootstrapping) return;
+  if (engine.settled || engine.bootstrapping || engine.phase !== 'discovering') return;
   const port = Number(obj.port);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     failEngine(`Engine reported an invalid port in its ready line: ${JSON.stringify(obj)}`);
     return;
   }
+  transitionEnginePhase('bootstrapping');
   engine.bootstrapping = true;
   engine.port = port;
   engine.pid = Number.isInteger(obj.pid) ? obj.pid : engine.child ? engine.child.pid : null;
@@ -433,10 +459,11 @@ function handleReadyLine(obj) {
   log(`engine ready: ${engine.endpoint.baseUrl} (pid ${engine.pid}, version ${engine.version || '?'}); minting renderer session`);
   requestEngineSession(engine.endpoint, engine.token).then(
     (capability) => {
-      if (engine.settled) return;
+      if (engine.settled || engine.phase !== 'bootstrapping') return;
       engine.session = capability;
       engine.bootstrapping = false;
       engine.settled = true;
+      transitionEnginePhase('ready');
       log('engine renderer session ready');
       if (resolveReady) resolveReady(engine.endpoint);
     },
@@ -447,49 +474,9 @@ function handleReadyLine(obj) {
   );
 }
 
-function startEngine() {
-  engine.ready = new Promise((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
-  // Swallow "unhandled rejection" noise; consumers (IPC handler) attach their own handlers.
-  engine.ready.catch(() => {});
-
-  let discovery;
-  try {
-    discovery = discoverDesktopEngine();
-  } catch (err) {
-    failEngine(`Desktop engine discovery failed: ${err.message}`);
-    return;
-  }
-
-  if (discovery.type === 'active_rendezvous') {
-    log(`connecting to active desktop engine rendezvous: ${discovery.origin} (pid ${discovery.pid})`);
-    engine.endpoint = { baseUrl: discovery.origin };
-    engine.token = discovery.token;
-    engine.pid = discovery.pid;
-    engine.bootstrapping = true;
-    engine.shared = true;
-
-    requestEngineSession(engine.endpoint, engine.token).then(
-      (capability) => {
-        if (engine.settled) return;
-        engine.session = capability;
-        engine.bootstrapping = false;
-        engine.settled = true;
-        log('engine renderer session ready via desktop rendezvous');
-        if (resolveReady) resolveReady(engine.endpoint);
-      },
-      (err) => {
-        engine.bootstrapping = false;
-        failEngine(`Could not bootstrap session with active desktop engine: ${err.message}`);
-      },
-    );
-    return;
-  }
-
+function spawnLocalEngine(discovery) {
   let config;
-  if (discovery.type === 'installed_desktop_engine') {
+  if (discovery && discovery.type === 'installed_desktop_engine') {
     config = {
       command: discovery.command,
       cwd: discovery.cwd,
@@ -500,7 +487,7 @@ function startEngine() {
     try {
       config = readEngineConfig();
     } catch (err) {
-      failEngine(discovery.message || err.message);
+      failEngine((discovery && discovery.message) || err.message);
       return;
     }
   }
@@ -582,6 +569,9 @@ function startEngine() {
     if (!engine.settled) {
       failEngine(`Engine exited (${how}) before it reported ready.`);
     } else if (!engine.failure && quitState === 'running') {
+      engine.endpoint = null;
+      engine.session = null;
+      transitionEnginePhase('failed');
       engine.failure = new Error(`Engine exited unexpectedly (${how}).`);
       showErrorPage('The HawaVoClean engine stopped unexpectedly', engine.failure.message);
     }
@@ -594,6 +584,63 @@ function startEngine() {
   }, ENGINE_READY_TIMEOUT_MS);
   timer.unref();
   engine.ready.then(() => clearTimeout(timer), () => clearTimeout(timer));
+}
+
+function startEngine() {
+  if (engine.phase !== 'idle') return;
+  transitionEnginePhase('discovering');
+  engine.ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  // Swallow "unhandled rejection" noise; consumers (IPC handler) attach their own handlers.
+  engine.ready.catch(() => {});
+
+  let discovery;
+  try {
+    discovery = discoverDesktopEngine();
+  } catch (err) {
+    failEngine(`Desktop engine discovery failed: ${err.message}`);
+    return;
+  }
+
+  if (discovery.type === 'active_rendezvous') {
+    log(`connecting to active desktop engine rendezvous: ${discovery.origin} (pid ${discovery.pid})`);
+    const freshToken = engine.token;
+    engine.endpoint = { baseUrl: discovery.origin };
+    engine.token = discovery.token;
+    engine.pid = discovery.pid;
+    engine.bootstrapping = true;
+    engine.shared = true;
+    transitionEnginePhase('bootstrapping');
+
+    requestEngineSession(engine.endpoint, engine.token).then(
+      (capability) => {
+        if (engine.settled || engine.phase !== 'bootstrapping') return;
+        engine.session = capability;
+        engine.bootstrapping = false;
+        engine.settled = true;
+        transitionEnginePhase('ready');
+        log('engine renderer session ready via desktop rendezvous');
+        if (resolveReady) resolveReady(engine.endpoint);
+      },
+      (err) => {
+        if (engine.settled || engine.phase !== 'bootstrapping') return;
+        log(`stale desktop rendezvous (${err.message}); falling back to local engine spawn`);
+        engine.endpoint = null;
+        engine.session = null;
+        engine.pid = null;
+        engine.token = freshToken;
+        engine.bootstrapping = false;
+        engine.shared = false;
+        transitionEnginePhase('discovering');
+        spawnLocalEngine(null);
+      },
+    );
+    return;
+  }
+
+  spawnLocalEngine(discovery);
 }
 
 function postShutdown(port, token, timeoutMs) {
@@ -651,14 +698,19 @@ function waitForExit(timeoutMs) {
 }
 
 async function stopEngine() {
+  const port = engine.port;
+  const token = engine.token;
+  engine.endpoint = null;
+  engine.session = null;
+  transitionEnginePhase('stopped');
   if (engine.shared) {
     log('shared desktop engine: leaving process intact on Resolve exit');
     return;
   }
   const child = engine.child;
   if (!child) return;
-  if (!engine.exited && engine.port) {
-    await postShutdown(engine.port, engine.token, SHUTDOWN_POST_TIMEOUT_MS);
+  if (!engine.exited && port) {
+    await postShutdown(port, token, SHUTDOWN_POST_TIMEOUT_MS);
     if (await waitForExit(1_000)) {
       signalEngineTree(child, 'SIGKILL');
       return;

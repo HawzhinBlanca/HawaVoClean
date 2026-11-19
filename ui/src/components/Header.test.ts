@@ -123,4 +123,25 @@ describe('Header i18n and language toggle', () => {
     const engineTxt = host.querySelector<HTMLElement>('.engine .txt .in');
     expect(engineTxt?.textContent).toBe('بزوێنەر ئامادەیە');
   });
+
+  it('marks the engine lamp BUSY during upload and pre-SSE job submission windows', async () => {
+    await act(async () => {
+      getState().setEngine('ready', null, '3.3.0');
+      getState().setUpload({ name: 'clip.wav', loaded: 50, total: 100, phase: 'sending' });
+    });
+    await render();
+    expect(host.querySelector<HTMLElement>('.engine .txt .in')?.textContent).toBe('ENGINE BUSY');
+
+    await act(async () => {
+      getState().setUpload(null);
+      getState().setJob({
+        id: 'job-pre-sse',
+        outputPath: '/out.wav',
+        reportPath: '/out.json',
+        status: null,
+        streamConnected: false,
+      });
+    });
+    expect(host.querySelector<HTMLElement>('.engine .txt .in')?.textContent).toBe('ENGINE BUSY');
+  });
 });

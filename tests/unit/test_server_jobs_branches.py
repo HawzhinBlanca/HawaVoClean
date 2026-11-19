@@ -172,3 +172,118 @@ def test_prepare_batch_rollback_store_error(tmp_path: Path) -> None:
 
     assert mgr._persistence_error is not None
     assert "simulated store delete failure" in mgr._persistence_error
+
+
+def test_retry_job_rejects_active_output_conflict_and_rolls_back_on_store_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from hawavoclean.server.job_store import OutputConflictError
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(work_dir))
+
+    in_file = tmp_path / "in.wav"
+    in_file.write_bytes(b"RIFFtest")
+    out_file = tmp_path / "out.wav"
+
+    # 1. Durable store: active output conflict raises OutputConflictError without
+    #    mutating j1 to stuck "queued" or leaking PinnedSource directories.
+    calls = [0]
+
+    def _cmd_factory(_rec: JobRecord) -> list[str]:
+        calls[0] += 1
+        if calls[0] == 1:
+            return [sys.executable, "-c", "import sys; sys.exit(1)"]
+        return [sys.executable, "-c", "import time; time.sleep(30)"]
+
+    import sys
+
+    mgr = JobManager(
+        command_factory=_cmd_factory,
+        store_path=tmp_path / "jobs.sqlite",
+        kill_grace_s=0.2,
+    )
+    try:
+        j1 = mgr.submit(
+            input_path=in_file, output_path=out_file, profile="production", overwrite=True
+        )
+        for _ in range(100):
+            st1 = mgr.get_status(j1["job_id"])
+            if st1 and st1["state"] == "failed":
+                break
+            time.sleep(0.02)
+        st1_failed = mgr.get_status(j1["job_id"])
+        assert st1_failed is not None and st1_failed["state"] == "failed"
+
+        j2 = mgr.submit(
+            input_path=in_file, output_path=out_file, profile="production", overwrite=True
+        )
+        for _ in range(100):
+            st2 = mgr.get_status(j2["job_id"])
+            if st2 and st2["state"] == "running":
+                break
+            time.sleep(0.02)
+
+        before_dirs = set(work_dir.iterdir())
+        with pytest.raises(OutputConflictError, match="reserved by an active job"):
+            mgr.retry_job(j1["job_id"])
+        assert set(work_dir.iterdir()) == before_dirs
+        st1_conflict = mgr.get_status(j1["job_id"])
+        assert st1_conflict is not None and st1_conflict["state"] == "failed"
+        assert j1["job_id"] not in mgr._queue
+
+        # After j2 is cancelled, a store.update error must roll back record and clean up snapshot.
+        mgr.cancel(j2["job_id"], wait=True)
+        after_cancel_dirs = set(work_dir.iterdir())
+        assert mgr._store is not None
+        with (
+            patch.object(mgr._store, "update", side_effect=JobStoreError("disk busy")),
+            pytest.raises(JobStoreError, match="disk busy"),
+        ):
+            mgr.retry_job(j1["job_id"])
+        assert set(work_dir.iterdir()) == after_cancel_dirs
+        st1_rollback = mgr.get_status(j1["job_id"])
+        assert st1_rollback is not None and st1_rollback["state"] == "failed"
+        assert j1["job_id"] not in mgr._queue
+
+        # Successful retry clears stale bundle/report/artifact_evidence.
+        rec1 = mgr._jobs[j1["job_id"]]
+        rec1.bundle = {"path": str(tmp_path / "stale.zip")}
+        rec1.report = {"stale": True}
+        rec1.artifact_evidence = {"stale": True}
+        retried = mgr.retry_job(j1["job_id"])
+        assert retried["state"] in {"queued", "running"}
+        assert "bundle" not in retried
+        assert rec1.bundle is None and rec1.report is None and rec1.artifact_evidence is None
+    finally:
+        mgr.shutdown(grace_s=0.2)
+
+    # 2. In-memory mode also blocks concurrent active output conflicts on retry.
+    calls[0] = 0
+    mem_mgr = JobManager(command_factory=_cmd_factory, store_path=None, kill_grace_s=0.2)
+    try:
+        m1 = mem_mgr.submit(
+            input_path=in_file, output_path=out_file, profile="production", overwrite=True
+        )
+        for _ in range(100):
+            m1_st = mem_mgr.get_status(m1["job_id"])
+            if m1_st and m1_st["state"] == "failed":
+                break
+            time.sleep(0.02)
+        m2 = mem_mgr.submit(
+            input_path=in_file, output_path=out_file, profile="production", overwrite=True
+        )
+        for _ in range(100):
+            m2_st = mem_mgr.get_status(m2["job_id"])
+            if m2_st and m2_st["state"] == "running":
+                break
+            time.sleep(0.02)
+        with pytest.raises(OutputConflictError, match="reserved by an active job"):
+            mem_mgr.retry_job(m1["job_id"])
+        m1_after = mem_mgr.get_status(m1["job_id"])
+        assert m1_after is not None and m1_after["state"] == "failed"
+    finally:
+        mem_mgr.shutdown(grace_s=0.2)

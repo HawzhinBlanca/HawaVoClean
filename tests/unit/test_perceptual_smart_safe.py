@@ -1375,3 +1375,31 @@ def test_enhancement_hf_artifact_helper_and_device_instantiation() -> None:
     assert isinstance(inst_dev, _WithDevice) and inst_dev.device == "auto"
     inst_plain = _instantiate_enhancer(_NoDevice)
     assert isinstance(inst_plain, _NoDevice) and inst_plain.ok is True
+
+
+def test_perceptual_scorer_extreme_peak_no_float32_rms_overflow() -> None:
+    import warnings
+
+    from hawavoclean.guard.perceptual_mos import _normalize_rms
+
+    sr = 48000
+    t = np.arange(sr, dtype=np.float32) / sr
+    base = (
+        0.12 * np.sin(2.0 * np.pi * 440.0 * t)
+        + 0.06 * np.sin(2.0 * np.pi * 1200.0 * t)
+        + 0.03 * np.sin(2.0 * np.pi * 4500.0 * t)
+    ).astype(np.float32)
+    extreme = (base * 1e35).astype(np.float32)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        norm_base = _normalize_rms(base, 0.08)
+        norm_ext = _normalize_rms(extreme, 0.08)
+        scorer = PerceptualQualityScorer(backend="acoustic_proxy")
+        score_base = scorer.score(base, sr)
+        score_ext = scorer.score(extreme, sr)
+
+    assert bool(np.all(np.isfinite(norm_ext)))
+    assert np.allclose(norm_base, norm_ext, atol=1e-5)
+    assert abs(score_base.noisiness - score_ext.noisiness) < 0.05
+    assert abs(score_base.coloration - score_ext.coloration) < 0.05

@@ -202,3 +202,49 @@ def test_supported_state_sizes_remain_bounded(config: AnalyzerConfig) -> None:
 def test_bad_analyzer_configuration_is_rejected(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         AnalyzerConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_mono_speech_not_falsely_blocked_by_crosstalk_while_music_and_noise_stay_blocked() -> None:
+    from hawavoclean.smart_safe.decision import DEFAULT_POLICY, eligible_routes
+
+    # Realistic modulated mono speech-like signal (5s) should not be disqualified
+    # by stereo-only crosstalk checks.
+    mono_speech = _speechlike(5.0)
+    speech_ev = analyze_audio_stream([AudioBuffer(mono_speech, SR)]).decision_evidence(
+        reconstruction_consent=False
+    )
+    assert speech_ev.crosstalk_risk <= DEFAULT_POLICY.crosstalk_risk_max
+
+    # Sustained tonal chord (music) must remain ineligible for Studio routes.
+    t = np.arange(5 * SR, dtype=np.float64) / SR
+    music = np.asarray(
+        0.25
+        * (
+            np.sin(2.0 * np.pi * 220.0 * t)
+            + 0.7 * np.sin(2.0 * np.pi * 329.63 * t)
+            + 0.5 * np.sin(2.0 * np.pi * 440.0 * t)
+            + 0.3 * np.sin(2.0 * np.pi * 659.25 * t)
+        ),
+        dtype=np.float32,
+    )
+    music_ev = analyze_audio_stream([AudioBuffer(music, SR)]).decision_evidence(
+        reconstruction_consent=False
+    )
+    music_elig = eligible_routes(
+        music_ev, restore_policy="disabled", speaker_profile_id=None, include_optional=True
+    )
+    assert music_elig["studio"][0] is False
+    assert music_elig["studio_pro"][0] is False
+    assert music_elig["dereverb"][0] is False
+
+    # Independent stereo channels (crosstalk) must still fail Studio eligibility.
+    independent = np.stack((mono_speech, np.roll(mono_speech, 337)), axis=0)
+    ind_ev = analyze_audio_stream(
+        [AudioBuffer(independent, SR, ChannelMode.AMBIGUOUS_STEREO)]
+    ).decision_evidence(reconstruction_consent=False)
+    ind_elig = eligible_routes(
+        ind_ev, restore_policy="disabled", speaker_profile_id=None, include_optional=True
+    )
+    assert ind_ev.crosstalk_risk > DEFAULT_POLICY.crosstalk_risk_max
+    assert ind_elig["studio"][0] is False
+    assert ind_elig["studio_pro"][0] is False

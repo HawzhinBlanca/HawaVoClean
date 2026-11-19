@@ -9,13 +9,13 @@ cyan (#39d0ff) on a dark squircle (#14171c with #2a3139 border).
 
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-
-from PIL import Image, ImageDraw
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DESKTOP_BUILD = ROOT / "desktop" / "build"
@@ -29,10 +29,18 @@ BAR_3_COLOR = "#ffd28a"
 BAR_4_5_COLOR = "#39d0ff"
 
 
-def render_master_icon(size: int = 4096) -> Image.Image:
+def _load_pil() -> tuple[Any, Any]:
+    """Lazily load Pillow Image and ImageDraw modules."""
+    image_mod = importlib.import_module("PIL.Image")
+    draw_mod = importlib.import_module("PIL.ImageDraw")
+    return image_mod, draw_mod
+
+
+def render_master_icon(size: int = 4096) -> Any:
     """Render a 4096x4096 supersampled RGBA image of the brand mark."""
-    master = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(master)
+    image_mod, draw_mod = _load_pil()
+    master = image_mod.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = draw_mod.Draw(master)
     scale = size / 32.0
 
     # Background squircle with border
@@ -69,11 +77,12 @@ def render_master_icon(size: int = 4096) -> Image.Image:
         draw.ellipse([cx - r_cap, y1, cx + r_cap, y1 + 2 * r_cap], fill=color)
         draw.ellipse([cx - r_cap, y2 - 2 * r_cap, cx + r_cap, y2], fill=color)
 
-    return master.resize((1024, 1024), Image.Resampling.LANCZOS)
+    return master.resize((1024, 1024), image_mod.Resampling.LANCZOS)
 
 
 def generate_all_icons(dest_dirs: list[Path]) -> None:
     """Generate all icon formats and populate destination directories."""
+    image_mod, _ = _load_pil()
     master_1024 = render_master_icon()
 
     for dest in dest_dirs:
@@ -89,7 +98,9 @@ def generate_all_icons(dest_dirs: list[Path]) -> None:
         linux_sizes = [16, 32, 48, 64, 128, 256, 512, 1024]
         for s in linux_sizes:
             resized = (
-                master_1024 if s == 1024 else master_1024.resize((s, s), Image.Resampling.LANCZOS)
+                master_1024
+                if s == 1024
+                else master_1024.resize((s, s), image_mod.Resampling.LANCZOS)
             )
             resized.save(icons_subdir / f"{s}x{s}.png", "PNG")
 
@@ -130,7 +141,7 @@ def generate_all_icons(dest_dirs: list[Path]) -> None:
                 resized = (
                     master_1024
                     if s == 1024
-                    else master_1024.resize((s, s), Image.Resampling.LANCZOS)
+                    else master_1024.resize((s, s), image_mod.Resampling.LANCZOS)
                 )
                 resized.save(iconset / name, "PNG")
 

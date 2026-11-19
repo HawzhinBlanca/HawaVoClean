@@ -12,7 +12,7 @@
 #   stubborn  engine ignores /api/shutdown and SIGTERM -> shell must SIGKILL it on quit.
 #   hard-crash SIGKILL the Electron host; the engine's parent watchdog must end it.
 #
-# Requires: the exact pnpm install performed by resolve-plugin/install.sh (Electron 43.4.1).
+# Requires: the exact pnpm install performed by resolve-plugin/install.sh (Electron 43.8.10).
 # Creates a temporary engine.json + index.html next to main.js and removes them afterwards
 # (pre-existing ones are backed up and restored).
 set -euo pipefail
@@ -183,7 +183,7 @@ for sc in "${SCENARIOS[@]}"; do
         [ "$(json_field "$line" 'Object.keys(o.endpoint).join(",")')" = "baseUrl" ] && [ "$(json_field "$line" 'o.endpointHasCredential')" = "false" ] && pass "renderer endpoint contains no credential" || failmsg "endpoint exposed credential material: $(json_field "$line" 'o.endpoint')"
         [ "$(json_field "$line" 'o.health.status')" = "200" ] && [ "$(json_field "$line" 'o.health.body.ok')" = "true" ] && pass "main-injected session authenticated /api/health" || failmsg "health: $(json_field "$line" 'o.health')"
         [ "$(json_field "$line" 'o.sessionBootstrapBlocked')" = "true" ] && pass "renderer cannot mint sessions" || failmsg "renderer reached /api/session"
-        [ "$(json_field "$line" 'o.runtime.electron')" = "43.4.1" ] && pass "runtime evidence is exact Electron 43.4.1" || failmsg "runtime = $(json_field "$line" 'o.runtime')"
+        [ "$(json_field "$line" 'o.runtime.electron')" = "43.8.10" ] && pass "runtime evidence is exact Electron 43.8.10" || failmsg "runtime = $(json_field "$line" 'o.runtime')"
         [ "$(json_field "$line" 'o.page.inlineScriptBlocked')" = "true" ] && pass "CSP blocked inline script" || failmsg "inline CSP probe failed"
         [ "$(json_field "$line" 'o.page.remoteFetchBlocked')" = "true" ] && pass "CSP blocked remote fetch" || failmsg "remote fetch was not blocked"
         [ "$(json_field "$line" 'o.page.popupBlocked')" = "true" ] && pass "popup denied" || failmsg "popup was not denied"

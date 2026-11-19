@@ -20,13 +20,16 @@ const {
 const {
   ALLOWED_ENGINE_BROKER_TRANSITIONS,
   EngineBroker,
+  cleanupOwnedRendezvousFile,
   engineSessionNeedsRenewal,
   parseDevelopmentCommand,
   rendererEngineEndpoint,
   requestEngineSession,
   requestNativeSourceRegistration,
   resolveEngineSpec,
+  resolveRendezvousDir,
   verifyBundledEngineIntegrity,
+  writeRendezvousRecord,
 } = require('../dist/engine.js');
 const {
   APP_ENTRY_URL,
@@ -718,3 +721,135 @@ test('EngineBroker enforces explicit lifecycle phases and clears origin after st
   }
 });
 
+test('rendezvous isolation respects userData and HAWAVOCLEAN_RENDEZVOUS_DIR, writes atomically, and guards cleanup by PID', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hawavoclean-rendezvous-'));
+  try {
+    const isolatedUserData = path.join(temp, 'isolated-profile');
+    assert.equal(
+      resolveRendezvousDir(isolatedUserData, undefined),
+      path.join(isolatedUserData, 'rendezvous'),
+    );
+    const customDir = path.join(temp, 'custom-rendezvous');
+    assert.equal(resolveRendezvousDir(isolatedUserData, customDir), path.resolve(customDir));
+
+    const rFile = writeRendezvousRecord(customDir, {
+      schemaVersion: 1,
+      pid: 424242,
+      port: 51234,
+      origin: 'http://127.0.0.1:51234',
+      token: 'a'.repeat(64),
+      createdAt: '2026-11-19T00:00:00.000Z',
+    });
+    assert.equal(rFile, path.join(customDir, 'engine.json'));
+    // Atomic rename leaves no stray temp files behind.
+    assert.deepEqual(fs.readdirSync(customDir), ['engine.json']);
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(rFile).mode & 0o777, 0o600);
+    }
+
+    // Foreign PID must NOT unlink another live instance's rendezvous record.
+    assert.equal(cleanupOwnedRendezvousFile(rFile, 999999), false);
+    assert.equal(fs.existsSync(rFile), true);
+
+    // Owning PID cleanly removes its own rendezvous record.
+    assert.equal(cleanupOwnedRendezvousFile(rFile, 424242), true);
+    assert.equal(fs.existsSync(rFile), false);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('hard-crash self-test isolates userData and strips ELECTRON_RUN_AS_NODE', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'scripts', 'hard-crash-selftest.cjs'),
+    'utf8',
+  );
+  assert.match(source, /--user-data-dir=/);
+  assert.match(source, /delete\s+childEnv\.ELECTRON_RUN_AS_NODE/);
+});
+
+test('EngineBroker.stop rejects pending endpoint when stopped while starting and deduplicates concurrent stop calls', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hawavoclean-broker-stop-'));
+  const prevOverride = process.env.HAWAVOCLEAN_DESKTOP_ENGINE_COMMAND;
+  try {
+    // 1. Child that hangs before emitting a ready line: stop() while starting must reject endpoint() immediately.
+    const hangScript = path.join(temp, 'hang-engine.js');
+    fs.writeFileSync(
+      hangScript,
+      "process.stdin.resume(); setInterval(() => {}, 10000);\n",
+      'utf8',
+    );
+    process.env.HAWAVOCLEAN_DESKTOP_ENGINE_COMMAND = JSON.stringify([process.execPath, hangScript]);
+    const startingBroker = new EngineBroker({
+      packaged: false,
+      platform: process.platform,
+      resourcesPath: temp,
+      repositoryRoot: temp,
+      userData: path.join(temp, 'ud-starting'),
+      temp,
+    });
+    const pendingEndpoint = startingBroker.endpoint();
+    const endpointRejection = assert.rejects(() => pendingEndpoint, /Engine broker stopped before ready/);
+    assert.equal(startingBroker.phase, 'starting');
+    await startingBroker.stop();
+    await endpointRejection;
+    assert.equal(startingBroker.phase, 'stopped');
+
+    // 2. Ready child with slow graceful /api/shutdown: concurrent stop() calls must deduplicate
+    //    so graceful shutdown completes without receiving a premature SIGTERM.
+    const shutdownRecord = path.join(temp, 'shutdown-signal.txt');
+    const readyScript = path.join(temp, 'ready-engine.js');
+    fs.writeFileSync(
+      readyScript,
+      `
+const fs = require('node:fs');
+const http = require('node:http');
+let token = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (c) => { token += c; });
+process.on('SIGTERM', () => {
+  fs.writeFileSync(${JSON.stringify(shutdownRecord)}, 'SIGTERM');
+  process.exit(0);
+});
+const server = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/api/shutdown') {
+    fs.writeFileSync(${JSON.stringify(shutdownRecord)}, 'HTTP_SHUTDOWN');
+    res.writeHead(200);
+    res.end('ok');
+    setTimeout(() => server.close(() => process.exit(0)), 150);
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+server.listen(0, '127.0.0.1', () => {
+  const { port } = server.address();
+  process.stdout.write(JSON.stringify({ event: 'ready', port }) + '\\n');
+});
+`,
+      'utf8',
+    );
+    process.env.HAWAVOCLEAN_DESKTOP_ENGINE_COMMAND = JSON.stringify([process.execPath, readyScript]);
+    const readyBroker = new EngineBroker({
+      packaged: false,
+      platform: process.platform,
+      resourcesPath: temp,
+      repositoryRoot: temp,
+      userData: path.join(temp, 'ud-ready'),
+      temp,
+    });
+    readyBroker.start();
+    const deadline = Date.now() + 5000;
+    while (readyBroker.phase === 'starting' && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assert.equal(readyBroker.phase, 'ready');
+    await Promise.all([readyBroker.stop(), readyBroker.stop()]);
+    assert.equal(readyBroker.phase, 'stopped');
+    assert.equal(fs.readFileSync(shutdownRecord, 'utf8'), 'HTTP_SHUTDOWN');
+  } finally {
+    if (prevOverride === undefined) delete process.env.HAWAVOCLEAN_DESKTOP_ENGINE_COMMAND;
+    else process.env.HAWAVOCLEAN_DESKTOP_ENGINE_COMMAND = prevOverride;
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

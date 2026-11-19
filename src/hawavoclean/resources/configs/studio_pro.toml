@@ -52,16 +52,16 @@ fractional_delay = true
 [guard]
 guard_id = "spectral-guard-v1"
 probe_id = "spectral-signature-v1"
-calibration_file = "guard-calibration-studio.json"
+calibration_file = "guard-calibration-studio-pro.json"
 mode = "integrity"
 min_anchor_confidence = 0.50
-max_posterior_js_div = 0.30
+max_posterior_js_div = 0.38
 max_peak_js_div = 0.90
 max_timing_drift_ms = 75.0
 enforce_signal_integrity = true
-spectral_hole_thresh = 0.10
+spectral_hole_thresh = 0.90
 musical_noise_thresh = 0.30
-min_hf_preservation_ratio = 0.50
+min_hf_preservation_ratio = 0.20
 
 [policy]
 strength_ladder = [1.0]

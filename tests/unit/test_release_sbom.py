@@ -136,13 +136,25 @@ def test_image_reference_is_resolved_and_source_labels_must_match(
         generate_sbom._resolve_image("mutable:tag", commit, "3.3.0")
 
 
+def _locked_electron_version() -> str:
+    package_json = json.loads(
+        (Path(__file__).resolve().parents[2] / "desktop" / "package.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    version = package_json["devDependencies"]["electron"]
+    assert isinstance(version, str)
+    return version
+
+
 def test_exact_locks_enrich_package_hashes_and_explicit_unknown_licenses() -> None:
+    electron_version = _locked_electron_version()
     components: list[dict[str, Any]] = [
         {
             "type": "library",
             "name": "electron",
-            "version": "43.4.1",
-            "purl": "pkg:npm/electron@43.4.1",
+            "version": electron_version,
+            "purl": f"pkg:npm/electron@{electron_version}",
         },
         {
             "type": "library",
@@ -184,6 +196,8 @@ def test_source_export_contains_only_the_exact_git_tree(tmp_path: Path) -> None:
 
 
 def _minimal_complete_contract() -> dict[str, Any]:
+    electron_version = _locked_electron_version()
+
     def package(purl: str) -> dict[str, Any]:
         return {
             "type": "library",
@@ -198,7 +212,7 @@ def _minimal_complete_contract() -> dict[str, Any]:
         "components": [
             package("pkg:pypi/hawavoclean@3.3.0"),
             package("pkg:npm/react@19.2.8"),
-            package("pkg:npm/electron@43.4.1"),
+            package(f"pkg:npm/electron@{electron_version}"),
             package("pkg:apk/wolfi/ffmpeg-7@7.1.5-r0"),
             *model_components,
             {
@@ -213,13 +227,12 @@ def _minimal_complete_contract() -> dict[str, Any]:
 
 
 def test_contract_requires_hashes_for_every_locked_ecosystem_component() -> None:
+    electron_purl = f"pkg:npm/electron@{_locked_electron_version()}"
     complete = _minimal_complete_contract()
     generate_sbom._validate_contract(complete, {"wheel"})
 
     electron = next(
-        component
-        for component in complete["components"]
-        if component.get("purl") == "pkg:npm/electron@43.4.1"
+        component for component in complete["components"] if component.get("purl") == electron_purl
     )
     electron["hashes"] = []
     with pytest.raises(generate_sbom.SbomError, match="no cryptographic hash"):

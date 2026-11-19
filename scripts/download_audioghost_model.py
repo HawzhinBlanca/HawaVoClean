@@ -1,13 +1,17 @@
 """Explicit post-approval model setup; never accepts terms or performs inference."""
 
 import argparse
+import importlib
 import json
 import os
 from pathlib import Path
 
 
 def download(model_size: str, check: bool) -> int:
-    from huggingface_hub import HfApi, get_token, snapshot_download
+    hf_hub = importlib.import_module("huggingface_hub")
+    hf_api_cls = hf_hub.HfApi
+    get_token = hf_hub.get_token
+    snapshot_download = hf_hub.snapshot_download
 
     token = get_token()
     if not token:
@@ -20,7 +24,7 @@ def download(model_size: str, check: bool) -> int:
         print("Credential configured. No files downloaded or model terms accepted.")
         return 0
     try:
-        api = HfApi(token=token)
+        api = hf_api_cls(token=token)
         model = f"facebook/sam-audio-{model_size}"
         directory = Path(
             snapshot_download(

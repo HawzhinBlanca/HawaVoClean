@@ -12,17 +12,23 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import logging
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import soundfile as sf
-from huggingface_hub import HfApi, hf_hub_download
 
 from hawavoclean.enrollment import _resample_to_48k, enroll_speaker
+
+# Optional runtime dependency: resolved lazily so unit tests and CI environments
+# without huggingface_hub can import this module and monkeypatch these symbols.
+HfApi: Any = None
+hf_hub_download: Any = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,13 +100,27 @@ def convert_to_canonical_wav(
     return duration_s, digest
 
 
+def _get_hf_api_cls() -> Any:
+    """Resolve huggingface_hub.HfApi lazily unless overridden in tests."""
+    if HfApi is not None:
+        return HfApi
+    return importlib.import_module("huggingface_hub").HfApi
+
+
+def _get_hf_hub_download() -> Any:
+    """Resolve huggingface_hub.hf_hub_download lazily unless overridden in tests."""
+    if hf_hub_download is not None:
+        return hf_hub_download
+    return importlib.import_module("huggingface_hub").hf_hub_download
+
+
 def fetch_tts4all_speaker_clips(
     speaker: str,
     max_clips: int,
     output_speaker_dir: Path,
 ) -> list[AcquiredClip]:
     """Fetch and standardize clips for a specific speaker from central-kurdish-tts4all."""
-    api = HfApi()
+    api = _get_hf_api_cls()()
     info = api.dataset_info(TTS4ALL_REPO)
     prefix = f"wavs/{speaker}/"
     siblings = info.siblings or []
@@ -120,6 +140,7 @@ def fetch_tts4all_speaker_clips(
 
     clips: list[AcquiredClip] = []
     output_speaker_dir.mkdir(parents=True, exist_ok=True)
+    download_fn = _get_hf_hub_download()
 
     for rfilename in target_files:
         basename = Path(rfilename).name
@@ -127,10 +148,12 @@ def fetch_tts4all_speaker_clips(
 
         # Download raw file from Hugging Face
         cached_path = Path(
-            hf_hub_download(
-                repo_id=TTS4ALL_REPO,
-                filename=rfilename,
-                repo_type="dataset",
+            str(
+                download_fn(
+                    repo_id=TTS4ALL_REPO,
+                    filename=rfilename,
+                    repo_type="dataset",
+                )
             )
         )
 

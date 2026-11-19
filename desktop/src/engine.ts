@@ -2,7 +2,6 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
@@ -416,6 +415,72 @@ export const ALLOWED_ENGINE_BROKER_TRANSITIONS: Readonly<
   failed: Object.freeze(['stopping', 'stopped'] as const),
 });
 
+export function resolveRendezvousDir(
+  userData: string,
+  overrideDir: string | undefined = process.env.HAWAVOCLEAN_RENDEZVOUS_DIR,
+): string {
+  const trimmed = overrideDir?.trim();
+  if (trimmed) return path.resolve(trimmed);
+  return path.join(userData, 'rendezvous');
+}
+
+export function writeRendezvousRecord(
+  rendezvousDir: string,
+  record: Readonly<{
+    schemaVersion: 1;
+    pid: number;
+    port: number;
+    origin: string;
+    token: string;
+    createdAt: string;
+  }>,
+): string {
+  fs.mkdirSync(rendezvousDir, { recursive: true, mode: 0o700 });
+  const targetFile = path.join(rendezvousDir, 'engine.json');
+  const tmpFile = path.join(
+    rendezvousDir,
+    `.engine.json.tmp.${process.pid}.${crypto.randomBytes(6).toString('hex')}`,
+  );
+  try {
+    fs.writeFileSync(tmpFile, JSON.stringify(record, null, 2) + '\n', { mode: 0o600 });
+    try {
+      fs.chmodSync(tmpFile, 0o600);
+    } catch {
+      // Best-effort on platforms without POSIX mode bits.
+    }
+    fs.renameSync(tmpFile, targetFile);
+    return targetFile;
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    } catch {
+      // Best-effort cleanup of temp file.
+    }
+    throw err;
+  }
+}
+
+export function cleanupOwnedRendezvousFile(filePath: string, expectedPid: number): boolean {
+  if (!Number.isInteger(expectedPid) || expectedPid <= 0) return false;
+  if (!fs.existsSync(filePath)) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    (parsed as Record<string, unknown>).pid !== expectedPid
+  ) {
+    return false;
+  }
+  fs.unlinkSync(filePath);
+  return true;
+}
+
 export class EngineBroker {
   readonly #paths: EnginePaths;
   readonly #token = crypto.randomBytes(32).toString('hex');
@@ -429,6 +494,9 @@ export class EngineBroker {
   #readyPromise: Promise<EngineEndpoint> | null = null;
   #resolveReady: ((endpoint: EngineEndpoint) => void) | null = null;
   #rejectReady: ((error: Error) => void) | null = null;
+  #stopPromise: Promise<void> | null = null;
+  #rendezvousFile: string | null = null;
+  #rendezvousPid: number | null = null;
 
   constructor(paths: EnginePaths) {
     this.#paths = paths;
@@ -618,7 +686,27 @@ export class EngineBroker {
 
   async stop(): Promise<void> {
     if (this.#phase === 'stopped') return;
+    if (this.#stopPromise !== null) return this.#stopPromise;
+    this.#stopPromise = this.#performStop();
+    try {
+      await this.#stopPromise;
+    } finally {
+      this.#stopPromise = null;
+    }
+  }
+
+  async #performStop(): Promise<void> {
+    if (this.#phase === 'stopped') return;
+    const wasStarting = this.#phase === 'starting';
     if (this.#phase !== 'stopping') this.#transition('stopping');
+    if (wasStarting || this.#rejectReady !== null) {
+      const rejectReady = this.#rejectReady;
+      this.#resolveReady = null;
+      this.#rejectReady = null;
+      const stopError = new Error('Engine broker stopped before ready.');
+      if (this.#failure === null) this.#failure = stopError;
+      rejectReady?.(stopError);
+    }
     this.#cleanupRendezvous();
     const endpoint = this.#endpoint;
     this.#endpoint = null;
@@ -663,7 +751,10 @@ export class EngineBroker {
       this.#endpoint = rendererEngineEndpoint(port);
       this.#transition('ready');
       this.#writeRendezvous(port);
-      this.#resolveReady?.(this.#endpoint);
+      const resolveReady = this.#resolveReady;
+      this.#resolveReady = null;
+      this.#rejectReady = null;
+      resolveReady?.(this.#endpoint);
     } catch {
       this.#pushStderr(`[stdout] ${line}`);
     }
@@ -671,34 +762,32 @@ export class EngineBroker {
 
   #writeRendezvous(port: number): void {
     try {
-      const rendezvousDir = process.platform === 'darwin'
-        ? path.join(os.homedir(), 'Library', 'Application Support', 'HawaVoClean', 'rendezvous')
-        : path.join(this.#paths.userData, 'rendezvous');
-      fs.mkdirSync(rendezvousDir, { recursive: true, mode: 0o700 });
-      const record = {
+      const origin = this.#endpoint?.baseUrl;
+      if (!origin) return;
+      const pid = this.#child?.pid ?? process.pid;
+      const rendezvousDir = resolveRendezvousDir(this.#paths.userData);
+      this.#rendezvousFile = writeRendezvousRecord(rendezvousDir, {
         schemaVersion: 1,
-        pid: this.#child?.pid ?? process.pid,
+        pid,
         port,
-        origin: this.#endpoint?.baseUrl,
+        origin,
         token: this.#token,
         createdAt: new Date().toISOString(),
-      };
-      const rFile = path.join(rendezvousDir, 'engine.json');
-      fs.writeFileSync(rFile, JSON.stringify(record, null, 2) + '\n', { mode: 0o600 });
+      });
+      this.#rendezvousPid = pid;
     } catch {
       // Best-effort
     }
   }
 
   #cleanupRendezvous(): void {
+    const rFile = this.#rendezvousFile;
+    const expectedPid = this.#rendezvousPid ?? this.#child?.pid ?? null;
+    this.#rendezvousFile = null;
+    this.#rendezvousPid = null;
+    if (!rFile || expectedPid === null) return;
     try {
-      const rendezvousDir = process.platform === 'darwin'
-        ? path.join(os.homedir(), 'Library', 'Application Support', 'HawaVoClean', 'rendezvous')
-        : path.join(this.#paths.userData, 'rendezvous');
-      const rFile = path.join(rendezvousDir, 'engine.json');
-      if (fs.existsSync(rFile)) {
-        fs.unlinkSync(rFile);
-      }
+      cleanupOwnedRendezvousFile(rFile, expectedPid);
     } catch {
       // Best-effort
     }
@@ -724,6 +813,9 @@ export class EngineBroker {
     if (this.#phase !== 'starting') return;
     this.#failure = error;
     this.#transition('failed');
-    this.#rejectReady?.(error);
+    const rejectReady = this.#rejectReady;
+    this.#resolveReady = null;
+    this.#rejectReady = null;
+    rejectReady?.(error);
   }
 }

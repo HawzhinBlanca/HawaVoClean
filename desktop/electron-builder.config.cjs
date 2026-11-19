@@ -19,7 +19,7 @@ module.exports = {
   appId: 'com.hawavoclean.desktop',
   productName: 'HawaVoClean',
   copyright: 'Copyright © Hawzhin',
-  electronVersion: '43.4.1',
+  electronVersion: '43.8.10',
   artifactName: '${productName}-${version}-${os}-${arch}.${ext}',
   extraMetadata: {
     hawavocleanSourceSha: releaseBuild

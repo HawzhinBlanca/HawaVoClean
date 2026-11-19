@@ -39,11 +39,14 @@ const player = vi.hoisted(() => ({
   gainOffsetDb: 0,
 }));
 const registerDroppedFile = vi.hoisted(() => vi.fn());
+const chooseExportPath = vi.hoisted(() => vi.fn());
+const revealInFinder = vi.hoisted(() => vi.fn(async (_path: string) => undefined));
+const bridgeHost = vi.hoisted(() => ({ current: 'web' as 'web' | 'electron' | 'resolve' }));
 vi.mock('../audio/player', () => ({ getPlayer: () => player }));
 
 vi.mock('../bridge', () => ({
   getBridge: () => ({
-    host: 'web',
+    host: bridgeHost.current,
     engine: {
       getEndpoint: async () => ({ baseUrl: 'http://127.0.0.1:8765' }),
     },
@@ -51,7 +54,8 @@ vi.mock('../bridge', () => ({
       pickAudio: async () => null,
       registerDroppedFile: (file: File) => registerDroppedFile(file),
       pathForFile: () => null,
-      revealInFinder: async () => undefined,
+      chooseExportPath: (req: unknown) => chooseExportPath(req),
+      revealInFinder: (p: string) => revealInFinder(p),
     },
   }),
 }));
@@ -257,6 +261,11 @@ beforeEach(() => {
   player.onFault.mockClear();
   registerDroppedFile.mockReset();
   registerDroppedFile.mockResolvedValue(null);
+  chooseExportPath.mockReset();
+  chooseExportPath.mockResolvedValue(null);
+  revealInFinder.mockReset();
+  revealInFinder.mockResolvedValue(undefined);
+  bridgeHost.current = 'web';
 });
 
 afterEach(() => {
@@ -2868,6 +2877,127 @@ describe('batch queue actions (True-10 D4.1)', () => {
 
     actions.toggleAdvancedOpen();
     expect(st().advancedOpen).toBe(false);
+  });
+
+  it('saveCleanedMaster does not open Finder when user cancels native Save dialog', async () => {
+    const { actions, store } = await boot();
+    bridgeHost.current = 'electron';
+    store.useStore.getState().setCleaned(analysis(), '/out/take_clean.wav');
+    chooseExportPath.mockResolvedValue(null);
+
+    await actions.saveCleanedMaster();
+
+    expect(chooseExportPath).toHaveBeenCalledWith({
+      kind: 'master',
+      suggestedName: 'take_clean.wav',
+      sourcePath: '/out/take_clean.wav',
+    });
+    expect(revealInFinder).not.toHaveBeenCalled();
+  });
+
+  it('saveCleanedMaster falls back to Finder only when native export throws', async () => {
+    const { actions, store } = await boot();
+    bridgeHost.current = 'electron';
+    store.useStore.getState().setCleaned(analysis(), '/out/take_clean.wav');
+    chooseExportPath.mockRejectedValue(new Error('disk full'));
+
+    await actions.saveCleanedMaster();
+
+    expect(revealInFinder).toHaveBeenCalledWith('/out/take_clean.wav');
+  });
+
+  it('saveProcessingRecord refuses to fake export when no bundle exists and stays quiet on cancel', async () => {
+    const { actions, store } = await boot();
+    bridgeHost.current = 'electron';
+    const st = () => store.useStore.getState();
+    st().setCleaned(analysis(), '/out/take_clean.wav');
+    st().setJob({
+      id: 'j-nobundle',
+      outputPath: '/out/take_clean.wav',
+      reportPath: '',
+      status: null,
+      streamConnected: false,
+    });
+
+    await actions.saveProcessingRecord();
+    expect(chooseExportPath).not.toHaveBeenCalled();
+    expect(revealInFinder).not.toHaveBeenCalled();
+    expect(st().statusLine).toContain('No processing record bundle');
+
+    // When a bundle exists and user cancels Save dialog, do not open Finder.
+    st().setJob({
+      id: 'j-bundle',
+      outputPath: '/out/take_clean.wav',
+      reportPath: '/out/take_clean.hawavoclean.json',
+      bundlePath: '/out/take_clean.hawavoclean.zip',
+      status: null,
+      streamConnected: false,
+    });
+    chooseExportPath.mockResolvedValueOnce(null);
+    await actions.saveProcessingRecord();
+    expect(chooseExportPath).toHaveBeenCalledWith({
+      kind: 'record_bundle',
+      suggestedName: 'take_clean.hawavoclean.zip',
+      sourcePath: '/out/take_clean.hawavoclean.zip',
+    });
+    expect(revealInFinder).not.toHaveBeenCalled();
+
+    // When user picks a destination, report export success.
+    chooseExportPath.mockResolvedValueOnce('/Users/test/Documents/export.zip');
+    await actions.saveProcessingRecord();
+    expect(st().statusLine).toBe('Processing record exported: export.zip');
+  });
+
+  it('probeEngine passes a live independent timeout signal to client.capabilities', async () => {
+    const { actions, client } = await boot();
+    let capsSignal: AbortSignal | undefined;
+    (client as unknown as { capabilities?: ReturnType<typeof vi.fn> }).capabilities = vi.fn(
+      async (signal?: AbortSignal) => {
+        capsSignal = signal;
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+    );
+
+    const probePromise = actions.connectEngine();
+    await settle(100);
+    expect(capsSignal).toBeDefined();
+    expect(capsSignal?.aborted).toBe(false);
+
+    // Advancing past HEALTH_TIMEOUT_MS must abort the hung capabilities probe so polling never freezes.
+    await settle(5_000);
+    await probePromise;
+    expect(capsSignal?.aborted).toBe(true);
+  });
+
+  it('handles interrupted job status on SSE stream without locking the workspace in processing', async () => {
+    const { actions, store } = await boot();
+    armed(store);
+    const st = () => store.useStore.getState();
+
+    await actions.startJob();
+    FakeEventSource.live.connect();
+    FakeEventSource.live.send(
+      'status',
+      JSON.stringify({
+        schemaVersion: 1,
+        jobId: 'j1',
+        state: 'interrupted',
+        stage: 'error',
+        progress: 0.35,
+        message: 'Interrupted by engine restart',
+        outputPath: '/out/a_studio.wav',
+        reportPath: '/out/a_studio.hawavoclean.json',
+      }),
+    );
+    await settle(20);
+
+    expect(st().job?.status?.state).toBe('interrupted');
+    expect(store.jobInFlight(st().job)).toBe(false);
+    expect(st().statusLine).toContain('Processing interrupted');
+    expect(st().error).not.toBeNull();
+    expect(st().history[0]?.outcome).toBe('failed');
   });
 });
 

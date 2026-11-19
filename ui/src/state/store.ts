@@ -93,7 +93,7 @@ export function jobInFlight(job: JobInfo | null | undefined): boolean {
   if (!job) return false;
   if (!job.status) return true;
   const s = job.status.state;
-  return s !== 'done' && s !== 'failed' && s !== 'cancelled';
+  return s !== 'done' && s !== 'failed' && s !== 'cancelled' && s !== 'interrupted';
 }
 
 export interface HoverUnit {

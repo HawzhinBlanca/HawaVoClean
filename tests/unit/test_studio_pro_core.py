@@ -84,7 +84,21 @@ def test_studio_pro_lockfile_and_profile_config_are_consistent(
     assert cfg.enhancement.model_sample_rate == 48000
     assert cfg.enhancement.phase_coherent is False
     assert cfg.guard.mode == "integrity"
+    assert cfg.guard.calibration_file == "guard-calibration-studio-pro.json"
+    assert cfg.guard.max_posterior_js_div == pytest.approx(0.38)
+    assert cfg.guard.spectral_hole_thresh == pytest.approx(0.90)
+    assert cfg.guard.min_hf_preservation_ratio == pytest.approx(0.20)
     assert cfg.runtime.device == "auto"
+
+    import json
+
+    calib = json.loads(
+        (MODELS_DIR / "guard-calibration-studio-pro.json").read_text(encoding="utf-8")
+    )
+    assert calib["calibration_id"] == hash_json_canonical(calib["thresholds"])
+    assert calib["thresholds"]["max_posterior_js_div"] == pytest.approx(0.38)
+    assert calib["thresholds"]["spectral_hole_thresh"] == pytest.approx(0.90)
+    assert calib["thresholds"]["min_hf_preservation_ratio"] == pytest.approx(0.20)
 
 
 def test_resolve_device_honours_core_preferred_devices(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -728,3 +742,69 @@ def test_load_natural_route_contract_dereverb_fails_closed_when_weights_missing(
     finally:
         _probe_optional_runtime_contract.cache_clear()
     assert STUDIO_DEREVERB_CORE_ID in CORE_REGISTRY
+
+
+def test_studio_pro_fail_closed_on_non_finite_and_extreme_peaks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import warnings
+
+    core = StudioProCore(device="cpu")
+    core._model = object()
+    sr = 48000
+
+    # 1. Non-finite inputs return sanitized finite fallback without invoking model.
+    nan_in = np.array([0.1, float("nan"), float("inf"), float("-inf"), -0.2], dtype=np.float32)
+    res_nan = core.enhance(nan_in, sr)
+    assert bool(np.all(np.isfinite(res_nan.waveform)))
+    assert len(res_nan.waveform) == len(nan_in)
+    assert res_nan.waveform[1] == 0.0 and res_nan.waveform[2] == 0.0 and res_nan.waveform[3] == 0.0
+
+    # 2. Non-finite model output reverts cleanly to finite input.
+    monkeypatch.setattr(
+        studio_pro,
+        "run_mossformer2_chunk",
+        lambda _m, _d, chunk: np.full(len(chunk), float("nan"), dtype=np.float32),
+    )
+    clean_in = np.linspace(-0.2, 0.2, 2048, dtype=np.float32)
+    res_revert = core.enhance(clean_in, sr)
+    assert bool(np.all(np.isfinite(res_revert.waveform)))
+    assert np.allclose(res_revert.waveform, clean_in, atol=1e-6)
+
+    # 3. Extreme finite input (1e35) does not overflow float32 in run_mossformer2_chunk.
+    monkeypatch.undo()
+    fake_torch = types.ModuleType("torch")
+
+    class _NoGrad:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    fake_torch.no_grad = lambda: _NoGrad()  # type: ignore[attr-defined]
+    fake_torch.from_numpy = lambda arr: arr  # type: ignore[attr-defined]
+    fake_torch.device = lambda d: d  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    class _FakeFeat:
+        def to(self, _dev: Any) -> Any:
+            return self
+
+    def _fake_extract(scaled: Any, **_k: Any) -> Any:
+        assert bool(np.all(np.isfinite(scaled)))
+        return _FakeFeat()
+
+    fake_arch = types.ModuleType("hawavoclean.enhancement.mossformer2_arch")
+    fake_arch.extract_mossformer2_features = _fake_extract  # type: ignore[attr-defined]
+    fake_arch.apply_mossformer2_mask = lambda scaled, _mask, **_k: (  # type: ignore[attr-defined]
+        np.asarray(scaled, dtype=np.float32) / 32768.0
+    )
+    monkeypatch.setitem(sys.modules, "hawavoclean.enhancement.mossformer2_arch", fake_arch)
+
+    extreme = np.full(2048, 1e35, dtype=np.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out_ext = studio_pro.run_mossformer2_chunk(lambda _x: [None], "cpu", extreme)
+    assert bool(np.all(np.isfinite(out_ext)))
+    assert len(out_ext) == len(extreme)

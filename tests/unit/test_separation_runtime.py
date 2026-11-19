@@ -661,3 +661,64 @@ def test_separation_worker_module_paths(tmp_path: Path, monkeypatch: pytest.Monk
     if os.name == "posix":
         monkeypatch.setenv("HAWAVOCLEAN_SEPARATION_PARENT_PID", "1")
         assert worker.main() == 130
+
+
+def test_roformer_worker_silence_fast_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    from hawavoclean.separation import worker
+
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", buf)
+
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    ckpt = model_dir / "model.ckpt"
+    cfg = model_dir / "model.yaml"
+    ckpt.write_bytes(b"ckpt")
+    cfg.write_bytes(b"yaml")
+
+    separator_called = False
+
+    class _FailSeparator:
+        def __init__(self, *_a: Any, **_k: Any) -> None:
+            nonlocal separator_called
+            separator_called = True
+            raise AssertionError("Separator must not run on all-zero silence")
+
+    fake_mlx_core = types.ModuleType("mlx.core")
+    fake_mlx_core.metal = types.SimpleNamespace(is_available=lambda: True)  # type: ignore[attr-defined]
+    fake_sep_core = types.ModuleType("mlx_audio_separator.core")
+    fake_sep_core.Separator = _FailSeparator  # type: ignore[attr-defined]
+    fake_mdxc = types.ModuleType("mlx_audio_separator.separator.architectures.mdxc_separator")
+
+    monkeypatch.setitem(sys.modules, "mlx.core", fake_mlx_core)
+    monkeypatch.setitem(sys.modules, "mlx_audio_separator.core", fake_sep_core)
+    monkeypatch.setitem(
+        sys.modules, "mlx_audio_separator.separator.architectures.mdxc_separator", fake_mdxc
+    )
+
+    in_wav = tmp_path / "silence.wav"
+    out_wav = tmp_path / "silence_out.wav"
+    sf.write(in_wav, np.zeros((4800, 2), dtype=np.float32), 48000, subtype="FLOAT")
+
+    meta = worker.run_roformer(
+        {
+            "action": "separate",
+            "model_dir": str(model_dir),
+            "model_filename": ckpt.name,
+            "config_filename": cfg.name,
+            "input": str(in_wav),
+            "output": str(out_wav),
+            "target_stem": "vocals",
+            "quality": "high",
+            "seed": 0,
+        }
+    )
+    assert separator_called is False
+    assert meta["selected_stem"] == "vocals"
+    assert meta["provider"] == "mlx"
+    out_data, out_sr = sf.read(out_wav, dtype="float32", always_2d=True)
+    assert out_sr == 48000
+    assert out_data.shape == (4800, 2)
+    assert float(np.max(np.abs(out_data))) == 0.0

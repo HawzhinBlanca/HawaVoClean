@@ -9,6 +9,6 @@
     "test": "node --test ../tests/*.test.cjs"
   },
   "devDependencies": {
-    "electron": "43.4.1"
+    "electron": "43.8.10"
   }
 }

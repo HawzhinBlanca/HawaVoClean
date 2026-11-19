@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { spawn } = require('node:child_process');
 const electron = require('electron');
 
@@ -33,13 +36,16 @@ async function waitForPidToDisappear(pid) {
 }
 
 async function main() {
-  const child = spawn(electron, ['.'], {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'hawavoclean-desktop-hard-crash-'));
+  const childEnv = {
+    ...process.env,
+    HAWAVOCLEAN_DESKTOP_SELFTEST: '1',
+    HAWAVOCLEAN_DESKTOP_SELFTEST_HARD_CRASH: '1',
+  };
+  delete childEnv.ELECTRON_RUN_AS_NODE;
+  const child = spawn(electron, ['.', `--user-data-dir=${userData}`], {
     cwd: __dirname + '/..',
-    env: {
-      ...process.env,
-      HAWAVOCLEAN_DESKTOP_SELFTEST: '1',
-      HAWAVOCLEAN_DESKTOP_SELFTEST_HARD_CRASH: '1',
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -99,6 +105,7 @@ async function main() {
       // failed watchdog assertion above.
       try { process.kill(enginePid, 'SIGKILL'); } catch {}
     }
+    fs.rmSync(userData, { recursive: true, force: true });
   }
 }
 

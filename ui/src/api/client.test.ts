@@ -678,4 +678,59 @@ describe('v1 capabilities and jobs (True-10 D4.11)', () => {
     expect(url.pathname).toBe('/api/v1/jobs/job%2Fwith%20space/events');
     expect(url.search).toBe('');
   });
+
+  it('normalizes camelCase v1 JobStatusResponseV1 states and paths into JobStatus', async () => {
+    const fetchFn = mockFetch(
+      res(
+        200,
+        JSON.stringify({
+          schemaVersion: 1,
+          jobId: 'j_v1_done',
+          state: 'completed',
+          stage: 'done',
+          progress: 1,
+          message: 'Finished',
+          outputPath: '/out/master.wav',
+          reportPath: '/out/master.hawavoclean.json',
+          startedAt: '2026-11-19T00:00:00Z',
+          finishedAt: '2026-11-19T00:00:05Z',
+        }),
+      ),
+    );
+    const done = await client().getV1Job('j_v1_done');
+    expect(done.job_id).toBe('j_v1_done');
+    expect(done.state).toBe('done');
+    expect(done.output_path).toBe('/out/master.wav');
+    expect(done.report_path).toBe('/out/master.hawavoclean.json');
+    expect(done.started_at).toBe('2026-11-19T00:00:00Z');
+    expect(done.finished_at).toBe('2026-11-19T00:00:05Z');
+
+    for (const v1Active of ['analyzing', 'rendering', 'guarding', 'publishing']) {
+      fetchFn.mockResolvedValueOnce(
+        res(200, JSON.stringify({ jobId: 'j_active', state: v1Active, stage: 'enhance', progress: 0.5 })),
+      );
+      const active = await client().getV1Job('j_active');
+      expect(active.job_id).toBe('j_active');
+      expect(active.state).toBe('running');
+    }
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          jobId: 'j_int',
+          state: 'interrupted',
+          stage: 'error',
+          progress: 0.4,
+          message: 'Interrupted on restart',
+          outputPath: '/out/m.wav',
+          reportPath: '/out/m.json',
+        }),
+      ),
+    );
+    const interrupted = await client().getV1Job('j_int');
+    expect(interrupted.job_id).toBe('j_int');
+    expect(interrupted.state).toBe('interrupted');
+    expect(interrupted.output_path).toBe('/out/m.wav');
+  });
 });

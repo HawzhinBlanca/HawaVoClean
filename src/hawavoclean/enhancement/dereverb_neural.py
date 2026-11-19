@@ -336,9 +336,12 @@ def _build_tfgridnet_v3(cfg: dict[str, Any]) -> Any:
 
         def forward(self, wav: torch.Tensor, sr: int = _INTERNAL_SAMPLE_RATE) -> torch.Tensor:
             n_samples = int(wav.shape[-1])
-            std = torch.std(wav, dim=1, keepdim=True) + 1e-12
-            mean = torch.mean(wav, dim=1, keepdim=True)
-            normed = (wav - mean) / std
+            peak = wav.abs().amax(dim=1, keepdim=True)
+            pre_scale = torch.where(peak > 1e6, peak, torch.ones_like(peak))
+            wav_scaled = wav / pre_scale
+            std = torch.std(wav_scaled, dim=1, keepdim=True) + 1e-12
+            mean = torch.mean(wav_scaled, dim=1, keepdim=True)
+            normed = (wav_scaled - mean) / std
 
             nfft = int(round(sr * fft_len))
             nhop = int(round(sr * hop_len))
@@ -365,7 +368,7 @@ def _build_tfgridnet_v3(cfg: dict[str, Any]) -> Any:
                 window=window,
                 length=n_samples,
             )
-            return out * std
+            return out * (std * pre_scale)
 
     return _TFGridNetV3()
 
@@ -418,7 +421,7 @@ def _run_dereverb_chunk(
         return np.zeros(0, dtype=np.float32)
 
     work = np.ascontiguousarray(chunk_16k, dtype=np.float32)
-    if float(np.sqrt(np.mean(work**2))) < _SILENCE_RMS_THRESHOLD:
+    if float(np.sqrt(np.mean(np.square(work, dtype=np.float64)))) < _SILENCE_RMS_THRESHOLD:
         return work.copy()
 
     # Minimum STFT window length at 16 kHz is 512 samples
@@ -607,7 +610,10 @@ class NeuralDereverberator:
         t_start = time.perf_counter()
         orig32 = np.ascontiguousarray(waveform, dtype=np.float32)
         orig_len = len(orig32)
-        if orig_len == 0 or float(np.sqrt(np.mean(orig32**2))) < _SILENCE_RMS_THRESHOLD:
+        if (
+            orig_len == 0
+            or float(np.sqrt(np.mean(np.square(orig32, dtype=np.float64)))) < _SILENCE_RMS_THRESHOLD
+        ):
             return DereverbResult(
                 waveform=orig32.copy(),
                 sample_rate=sample_rate,
@@ -677,7 +683,10 @@ class NeuralDereverberator:
         blended = _blend_strength(orig32, _match_length(derev_out, orig_len), sample_rate, strength)
         peak = float(np.max(np.abs(blended))) if len(blended) > 0 else 0.0
         if peak > 0.99:
-            blended = np.ascontiguousarray(blended * (0.99 / peak), dtype=np.float32)
+            blended = np.ascontiguousarray(
+                (blended.astype(np.float64) * (0.99 / peak)).astype(np.float32),
+                dtype=np.float32,
+            )
 
         return DereverbResult(
             waveform=blended,

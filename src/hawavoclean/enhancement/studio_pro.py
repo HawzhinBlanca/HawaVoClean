@@ -224,6 +224,16 @@ def run_mossformer2_chunk(
     win_type = str(STUDIO_PRO_PARAMS["win_type"])
 
     work = np.ascontiguousarray(chunk_48k, dtype=np.float32)
+    if not bool(np.all(np.isfinite(work))):
+        return np.ascontiguousarray(
+            np.nan_to_num(work[:orig_len], nan=0.0, posinf=0.0, neginf=0.0),
+            dtype=np.float32,
+        )
+    peak_in = float(np.max(np.abs(work)))
+    if peak_in > 1e6:
+        # Guard float32 scaling (`work * 32768.0`) and Kaldi fbank energy against
+        # overflow on extreme finite inputs; StudioProCore peak-limits to 0.99.
+        work = np.ascontiguousarray(work / np.float32(peak_in), dtype=np.float32)
     if len(work) < win_len:
         pad_len = win_len - len(work)
     else:
@@ -255,6 +265,9 @@ def run_mossformer2_chunk(
     out32 = np.asarray(out[:orig_len], dtype=np.float32)
     if len(out32) < orig_len:
         out32 = np.pad(out32, (0, orig_len - len(out32)), mode="constant")
+    if not bool(np.all(np.isfinite(out32))):
+        logger.warning("MossFormer2_SE_48K produced non-finite samples; reverting chunk to input")
+        return np.ascontiguousarray(work[:orig_len], dtype=np.float32)
     return np.ascontiguousarray(out32, dtype=np.float32)
 
 
@@ -364,18 +377,32 @@ class StudioProCore(Enhancer):
     ) -> EnhancementResult:
         check_memory_budget("studio_pro")
         t_start = time.perf_counter()
-        orig_len = len(waveform)
+        orig32 = np.ascontiguousarray(waveform, dtype=np.float32)
+        orig_len = len(orig32)
         if orig_len == 0:
             return EnhancementResult(
-                waveform=waveform.copy(),
+                waveform=orig32.copy(),
                 sample_rate=sample_rate,
                 model_runtime_ms=0.0,
                 input_samples=0,
                 output_samples=0,
             )
+        if not bool(np.all(np.isfinite(orig32))):
+            logger.warning("StudioProCore received non-finite input; returning sanitized fallback")
+            safe_out = np.ascontiguousarray(
+                np.nan_to_num(orig32, nan=0.0, posinf=0.0, neginf=0.0),
+                dtype=np.float32,
+            )
+            return EnhancementResult(
+                waveform=safe_out,
+                sample_rate=sample_rate,
+                model_runtime_ms=(time.perf_counter() - t_start) * 1000.0,
+                input_samples=orig_len,
+                output_samples=len(safe_out),
+            )
 
         self._ensure_model()
-        audio_48k = resample_audio(waveform, sample_rate, self._sample_rate)
+        audio_48k = resample_audio(orig32, sample_rate, self._sample_rate)
         chunk_samples = int(round(float(STUDIO_PRO_PARAMS["chunk_duration_s"]) * self._sample_rate))
         overlap_samples = int(
             round(float(STUDIO_PRO_PARAMS["overlap_duration_s"]) * self._sample_rate)
@@ -390,9 +417,15 @@ class StudioProCore(Enhancer):
         enhanced_out = resample_audio(
             enhanced_48k, self._sample_rate, sample_rate, target_samples=orig_len
         )
+        if not bool(np.all(np.isfinite(enhanced_out))):
+            logger.warning("StudioProCore produced non-finite samples; reverting to input")
+            enhanced_out = orig32.copy()
         peak = float(np.max(np.abs(enhanced_out))) if len(enhanced_out) > 0 else 0.0
         if peak > 0.99:
-            enhanced_out = np.ascontiguousarray(enhanced_out * (0.99 / peak), dtype=np.float32)
+            enhanced_out = np.ascontiguousarray(
+                (enhanced_out.astype(np.float64) * (0.99 / peak)).astype(np.float32),
+                dtype=np.float32,
+            )
 
         t_elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         return EnhancementResult(

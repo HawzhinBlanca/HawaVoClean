@@ -492,6 +492,11 @@ class SmartSafePreviewEngine:
         self._hf_detector = HighBandEventDetector(sample_rate=sample_rate)
         self._speaker_extractor = SpeakerEmbeddingExtractor(sample_rate=sample_rate)
 
+    @property
+    def perceptual_backend(self) -> str:
+        """Name of the active perceptual quality scoring backend (e.g. 'nisqa_v2')."""
+        return self._perceptual_scorer.active_backend
+
     def render_route_audio(
         self,
         route: Route,

@@ -6,6 +6,7 @@
 #
 # Implements Task Q5.2 (P0/L).
 set -euo pipefail
+export COPYFILE_DISABLE=1
 
 STAGE=""
 OUTPUT=""
@@ -54,11 +55,15 @@ trap 'rm -rf "$PKG_ROOT" "$PKG_SCRIPTS"' EXIT
 # Payload: the plugin directory itself
 mkdir -p "$PKG_ROOT/$PLUGIN_ID"
 cp -R "$STAGE/." "$PKG_ROOT/$PLUGIN_ID/"
+if command -v xattr >/dev/null 2>&1; then
+  xattr -cr "$PKG_ROOT/$PLUGIN_ID" 2>/dev/null || true
+fi
 
 # Write preinstall script: backup prior version and check Resolve is closed
 cat > "$PKG_SCRIPTS/preinstall" << 'EOF'
 #!/bin/bash
 set -euo pipefail
+export COPYFILE_DISABLE=1
 
 DEST="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins"
 PLUGIN_ID="com.hawavoclean.resolve"
@@ -85,6 +90,7 @@ chmod +x "$PKG_SCRIPTS/preinstall"
 cat > "$PKG_SCRIPTS/postinstall" << 'EOF'
 #!/bin/bash
 set -euo pipefail
+export COPYFILE_DISABLE=1
 
 DEST="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins"
 PLUGIN_ID="com.hawavoclean.resolve"

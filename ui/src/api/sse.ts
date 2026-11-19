@@ -1,7 +1,12 @@
-import { EngineError, type EngineClient } from './client';
+import { EngineError, normalizeJobStatus, type EngineClient } from './client';
 import type { BatchSummary, JobState, JobStatus } from './types';
 
-const TERMINAL: ReadonlySet<JobState> = new Set<JobState>(['done', 'failed', 'cancelled']);
+const TERMINAL: ReadonlySet<JobState> = new Set<JobState>([
+  'done',
+  'failed',
+  'cancelled',
+  'interrupted',
+]);
 
 export function isTerminal(state: JobState): boolean {
   return TERMINAL.has(state);
@@ -99,7 +104,8 @@ export function followJob(
     };
     es.addEventListener('status', (ev) => {
       try {
-        const st = JSON.parse((ev as MessageEvent<string>).data) as JobStatus;
+        const parsed = JSON.parse((ev as MessageEvent<string>).data) as Record<string, unknown>;
+        const st = normalizeJobStatus(parsed);
         handlers.onStatus(st);
         if (isTerminal(st.state)) finish();
       } catch {

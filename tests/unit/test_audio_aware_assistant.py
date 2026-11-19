@@ -716,3 +716,29 @@ def test_cli_process_strength_and_time_range_preserves_outside_samples_and_hashe
         with pytest.raises(SystemExit) as bad_exc:
             cli.main()
         assert bad_exc.value.code != 0
+
+
+def test_assistant_handles_out_of_range_timestamps_and_rejects_control_chars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HAWAVOCLEAN_CHAT_PROVIDER", "rules")
+
+    # Timestamps exceeding 24h (86400s) return a clarification rather than ValidationError.
+    for msg in (
+        "Remove siren from 90000s to 95000s",
+        "Remove siren from 2000 minutes to 3000 minutes",
+        "Remove siren from 99:99:99 to 99:99:99.5",
+    ):
+        plan = plan_audio(AudioPlanRequest(message=msg))
+        assert plan.operation == "clarify"
+        assert plan.needs_clarification is True
+
+    # Non-whitespace ASCII control characters fail closed at AudioPlanRequest validation (HTTP 422).
+    for bad in ("Remove dog\x00barking", "Remove dog\x07barking", "Clean\x1b[31mvoice"):
+        with pytest.raises(ValidationError, match="control characters"):
+            AudioPlanRequest(message=bad)
+
+    # Normal whitespace (\n, \t) remains valid.
+    multiline = plan_audio(AudioPlanRequest(message="Remove dog\nbarking"))
+    assert multiline.operation == "remove"
+    assert multiline.target == "dog barking"

@@ -32,7 +32,7 @@ def emit(value: dict[str, Any]) -> None:
 
 
 def cached_assets(repo_id: str) -> tuple[Path, Path, Path]:
-    from huggingface_hub import try_to_load_from_cache
+    try_to_load_from_cache = importlib.import_module("huggingface_hub").try_to_load_from_cache
 
     def cached(repo: str, filename: str) -> Path | None:
         path = try_to_load_from_cache(repo, filename)
@@ -261,6 +261,31 @@ def run_roformer(request: dict[str, Any]) -> dict[str, Any]:
 
     # Preserve levels for hot float signals (> 1.0) without clipping in separator.
     input_peak = float(np.max(np.abs(audio)))
+    if input_peak == 0.0:
+        sf.write(
+            request["output"],
+            np.zeros((source_frames, source_channels), dtype=np.float32),
+            source_sr,
+            subtype="FLOAT",
+        )
+        emit({"kind": "progress", "fraction": 1.0, "message": "Finished vocal/music separation"})
+        silent_versions: dict[str, str] = {}
+        for package in ("mlx", "mlx-audio-separator", "numpy", "scipy", "soundfile"):
+            with contextlib.suppress(importlib.metadata.PackageNotFoundError):
+                silent_versions[package] = importlib.metadata.version(package)
+        return {
+            "model": model_filename,
+            "license": "MIT",
+            "device": provider,
+            "provider": provider,
+            "runtime_versions": silent_versions,
+            "model_sample_rate": ROFORMER_SAMPLE_RATE,
+            "model_sha256": sha256(model_path),
+            "model_config_sha256": sha256(yaml_path),
+            "selected_stem": target_stem,
+            "runtime_ms": round((time.monotonic() - started) * 1000, 3),
+            "overlap": overlap,
+        }
     headroom_scale = input_peak if input_peak > 1.0 else 1.0
     model_audio = audio / headroom_scale if headroom_scale > 1.0 else audio
     if source_channels == 1:

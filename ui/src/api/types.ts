@@ -252,7 +252,7 @@ export interface CreateJobResponse {
   report_path: string;
 }
 
-export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+export type JobState = 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'interrupted';
 export type JobStage =
   | 'preflight'
   | 'decode'

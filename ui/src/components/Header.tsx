@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useI18n } from '../state/i18n';
+import { deriveEnginePhase, deriveWorkspacePhase } from '../state/machines';
 import { useReducedMotion } from '../state/reducedMotion';
 import { useStore } from '../state/store';
 import { Led, type LedState } from './Led';
@@ -67,21 +68,30 @@ function HeaderNow() {
   const source = useStore((s) => s.source);
   const original = useStore((s) => s.original);
   const cleaned = useStore((s) => s.cleaned);
+  const cleanedPath = useStore((s) => s.cleanedPath);
   const analyzing = useStore((s) => s.analyzing);
   const upload = useStore((s) => s.upload);
   const job = useStore((s) => s.job);
   const report = useStore((s) => s.report);
   const { t } = useI18n();
 
+  const phase = deriveWorkspacePhase({
+    source,
+    upload,
+    analyzing,
+    original,
+    job,
+    cleanedPath,
+    report,
+  });
   const status = job?.status ?? null;
   const state = status?.state ?? (job ? 'queued' : null);
-  const running = state === 'running' || state === 'queued';
 
   let tone = 'idle';
   let label = t.noClip;
   const facts: Array<{ k: string; v: string }> = [];
 
-  if (upload) {
+  if (phase === 'uploading' && upload) {
     tone = 'busy';
     label = t.uploading;
     // The name goes in the *value* slot, like every other branch here. It was
@@ -95,25 +105,25 @@ function HeaderNow() {
       k: t.sent,
       v: `${Math.round((upload.total ? upload.loaded / upload.total : 0) * 100)}%`,
     });
-  } else if (analyzing) {
+  } else if (phase === 'analyzing') {
     tone = 'busy';
     label = t.analyzing;
     if (source) facts.push({ k: t.clip, v: source.name });
-  } else if (running) {
+  } else if (phase === 'processing') {
     tone = 'busy';
     label = t.running;
     facts.push({ k: t.stage, v: status?.stage ?? 'working' });
     if (status?.unit) facts.push({ k: t.unit, v: `${status.unit.index} / ${status.unit.total}` });
     facts.push({ k: t.done, v: `${Math.round((status?.progress ?? 0) * 100)}%` });
-  } else if (state === 'failed') {
+  } else if (state === 'failed' || state === 'interrupted') {
     tone = 'fail';
-    label = t.failed;
+    label = state === 'interrupted' ? 'Interrupted' : t.failed;
     facts.push({ k: t.reason, v: status?.error?.code ?? status?.message ?? 'unknown' });
   } else if (state === 'cancelled') {
     tone = 'idle';
     label = t.cancelled;
     if (source) facts.push({ k: t.clip, v: source.name });
-  } else if (state === 'done' && report) {
+  } else if (phase === 'reviewed' && report) {
     tone = 'done';
     label = t.done;
     const sum = report.summary;
@@ -128,7 +138,7 @@ function HeaderNow() {
     if (ni !== null && ni !== undefined && no !== null && no !== undefined) {
       facts.push({ k: t.noise, v: `${signed(no - ni)} dB` });
     }
-  } else if (source && original) {
+  } else if (phase === 'ready' && source && original) {
     tone = 'ready';
     label = t.armed;
     facts.push({ k: t.clip, v: source.name });
@@ -164,19 +174,45 @@ export function Header() {
   const host = useStore((s) => s.host);
   const engineStatus = useStore((s) => s.engineStatus);
   const engineVersion = useStore((s) => s.engineVersion);
+  const engineOfflineSince = useStore((s) => s.engineOfflineSince);
+  const engineNextProbeAt = useStore((s) => s.engineNextProbeAt);
+  const engineProbing = useStore((s) => s.engineProbing);
+  const source = useStore((s) => s.source);
+  const upload = useStore((s) => s.upload);
+  const original = useStore((s) => s.original);
+  const cleanedPath = useStore((s) => s.cleanedPath);
+  const report = useStore((s) => s.report);
   const job = useStore((s) => s.job);
   const analyzing = useStore((s) => s.analyzing);
   const reduced = useReducedMotion() === true;
   const { locale, setLocale, t } = useI18n();
 
+  const workspacePhase = deriveWorkspacePhase({
+    source,
+    upload,
+    analyzing,
+    original,
+    job,
+    cleanedPath,
+    report,
+  });
+  const engine = deriveEnginePhase({
+    engineStatus,
+    engineVersion,
+    engineOfflineSince,
+    engineNextProbeAt,
+    engineProbing,
+  });
   const busy =
-    analyzing || (job?.status && (job.status.state === 'running' || job.status.state === 'queued'));
+    workspacePhase === 'uploading' ||
+    workspacePhase === 'analyzing' ||
+    workspacePhase === 'processing';
   let led: LedState = 'off';
   let text = t.engineOffline;
-  if (engineStatus === 'connecting') {
+  if (engine.phase === 'connecting') {
     led = 'busy';
     text = t.engineConnecting;
-  } else if (engineStatus === 'ready') {
+  } else if (engine.phase === 'ready') {
     led = busy ? 'busy' : 'ok';
     text = busy ? t.engineBusy : t.engineReady;
   } else {
