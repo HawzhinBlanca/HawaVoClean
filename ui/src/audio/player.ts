@@ -458,11 +458,16 @@ export class DualPlayer {
     if (next === this.deltaModeEnabled) return;
     this.deltaModeEnabled = next;
     if (next) {
-      // Keep both decks sample-locked before summing phase-inverted Cleaned.
-      const t = this.els[this.active].currentTime;
+      // Keep both decks sample-locked (accounting for any region-preview offset)
+      // before summing phase-inverted Cleaned.
+      const t = this.time;
       const other: Deck = this.active === 'original' ? 'cleaned' : 'original';
-      if (Number.isFinite(t) && Math.abs(this.els[other].currentTime - t) > SYNC_TOLERANCE_S) {
-        this.els[other].currentTime = t;
+      const expectedOther = this.timelineToDeck(other, t);
+      if (
+        Number.isFinite(expectedOther) &&
+        Math.abs(this.els[other].currentTime - expectedOther) > SYNC_TOLERANCE_S
+      ) {
+        this.els[other].currentTime = expectedOther;
       }
       if (this.wantPlaying && this.els[other].paused) {
         void this.els[other].play().catch(() => undefined);

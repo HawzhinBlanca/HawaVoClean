@@ -1045,6 +1045,15 @@ describe('active-deck reload continuity & region preview offset alignment', () =
     player.setActive('original');
     expect(el('original').currentTime).toBeCloseTo(10.5, 2);
 
+    // Toggling Delta during an offset preview must preserve region-offset phase alignment
+    player.setActive('cleaned');
+    el('cleaned').currentTime = 1.5;
+    el('original').currentTime = 0; // force drift
+    player.setDeltaMode(true);
+    expect(el('original').currentTime).toBeCloseTo(10.5, 2);
+    expect(el('cleaned').currentTime).toBeCloseTo(1.5, 2);
+    player.setDeltaMode(false);
+
     // Play and advance past loopEnd (12.0s) -> loops both decks back to 9.0 / 0.0
     player.setActive('cleaned');
     await player.play();

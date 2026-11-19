@@ -1663,7 +1663,7 @@ kbd {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--pad-2);
+  gap: 6px;
 }
 
 .btn-level-match {
@@ -3180,7 +3180,7 @@ kbd {
 .timecode {
   display: inline-flex;
   align-items: baseline;
-  padding: 3px var(--pad-2) 4px;
+  padding: 3px 5px 4px;
   border-radius: var(--r-sm);
   background: var(--glass), linear-gradient(180deg, #06070a, var(--display-2) 72%);
   box-shadow: var(--shadow-display), var(--vignette-sm);
