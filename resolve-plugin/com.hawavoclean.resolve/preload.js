@@ -61,6 +61,8 @@ if (host === 'resolve') {
     replaceClip: (mediaId, filePath) => invoke('hawa:resolve:replace', mediaId, filePath),
     appendToTimeline: (mediaId) => invoke('hawa:resolve:append', mediaId),
     newTrack: (mediaId, filePath, options) => invoke('hawa:resolve:new-track', mediaId, filePath, options),
+    batchCleanTrack: (payload) => invoke('hawa:resolve:batch-clean-track', payload),
+    applyGuardMarkers: (payload) => invoke('hawa:resolve:apply-guard-markers', payload),
     getContext: () => invoke('hawa:resolve:context'),
   };
 }

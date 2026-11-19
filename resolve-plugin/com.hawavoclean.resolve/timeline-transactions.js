@@ -118,6 +118,244 @@ function validateAudioFormat(filePath) {
   }
 }
 
+const GUARD_MARKER_COLORS = Object.freeze({
+  REVERTED: 'Red',
+  ERROR_PASSTHROUGH: 'Red',
+  CONTINUITY_REVERTED: 'Yellow',
+  LOW_STRENGTH: 'Yellow',
+});
+
+/**
+ * Formats a guard score scalar deterministically without floating-point noise.
+ *
+ * @param {unknown} value
+ * @returns {string}
+ */
+function formatGuardScoreValue(value) {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return String(value);
+    return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
+  }
+  return String(value);
+}
+
+/**
+ * Maps a `.hawavoclean.json` unit record into a Resolve Guard marker classification,
+ * or returns null when the unit passed cleanly and requires no timeline marker.
+ *
+ * @param {Record<string, any>} unit
+ * @param {number} lowStrengthThreshold
+ * @returns {{ decision: 'REVERTED' | 'ERROR_PASSTHROUGH' | 'CONTINUITY_REVERTED' | 'LOW_STRENGTH', color: 'Red' | 'Yellow' } | null}
+ */
+function classifyUnitForGuardMarker(unit, lowStrengthThreshold) {
+  const rawDecision = typeof unit.final_decision === 'string'
+    ? unit.final_decision.trim()
+    : (typeof unit.decision === 'string' ? unit.decision.trim() : '');
+  const upper = rawDecision.toUpperCase();
+  const verdict = typeof unit.guard_a_verdict === 'string' ? unit.guard_a_verdict.trim().toUpperCase() : '';
+  const chosenStrength = Number(unit.chosen_strength);
+
+  if (upper === 'NO_SPEECH' || upper === 'ORIGINAL_NO_SPEECH' || verdict === 'NO_SPEECH') {
+    return null;
+  }
+
+  if (
+    upper === 'ERROR_PASSTHROUGH' ||
+    upper === 'ORIGINAL_ERROR' ||
+    upper === 'ERROR' ||
+    verdict === 'ERROR'
+  ) {
+    return { decision: 'ERROR_PASSTHROUGH', color: GUARD_MARKER_COLORS.ERROR_PASSTHROUGH };
+  }
+
+  if (upper === 'CONTINUITY_REVERTED' || upper === 'ORIGINAL_CONTINUITY') {
+    return { decision: 'CONTINUITY_REVERTED', color: GUARD_MARKER_COLORS.CONTINUITY_REVERTED };
+  }
+
+  if (
+    upper === 'REVERTED' ||
+    upper === 'ORIGINAL_REVERTED' ||
+    upper === 'UNVERIFIED' ||
+    upper === 'ORIGINAL_UNVERIFIED'
+  ) {
+    return { decision: 'REVERTED', color: GUARD_MARKER_COLORS.REVERTED };
+  }
+
+  if (upper === 'LOW_STRENGTH') {
+    return { decision: 'LOW_STRENGTH', color: GUARD_MARKER_COLORS.LOW_STRENGTH };
+  }
+
+  if (upper === 'ENHANCED' || upper === '') {
+    if (verdict === 'REVERT' || verdict === 'UNVERIFIED') {
+      return { decision: 'REVERTED', color: GUARD_MARKER_COLORS.REVERTED };
+    }
+    if (
+      Number.isFinite(chosenStrength) &&
+      chosenStrength > 0 &&
+      chosenStrength <= lowStrengthThreshold
+    ) {
+      return { decision: 'LOW_STRENGTH', color: GUARD_MARKER_COLORS.LOW_STRENGTH };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Pure, deterministic parser that converts HawaVoClean `.hawavoclean.json` unit records
+ * into DaVinci Resolve timeline marker descriptors.
+ *
+ * Emits `'Red'` markers for `REVERTED` / `ERROR_PASSTHROUGH` and `'Yellow'` markers for
+ * `CONTINUITY_REVERTED` / `LOW_STRENGTH`. Returns `[]` cleanly for missing or empty reports.
+ *
+ * @param {object | null | undefined} report Parsed `.hawavoclean.json` report object
+ * @param {number} clipStartFrame Clip's timeline start frame
+ * @param {number} fps Timeline frame rate (frames per second)
+ * @param {object} [options]
+ * @param {number} [options.sourceOffsetS=0] Clip in-point offset into source audio (seconds)
+ * @param {number} [options.lowStrengthThreshold=0.5] Max chosen_strength treated as LOW_STRENGTH
+ * @returns {Array<{ frameOffset: number, color: 'Red' | 'Yellow', name: string, note: string, durationFrames: number, decision: string, unitId: number | null }>}
+ */
+function extractGuardMarkersFromReport(
+  report,
+  clipStartFrame,
+  fps,
+  { sourceOffsetS = 0, lowStrengthThreshold = 0.5 } = {}
+) {
+  if (!report || typeof report !== 'object' || !Array.isArray(report.units) || report.units.length === 0) {
+    return [];
+  }
+  const rate = Number(fps);
+  if (!Number.isFinite(rate) || rate <= 0) {
+    return [];
+  }
+
+  const baseFrame = Number.isFinite(Number(clipStartFrame)) ? Math.round(Number(clipStartFrame)) : 0;
+  const offsetS = Number.isFinite(Number(sourceOffsetS)) && Number(sourceOffsetS) > 0 ? Number(sourceOffsetS) : 0;
+  const threshold = Number.isFinite(Number(lowStrengthThreshold)) ? Number(lowStrengthThreshold) : 0.5;
+
+  /** @type {Array<{ frameOffset: number, color: 'Red' | 'Yellow', name: string, note: string, durationFrames: number, decision: string, unitId: number | null }>} */
+  const markers = [];
+
+  for (const unit of report.units) {
+    if (!unit || typeof unit !== 'object') continue;
+    const classification = classifyUnitForGuardMarker(unit, threshold);
+    if (!classification) continue;
+
+    const startRaw = unit.start_time_s ?? unit.startTimeS ?? unit.start_s;
+    const endRaw = unit.end_time_s ?? unit.endTimeS ?? unit.end_s;
+    const startS = Number(startRaw);
+    if (!Number.isFinite(startS)) continue;
+    const endParsed = Number(endRaw);
+    const endS = Number.isFinite(endParsed) && endParsed >= startS ? endParsed : startS;
+
+    // Skip units that ended entirely before the clip's visible in-point handle
+    if (offsetS > 0 && endS <= offsetS) continue;
+
+    const relStartS = Math.max(0, startS - offsetS);
+    const relEndS = Math.max(relStartS, endS - offsetS);
+    const frameOffset = baseFrame + Math.round(relStartS * rate);
+    const durationFrames = Math.max(1, Math.round((relEndS - relStartS) * rate));
+
+    const unitIdRaw = unit.unit_id ?? unit.unitId;
+    const unitId = unitIdRaw !== undefined && unitIdRaw !== null && Number.isFinite(Number(unitIdRaw))
+      ? Number(unitIdRaw)
+      : null;
+
+    const name = unitId !== null
+      ? `HawaVoClean Guard: ${classification.decision} (unit ${unitId})`
+      : `HawaVoClean Guard: ${classification.decision}`;
+
+    const noteParts = [];
+    if (typeof unit.decision_reason === 'string' && unit.decision_reason.trim().length > 0) {
+      noteParts.push(unit.decision_reason.trim());
+    }
+    if (classification.decision === 'LOW_STRENGTH' && Number.isFinite(Number(unit.chosen_strength))) {
+      noteParts.push(`chosen_strength=${formatGuardScoreValue(Number(unit.chosen_strength))}`);
+    }
+
+    const scoreEntries = [];
+    if (unit.guard_a_scores && typeof unit.guard_a_scores === 'object' && !Array.isArray(unit.guard_a_scores)) {
+      for (const key of Object.keys(unit.guard_a_scores).sort()) {
+        const val = unit.guard_a_scores[key];
+        if (val !== undefined && val !== null) {
+          scoreEntries.push(`${key}=${formatGuardScoreValue(val)}`);
+        }
+      }
+    }
+    if (unit.guard_b_scores && typeof unit.guard_b_scores === 'object' && !Array.isArray(unit.guard_b_scores)) {
+      for (const key of Object.keys(unit.guard_b_scores).sort()) {
+        const val = unit.guard_b_scores[key];
+        if (val !== undefined && val !== null) {
+          scoreEntries.push(`guard_b.${key}=${formatGuardScoreValue(val)}`);
+        }
+      }
+    }
+    if (scoreEntries.length > 0) {
+      noteParts.push(`scores: ${scoreEntries.join(', ')}`);
+    }
+
+    const note = noteParts.length > 0 ? noteParts.join(' | ') : `Decision: ${classification.decision}`;
+
+    markers.push({
+      frameOffset,
+      color: classification.color,
+      name,
+      note,
+      durationFrames,
+      decision: classification.decision,
+      unitId,
+    });
+  }
+
+  markers.sort((a, b) => {
+    if (a.frameOffset !== b.frameOffset) return a.frameOffset - b.frameOffset;
+    const ua = a.unitId ?? Number.MAX_SAFE_INTEGER;
+    const ub = b.unitId ?? Number.MAX_SAFE_INTEGER;
+    if (ua !== ub) return ua - ub;
+    return a.name.localeCompare(b.name);
+  });
+
+  return markers;
+}
+
+/**
+ * Safely loads a `.hawavoclean.json` report from an explicit report object, explicit report path,
+ * or matching sidecar `<stem>.hawavoclean.json` next to `cleanedFilePath`.
+ *
+ * @param {object} entry
+ * @param {string} cleanedFilePath
+ * @returns {object | null}
+ */
+function resolveClipReport(entry, cleanedFilePath) {
+  if (entry && typeof entry === 'object' && entry.report && typeof entry.report === 'object') {
+    return entry.report;
+  }
+
+  const candidatePaths = [];
+  if (entry && typeof entry === 'object' && typeof entry.reportPath === 'string' && entry.reportPath.length > 0) {
+    candidatePaths.push(entry.reportPath);
+  }
+  if (typeof cleanedFilePath === 'string' && cleanedFilePath.length > 0) {
+    const parsed = path.parse(cleanedFilePath);
+    candidatePaths.push(path.join(parsed.dir, `${parsed.name}.hawavoclean.json`));
+  }
+
+  for (const candidate of candidatePaths) {
+    if (!path.isAbsolute(candidate)) continue;
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch (_) {
+      // Malformed or unreadable sidecar report does not abort audio delivery
+    }
+  }
+
+  return null;
+}
+
 /** Explicit legal stage transitions for Resolve timeline transactions. */
 const ALLOWED_TRANSACTION_TRANSITIONS = Object.freeze({
   INIT: Object.freeze(['STAGED', 'COMMITTED', 'ROLLING_BACK']),
@@ -537,11 +775,475 @@ class TimelineTransactionManager {
       throw err;
     }
   }
+
+  /**
+   * Transactionally places a batch of cleaned 48 kHz audio clips onto a single
+   * non-destructive audio track (creating or reusing `targetTrackName`), aligns
+   * every clip to its original timeline start frame with handle preservation,
+   * drops HawaVoClean Guard Timeline Markers when available, persists a `0o600`
+   * transaction journal, and executes full compensating rollback on any mid-batch
+   * failure.
+   *
+   * @param {object} params
+   * @param {object} [params.timeline] Resolve Timeline object (defaults to active timeline)
+   * @param {Array<object>} params.clips Original timeline clip descriptors
+   * @param {Record<string, string | { filePath: string, report?: object, reportPath?: string }> | Map<string, any>} params.cleanedByClipId
+   * @param {string} [params.targetTrackName='HawaVoClean Cleaned']
+   * @param {number} [params.fps=24]
+   * @param {boolean} [params.addGuardMarkers=true]
+   * @param {string} [params.failPoint] Optional injected failure point for testing
+   * @returns {Promise<{ success: boolean, txId: string, journalPath: string, trackIndex: number, trackName: string, reusedTrack: boolean, clipsPlaced: number, markersAdded: number, markers: Array<object> }>}
+   */
+  async transactionalBatchTrackClean({
+    timeline,
+    clips,
+    cleanedByClipId,
+    targetTrackName = 'HawaVoClean Cleaned',
+    fps = 24,
+    addGuardMarkers = true,
+    failPoint,
+  } = {}) {
+    if (!Array.isArray(clips) || clips.length === 0) {
+      throw new Error('batchTrackClean: clips must be a non-empty array.');
+    }
+    if (!cleanedByClipId || typeof cleanedByClipId !== 'object') {
+      throw new Error('batchTrackClean: cleanedByClipId map is required.');
+    }
+    const rate = Number(fps);
+    if (!Number.isFinite(rate) || rate <= 0) {
+      throw new Error(`batchTrackClean: invalid fps (${fps}).`);
+    }
+    if (typeof targetTrackName !== 'string' || targetTrackName.trim().length === 0) {
+      throw new Error('batchTrackClean: targetTrackName must be a non-empty string.');
+    }
+
+    let activeTimeline = timeline || null;
+    if (!activeTimeline) {
+      const project = await this.getProject();
+      if (!project) throw new Error('No project is open in DaVinci Resolve.');
+      activeTimeline = await project.GetCurrentTimeline();
+    }
+    if (!activeTimeline) {
+      throw new Error('No active timeline in DaVinci Resolve.');
+    }
+
+    const mediaPool = await this.getMediaPool();
+    if (!mediaPool) {
+      throw new Error('MediaPool unavailable.');
+    }
+
+    // 1. Pre-validate every cleaned WAV and resolve clip alignment before any timeline mutation.
+    const prepared = [];
+    let maxChannels = 1;
+
+    for (let i = 0; i < clips.length; i += 1) {
+      const clip = clips[i];
+      if (!clip || typeof clip !== 'object') {
+        throw new Error(`batchTrackClean: clip at index ${i} must be an object.`);
+      }
+      const clipId = String(clip.clipId ?? clip.mediaId ?? clip.id ?? '').trim();
+      if (!clipId) {
+        throw new Error(`batchTrackClean: clip at index ${i} is missing clipId/mediaId/id.`);
+      }
+
+      const cleanedEntry = cleanedByClipId instanceof Map
+        ? cleanedByClipId.get(clipId)
+        : cleanedByClipId[clipId];
+      if (!cleanedEntry) {
+        throw new Error(`batchTrackClean: missing cleaned audio entry for clip '${clipId}'.`);
+      }
+
+      const filePath = typeof cleanedEntry === 'string' ? cleanedEntry : cleanedEntry.filePath;
+      if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+        throw new Error(`batchTrackClean: cleaned audio path for clip '${clipId}' must be absolute.`);
+      }
+
+      const audioCheck = validateAudioFormat(filePath);
+      if (!audioCheck.valid) {
+        throw new Error(`batchTrackClean rejected clip '${clipId}': ${audioCheck.error}`);
+      }
+      if (audioCheck.channels > maxChannels) {
+        maxChannels = audioCheck.channels;
+      }
+
+      let startFrame = clip.startFrame ?? clip.recordFrame;
+      if (startFrame === undefined && typeof clip.GetStart === 'function') {
+        startFrame = await clip.GetStart();
+      }
+      startFrame = Number(startFrame);
+      if (!Number.isFinite(startFrame) || startFrame < 0) {
+        throw new Error(`batchTrackClean: invalid startFrame for clip '${clipId}'.`);
+      }
+
+      const handleStartRaw = clip.sourceStartFrame ?? clip.startFrameInSource ?? clip.leftOffset;
+      const handleStartFrame = handleStartRaw !== undefined && handleStartRaw !== null && Number.isFinite(Number(handleStartRaw))
+        ? Math.max(0, Math.round(Number(handleStartRaw)))
+        : null;
+
+      let handleEndFrame = null;
+      const handleEndRaw = clip.sourceEndFrame ?? clip.endFrameInSource;
+      if (handleEndRaw !== undefined && handleEndRaw !== null && Number.isFinite(Number(handleEndRaw))) {
+        handleEndFrame = Math.max(0, Math.round(Number(handleEndRaw)));
+      } else if (
+        handleStartFrame !== null &&
+        clip.durationFrames !== undefined &&
+        Number.isFinite(Number(clip.durationFrames)) &&
+        Number(clip.durationFrames) > 0
+      ) {
+        handleEndFrame = handleStartFrame + Math.round(Number(clip.durationFrames));
+      }
+
+      const sourceOffsetS = Number.isFinite(Number(clip.sourceOffsetS)) && Number(clip.sourceOffsetS) > 0
+        ? Number(clip.sourceOffsetS)
+        : (handleStartFrame !== null ? handleStartFrame / rate : 0);
+
+      const report = addGuardMarkers ? resolveClipReport(cleanedEntry, filePath) : null;
+
+      prepared.push({
+        clipId,
+        filePath,
+        startFrame: Math.round(startFrame),
+        handleStartFrame,
+        handleEndFrame,
+        sourceOffsetS,
+        mediaType: Number.isFinite(Number(clip.mediaType)) ? Number(clip.mediaType) : undefined,
+        report,
+      });
+    }
+
+    const trackSubtype = maxChannels === 1 ? 'mono' : 'stereo';
+    const txId = this.journal.begin('batch-track-clean', {
+      targetTrackName,
+      trackSubtype,
+      fps: rate,
+      clipCount: prepared.length,
+      addGuardMarkers: Boolean(addGuardMarkers),
+    });
+    const journalPath = path.join(this.journal.txDir, `${txId}.json`);
+
+    /** @type {number | null} */
+    let targetTrackIndex = null;
+    /** @type {number | null} */
+    let createdTrackIndex = null;
+    let reusedTrack = false;
+    /** @type {Array<any>} */
+    const importedItems = [];
+    /** @type {Array<any>} */
+    const appendedItems = [];
+    /** @type {Array<number>} */
+    const addedMarkerFrames = [];
+    /** @type {Array<object>} */
+    const placedMarkers = [];
+    const seenMarkerFrames = new Set();
+
+    try {
+      if (failPoint === 'before_track_creation') {
+        throw new Error('Injected failure before track creation');
+      }
+
+      // 2. Reuse existing track with matching name, or create a single dedicated non-destructive track.
+      const trackCountBefore = (await activeTimeline.GetTrackCount('audio')) || 0;
+      if (typeof activeTimeline.GetTrackName === 'function') {
+        for (let idx = 1; idx <= trackCountBefore; idx += 1) {
+          const existingName = await activeTimeline.GetTrackName('audio', idx);
+          if (existingName === targetTrackName) {
+            targetTrackIndex = idx;
+            reusedTrack = true;
+            break;
+          }
+        }
+      }
+
+      if (targetTrackIndex === null) {
+        let trackCreated = false;
+        if (typeof activeTimeline.AddTrack === 'function') {
+          trackCreated = Boolean(await activeTimeline.AddTrack('audio', trackSubtype));
+        }
+        if (!trackCreated) {
+          throw new Error(`Failed to create audio track '${targetTrackName}' (${trackSubtype}).`);
+        }
+        const trackCountAfter = (await activeTimeline.GetTrackCount('audio')) || trackCountBefore + 1;
+        targetTrackIndex = trackCountAfter;
+        createdTrackIndex = trackCountAfter;
+        if (typeof activeTimeline.SetTrackName === 'function') {
+          try {
+            await activeTimeline.SetTrackName('audio', targetTrackIndex, targetTrackName);
+          } catch (_) {}
+        }
+      }
+
+      this.journal.update(txId, 'STAGED', [
+        {
+          action: createdTrackIndex !== null ? 'delete_track' : 'reuse_track',
+          trackIndex: targetTrackIndex,
+          trackName: targetTrackName,
+        },
+      ]);
+
+      // 3. Import and append all cleaned clips aligned to original startFrame with handle preservation.
+      for (let i = 0; i < prepared.length; i += 1) {
+        const entry = prepared[i];
+
+        if (failPoint === `clip_${i}_before_import`) {
+          throw new Error(`Injected failure before import at clip index ${i} (${entry.clipId})`);
+        }
+
+        const imported = (await mediaPool.ImportMedia([entry.filePath])) || [];
+        if (!imported.length || !imported[0]) {
+          throw new Error(`Failed to import cleaned media for clip '${entry.clipId}' at ${entry.filePath}`);
+        }
+        const mediaPoolItem = imported[0];
+        importedItems.push(mediaPoolItem);
+
+        if (
+          failPoint === `clip_${i}_before_append` ||
+          (failPoint === 'mid_batch' && i === Math.max(1, Math.floor(prepared.length / 2)))
+        ) {
+          throw new Error(`Injected mid-batch failure before append at clip index ${i} (${entry.clipId})`);
+        }
+
+        /** @type {Record<string, any>} */
+        const clipSpec = {
+          mediaPoolItem,
+          trackIndex: targetTrackIndex,
+          recordFrame: entry.startFrame,
+        };
+        if (entry.handleStartFrame !== null) {
+          clipSpec.startFrame = entry.handleStartFrame;
+        }
+        if (entry.handleEndFrame !== null) {
+          clipSpec.endFrame = entry.handleEndFrame;
+        }
+        if (entry.mediaType !== undefined) {
+          clipSpec.mediaType = entry.mediaType;
+        }
+
+        const appendResult = await mediaPool.AppendToTimeline([clipSpec]);
+        const ok = Array.isArray(appendResult) ? appendResult.length > 0 : Boolean(appendResult);
+        if (!ok) {
+          throw new Error(`AppendToTimeline failed for clip '${entry.clipId}' at frame ${entry.startFrame}`);
+        }
+        if (Array.isArray(appendResult)) {
+          for (const item of appendResult) {
+            if (item) appendedItems.push(item);
+          }
+        }
+
+        if (failPoint === `clip_${i}_after_append`) {
+          throw new Error(`Injected failure after append at clip index ${i} (${entry.clipId})`);
+        }
+      }
+
+      // 4. Drop Guard Timeline Markers from each clip's `.hawavoclean.json` report.
+      if (addGuardMarkers && typeof activeTimeline.AddMarker === 'function') {
+        for (const entry of prepared) {
+          if (!entry.report) continue;
+          const clipMarkers = extractGuardMarkersFromReport(entry.report, entry.startFrame, rate, {
+            sourceOffsetS: entry.sourceOffsetS,
+          });
+          for (const marker of clipMarkers) {
+            if (failPoint === 'during_markers' && placedMarkers.length > 0) {
+              throw new Error('Injected failure during guard marker placement');
+            }
+            const added = await activeTimeline.AddMarker(
+              marker.frameOffset,
+              marker.color,
+              marker.name,
+              marker.note,
+              marker.durationFrames
+            );
+            if (added !== false) {
+              if (!seenMarkerFrames.has(marker.frameOffset)) {
+                seenMarkerFrames.add(marker.frameOffset);
+                addedMarkerFrames.push(marker.frameOffset);
+              }
+              placedMarkers.push(marker);
+            }
+          }
+        }
+      }
+
+      if (failPoint === 'after_markers') {
+        throw new Error('Injected failure after guard marker placement');
+      }
+
+      // 5. Commit and persist 0o600 audit journal.
+      this.journal.update(txId, 'COMMITTED', []);
+      return {
+        success: true,
+        txId,
+        journalPath,
+        trackIndex: targetTrackIndex,
+        trackName: targetTrackName,
+        reusedTrack,
+        clipsPlaced: prepared.length,
+        markersAdded: placedMarkers.length,
+        markers: placedMarkers,
+      };
+    } catch (err) {
+      this.log(`transactionalBatchTrackClean failed: ${err.message}. Initiating compensating rollback...`);
+      const compensations = [];
+      this.journal.update(txId, 'ROLLING_BACK', compensations);
+
+      // Compensating action 1: delete markers added during this transaction
+      if (addedMarkerFrames.length > 0 && typeof activeTimeline.DeleteMarkerAtFrame === 'function') {
+        for (const frameId of [...addedMarkerFrames].reverse()) {
+          try {
+            await activeTimeline.DeleteMarkerAtFrame(frameId);
+            compensations.push({ action: 'delete_marker', frameId, status: 'ok' });
+          } catch (markerErr) {
+            compensations.push({ action: 'delete_marker', frameId, status: 'error', error: markerErr.message });
+            this.log(`Rollback DeleteMarkerAtFrame(${frameId}) failed: ${markerErr.message}`);
+          }
+        }
+      }
+
+      // Compensating action 2: delete appended timeline items
+      if (appendedItems.length > 0) {
+        if (typeof activeTimeline.DeleteClips === 'function') {
+          try {
+            await activeTimeline.DeleteClips(appendedItems, false);
+            compensations.push({ action: 'delete_timeline_items', count: appendedItems.length, status: 'ok' });
+          } catch (itemsErr) {
+            compensations.push({ action: 'delete_timeline_items', count: appendedItems.length, status: 'error', error: itemsErr.message });
+            this.log(`Rollback DeleteClips(timeline) failed: ${itemsErr.message}`);
+          }
+        } else if (typeof activeTimeline.DeleteItem === 'function') {
+          for (const item of [...appendedItems].reverse()) {
+            try {
+              await activeTimeline.DeleteItem(item);
+              compensations.push({ action: 'delete_timeline_item', status: 'ok' });
+            } catch (itemErr) {
+              compensations.push({ action: 'delete_timeline_item', status: 'error', error: itemErr.message });
+              this.log(`Rollback DeleteItem failed: ${itemErr.message}`);
+            }
+          }
+        }
+      }
+
+      // Compensating action 3: remove newly created track (never delete a reused pre-existing track)
+      if (createdTrackIndex !== null && typeof activeTimeline.DeleteTrack === 'function') {
+        try {
+          await activeTimeline.DeleteTrack('audio', createdTrackIndex);
+          compensations.push({ action: 'delete_track', trackIndex: createdTrackIndex, status: 'ok' });
+        } catch (trackErr) {
+          compensations.push({ action: 'delete_track', trackIndex: createdTrackIndex, status: 'error', error: trackErr.message });
+          this.log(`Rollback DeleteTrack(${createdTrackIndex}) failed: ${trackErr.message}`);
+        }
+      }
+
+      // Compensating action 4: purge imported media pool items
+      if (importedItems.length > 0 && typeof mediaPool.DeleteClips === 'function') {
+        try {
+          await mediaPool.DeleteClips(importedItems);
+          compensations.push({ action: 'delete_media_pool_clips', count: importedItems.length, status: 'ok' });
+        } catch (poolErr) {
+          compensations.push({ action: 'delete_media_pool_clips', count: importedItems.length, status: 'error', error: poolErr.message });
+          this.log(`Rollback mediaPool.DeleteClips failed: ${poolErr.message}`);
+        }
+      }
+
+      this.journal.update(txId, 'ROLLED_BACK', compensations);
+      throw err;
+    }
+  }
+
+  /**
+   * Applies HawaVoClean Guard markers from a report or explicit marker list onto a timeline,
+   * rolling back any partially placed markers if an error occurs mid-apply.
+   *
+   * @param {object} params
+   * @param {object} [params.timeline]
+   * @param {object | null} [params.report]
+   * @param {string} [params.reportPath]
+   * @param {number} [params.clipStartFrame=0]
+   * @param {number} [params.fps=24]
+   * @param {number} [params.sourceOffsetS=0]
+   * @param {Array<{ frameOffset: number, color: string, name: string, note?: string, durationFrames?: number }>} [params.markers]
+   * @returns {Promise<{ success: boolean, markersAdded: number, markers: Array<object> }>}
+   */
+  async applyGuardMarkers({
+    timeline,
+    report = null,
+    reportPath,
+    clipStartFrame = 0,
+    fps = 24,
+    sourceOffsetS = 0,
+    markers,
+  } = {}) {
+    let activeTimeline = timeline || null;
+    if (!activeTimeline) {
+      const project = await this.getProject();
+      if (!project) throw new Error('No project is open in DaVinci Resolve.');
+      activeTimeline = await project.GetCurrentTimeline();
+    }
+    if (!activeTimeline) {
+      throw new Error('No active timeline in DaVinci Resolve.');
+    }
+
+    let resolvedMarkers = [];
+    if (Array.isArray(markers)) {
+      resolvedMarkers = markers.map((m, idx) => {
+        if (!m || typeof m !== 'object' || !Number.isFinite(Number(m.frameOffset))) {
+          throw new Error(`applyGuardMarkers: invalid marker descriptor at index ${idx}.`);
+        }
+        return {
+          frameOffset: Math.round(Number(m.frameOffset)),
+          color: typeof m.color === 'string' && m.color ? m.color : 'Yellow',
+          name: typeof m.name === 'string' && m.name ? m.name : 'HawaVoClean Guard',
+          note: typeof m.note === 'string' ? m.note : '',
+          durationFrames: Math.max(1, Number.isFinite(Number(m.durationFrames)) ? Math.round(Number(m.durationFrames)) : 1),
+        };
+      });
+    } else {
+      const parsedReport = resolveClipReport({ report, reportPath }, '');
+      resolvedMarkers = extractGuardMarkersFromReport(parsedReport, clipStartFrame, fps, { sourceOffsetS });
+    }
+
+    if (resolvedMarkers.length === 0 || typeof activeTimeline.AddMarker !== 'function') {
+      return { success: true, markersAdded: 0, markers: [] };
+    }
+
+    const addedFrames = [];
+    const placed = [];
+    const seen = new Set();
+
+    try {
+      for (const marker of resolvedMarkers) {
+        const added = await activeTimeline.AddMarker(
+          marker.frameOffset,
+          marker.color,
+          marker.name,
+          marker.note,
+          marker.durationFrames
+        );
+        if (added !== false) {
+          if (!seen.has(marker.frameOffset)) {
+            seen.add(marker.frameOffset);
+            addedFrames.push(marker.frameOffset);
+          }
+          placed.push(marker);
+        }
+      }
+      return { success: true, markersAdded: placed.length, markers: placed };
+    } catch (err) {
+      if (addedFrames.length > 0 && typeof activeTimeline.DeleteMarkerAtFrame === 'function') {
+        for (const frameId of [...addedFrames].reverse()) {
+          try {
+            await activeTimeline.DeleteMarkerAtFrame(frameId);
+          } catch (_) {}
+        }
+      }
+      throw err;
+    }
+  }
 }
 
 module.exports = {
   ALLOWED_TRANSACTION_TRANSITIONS,
+  GUARD_MARKER_COLORS,
   validateAudioFormat,
+  extractGuardMarkersFromReport,
   TransactionJournal,
   TimelineTransactionManager,
   TRANSACTIONS_DIR,

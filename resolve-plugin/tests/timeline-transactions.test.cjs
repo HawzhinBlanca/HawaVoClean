@@ -9,6 +9,8 @@ const os = require('node:os');
 
 const {
   validateAudioFormat,
+  extractGuardMarkersFromReport,
+  GUARD_MARKER_COLORS,
   TransactionJournal,
   TimelineTransactionManager,
 } = require('../com.hawavoclean.resolve/timeline-transactions.js');
@@ -297,4 +299,543 @@ test('TransactionJournal enforces explicit stage transition table', () => {
   } finally {
     fs.rmSync(txDir, { recursive: true, force: true });
   }
+});
+
+test('extractGuardMarkersFromReport handles missing/empty inputs and maps decisions, offsets, and notes deterministically', () => {
+  assert.deepEqual(extractGuardMarkersFromReport(null, 86400, 24), []);
+  assert.deepEqual(extractGuardMarkersFromReport(undefined, 86400, 24), []);
+  assert.deepEqual(extractGuardMarkersFromReport({}, 86400, 24), []);
+  assert.deepEqual(extractGuardMarkersFromReport({ units: [] }, 86400, 24), []);
+  assert.deepEqual(extractGuardMarkersFromReport({ units: [{ final_decision: 'REVERTED', start_time_s: 1, end_time_s: 2 }] }, 86400, 0), []);
+  assert.deepEqual(extractGuardMarkersFromReport({ units: [{ final_decision: 'REVERTED', start_time_s: 1, end_time_s: 2 }] }, 86400, -24), []);
+
+  const report = {
+    units: [
+      {
+        unit_id: 0,
+        start_time_s: 0.0,
+        end_time_s: 0.4,
+        final_decision: 'REVERTED',
+        decision_reason: 'Pre-roll unit before in-point',
+      },
+      {
+        unit_id: 1,
+        start_time_s: 0.5,
+        end_time_s: 2.0,
+        final_decision: 'enhanced',
+        chosen_strength: 1.0,
+        guard_a_verdict: 'PASS',
+        decision_reason: 'Passed Guard A with strength s=1.00',
+      },
+      {
+        unit_id: 2,
+        start_time_s: 2.0,
+        end_time_s: 3.5,
+        final_decision: 'original_no_speech',
+        guard_a_verdict: 'NO_SPEECH',
+      },
+      {
+        unit_id: 5,
+        start_time_s: 6.5,
+        end_time_s: 8.0,
+        final_decision: 'ERROR_PASSTHROUGH',
+        guard_a_verdict: 'ERROR',
+        decision_reason: 'Enhancer timed out',
+        guard_a_scores: { enhancer_error: true },
+      },
+      {
+        unit_id: 3,
+        start_time_s: 3.5,
+        end_time_s: 5.0,
+        final_decision: 'original_reverted',
+        guard_a_verdict: 'REVERT',
+        decision_reason: 'Spectral hole exceeded threshold',
+        guard_a_scores: { spectral_hole: 0.14231, hf_preservation: 0.41 },
+      },
+      {
+        unit_id: 4,
+        start_time_s: 5.0,
+        end_time_s: 6.0,
+        final_decision: 'original_continuity',
+        guard_a_verdict: 'PASS',
+        decision_reason: 'Continuity policy reverted isolated island',
+        guard_a_scores: { seam_delta_db: 4.25 },
+      },
+      {
+        unit_id: 6,
+        start_time_s: 8.5,
+        end_time_s: 9.5,
+        final_decision: 'enhanced',
+        chosen_strength: 0.25,
+        guard_a_verdict: 'PASS',
+        decision_reason: 'Passed Guard A with strength s=0.25',
+        guard_a_scores: { spectral_hole: 0.03 },
+      },
+    ],
+  };
+
+  const markers = extractGuardMarkersFromReport(report, 86400, 24, { sourceOffsetS: 0.5 });
+  assert.equal(markers.length, 4);
+
+  // Sorted deterministically by frameOffset
+  assert.equal(markers[0].unitId, 3);
+  assert.equal(markers[0].decision, 'REVERTED');
+  assert.equal(markers[0].color, GUARD_MARKER_COLORS.REVERTED);
+  assert.equal(markers[0].frameOffset, 86400 + Math.round((3.5 - 0.5) * 24));
+  assert.equal(markers[0].durationFrames, Math.round(1.5 * 24));
+  assert.ok(markers[0].note.includes('Spectral hole exceeded threshold'));
+  assert.ok(markers[0].note.includes('hf_preservation=0.41'));
+  assert.ok(markers[0].note.includes('spectral_hole=0.1423'));
+
+  assert.equal(markers[1].unitId, 4);
+  assert.equal(markers[1].decision, 'CONTINUITY_REVERTED');
+  assert.equal(markers[1].color, 'Yellow');
+  assert.equal(markers[1].frameOffset, 86400 + Math.round((5.0 - 0.5) * 24));
+  assert.equal(markers[1].durationFrames, 24);
+  assert.ok(markers[1].note.includes('seam_delta_db=4.25'));
+
+  assert.equal(markers[2].unitId, 5);
+  assert.equal(markers[2].decision, 'ERROR_PASSTHROUGH');
+  assert.equal(markers[2].color, 'Red');
+  assert.equal(markers[2].frameOffset, 86400 + Math.round((6.5 - 0.5) * 24));
+  assert.ok(markers[2].note.includes('Enhancer timed out'));
+
+  assert.equal(markers[3].unitId, 6);
+  assert.equal(markers[3].decision, 'LOW_STRENGTH');
+  assert.equal(markers[3].color, 'Yellow');
+  assert.equal(markers[3].frameOffset, 86400 + Math.round((8.5 - 0.5) * 24));
+  assert.ok(markers[3].note.includes('chosen_strength=0.25'));
+
+  // Pure & deterministic: calling twice yields byte-identical JSON
+  const markersAgain = extractGuardMarkersFromReport(report, 86400, 24, { sourceOffsetS: 0.5 });
+  assert.deepEqual(markersAgain, markers);
+});
+
+test('transactionalBatchTrackClean creates track, aligns clips with handles, places Guard markers, and persists 0o600 journal', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tx-batch-happy-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const journalDir = path.join(tmpDir, 'journal');
+  const journal = new TransactionJournal(journalDir);
+  const wav1 = path.join(tmpDir, 'clip1_clean.wav');
+  const wav2 = path.join(tmpDir, 'clip2_clean.wav');
+  createSyntheticWav(wav1, { sampleRate: 48000, channels: 1 });
+  createSyntheticWav(wav2, { sampleRate: 48000, channels: 2 });
+
+  const tracks = [{ name: 'Dialogue 1', subtype: 'mono' }];
+  const appendedSpecs = [];
+  const addedMarkers = [];
+
+  const mockTimeline = {
+    GetTrackCount: async () => tracks.length,
+    GetTrackName: async (_type, idx) => tracks[idx - 1]?.name || '',
+    AddTrack: async (_type, subtype) => {
+      tracks.push({ name: `Audio ${tracks.length + 1}`, subtype });
+      return true;
+    },
+    SetTrackName: async (_type, idx, name) => {
+      tracks[idx - 1].name = name;
+      return true;
+    },
+    AddMarker: async (frameId, color, name, note, duration) => {
+      addedMarkers.push({ frameId, color, name, note, duration });
+      return true;
+    },
+    DeleteMarkerAtFrame: async () => true,
+    DeleteClips: async () => true,
+    DeleteTrack: async () => true,
+  };
+
+  let importCounter = 0;
+  const mockMediaPool = {
+    ImportMedia: async (paths) => [{ id: `mp-${++importCounter}`, path: paths[0] }],
+    AppendToTimeline: async (specs) => {
+      appendedSpecs.push(...specs);
+      return specs.map((s, i) => ({ tlItemId: `tl-${appendedSpecs.length}-${i}`, spec: s }));
+    },
+    DeleteClips: async () => true,
+  };
+
+  const manager = new TimelineTransactionManager({
+    getProject: async () => ({ GetCurrentTimeline: async () => mockTimeline }),
+    getMediaPool: async () => mockMediaPool,
+    findItemByMediaId: async () => null,
+    log: () => {},
+    journal,
+  });
+
+  const clips = [
+    { clipId: 'c1', startFrame: 86400, sourceStartFrame: 24, durationFrames: 240 },
+    { clipId: 'c2', startFrame: 86800, sourceStartFrame: 0, sourceEndFrame: 360 },
+  ];
+  const cleanedByClipId = {
+    c1: {
+      filePath: wav1,
+      report: {
+        units: [
+          {
+            unit_id: 1,
+            start_time_s: 2.0,
+            end_time_s: 3.5,
+            final_decision: 'REVERTED',
+            decision_reason: 'Consonant attenuation guard triggered',
+            guard_a_scores: { hf_preservation: 0.32 },
+          },
+        ],
+      },
+    },
+    c2: {
+      filePath: wav2,
+      report: {
+        units: [
+          {
+            unit_id: 2,
+            start_time_s: 1.0,
+            end_time_s: 2.0,
+            final_decision: 'LOW_STRENGTH',
+            chosen_strength: 0.5,
+            decision_reason: 'Reduced strength selected',
+            guard_a_scores: { spectral_hole: 0.04 },
+          },
+        ],
+      },
+    },
+  };
+
+  const res = await manager.transactionalBatchTrackClean({
+    timeline: mockTimeline,
+    clips,
+    cleanedByClipId,
+    targetTrackName: 'HawaVoClean Cleaned',
+    fps: 24,
+    addGuardMarkers: true,
+  });
+
+  assert.equal(res.success, true);
+  assert.equal(res.trackIndex, 2);
+  assert.equal(res.trackName, 'HawaVoClean Cleaned');
+  assert.equal(res.reusedTrack, false);
+  assert.equal(res.clipsPlaced, 2);
+  assert.equal(res.markersAdded, 2);
+  assert.equal(tracks[1].subtype, 'stereo'); // max channel count across batch
+  assert.equal(tracks[1].name, 'HawaVoClean Cleaned');
+
+  // Verify exact frame alignment + handle preservation
+  assert.equal(appendedSpecs.length, 2);
+  assert.equal(appendedSpecs[0].trackIndex, 2);
+  assert.equal(appendedSpecs[0].recordFrame, 86400);
+  assert.equal(appendedSpecs[0].startFrame, 24);
+  assert.equal(appendedSpecs[0].endFrame, 264);
+  assert.equal(appendedSpecs[1].trackIndex, 2);
+  assert.equal(appendedSpecs[1].recordFrame, 86800);
+  assert.equal(appendedSpecs[1].startFrame, 0);
+  assert.equal(appendedSpecs[1].endFrame, 360);
+
+  // Verify Guard Timeline Markers (clip 1 had sourceStartFrame=24 -> 1.0s offset, unit at 2.0s -> +24 frames)
+  assert.equal(addedMarkers.length, 2);
+  assert.equal(addedMarkers[0].frameId, 86424);
+  assert.equal(addedMarkers[0].color, 'Red');
+  assert.equal(addedMarkers[0].duration, 36);
+  assert.equal(addedMarkers[1].frameId, 86824);
+  assert.equal(addedMarkers[1].color, 'Yellow');
+
+  // Verify 0o600 transaction journal persisted in COMMITTED stage
+  assert.ok(fs.existsSync(res.journalPath));
+  const journalData = JSON.parse(fs.readFileSync(res.journalPath, 'utf8'));
+  assert.equal(journalData.stage, 'COMMITTED');
+  assert.equal(journalData.operation, 'batch-track-clean');
+  if (process.platform !== 'win32') {
+    const mode = fs.statSync(res.journalPath).mode & 0o777;
+    assert.equal(mode, 0o600);
+  }
+});
+
+test('transactionalBatchTrackClean executes full compensating rollback on mid-batch and post-marker failures', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tx-batch-rollback-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const journalDir = path.join(tmpDir, 'journal');
+  const journal = new TransactionJournal(journalDir);
+  const wav1 = path.join(tmpDir, 'clip1.wav');
+  const wav2 = path.join(tmpDir, 'clip2.wav');
+  createSyntheticWav(wav1, { sampleRate: 48000, channels: 1 });
+  createSyntheticWav(wav2, { sampleRate: 48000, channels: 1 });
+
+  // Case A: Mid-batch failure after clip 0 placed and clip 1 imported
+  {
+    const tracks = [{ name: 'Dialogue 1', subtype: 'mono' }];
+    const deletedTimelineItems = [];
+    const deletedTracks = [];
+    const deletedPoolClips = [];
+    const deletedMarkerFrames = [];
+
+    const mockTimeline = {
+      GetTrackCount: async () => tracks.length,
+      GetTrackName: async (_type, idx) => tracks[idx - 1]?.name || '',
+      AddTrack: async (_type, subtype) => {
+        tracks.push({ name: `Audio ${tracks.length + 1}`, subtype });
+        return true;
+      },
+      SetTrackName: async (_type, idx, name) => {
+        tracks[idx - 1].name = name;
+        return true;
+      },
+      AddMarker: async () => true,
+      DeleteMarkerAtFrame: async (frameId) => {
+        deletedMarkerFrames.push(frameId);
+        return true;
+      },
+      DeleteClips: async (items) => {
+        deletedTimelineItems.push(...items);
+        return true;
+      },
+      DeleteTrack: async (_type, idx) => {
+        deletedTracks.push(idx);
+        return true;
+      },
+    };
+
+    let idxCounter = 0;
+    const mockMediaPool = {
+      ImportMedia: async (paths) => [{ id: `mp-${++idxCounter}`, path: paths[0] }],
+      AppendToTimeline: async (specs) => [{ id: `tl-${idxCounter}`, spec: specs[0] }],
+      DeleteClips: async (clips) => {
+        deletedPoolClips.push(...clips);
+        return true;
+      },
+    };
+
+    const manager = new TimelineTransactionManager({
+      getProject: async () => ({ GetCurrentTimeline: async () => mockTimeline }),
+      getMediaPool: async () => mockMediaPool,
+      findItemByMediaId: async () => null,
+      log: () => {},
+      journal,
+    });
+
+    await assert.rejects(
+      manager.transactionalBatchTrackClean({
+        timeline: mockTimeline,
+        clips: [
+          { clipId: 'c1', startFrame: 100 },
+          { clipId: 'c2', startFrame: 300 },
+        ],
+        cleanedByClipId: { c1: wav1, c2: wav2 },
+        failPoint: 'mid_batch',
+      }),
+      /Injected mid-batch failure/
+    );
+
+    assert.equal(deletedTimelineItems.length, 1, 'first appended clip must be rolled back');
+    assert.deepEqual(deletedTracks, [2], 'newly created track must be deleted');
+    assert.equal(deletedPoolClips.length, 2, 'both imported media pool items must be purged');
+    assert.equal(deletedMarkerFrames.length, 0);
+
+    const journalFiles = fs.readdirSync(journalDir).filter((f) => f.endsWith('.json'));
+    assert.equal(journalFiles.length, 1);
+    const jPath = path.join(journalDir, journalFiles[0]);
+    const rec = JSON.parse(fs.readFileSync(jPath, 'utf8'));
+    assert.equal(rec.stage, 'ROLLED_BACK');
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(jPath).mode & 0o777, 0o600);
+    }
+  }
+
+  // Case B: Post-marker failure on a REUSED track rolls back markers, items, pool clips, but preserves pre-existing track
+  {
+    const tracks = [
+      { name: 'Dialogue 1', subtype: 'mono' },
+      { name: 'HawaVoClean Cleaned', subtype: 'mono' },
+    ];
+    const deletedTimelineItems = [];
+    const deletedTracks = [];
+    const deletedPoolClips = [];
+    const deletedMarkerFrames = [];
+
+    const mockTimeline = {
+      GetTrackCount: async () => tracks.length,
+      GetTrackName: async (_type, idx) => tracks[idx - 1]?.name || '',
+      AddTrack: async () => {
+        throw new Error('AddTrack must not be called when reusing targetTrackName');
+      },
+      AddMarker: async () => true,
+      DeleteMarkerAtFrame: async (frameId) => {
+        deletedMarkerFrames.push(frameId);
+        return true;
+      },
+      DeleteItem: async (item) => {
+        deletedTimelineItems.push(item);
+        return true;
+      },
+      DeleteTrack: async (_type, idx) => {
+        deletedTracks.push(idx);
+        return true;
+      },
+    };
+
+    const mockMediaPool = {
+      ImportMedia: async (paths) => [{ id: paths[0] }],
+      AppendToTimeline: async (specs) => [{ id: `tl-${specs[0].recordFrame}` }],
+      DeleteClips: async (clips) => {
+        deletedPoolClips.push(...clips);
+        return true;
+      },
+    };
+
+    const manager = new TimelineTransactionManager({
+      getProject: async () => ({ GetCurrentTimeline: async () => mockTimeline }),
+      getMediaPool: async () => mockMediaPool,
+      findItemByMediaId: async () => null,
+      log: () => {},
+      journal,
+    });
+
+    await assert.rejects(
+      manager.transactionalBatchTrackClean({
+        timeline: mockTimeline,
+        clips: [
+          { clipId: 'c1', startFrame: 100 },
+          { clipId: 'c2', startFrame: 400 },
+        ],
+        cleanedByClipId: {
+          c1: {
+            filePath: wav1,
+            report: { units: [{ unit_id: 1, start_time_s: 1.0, end_time_s: 2.0, final_decision: 'REVERTED' }] },
+          },
+          c2: {
+            filePath: wav2,
+            report: { units: [{ unit_id: 2, start_time_s: 2.0, end_time_s: 3.0, final_decision: 'CONTINUITY_REVERTED' }] },
+          },
+        },
+        targetTrackName: 'HawaVoClean Cleaned',
+        fps: 24,
+        failPoint: 'after_markers',
+      }),
+      /Injected failure after guard marker placement/
+    );
+
+    assert.deepEqual(deletedMarkerFrames, [448, 124], 'markers added in tx must be deleted in reverse order');
+    assert.equal(deletedTimelineItems.length, 2, 'all appended items must be deleted');
+    assert.deepEqual(deletedTracks, [], 'pre-existing reused track must NOT be deleted on rollback');
+    assert.equal(deletedPoolClips.length, 2, 'all imported media pool clips must be purged');
+  }
+});
+
+test('transactionalBatchTrackClean rejects non-48kHz WAV before mutating timeline', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tx-batch-44k-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const wav48k = path.join(tmpDir, 'ok_48k.wav');
+  const wav44k = path.join(tmpDir, 'bad_44k.wav');
+  createSyntheticWav(wav48k, { sampleRate: 48000, channels: 1 });
+  createSyntheticWav(wav44k, { sampleRate: 44100, channels: 1 });
+
+  let mutated = false;
+  const mockTimeline = {
+    GetTrackCount: async () => 1,
+    AddTrack: async () => {
+      mutated = true;
+      return true;
+    },
+  };
+  const mockMediaPool = {
+    ImportMedia: async () => {
+      mutated = true;
+      return [];
+    },
+  };
+
+  const manager = new TimelineTransactionManager({
+    getProject: async () => ({ GetCurrentTimeline: async () => mockTimeline }),
+    getMediaPool: async () => mockMediaPool,
+    findItemByMediaId: async () => null,
+    log: () => {},
+    journal: new TransactionJournal(path.join(tmpDir, 'journal')),
+  });
+
+  await assert.rejects(
+    manager.transactionalBatchTrackClean({
+      timeline: mockTimeline,
+      clips: [
+        { clipId: 'c1', startFrame: 0 },
+        { clipId: 'c2', startFrame: 100 },
+      ],
+      cleanedByClipId: { c1: wav48k, c2: wav44k },
+    }),
+    /must be delivered at 48 kHz/
+  );
+  assert.equal(mutated, false, 'invalid batch must fail before any timeline or media pool mutation');
+});
+
+test('applyGuardMarkers places markers and rolls back partial writes on error', async () => {
+  const placed = [];
+  const deleted = [];
+  let failOnSecond = false;
+
+  const mockTimeline = {
+    AddMarker: async (frameId, color, name, note, duration) => {
+      if (failOnSecond && placed.length === 1) {
+        throw new Error('Resolve AddMarker IPC failure');
+      }
+      placed.push({ frameId, color, name, note, duration });
+      return true;
+    },
+    DeleteMarkerAtFrame: async (frameId) => {
+      deleted.push(frameId);
+      return true;
+    },
+  };
+
+  const manager = new TimelineTransactionManager({
+    getProject: async () => ({ GetCurrentTimeline: async () => mockTimeline }),
+    getMediaPool: async () => ({}),
+    findItemByMediaId: async () => null,
+    log: () => {},
+  });
+
+  const report = {
+    units: [
+      { unit_id: 1, start_time_s: 1.0, end_time_s: 2.0, final_decision: 'REVERTED', decision_reason: 'Hole' },
+      { unit_id: 2, start_time_s: 3.0, end_time_s: 4.0, final_decision: 'CONTINUITY_REVERTED', decision_reason: 'Seam' },
+    ],
+  };
+
+  const ok = await manager.applyGuardMarkers({ timeline: mockTimeline, report, clipStartFrame: 1000, fps: 24 });
+  assert.equal(ok.success, true);
+  assert.equal(ok.markersAdded, 2);
+  assert.equal(placed.length, 2);
+
+  placed.length = 0;
+  failOnSecond = true;
+  await assert.rejects(
+    manager.applyGuardMarkers({ timeline: mockTimeline, report, clipStartFrame: 1000, fps: 24 }),
+    /Resolve AddMarker IPC failure/
+  );
+  assert.deepEqual(deleted, [1024], 'marker placed prior to failure must be rolled back');
+});
+
+test('main.js and preload.js wire resolve:batch-clean-track and resolve:apply-guard-markers behind requireTrustedIpcSender', () => {
+  const mainSource = fs.readFileSync(
+    path.join(__dirname, '..', 'com.hawavoclean.resolve', 'main.js'),
+    'utf8'
+  );
+  const preloadSource = fs.readFileSync(
+    path.join(__dirname, '..', 'com.hawavoclean.resolve', 'preload.js'),
+    'utf8'
+  );
+
+  assert.match(
+    mainSource,
+    /ipcMain\.handle\(\s*'hawa:resolve:batch-clean-track',\s*async\s*\(event,\s*payload\)\s*=>\s*\{\s*requireTrustedIpcSender\(event\);\s*return\s+resolveBatchCleanTrack\(payload\);/
+  );
+  assert.match(
+    mainSource,
+    /ipcMain\.handle\(\s*'hawa:resolve:apply-guard-markers',\s*async\s*\(event,\s*payload\)\s*=>\s*\{\s*requireTrustedIpcSender\(event\);\s*return\s+resolveApplyGuardMarkers\(payload\);/
+  );
+  assert.ok(
+    !mainSource.includes('failPoint: payload'),
+    'main.js IPC bridge must never forward untrusted test failPoint from renderer payload'
+  );
+  assert.match(preloadSource, /batchCleanTrack:\s*\(payload\)\s*=>\s*invoke\('hawa:resolve:batch-clean-track',\s*payload\)/);
+  assert.match(preloadSource, /applyGuardMarkers:\s*\(payload\)\s*=>\s*invoke\('hawa:resolve:apply-guard-markers',\s*payload\)/);
 });

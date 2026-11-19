@@ -973,6 +973,35 @@ async function resolveNewTrack(mediaId, filePath, options) {
   return mgr.transactionalNewTrack(mediaId, filePath, options);
 }
 
+async function resolveBatchCleanTrack(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('batchCleanTrack: payload must be an object.');
+  }
+  const mgr = getTimelineTxManager();
+  return mgr.transactionalBatchTrackClean({
+    clips: payload.clips,
+    cleanedByClipId: payload.cleanedByClipId,
+    targetTrackName: payload.targetTrackName,
+    fps: payload.fps,
+    addGuardMarkers: payload.addGuardMarkers,
+  });
+}
+
+async function resolveApplyGuardMarkers(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('applyGuardMarkers: payload must be an object.');
+  }
+  const mgr = getTimelineTxManager();
+  return mgr.applyGuardMarkers({
+    report: payload.report,
+    reportPath: payload.reportPath,
+    clipStartFrame: payload.clipStartFrame,
+    fps: payload.fps,
+    sourceOffsetS: payload.sourceOffsetS,
+    markers: payload.markers,
+  });
+}
+
 async function resolveGetContext() {
   const resolve = requireResolve();
   const ctx = { project: null, timeline: null, page: null };
@@ -1189,6 +1218,14 @@ function registerIpc() {
   ipcMain.handle('hawa:resolve:new-track', async (event, mediaId, filePath, options) => {
     requireTrustedIpcSender(event);
     return resolveNewTrack(mediaId, filePath, options);
+  });
+  ipcMain.handle('hawa:resolve:batch-clean-track', async (event, payload) => {
+    requireTrustedIpcSender(event);
+    return resolveBatchCleanTrack(payload);
+  });
+  ipcMain.handle('hawa:resolve:apply-guard-markers', async (event, payload) => {
+    requireTrustedIpcSender(event);
+    return resolveApplyGuardMarkers(payload);
   });
   ipcMain.handle('hawa:resolve:context', async (event) => {
     requireTrustedIpcSender(event);
