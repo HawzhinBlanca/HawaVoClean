@@ -127,6 +127,24 @@ def _core_runs_on_device(core_id: str) -> bool:
     return registration.device_aware
 
 
+def _core_preferred_devices(core_id: str | None) -> tuple[str, ...]:
+    """Return the auto-selection device preference ladder for ``core_id``.
+
+    Legacy CPU-locked cores (production Wiener, DFN3 studio/lowband) declare
+    ``("cpu",)`` so ``auto`` stays 100% bit-identical to reference hashes.
+    Heavy neural cores whose GPU path is measured faster (e.g.
+    ``studio-mossformer2-48k-v1``) declare ``("mps", "cuda", "cpu")``.
+    """
+    if core_id is None:
+        return AUTO_DEVICE_PREFERENCE
+    from hawavoclean.enhancement.factory import CORE_REGISTRY
+
+    registration = CORE_REGISTRY.get(core_id)
+    if registration is None:
+        return AUTO_DEVICE_PREFERENCE
+    return registration.preferred_devices
+
+
 def resolve_device(
     requested: str,
     core_id: str | None = None,
@@ -134,11 +152,13 @@ def resolve_device(
 ) -> DeviceResolution:
     """Turn ``runtime.device`` into the device the run will actually use.
 
-    ``auto`` walks ``preference`` (default :data:`AUTO_DEVICE_PREFERENCE`) and
-    takes the first available entry, falling back to ``cpu``. An explicit
-    device that this machine cannot provide is a designed error, never a
-    silent fallback — a run that quietly drops to the CPU after being told to
-    use a GPU has misreported its own compute path.
+    ``auto`` walks ``preference`` (defaulting to the core's declared
+    ``preferred_devices`` ladder, or :data:`AUTO_DEVICE_PREFERENCE` when no
+    registered ``core_id`` is supplied) and takes the first available entry,
+    falling back to ``cpu``. An explicit device that this machine cannot
+    provide is a designed error, never a silent fallback — a run that quietly
+    drops to the CPU after being told to use a GPU has misreported its own
+    compute path.
 
     ``core_id`` (optional) downgrades the answer to ``cpu`` for cores that do
     not run on an accelerator, so the recorded device is the one that ran.
@@ -150,7 +170,7 @@ def resolve_device(
         )
 
     if requested == "auto":
-        ladder = AUTO_DEVICE_PREFERENCE if preference is None else preference
+        ladder = _core_preferred_devices(core_id) if preference is None else preference
         chosen = next((d for d in ladder if device_available(d)), "cpu")
         reason = (
             f"auto selected {chosen!r} from preference {list(ladder)}"

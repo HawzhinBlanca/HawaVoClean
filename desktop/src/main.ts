@@ -15,7 +15,6 @@ import {
 import {
   AUDIO_EXTENSIONS,
   type AppInfo,
-  type DiagnosticsState,
   IPC,
   parseExportRequest,
   requireAbsolutePath,
@@ -23,11 +22,8 @@ import {
   safeClearSessionStorage,
   safeSuggestedExportName,
   SESSION_PARTITION,
-  type UpdateState,
 } from './contracts.js';
 import { EngineBroker } from './engine.js';
-import { DiagnosticsManager, type RedactedDiagnosticReport } from './diagnostics.js';
-import { UpdateManager } from './updates/index.js';
 import { packagedProofSelfTestAllowed } from './proof.js';
 import {
   APP_ENTRY_URL,
@@ -93,14 +89,6 @@ const broker = new EngineBroker({
   userData: app.getPath('userData'),
   temp: app.getPath('temp'),
   platform: process.platform,
-});
-const diagnosticsManager = new DiagnosticsManager();
-const updateManager = new UpdateManager({
-  currentVersion: app.getVersion() || '3.3.0',
-  feedUrl: process.env.HAWAVOCLEAN_UPDATE_FEED_URL,
-  publicKey: process.env.HAWAVOCLEAN_UPDATE_PUBLIC_KEY,
-  updateDir: path.join(app.getPath('userData'), 'updates'),
-  dbPath: path.join(app.getPath('userData'), 'state', 'jobs.sqlite3'),
 });
 
 let mainWindow: BrowserWindow | null = null;
@@ -265,16 +253,6 @@ function registerIpc(): void {
     return { sourceId: registered.sourceId, path: registered.path };
   });
 
-  ipcMain.handle(IPC.pickFolder, async (event) => {
-    requireTrustedIpcSender(event);
-    const result = await openDialogFor(event, {
-      title: 'Choose a folder',
-      buttonLabel: 'Choose',
-      properties: ['openDirectory', 'createDirectory', 'promptToCreate'],
-    });
-    return result.canceled ? null : (result.filePaths[0] ?? null);
-  });
-
   ipcMain.handle(IPC.chooseExportPath, async (event, value: unknown) => {
     requireTrustedIpcSender(event);
     const request = parseExportRequest(value);
@@ -318,49 +296,6 @@ function registerIpc(): void {
       packaged: app.isPackaged,
     });
   });
-
-  ipcMain.handle(
-    IPC.diagnosticsState,
-    (event, payload?: unknown): DiagnosticsState | RedactedDiagnosticReport => {
-      requireTrustedIpcSender(event);
-      if (payload && typeof payload === 'object' && 'action' in payload) {
-        const action = (payload as { action: string; optIn?: boolean }).action;
-        if (action === 'setOptIn') {
-          return diagnosticsManager.setOptIn(Boolean((payload as { optIn?: boolean }).optIn));
-        }
-        if (action === 'export') {
-          return diagnosticsManager.generateReport({
-            appName: app.name,
-            appVersion: app.getVersion(),
-            packaged: app.isPackaged,
-            engineStatus: broker.origin ? 'running' : 'stopped',
-            enginePid: broker.pid,
-          });
-        }
-      }
-      return diagnosticsManager.getState();
-    },
-  );
-
-  ipcMain.handle(
-    IPC.updateState,
-    async (
-      event,
-      payload?: { action?: 'check' | 'apply' | 'rollback'; version?: string },
-    ): Promise<UpdateState> => {
-      requireTrustedIpcSender(event);
-      if (payload && typeof payload === 'object' && payload.action) {
-        if (payload.action === 'check') {
-          await updateManager.checkForUpdates();
-        } else if (payload.action === 'apply') {
-          await updateManager.applyUpdate();
-        } else if (payload.action === 'rollback') {
-          await updateManager.rollback(payload.version ?? '3.3.0');
-        }
-      }
-      return updateManager.getState();
-    },
-  );
 
   ipcMain.handle(IPC.clearLocalData, async (event) => {
     requireTrustedIpcSender(event);
@@ -549,8 +484,6 @@ async function runSelfTest(window: BrowserWindow): Promise<void> {
           fileKeys: Object.keys(bridge.files).sort(),
           app: appInfo,
           renderer,
-          diagnostics: await bridge.diagnostics.getState(),
-          updates: await bridge.updates.getState(),
           endpointKeys: Object.keys(endpoint).sort(),
           endpointHasSecret: 'token' in endpoint || 'authorization' in endpoint,
           endpointUrlHasAuth: /(?:token|authorization|session)=/i.test(endpoint.baseUrl),

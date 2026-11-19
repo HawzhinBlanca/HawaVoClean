@@ -8,29 +8,6 @@ import { useSyncExternalStore } from 'react';
 export type Locale = 'en' | 'ckb';
 
 export interface TranslationCatalog {
-  appName: string;
-  tagline: string;
-  dropPrompt: string;
-  dropSubPrompt: string;
-  processButton: string;
-  processing: string;
-  cancel: string;
-  original: string;
-  cleaned: string;
-  restore: string;
-  smartSafe: string;
-  production: string;
-  studio: string;
-  preserve: string;
-  offlineBanner: string;
-  reconnecting: string;
-  jobCompleted: string;
-  jobFailed: string;
-  metricsTitle: string;
-  sampleRate: string;
-  duration: string;
-  channels: string;
-  languageName: string;
   langToggleLabel: string;
   langToggleAria: string;
   noClip: string;
@@ -54,39 +31,24 @@ export interface TranslationCatalog {
   channelsSuffix: string;
   noise: string;
   lufs: string;
-  shortcutsPrompt: string;
   engineOffline: string;
   engineConnecting: string;
   engineReady: string;
   engineBusy: string;
   noAnalysis: string;
+  profileStudioPro: string;
+  profileDereverb: string;
+  profileStudio: string;
+  profileLowband: string;
+  profileProduction: string;
+  region: string;
+  markStart: string;
+  markEnd: string;
+  clearRegion: string;
 }
 
 export const CATALOGS: Record<Locale, TranslationCatalog> = {
   en: {
-    appName: 'HawaVoClean',
-    tagline: 'High-End Kurdish & Multilingual Voice Cleaner',
-    dropPrompt: 'Drop audio file here',
-    dropSubPrompt: 'WAV, FLAC, MP3, AIFF, or MP4',
-    processButton: 'Clean Audio',
-    processing: 'Processing...',
-    cancel: 'Cancel',
-    original: 'Original (A)',
-    cleaned: 'Cleaned (B)',
-    restore: 'Restore',
-    smartSafe: 'Smart Safe',
-    production: 'Production',
-    studio: 'Studio',
-    preserve: 'Preserve',
-    offlineBanner: 'Engine offline. Attempting automatic reconnection...',
-    reconnecting: 'Reconnecting...',
-    jobCompleted: 'Processing complete. Master audio ready.',
-    jobFailed: 'Processing failed. Safe fallback engaged.',
-    metricsTitle: 'Audio Metrics',
-    sampleRate: 'Sample Rate',
-    duration: 'Duration',
-    channels: 'Channels',
-    languageName: 'English',
     langToggleLabel: 'کوردی',
     langToggleAria: 'Switch to Sorani Kurdish',
     noClip: 'No clip',
@@ -110,37 +72,22 @@ export const CATALOGS: Record<Locale, TranslationCatalog> = {
     channelsSuffix: 'ch',
     noise: 'Noise',
     lufs: 'LUFS',
-    shortcutsPrompt: 'Keyboard Shortcuts',
     engineOffline: 'ENGINE OFFLINE',
     engineConnecting: 'ENGINE CONNECTING',
     engineReady: 'ENGINE READY',
     engineBusy: 'ENGINE BUSY',
     noAnalysis: 'No analysis',
+    profileStudioPro: 'Studio Pro',
+    profileDereverb: 'Dereverb',
+    profileStudio: 'Studio',
+    profileLowband: 'Low-band',
+    profileProduction: 'Production',
+    region: 'Region',
+    markStart: 'In',
+    markEnd: 'Out',
+    clearRegion: 'Clear',
   },
   ckb: {
-    appName: 'هاواڤۆکلین',
-    tagline: 'پاککەرەوەی دەنگی پێشکەوتووی کوردی و فرەزمان',
-    dropPrompt: 'فایلی دەنگی لێرە دابنێ',
-    dropSubPrompt: 'WAV, FLAC, MP3, AIFF, یان MP4',
-    processButton: 'پاککردنەوەی دەنگ',
-    processing: 'لە جێبەجێکردندایە...',
-    cancel: 'پەشیمانبوونەوە',
-    original: 'دەنگی بنەڕەتی (A)',
-    cleaned: 'دەنگی پاککراوە (B)',
-    restore: 'گەڕاندنەوە',
-    smartSafe: 'زیرەکی پارێزراو',
-    production: 'بەرهەمهێنان',
-    studio: 'ستۆدیۆ',
-    preserve: 'پاراستن',
-    offlineBanner: 'بزوێنەرەکە لەکار کەوتووە. هەوڵی گرێدانەوە دەدرێت...',
-    reconnecting: 'دووبارە گرێدانەوە...',
-    jobCompleted: 'جێبەجێکردن تەواو بوو. فایلی دەنگی ماستەر ئامادەیە.',
-    jobFailed: 'جێبەجێکردن سەرکەوتوو نەبوو. دۆخی پارێزراو چالاک کرا.',
-    metricsTitle: 'پێوانەکانی دەنگ',
-    sampleRate: 'ڕێژەی نموونە',
-    duration: 'ماوە',
-    channels: 'کەناڵەکان',
-    languageName: 'کوردی (سۆرانی)',
     langToggleLabel: 'English',
     langToggleAria: 'گۆڕین بۆ زمانی ئینگلیزی',
     noClip: 'هیچ کلیپێک نییە',
@@ -164,12 +111,20 @@ export const CATALOGS: Record<Locale, TranslationCatalog> = {
     channelsSuffix: 'کەناڵ',
     noise: 'ژاوەژاو',
     lufs: 'LUFS',
-    shortcutsPrompt: 'کورتەبڕەکانی تەختەکلیل',
     engineOffline: 'بزوێنەر لەسەر هێڵ نییە',
     engineConnecting: 'بزوێنەر پەیوەست دەبێت',
     engineReady: 'بزوێنەر ئامادەیە',
     engineBusy: 'بزوێنەر سەرقاڵە',
     noAnalysis: 'بێ شیکاری',
+    profileStudioPro: 'ستۆدیۆ پرۆ',
+    profileDereverb: 'لابردنی دەنگدانەوە',
+    profileStudio: 'ستۆدیۆ',
+    profileLowband: 'باندی نزم',
+    profileProduction: 'بەرهەمهێنان',
+    region: 'ناوچە',
+    markStart: 'دەستپێک',
+    markEnd: 'کۆتایی',
+    clearRegion: 'سڕینەوە',
   },
 };
 
@@ -192,12 +147,6 @@ function getInitialLocale(): Locale {
 let currentLocale: Locale = getInitialLocale();
 const listeners = new Set<() => void>();
 
-function notify(): void {
-  for (const listener of listeners) {
-    listener();
-  }
-}
-
 export function setLocale(locale: Locale): void {
   currentLocale = locale;
   if (typeof window !== 'undefined' && window.localStorage) {
@@ -211,24 +160,13 @@ export function setLocale(locale: Locale): void {
     document.documentElement.lang = locale;
     document.documentElement.dir = locale === 'ckb' ? 'rtl' : 'ltr';
   }
-  notify();
+  for (const listener of listeners) {
+    listener();
+  }
 }
 
 export function getLocale(): Locale {
   return currentLocale;
-}
-
-export function getTranslation(locale: Locale = currentLocale): TranslationCatalog {
-  return CATALOGS[locale] ?? CATALOGS.en;
-}
-
-/**
- * Pseudolocalizes a string for layout testing: expands vowels and wraps in delimiters
- * to verify UI layout doesn't truncate or wrap unexpectedly.
- */
-export function pseudolocalize(text: string): string {
-  const transformed = text.replace(/[aeiouAEIOU]/g, (char) => `${char}${char}`);
-  return `[!! ${transformed} !!]`;
 }
 
 export function useI18n(): {
@@ -243,7 +181,7 @@ export function useI18n(): {
       return () => listeners.delete(cb);
     },
     () => currentLocale,
-    () => 'en' as Locale
+    () => 'en' as Locale,
   );
 
   return {

@@ -1,9 +1,12 @@
 # Model and enhancement-core provenance
 
-HawaVoClean 3.3 has three registered cores. Production is classical DSP; studio and lowband share one
-vendored DeepFilterNet3 checkpoint but apply it differently. `hawavoclean audit-models` and processing
-preflight verify every core lock, parameter digest, weight digest, calibration digest and licence
-allowlist entry before audio can be published.
+HawaVoClean 3.3 has five registered cores. Production is classical DSP; studio and lowband share one
+vendored DeepFilterNet3 checkpoint; studio pro uses external SHA-256-locked MossFormer2_SE_48K
+weights (Apache-2.0); dereverb uses external SHA-256-locked GAP-URGENet Predictor weights (MIT)
+with a pure discriminative Apache-2.0 TF-GridNetV3 architecture (`enable_bwe = false` in Natural
+mode). `hawavoclean audit-models` and processing preflight verify every core lock,
+parameter digest, weight digest, calibration digest and licence allowlist entry before audio can be
+published.
 
 ## Locked inventory
 
@@ -12,6 +15,8 @@ allowlist entry before audio can be published.
 | `wiener-dd-48k-v1` | `hawavoclean.enhancement.production.WienerSpectralEnhancer` | Decision-directed spectral Wiener filter; no weights | Yes | `production-core.lock.toml` |
 | `studio-dfn3-48k-v1` | `hawavoclean.enhancement.studio.StudioVoiceCore` | Single-channel WPE + DeepFilterNet3 + decay-gated late-tail suppression | No | `studio-core.lock.toml` |
 | `studio-dfn3-lowband-48k-v1` | `hawavoclean.enhancement.studio_lowband.StudioLowBandCore` | Full-band DeepFilterNet3, retained below 1 kHz; original complementary high band | No | `studio-lowband-core.lock.toml` |
+| `studio-mossformer2-48k-v1` | `hawavoclean.enhancement.studio_pro.StudioProCore` | Native 48 kHz MossFormer2_SE_48K with bounded-memory overlap-add chunking (Apache-2.0) | No | `studio-pro-core.lock.toml` |
+| `studio-dereverb-48k-v1` | `hawavoclean.enhancement.dereverb_neural.NeuralDereverbCore` | GAP-URGENet Predictor TF-GridNetV3 pure discriminative mono dereverberation (MIT/Apache-2.0) | No | `studio-dereverb-core.lock.toml` |
 
 All locks live in `src/hawavoclean/resources/models/`. A parameter change is a new locked core
 revision, not a hidden taste adjustment.
@@ -71,6 +76,27 @@ The crossover is locked because it is a content-safety boundary: the engineering
 0.066 against the 0.100 spectral-hole threshold at 1,000 Hz, while 1,500 Hz scores 0.103 and is
 reverted. Feeding DFN3 a pre-lowpassed signal is also rejected because it moves the model out of the
 full-band distribution it was trained to receive.
+
+## Studio Pro core
+
+- Core ID: `studio-mossformer2-48k-v1` (version 1.0.0).
+- Upstream: [alibabasglab/MossFormer2_SE_48K](https://huggingface.co/alibabasglab/MossFormer2_SE_48K) (Apache-2.0).
+- Runtime implementation: pure-PyTorch inference architecture in `hawavoclean.enhancement.mossformer2_arch` (Apache-2.0, derived from Alibaba Speech Lab ClearerVoice-Studio; requires only `torch`, `torchaudio`, and `numpy`, with no `clearvoice` dependency).
+- Parameter SHA-256: `077bc0b3ac03f803b2e26cc87e3a89d46e9d121eb54c9b4dbced7906577a7011`.
+- External checkpoint: `last_best_checkpoint.pt` (SHA-256 `03692b9f773bbd6bb43b9c5a41f96b1e28affd66e13796b7bec66ad3d8b227c6`), verified offline before tensor deserialization.
+- Runs at native 48 kHz in 12 s raised-cosine overlap-add chunks (1.5 s overlap) with automatic `mps -> cuda -> cpu` device preference under `runtime.device = "auto"`.
+- Non-phase-coherent; optional parallel wet/dry blending uses GCC-PHAT delay alignment.
+
+## Dereverb core
+
+- Core ID: `studio-dereverb-48k-v1` (version 1.0.0).
+- Upstream weights: [Xiaobin-Rong/gap-urgenet](https://huggingface.co/Xiaobin-Rong/gap-urgenet) (`Predictor.pt`, MIT License, 88.5 MB).
+- Runtime implementation: pure-PyTorch ESPnet `TFGridNetV3` architecture (Apache-2.0) in `hawavoclean.enhancement.dereverb_neural`, locked to strictly discriminative Natural operation (`enable_bwe = false`; zero generative spectral synthesis).
+- Parameter SHA-256: `ed33e5a05eba17604991c31c3d54e4085665d1deb7e046fd8078d55aa928d3fc`.
+- External checkpoint: `Predictor.pt` (SHA-256 `1e58c270c12ab953e4df32a34e4b580f780d016bee9bf5580684d6c982f77866`), verified offline before tensor deserialization.
+- Guard calibration: `guard-calibration-dereverb.json` (calibration ID `57bd2eb8c92826a9f81dddea2e428c2dbd92bd0257cd0a363f5e1a72597a2bdf`), setting `spectral_hole_thresh = 0.30` and `min_hf_preservation_ratio = 0.30` in `integrity` mode for mono room dereverberation.
+- Processes arbitrary-length mono speech in 12 s raised-cosine overlap-add chunks (1.5 s overlap) with automatic `mps -> cuda -> cpu` device preference under `runtime.device = "auto"`.
+- Non-phase-coherent; optional parallel wet/dry blending uses GCC-PHAT delay alignment.
 
 ## Licence policy and SBOM
 

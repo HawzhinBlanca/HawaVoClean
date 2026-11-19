@@ -1,6 +1,9 @@
 import type {
   ApiError,
   AudioAnalysis,
+  AudioAssistantStatus,
+  AudioPlan,
+  AudioPlanRequest,
   BatchSummary,
   CapabilitiesResponseV1,
   CreateJobRequest,
@@ -197,6 +200,66 @@ export class EngineClient {
       schemaVersion: res.schemaVersion ?? res.schema_version ?? 1,
       jobs,
     };
+  }
+
+  /** Planning only: the response is reviewed before a separate job request. */
+  async assistantStatus(signal?: AbortSignal): Promise<AudioAssistantStatus> {
+    const value = await this.json<AudioAssistantStatus>('/api/v1/assistant/status', { method: 'GET' }, signal);
+    if (!value || !['auto', 'rules', 'ollama', 'openai', 'unconfigured'].includes(value.provider)) {
+      throw new EngineError(502, 'bad_response', 'The assistant status is unavailable.');
+    }
+    return value;
+  }
+
+  /** Planning never changes the recording or starts an audio job. */
+  async planAudio(req: AudioPlanRequest, signal?: AbortSignal): Promise<AudioPlan> {
+    const value: unknown = await this.json<unknown>(
+      '/api/v1/assistant/plan',
+      { method: 'POST', body: JSON.stringify(req) },
+      signal,
+    );
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new EngineError(502, 'bad_plan', 'The assistant returned an unreadable plan. Please try again.');
+    }
+    const p = value as Record<string, unknown>;
+    const validStrength =
+      p.strength === undefined ||
+      (typeof p.strength === 'number' && Number.isFinite(p.strength) && p.strength >= 0.1 && p.strength <= 1.0);
+    const validTimeRange = (() => {
+      if (p.time_range === undefined || p.time_range === null) return true;
+      if (typeof p.time_range !== 'object' || Array.isArray(p.time_range)) return false;
+      const tr = p.time_range as Record<string, unknown>;
+      return (
+        typeof tr.start_s === 'number' &&
+        typeof tr.end_s === 'number' &&
+        Number.isFinite(tr.start_s) &&
+        Number.isFinite(tr.end_s) &&
+        tr.start_s >= 0 &&
+        tr.end_s > tr.start_s &&
+        tr.end_s <= 86400
+      );
+    })();
+    const valid =
+      ['clean', 'restore', 'extract', 'remove', 'clarify'].includes(String(p.operation)) &&
+      (p.target === null || (typeof p.target === 'string' && p.target.trim().length > 0 && p.target.length <= 2000)) &&
+      (p.cleanup_profile === null || ['production', 'studio', 'studio_pro', 'dereverb', 'lowband'].includes(String(p.cleanup_profile))) &&
+      ['small', 'base', 'large'].includes(String(p.model_size)) &&
+      p.quality === 'high' &&
+      validStrength &&
+      validTimeRange &&
+      typeof p.explanation === 'string' && p.explanation.trim().length > 0 && p.explanation.length <= 4000 &&
+      ['rules', 'ollama', 'openai'].includes(String(p.provider)) &&
+      typeof p.needs_clarification === 'boolean' &&
+      ((p.operation === 'clarify') === p.needs_clarification) &&
+      (!['extract', 'remove'].includes(String(p.operation)) || typeof p.target === 'string') &&
+      (!['clean', 'restore', 'clarify'].includes(String(p.operation)) || p.target === null) &&
+      (p.operation !== 'clean' || p.cleanup_profile !== null) &&
+      (p.operation !== 'restore' || p.cleanup_profile === null) &&
+      (p.operation !== 'clarify' || (p.cleanup_profile === null && (p.time_range === undefined || p.time_range === null)));
+    if (!valid) {
+      throw new EngineError(502, 'bad_plan', 'The assistant could not make a clear plan. Please describe the sound again.');
+    }
+    return p as unknown as AudioPlan;
   }
 
   /** @deprecated Use createV1Jobs (/api/v1/jobs) with source IDs. Scheduled for removal 2026-10-01 (v1.0.0). */

@@ -78,7 +78,7 @@ describe('SmartExplanation', () => {
     expect(el).not.toBeNull();
     expect(el?.getAttribute('aria-label')).toBe('Smart workflow guide');
     expect(host.textContent).toContain('Step 1: Add Media');
-    expect(host.textContent).toContain('Drop any Kurdish speech audio');
+    expect(host.textContent).toContain('Drop an audio or video recording');
   });
 
   it('renders analyzing state when analyzing is true', async () => {
@@ -157,11 +157,28 @@ describe('SmartExplanation', () => {
 
     const el = host.querySelector('.smart-explanation.done');
     expect(el).not.toBeNull();
-    expect(host.textContent).toContain('Processing Verified');
-    expect(host.textContent).toContain('Guard R: Safe');
+    expect(host.textContent).toContain('Processing complete');
+    expect(host.textContent).toContain('Guard decisions recorded');
+    expect(host.textContent).toContain('They do not verify spoken words');
+    expect(host.textContent).not.toContain('Zero phoneme damage');
     expect(host.textContent).toContain('18 / 20 units');
     expect(host.textContent).toContain('2 units');
     expect(host.textContent).toContain('Level-matched A/B (-1.2 dB on Cleaned)');
+  });
+
+  it('labels a separated result as experimental without claiming linguistic safety', async () => {
+    useStore.setState({
+      source: { path: '/tmp/take1.wav', name: 'take1.wav', origin: 'file' },
+      original: fakeAnalysis(),
+      report: { ...fakeReport({ units_total: 0, enhanced: 0 }), separation: { operation: 'remove', prompt: 'background music', qualification: 'experimental_unqualified' } },
+    });
+    await act(async () => root.render(createElement(SmartExplanation)));
+    expect(host.textContent).toContain('Sound separation complete');
+    expect(host.textContent).toContain('Experimental');
+    expect(host.textContent).toContain('Removed: background music');
+    expect(host.textContent).toContain('do not verify word retention');
+    expect(host.textContent).not.toContain('Guard R: Safe');
+    expect(host.textContent).not.toContain('Zero phoneme damage');
   });
 
   it('renders MP4 dialogue isolation note when input file is an MP4 video container', async () => {
@@ -189,5 +206,26 @@ describe('SmartExplanation', () => {
 
     expect(host.querySelector('.se-mp4-notice')).not.toBeNull();
     expect(host.textContent).toContain('MP4 Dialogue Master');
+  });
+
+  it('formats studio_pro cleanly in the armed strategy metric', async () => {
+    useStore.setState({
+      source: { path: '/tmp/take1.wav', name: 'take1.wav', origin: 'file' },
+      analyzing: false,
+      original: fakeAnalysis(),
+      profile: 'studio_pro',
+      mode: 'natural',
+    });
+
+    await act(async () => {
+      root.render(createElement(SmartExplanation));
+    });
+
+    expect(host.textContent).toContain('STUDIO PRO · NATURAL');
+
+    await act(async () => {
+      useStore.setState({ profile: 'dereverb' });
+    });
+    expect(host.textContent).toContain('DEREVERB · NATURAL');
   });
 });

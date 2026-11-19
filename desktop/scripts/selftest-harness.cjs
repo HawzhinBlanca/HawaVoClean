@@ -25,7 +25,7 @@ function assertSelfTestResult(result, expectedPackaged) {
   assert.equal(result.remoteBlocked, true);
   assert.equal(result.popupBlocked, true);
   assert.equal(result.nodeHidden, true);
-  assert.deepEqual(result.topLevelKeys, ['app', 'diagnostics', 'engine', 'files', 'host', 'session', 'updates']);
+  assert.deepEqual(result.topLevelKeys, ['app', 'engine', 'files', 'host', 'session']);
   assert.equal(result.app.name, 'HawaVoClean');
   assert.equal(result.app.version, '3.3.0');
   assert.equal(result.app.packaged, expectedPackaged);
@@ -60,28 +60,17 @@ function assertSelfTestResult(result, expectedPackaged) {
     Number.isInteger(result.renderer.moduleScriptCount) && result.renderer.moduleScriptCount >= 1,
     'production renderer module did not load',
   );
-  assert.deepEqual(result.diagnostics, {
-    status: 'ready',
-    optIn: false,
-    canExport: false,
-    reason: 'Opt-in required to retain diagnostics',
-    pendingErrorCount: 0,
-    telemetryEgress: 'none',
-  });
-  assert.deepEqual(result.updates, {
-    status: 'disabled',
-    reason: 'release_feed_not_configured',
-    canCheck: false,
-  });
 }
 
 async function runDesktopSelfTest({ executable, args, cwd, expectedPackaged, label }) {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'hawavoclean-desktop-selftest-'));
   try {
     await new Promise((resolve, reject) => {
+      const childEnv = { ...process.env, HAWAVOCLEAN_DESKTOP_SELFTEST: '1' };
+      delete childEnv.ELECTRON_RUN_AS_NODE;
       const child = spawn(executable, [...args, `--user-data-dir=${userData}`], {
         cwd,
-        env: { ...process.env, HAWAVOCLEAN_DESKTOP_SELFTEST: '1' },
+        env: childEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });

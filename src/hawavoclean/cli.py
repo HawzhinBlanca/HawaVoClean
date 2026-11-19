@@ -15,7 +15,7 @@ import time
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import numpy as np
 import scipy
@@ -69,7 +69,14 @@ logger = get_logger("cli")
 #: Each name is a TOML in ``hawavoclean/resources/configs/``; ``doctor``
 #: validates every one of them, so adding a file here without adding the
 #: config (or vice versa) fails preflight rather than at run time.
-PROFILE_CHOICES: tuple[str, ...] = ("production", "studio", "lowband", "development")
+PROFILE_CHOICES: tuple[str, ...] = (
+    "production",
+    "studio",
+    "studio_pro",
+    "dereverb",
+    "lowband",
+    "development",
+)
 
 
 def exit_with_code(code: ExitCode | int, message: str | None = None) -> NoReturn:
@@ -172,8 +179,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
 
     # 6. Production capabilities status (Quarantine boundaries)
     print(
-        "[OK] Production capabilities: Natural routes active (production, studio, lowband). "
-        "Restore and Smart Safe quarantined (BLOCKED) until qualified signed packs are installed."
+        "[OK] Core lock inspection complete. Live route readiness is reported by "
+        "/api/v1/capabilities; source/enrolled Restore requires qualified signed packs."
     )
 
     print("================================================================================")
@@ -481,9 +488,12 @@ def cmd_process(args: argparse.Namespace) -> int:
             sink.emit(event.to_dict())
 
     clean_only = bool(getattr(args, "clean_only", False))
+    requested_profile: str | None = getattr(args, "profile", None)
+    profile = requested_profile or "production"
     in_path = Path(args.input)
     if in_path.is_dir():
         # Route directory input directly to batch processing
+        args.profile = profile
         args.inputs = [in_path]
         args.output_dir = args.output
         args.suffix = getattr(args, "suffix", "_clean")
@@ -493,10 +503,44 @@ def cmd_process(args: argparse.Namespace) -> int:
 
     mode = getattr(args, "mode", "natural")
     passes = getattr(args, "passes", 1)
+    speaker_id = getattr(args, "speaker_id", None)
+    is_source_restore = mode == "restore" and not speaker_id
     allow_research_restore = (
         bool(getattr(args, "allow_research_restore", False))
         or os.environ.get("HAWAVOCLEAN_ALLOW_RESEARCH_RESTORE") == "1"
     )
+    strength = getattr(args, "strength", None)
+    raw_time_range = getattr(args, "time_range", None)
+    time_range: tuple[float, float] | None = None
+    if strength is not None and (
+        not math.isfinite(float(strength)) or not 0.1 <= float(strength) <= 1.0
+    ):
+        exit_with_code(
+            ExitCode.INVALID_USER_INPUT,
+            "--strength must be a finite number between 0.1 and 1.0",
+        )
+    if raw_time_range is not None:
+        if len(raw_time_range) != 2:
+            exit_with_code(ExitCode.INVALID_USER_INPUT, "--time-range requires START END")
+        start_s, end_s = float(raw_time_range[0]), float(raw_time_range[1])
+        if (
+            not math.isfinite(start_s)
+            or not math.isfinite(end_s)
+            or start_s < 0.0
+            or end_s <= start_s
+            or end_s > 86400.0
+        ):
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "--time-range must satisfy 0 <= START < END <= 86400",
+            )
+        time_range = (start_s, end_s)
+    needs_edit_blend = (strength is not None and float(strength) < 1.0) or time_range is not None
+    if needs_edit_blend and (passes != 1 or (mode != "natural" and not is_source_restore)):
+        exit_with_code(
+            ExitCode.INVALID_USER_INPUT,
+            "--strength and --time-range are supported only for single-pass natural or source-restore mode",
+        )
     if mode in ("restore", "smart_safe") and passes != 1:
         exit_with_code(
             ExitCode.INVALID_USER_INPUT,
@@ -504,32 +548,65 @@ def cmd_process(args: argparse.Namespace) -> int:
             "--passes. Re-run with --passes 1 (the default).",
         )
     if mode == "restore":
-        if not getattr(args, "speaker_id", None):
+        if is_source_restore:
+            from hawavoclean.restoration.neural_bwe import probe_neural_bwe_runtime
+
+            bwe_ok, bwe_reason = probe_neural_bwe_runtime()
+            if not bwe_ok:
+                msg = (
+                    f"Source restoration is unavailable ({bwe_reason}). "
+                    "Restore mode requires an explicit --speaker-id <ID> when source restoration weights are not installed."
+                )
+                if sink is not None:
+                    try:
+                        return fail(
+                            ExitCode.INVALID_USER_INPUT,
+                            "Invalid user input",
+                            InvalidUserInputError(msg),
+                        )
+                    finally:
+                        sink.close()
+                exit_with_code(ExitCode.INVALID_USER_INPUT, msg)
+        elif profile != "development" and not allow_research_restore:
             exit_with_code(
                 ExitCode.INVALID_USER_INPUT,
-                "Restore mode requires an explicit --speaker-id <ID>",
-            )
-        if args.profile != "development" and not allow_research_restore:
-            exit_with_code(
-                ExitCode.INVALID_USER_INPUT,
-                f"Production restoration capability is BLOCKED for profile '{args.profile}': No qualified signed "
+                f"Production restoration capability is BLOCKED for profile '{profile}': No qualified signed "
                 f"Sorani Restore pack is installed. Loose research checkpoints and profiles are quarantined "
                 f"behind research boundaries and cannot enter a production job or report (pass "
                 f"--allow-research-restore or use --profile development for research evaluation).",
             )
+    args.profile = profile
     try:
-        if passes == 1:
+        if is_source_restore:
+            _run_source_restoration(
+                args=args,
+                requested_profile=requested_profile,
+                strength=float(strength) if strength is not None else 1.0,
+                time_range=time_range,
+                clean_only=clean_only,
+                on_progress=on_progress,
+            )
+        elif needs_edit_blend:
+            _run_natural_edit_blend(
+                args=args,
+                strength=float(strength) if strength is not None else 1.0,
+                time_range=time_range,
+                clean_only=clean_only,
+                on_progress=on_progress,
+                allow_research_restore=allow_research_restore,
+            )
+        elif passes == 1:
             # The default path: byte-identical to a run before --passes
             # existed, including the progress event stream.
             run_pipeline(
                 input_path=args.input,
                 output_path=args.output,
                 config_path=args.config,
-                profile=args.profile,
+                profile=profile,
                 overwrite=args.overwrite,
                 on_progress=on_progress,
                 mode=getattr(args, "mode", "natural"),
-                speaker_id=getattr(args, "speaker_id", None),
+                speaker_id=speaker_id,
                 cutoff=getattr(args, "cutoff", "auto"),
                 cutoff_hz=getattr(args, "cutoff_hz", None),
                 profiles_dir=_resolve_profiles_dir(getattr(args, "profiles_dir", None)),
@@ -543,7 +620,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 output_path=args.output,
                 passes=passes,
                 config_path=args.config,
-                profile=args.profile,
+                profile=profile,
                 overwrite=args.overwrite,
                 on_progress=on_progress,
                 clean_only=clean_only,
@@ -624,6 +701,703 @@ def _resolve_profiles_dir(explicit: str | Path | None) -> Path:
     if explicit is None:
         return paths_profiles_root()
     return Path(explicit)
+
+
+def _splice_time_range_waveform(
+    orig_data: np.ndarray[Any, np.dtype[np.float32]],
+    processed_seg: np.ndarray[Any, np.dtype[np.float32]],
+    start_idx: int,
+    end_idx: int,
+    sample_rate: int,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Splice a limited processed slice into ``orig_data`` with exact outside bit-identity."""
+    from hawavoclean.finishing.limiter import apply_lookahead_limiter
+
+    limited_seg = apply_lookahead_limiter(
+        processed_seg, sample_rate, ceiling_dbtp=-1.0
+    ).limited_waveform
+    seg_len = end_idx - start_idx
+    fade = min(int(round(0.030 * sample_rate)), seg_len // 2)
+    result = orig_data.copy()
+    if fade > 0:
+        orig_seg = orig_data[:, start_idx:end_idx]
+        t = (np.arange(fade, dtype=np.float64) + 0.5) / fade
+        fade_in = np.sin(0.5 * np.pi * t).astype(np.float32)
+        fade_out = np.cos(0.5 * np.pi * t).astype(np.float32)
+        spliced = limited_seg.copy()
+        if start_idx > 0:
+            spliced[:, :fade] = orig_seg[:, :fade] * fade_out + limited_seg[:, :fade] * fade_in
+        if end_idx < orig_data.shape[1]:
+            spliced[:, -fade:] = limited_seg[:, -fade:] * fade_out + orig_seg[:, -fade:] * fade_in
+        result[:, start_idx:end_idx] = spliced
+    else:
+        result[:, start_idx:end_idx] = limited_seg
+    return result
+
+
+def _surgical_encode_params(
+    source: Path,
+    time_range: tuple[float, float] | None,
+) -> tuple[Literal["pcm24", "float32"], bool]:
+    """Preserve float32 bit-identity on FLOAT/DOUBLE WAVs when splicing a surgical time_range."""
+    if time_range is None:
+        return "pcm24", True
+    with contextlib.suppress(OSError, RuntimeError):
+        src_info = sf.info(str(source))
+        if src_info.format in {"WAV", "WAVEX", "RF64"} and src_info.subtype in {
+            "FLOAT",
+            "DOUBLE",
+        }:
+            return "float32", False
+    return "pcm24", False
+
+
+def _run_natural_edit_blend(
+    *,
+    args: argparse.Namespace,
+    strength: float,
+    time_range: tuple[float, float] | None,
+    clean_only: bool,
+    on_progress: Any,
+    allow_research_restore: bool,
+) -> None:
+    """Run single-pass natural cleanup with wet/dry strength and/or surgical time_range."""
+    from hawavoclean.audio.decode import decode_audio
+    from hawavoclean.audio.encode import encode_audio
+    from hawavoclean.audio.resample import resample_audio
+    from hawavoclean.audio.types import AudioBuffer
+    from hawavoclean.enhancement.studio_pro import blend_wet_dry
+    from hawavoclean.finishing.limiter import apply_lookahead_limiter
+    from hawavoclean.publication import publish_output_generation
+    from hawavoclean.report.schema import HawaVoCleanReport, MediaStats
+    from hawavoclean.report.summary import generate_human_summary
+    from hawavoclean.report.writer import serialize_json_report
+
+    source = Path(args.input).resolve()
+    out_path = public_output_path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    probe = probe_audio(source)
+    original = decode_audio(probe)
+    sr = original.sample_rate
+    orig_data = original.data
+
+    with tempfile.TemporaryDirectory(prefix=".hawa-edit-", dir=out_path.parent) as tmp_dir:
+        work = Path(tmp_dir)
+        tmp_out = work / "processed.wav"
+        if time_range is not None:
+            start_s, end_s = time_range
+            if start_s >= original.duration_s:
+                raise InvalidUserInputError(
+                    f"--time-range start ({start_s}s) exceeds clip duration ({original.duration_s:.2f}s)"
+                )
+            start_idx = max(0, min(original.samples, int(round(start_s * sr))))
+            end_idx = max(start_idx + 1, min(original.samples, int(round(end_s * sr))))
+            pad_samples = int(round(1.5 * sr))
+            pad_start = max(0, start_idx - pad_samples)
+            pad_end = min(original.samples, end_idx + pad_samples)
+            tmp_in = work / "slice_in.wav"
+            sf.write(tmp_in, orig_data[:, pad_start:pad_end].T, sr, subtype="FLOAT")
+            report = run_pipeline(
+                input_path=tmp_in,
+                output_path=tmp_out,
+                config_path=args.config,
+                profile=args.profile,
+                overwrite=True,
+                on_progress=on_progress,
+                mode="natural",
+                clean_only=clean_only,
+                original_input_path=getattr(args, "original_input_path", None) or str(source),
+                allow_research_restore=allow_research_restore,
+            )
+            enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
+            enh_window = resample_audio(enh_raw.T, enh_sr, sr, pad_end - pad_start)
+            inner_start = start_idx - pad_start
+            inner_end = end_idx - pad_start
+            orig_seg = orig_data[:, start_idx:end_idx]
+            enh_seg = enh_window[:, inner_start:inner_end]
+            if strength < 1.0:
+                blended_seg = np.stack(
+                    [
+                        blend_wet_dry(orig_seg[ch], enh_seg[ch], sr, strength)
+                        for ch in range(original.channels)
+                    ],
+                    axis=0,
+                )
+            else:
+                blended_seg = enh_seg
+            result = _splice_time_range_waveform(orig_data, blended_seg, start_idx, end_idx, sr)
+        else:
+            report = run_pipeline(
+                input_path=args.input,
+                output_path=tmp_out,
+                config_path=args.config,
+                profile=args.profile,
+                overwrite=True,
+                on_progress=on_progress,
+                mode="natural",
+                clean_only=clean_only,
+                original_input_path=getattr(args, "original_input_path", None),
+                allow_research_restore=allow_research_restore,
+            )
+            enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
+            enh_full = resample_audio(enh_raw.T, enh_sr, sr, original.samples)
+            result = np.stack(
+                [
+                    blend_wet_dry(orig_data[ch], enh_full[ch], sr, strength)
+                    for ch in range(original.channels)
+                ],
+                axis=0,
+            )
+            result = apply_lookahead_limiter(result, sr).limited_waveform
+
+        tmp_final = work / "final.wav"
+        output_bit_depth, use_dither = _surgical_encode_params(source, time_range)
+        encode_audio(
+            AudioBuffer(result, sr),
+            tmp_final,
+            output_bit_depth=output_bit_depth,
+            dither=use_dither,
+            seed_context=report.config_hash,
+        )
+        enc_data, enc_sr = sf.read(tmp_final, dtype="float32", always_2d=True)
+        enc_buf = AudioBuffer(enc_data.T, enc_sr)
+        out_meas = measure_loudness_and_peaks(enc_buf.data, enc_buf.sample_rate)
+        in_meas = measure_loudness_and_peaks(orig_data, sr)
+        orig_path_str = str(getattr(args, "original_input_path", None) or source)
+        payload = report.model_dump()
+        payload["input"] = MediaStats(
+            path=orig_path_str,
+            sha256=probe.sha256,
+            sample_rate=sr,
+            channels=original.channels,
+            samples=original.samples,
+            duration_s=original.duration_s,
+            integrated_lufs=in_meas.integrated_lufs,
+            true_peak_dbtp=in_meas.true_peak_dbtp,
+        ).model_dump()
+        payload["output"] = MediaStats(
+            path=str(out_path),
+            sha256=hash_file(tmp_final),
+            sample_rate=enc_buf.sample_rate,
+            channels=enc_buf.channels,
+            samples=enc_buf.samples,
+            duration_s=enc_buf.duration_s,
+            integrated_lufs=out_meas.integrated_lufs,
+            true_peak_dbtp=out_meas.true_peak_dbtp,
+        ).model_dump()
+        updated_report = HawaVoCleanReport.model_validate(payload)
+        publish_output_generation(
+            tmp_final,
+            out_path,
+            serialize_json_report(updated_report),
+            generate_human_summary(updated_report),
+            overwrite=bool(args.overwrite),
+        )
+
+
+def _select_restore_clean_profile(requested_profile: str | None) -> str:
+    """Pick the best runnable pre-clean profile for source-conditioned restore."""
+    from hawavoclean.natural_contract import load_natural_route_contract
+
+    if requested_profile is None or requested_profile == "studio_pro":
+        candidates: tuple[str, ...] = ("studio_pro", "studio", "production")
+    else:
+        candidates = (requested_profile, "production")
+    for candidate in candidates:
+        try:
+            load_natural_route_contract(candidate, activate_runtime_config=False)
+        except Exception:
+            continue
+        return candidate
+    return "production"
+
+
+def _source_restore_strengths(target_strength: float) -> list[float]:
+    """Build descending candidate strengths ending with the 0.0 fail-closed fallback."""
+    out: list[float] = []
+    for value in (target_strength, 0.75, 0.5, 0.25, 0.0):
+        if value <= target_strength + 1e-6 and all(abs(value - seen) > 1e-6 for seen in out):
+            out.append(float(value))
+    return out
+
+
+def _run_source_restoration(
+    *,
+    args: argparse.Namespace,
+    requested_profile: str | None,
+    strength: float,
+    time_range: tuple[float, float] | None,
+    clean_only: bool,
+    on_progress: Any,
+) -> None:
+    """Execute guarded 48 kHz source-conditioned bandwidth restoration (LavaSR v2)."""
+    from hawavoclean.audio.decode import decode_audio
+    from hawavoclean.audio.encode import encode_audio
+    from hawavoclean.audio.resample import resample_audio
+    from hawavoclean.audio.types import AudioBuffer
+    from hawavoclean.finishing.limiter import apply_lookahead_limiter
+    from hawavoclean.hashing import hash_bytes
+    from hawavoclean.progress import emit_progress
+    from hawavoclean.publication import publication_exists, publish_output_generation
+    from hawavoclean.report.schema import HawaVoCleanReport, MediaStats
+    from hawavoclean.report.summary import generate_human_summary
+    from hawavoclean.report.writer import serialize_json_report
+    from hawavoclean.restoration.bandwidth import BandwidthDetector
+    from hawavoclean.restoration.neural_bwe import (
+        LAVASR_MODEL_LICENSE,
+        LAVASR_MODEL_NAME,
+        LAVASR_V2_CONFIG_SHA256,
+        LAVASR_V2_WEIGHTS_SHA256,
+        NeuralBWERestorer,
+        probe_neural_bwe_runtime,
+    )
+    from hawavoclean.restoration.protected_band import (
+        ProtectedBandVerification,
+        verify_protected_band_invariance,
+    )
+    from hawavoclean.runtime import resolve_device
+
+    cutoff_mode = getattr(args, "cutoff", "auto")
+    cutoff_hz_arg = getattr(args, "cutoff_hz", None)
+    if cutoff_mode not in ("auto", "manual"):
+        raise InvalidUserInputError(f"Unknown cutoff mode: '{cutoff_mode}' (expected auto|manual)")
+    if cutoff_mode == "manual" and cutoff_hz_arg is None:
+        raise InvalidUserInputError("--cutoff manual requires an explicit --cutoff-hz <Hz>")
+    effective_cutoff_mode = "manual" if cutoff_hz_arg is not None else "auto"
+
+    source = Path(args.input).resolve()
+    orig_path_str = str(getattr(args, "original_input_path", None) or source)
+    out_path = public_output_path(args.output)
+    if out_path.suffix.lower() != ".wav":
+        raise PublicationError(
+            f"Output must be a .wav file, got {out_path.name!r}. "
+            "The published master is RIFF/WAVE audio and the name has to match."
+        )
+    if out_path.is_dir():
+        raise PublicationError(f"Output path is a directory: {out_path}.")
+    if out_path == source or out_path == Path(orig_path_str).resolve():
+        raise PublicationError(f"Refusing to write output over the input: {source}.")
+    if not bool(args.overwrite) and publication_exists(out_path):
+        raise PublicationError(
+            f"Destination output file already exists and overwrite=False: {out_path} "
+            "(pass --overwrite to replace it)"
+        )
+
+    bwe_ok, bwe_reason = probe_neural_bwe_runtime()
+    if not bwe_ok:
+        raise PreflightError(f"Source restoration runtime unavailable: {bwe_reason}")
+
+    emit_progress(
+        on_progress,
+        ProgressEvent("preflight", 0.02, "Verified guarded source restoration runtime"),
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    probe = probe_audio(source)
+    original = decode_audio(probe)
+    sr = original.sample_rate
+    orig_data = original.data
+    channels = original.channels
+
+    start_idx = 0
+    end_idx = original.samples
+    pad_start = 0
+    pad_end = original.samples
+    if time_range is not None:
+        start_s, end_s = time_range
+        if start_s >= original.duration_s:
+            raise InvalidUserInputError(
+                f"--time-range start ({start_s}s) exceeds clip duration ({original.duration_s:.2f}s)"
+            )
+        start_idx = max(0, min(original.samples, int(round(start_s * sr))))
+        end_idx = max(start_idx + 1, min(original.samples, int(round(end_s * sr))))
+        pad_samples = int(round(1.5 * sr))
+        pad_start = max(0, start_idx - pad_samples)
+        pad_end = min(original.samples, end_idx + pad_samples)
+        work_orig = orig_data[:, pad_start:pad_end]
+    else:
+        work_orig = orig_data
+
+    work_sr = 48000
+    if sr != work_sr:
+        work_48k = np.stack(
+            [resample_audio(work_orig[ch], sr, work_sr) for ch in range(channels)],
+            axis=0,
+        )
+    else:
+        work_48k = np.ascontiguousarray(work_orig, dtype=np.float32)
+    n_48k = int(work_48k.shape[1])
+
+    bw_est = BandwidthDetector(sample_rate=work_sr).detect(
+        work_48k, override_cutoff_hz=cutoff_hz_arg
+    )
+    emit_progress(
+        on_progress,
+        ProgressEvent(
+            "decode",
+            0.08,
+            f"Analyzed bandwidth ({bw_est.shape}, cutoff {bw_est.effective_cutoff_hz:.0f} Hz)",
+        ),
+    )
+
+    clean_profile = _select_restore_clean_profile(requested_profile)
+
+    def _scaled_clean_progress(event: ProgressEvent) -> None:
+        scaled = 0.12 + 0.46 * min(1.0, max(0.0, float(event.progress)))
+        emit_progress(
+            on_progress,
+            ProgressEvent(
+                "enhance",
+                round(scaled, 3),
+                event.message,
+                event.unit_index,
+                event.unit_total,
+            ),
+        )
+
+    with tempfile.TemporaryDirectory(prefix=".hawa-restore-", dir=out_path.parent) as tmp_dir:
+        work_dir = Path(tmp_dir)
+        tmp_clean_in = work_dir / "clean_in.wav"
+        tmp_clean_out = work_dir / "cleaned.wav"
+        sf.write(tmp_clean_in, work_48k.T, work_sr, subtype="FLOAT")
+
+        clean_report = run_pipeline(
+            input_path=tmp_clean_in,
+            output_path=tmp_clean_out,
+            config_path=getattr(args, "config", None),
+            profile=clean_profile,
+            overwrite=True,
+            on_progress=_scaled_clean_progress if on_progress is not None else None,
+            mode="natural",
+            clean_only=True,
+            original_input_path=orig_path_str,
+        )
+        clean_raw, clean_sr = sf.read(tmp_clean_out, dtype="float32", always_2d=True)
+        cleaned_48k = (
+            resample_audio(clean_raw.T, clean_sr, work_sr, n_48k)
+            if clean_sr != work_sr or clean_raw.shape[0] != n_48k
+            else np.ascontiguousarray(clean_raw.T, dtype=np.float32)
+        )
+
+        restored_48k = cleaned_48k
+        accepted_strength = 0.0
+        guard_verdict = "NO_RESTORE"
+        guard_reason = (
+            f"Input is already {bw_est.shape} (cutoff {bw_est.effective_cutoff_hz:.0f} Hz); "
+            "bypassed generative bandwidth extension"
+        )
+        restorer_device = resolve_device("auto", preference=("mps", "cuda", "cpu")).resolved
+        segments_counts: dict[str, int] = {
+            "restored": 0,
+            "reduced": 0,
+            "reverted": 0,
+            "bypassed": 1,
+            "errors": 0,
+        }
+        review_entries: list[dict[str, Any]] = []
+        pb_check = ProtectedBandVerification(
+            max_waveform_abs_error=0.0,
+            rms_waveform_error=0.0,
+            complex_stft_relative_error=0.0,
+            max_phase_deviation_rad=0.0,
+            worst_band_energy_deviation_db=0.0,
+            worst_band_center_hz=0.0,
+            passes_invariance=True,
+        )
+
+        if bw_est.restore_recommended:
+            emit_progress(
+                on_progress,
+                ProgressEvent(
+                    "enhance",
+                    0.62,
+                    f"Extending missing highs above {bw_est.effective_cutoff_hz:.0f} Hz (LavaSR v2)",
+                ),
+            )
+            restorer = NeuralBWERestorer(device="auto", sample_rate=work_sr)
+            restorer_device = restorer.device
+            render_result = restorer.render(
+                cleaned_48k,
+                sample_rate=work_sr,
+                effective_cutoff_hz=bw_est.effective_cutoff_hz,
+                strengths=_source_restore_strengths(strength),
+            )
+            emit_progress(
+                on_progress,
+                ProgressEvent("guard", 0.82, "Verifying protected-band spectral invariance"),
+            )
+            best_active = next((c for c in render_result.candidates if c.strength > 0.0), None)
+            if render_result.success and best_active is not None:
+                cand_audio = np.ascontiguousarray(
+                    np.atleast_2d(best_active.audio), dtype=np.float32
+                )
+                pb_check = verify_protected_band_invariance(
+                    cleaned_48k,
+                    cand_audio,
+                    sample_rate=work_sr,
+                    cutoff_hz=bw_est.effective_cutoff_hz,
+                    tolerance_rms=0.05,
+                    tolerance_stft=0.10,
+                    max_third_octave_deviation_db=6.0,
+                )
+                if (
+                    pb_check.passes_invariance
+                    and pb_check.worst_band_energy_deviation_db <= 6.0
+                    and bool(np.all(np.isfinite(cand_audio)))
+                ):
+                    restored_48k = cand_audio
+                    accepted_strength = float(best_active.strength)
+                    guard_verdict = "PASS"
+                    guard_reason = (
+                        "Protected-band invariance verified "
+                        f"(worst_band={pb_check.worst_band_energy_deviation_db:.4f} dB <= 6.0 dB)"
+                    )
+                    reduced = accepted_strength < strength - 1e-6
+                    segments_counts = {
+                        "restored": 0 if reduced else 1,
+                        "reduced": 1 if reduced else 0,
+                        "reverted": 0,
+                        "bypassed": 0,
+                        "errors": 0,
+                    }
+                else:
+                    restored_48k = cleaned_48k
+                    accepted_strength = 0.0
+                    guard_verdict = "FAIL"
+                    guard_reason = (
+                        "Protected-band invariance failed "
+                        f"(worst_band={pb_check.worst_band_energy_deviation_db:.2f} dB); "
+                        "reverted to cleaned signal"
+                    )
+                    segments_counts = {
+                        "restored": 0,
+                        "reduced": 0,
+                        "reverted": 1,
+                        "bypassed": 0,
+                        "errors": 0,
+                    }
+                    review_entries.append(
+                        {
+                            "segment_index": 0,
+                            "start_time_s": float(time_range[0]) if time_range else 0.0,
+                            "action": "reverted",
+                            "verdict": "FAIL",
+                            "reason": guard_reason,
+                        }
+                    )
+            else:
+                restored_48k = cleaned_48k
+                accepted_strength = 0.0
+                is_error = render_result.fallback_status == "runtime_error"
+                guard_verdict = "ERROR" if is_error else "FAIL"
+                guard_reason = (
+                    render_result.error_message
+                    or f"Reverted to cleaned signal ({render_result.fallback_status})"
+                )
+                pb_check = ProtectedBandVerification(
+                    max_waveform_abs_error=0.0,
+                    rms_waveform_error=0.0,
+                    complex_stft_relative_error=0.0,
+                    max_phase_deviation_rad=0.0,
+                    worst_band_energy_deviation_db=0.0,
+                    worst_band_center_hz=0.0,
+                    passes_invariance=False,
+                )
+                segments_counts = {
+                    "restored": 0,
+                    "reduced": 0,
+                    "reverted": 0 if is_error else 1,
+                    "bypassed": 0,
+                    "errors": 1 if is_error else 0,
+                }
+                review_entries.append(
+                    {
+                        "segment_index": 0,
+                        "start_time_s": float(time_range[0]) if time_range else 0.0,
+                        "action": "error" if is_error else "reverted",
+                        "verdict": guard_verdict,
+                        "reason": guard_reason,
+                    }
+                )
+
+        emit_progress(
+            on_progress,
+            ProgressEvent("finish", 0.90, "Applying lookahead limiter and encoding master"),
+        )
+        cleaned_limited = apply_lookahead_limiter(
+            cleaned_48k, work_sr, ceiling_dbtp=-1.0
+        ).limited_waveform
+        restored_limited = apply_lookahead_limiter(
+            restored_48k, work_sr, ceiling_dbtp=-1.0
+        ).limited_waveform
+
+        post_pb_passes = True
+        post_pb_worst_db = 0.0
+        post_pb_fallback = False
+        post_pb_reason = "No active bandwidth extension applied"
+        shipped_48k = restored_limited
+
+        if accepted_strength > 0.0:
+            post_pb = verify_protected_band_invariance(
+                cleaned_limited,
+                restored_limited,
+                sample_rate=work_sr,
+                cutoff_hz=bw_est.effective_cutoff_hz,
+                tolerance_rms=0.05,
+                tolerance_stft=0.10,
+                max_third_octave_deviation_db=6.0,
+            )
+            post_pb_worst_db = float(post_pb.worst_band_energy_deviation_db)
+            if not post_pb.passes_invariance or post_pb_worst_db > 6.0:
+                shipped_48k = cleaned_limited
+                post_pb_passes = False
+                post_pb_fallback = True
+                post_pb_reason = (
+                    f"Post-mastering protected-band drift ({post_pb_worst_db:.2f} dB) exceeded "
+                    "6.0 dB; reverted to mastered cleaned signal"
+                )
+                accepted_strength = 0.0
+                guard_verdict = "FAIL"
+                guard_reason = post_pb_reason
+                segments_counts = {
+                    "restored": 0,
+                    "reduced": 0,
+                    "reverted": 1,
+                    "bypassed": 0,
+                    "errors": 0,
+                }
+                review_entries.append(
+                    {
+                        "segment_index": 0,
+                        "start_time_s": float(time_range[0]) if time_range else 0.0,
+                        "action": "post_mastering_reverted",
+                        "verdict": "FAIL",
+                        "reason": post_pb_reason,
+                    }
+                )
+            else:
+                post_pb_reason = (
+                    f"Post-mastering protected-band invariance verified ({post_pb_worst_db:.4f} dB)"
+                )
+
+        if time_range is not None:
+            shipped_window = (
+                resample_audio(shipped_48k, work_sr, sr, pad_end - pad_start)
+                if sr != work_sr
+                else shipped_48k
+            )
+            inner_start = start_idx - pad_start
+            inner_end = end_idx - pad_start
+            rest_seg = shipped_window[:, inner_start:inner_end]
+            result = _splice_time_range_waveform(orig_data, rest_seg, start_idx, end_idx, sr)
+            out_sr = sr
+        else:
+            result = shipped_48k
+            out_sr = work_sr
+
+        tmp_final = work_dir / "final.wav"
+        output_bit_depth, use_dither = _surgical_encode_params(source, time_range)
+
+        encode_audio(
+            AudioBuffer(result, out_sr),
+            tmp_final,
+            output_bit_depth=output_bit_depth,
+            dither=use_dither,
+            seed_context=clean_report.config_hash,
+        )
+        enc_data, enc_sr = sf.read(tmp_final, dtype="float32", always_2d=True)
+        enc_buf = AudioBuffer(enc_data.T, enc_sr)
+        out_meas = measure_loudness_and_peaks(enc_buf.data, enc_buf.sample_rate)
+        in_meas = measure_loudness_and_peaks(orig_data, sr)
+
+        pb_dict: dict[str, Any] = {
+            "max_waveform_abs_error": float(pb_check.max_waveform_abs_error),
+            "rms_waveform_error": float(pb_check.rms_waveform_error),
+            "complex_stft_relative_error": float(pb_check.complex_stft_relative_error),
+            "max_phase_deviation_rad": float(pb_check.max_phase_deviation_rad),
+            "worst_band_energy_deviation_db": float(pb_check.worst_band_energy_deviation_db),
+            "worst_band_center_hz": float(pb_check.worst_band_center_hz),
+            "passes_invariance": bool(pb_check.passes_invariance),
+        }
+        restoration_payload: dict[str, Any] = {
+            "mode": "restore_source",
+            "maturity": "experimental",
+            "reconstruction_disclosed": True,
+            "speaker_id": None,
+            "profile_hash": None,
+            "clean_profile": clean_profile,
+            "natural_output_hash": hash_bytes(cleaned_48k.tobytes()),
+            "bandwidth": {**bw_est.to_dict(), "cutoff_mode": effective_cutoff_mode},
+            "restorer": {
+                "name": LAVASR_MODEL_NAME,
+                "license": LAVASR_MODEL_LICENSE,
+                "weights_sha256": LAVASR_V2_WEIGHTS_SHA256,
+                "config_sha256": LAVASR_V2_CONFIG_SHA256,
+                "device": restorer_device,
+                "solver": "lavasr_v2_protected_band",
+                "maturity": "experimental",
+                "production_qualified": False,
+            },
+            "segments": segments_counts,
+            "guard_r": {
+                "verdict": guard_verdict,
+                "accepted_strength": float(accepted_strength),
+                "reason": guard_reason,
+                "protected_band": pb_dict,
+            },
+            "protected_band": pb_dict,
+            "post_mastering_verification": {
+                "passes": post_pb_passes,
+                "worst_band_energy_deviation_db": post_pb_worst_db,
+                "fallback_applied": post_pb_fallback,
+                "reason": post_pb_reason,
+            },
+            "review_timecodes": review_entries,
+        }
+        if time_range is not None:
+            restoration_payload["time_range"] = [time_range[0], time_range[1]]
+
+        payload = clean_report.model_dump()
+        payload["input"] = MediaStats(
+            path=orig_path_str,
+            sha256=probe.sha256,
+            sample_rate=sr,
+            channels=original.channels,
+            samples=original.samples,
+            duration_s=original.duration_s,
+            integrated_lufs=in_meas.integrated_lufs,
+            true_peak_dbtp=in_meas.true_peak_dbtp,
+        ).model_dump()
+        payload["output"] = MediaStats(
+            path=str(out_path),
+            sha256=hash_file(tmp_final),
+            sample_rate=enc_buf.sample_rate,
+            channels=enc_buf.channels,
+            samples=enc_buf.samples,
+            duration_s=enc_buf.duration_s,
+            integrated_lufs=out_meas.integrated_lufs,
+            true_peak_dbtp=out_meas.true_peak_dbtp,
+        ).model_dump()
+        payload["restoration"] = restoration_payload
+        updated_report = HawaVoCleanReport.model_validate(payload)
+        emit_progress(on_progress, ProgressEvent("publish", 0.98, "Publishing master"))
+        publish_output_generation(
+            tmp_final,
+            out_path,
+            serialize_json_report(updated_report),
+            generate_human_summary(updated_report),
+            overwrite=bool(args.overwrite),
+            clean_only=clean_only,
+        )
+
+
+def _strength_arg(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid strength: {value!r}") from exc
+    if not math.isfinite(parsed) or not 0.1 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("--strength must be finite and between 0.1 and 1.0")
+    return parsed
 
 
 def _cutoff_hz_arg(value: str) -> float:
@@ -1582,7 +2356,6 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
         manifest_path=args.manifest,
         output_calibration_path=args.output,
         corruption_profile=args.corruption_profile,
-        use_fixed_probe=args.fixed_probe,
     )
     m = res["measured"]
     print(f"Calibration measured and written to: {args.output}")
@@ -1856,7 +2629,7 @@ def _main() -> None:
     p_proc.add_argument("input", help="Path to input audio file")
     p_proc.add_argument("--output", "-o", required=True, help="Path to output mastered WAV")
     p_proc.add_argument("--config", "-c", help="Path to custom TOML configuration")
-    p_proc.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default="production")
+    p_proc.add_argument("--profile", "-p", choices=PROFILE_CHOICES, default=None)
     p_proc.add_argument(
         "--mode",
         choices=["natural", "restore", "smart_safe"],
@@ -1885,6 +2658,20 @@ def _main() -> None:
             "Path to speaker profiles directory "
             "(default: $HAWAVOCLEAN_PROFILES_DIR, else the installed profiles tree)"
         ),
+    )
+    p_proc.add_argument(
+        "--strength",
+        type=_strength_arg,
+        default=None,
+        help="Optional wet/dry parallel blend strength in [0.1, 1.0] (default: 1.0)",
+    )
+    p_proc.add_argument(
+        "--time-range",
+        nargs=2,
+        type=float,
+        metavar=("START_S", "END_S"),
+        default=None,
+        help="Optional surgical edit range in seconds (samples outside remain bit-identical)",
     )
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"
@@ -2160,9 +2947,6 @@ def _main() -> None:
         choices=["mild", "standard", "severe"],
         default="standard",
         help="Corruption operator suite to measure against",
-    )
-    p_calib.add_argument(
-        "--fixed-probe", action="store_true", help="Use the deterministic FixedProbe (tests only)"
     )
     p_calib.set_defaults(func=cmd_calibrate)
 

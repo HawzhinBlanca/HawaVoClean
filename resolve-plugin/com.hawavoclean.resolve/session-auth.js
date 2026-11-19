@@ -85,7 +85,16 @@ function sessionNeedsRenewal(capability, nowMs) {
   );
 }
 
-function requestEngineSession(endpoint, rootToken, now = () => Date.now()) {
+function postLoopbackJson(
+  endpoint,
+  rootToken,
+  routePath,
+  label,
+  timeoutMs,
+  maxBytes,
+  refusedStatusMessage,
+  payload,
+) {
   const origin = endpoint && exactEngineOrigin(endpoint.baseUrl);
   if (origin === null) {
     return Promise.reject(new Error('Engine endpoint is not an exact 127.0.0.1 HTTP origin.'));
@@ -93,6 +102,7 @@ function requestEngineSession(endpoint, rootToken, now = () => Date.now()) {
   if (typeof rootToken !== 'string' || rootToken.length < 1 || rootToken.length > 256) {
     return Promise.reject(new Error('Engine bootstrap secret is invalid.'));
   }
+  const body = payload === undefined ? null : Buffer.from(JSON.stringify(payload), 'utf8');
   const url = new URL(origin);
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -101,99 +111,100 @@ function requestEngineSession(endpoint, rootToken, now = () => Date.now()) {
       settled = true;
       if (error) reject(error);
       else if (value) resolve(value);
-      else reject(new Error('Engine session bootstrap produced no result.'));
+      else reject(new Error(`${label} produced no result.`));
     };
+    const headers = {
+      'X-Hawa-Token': rootToken,
+      Accept: 'application/json',
+      'Content-Length': body ? String(body.length) : '0',
+    };
+    if (body) headers['Content-Type'] = 'application/json';
     const request = http.request(
-      {
-        hostname: '127.0.0.1',
-        port: Number(url.port),
-        method: 'POST',
-        path: '/api/session',
-        headers: {
-          'X-Hawa-Token': rootToken,
-          Accept: 'application/json',
-          'Content-Length': '0',
-        },
-        timeout: SESSION_HTTP_TIMEOUT_MS,
-      },
+      { hostname: '127.0.0.1', port: Number(url.port), method: 'POST', path: routePath, headers, timeout: timeoutMs },
       (response) => {
         const chunks = [];
         let bytes = 0;
         response.on('data', (chunk) => {
           bytes += chunk.length;
-          if (bytes > SESSION_RESPONSE_LIMIT) {
+          if (bytes > maxBytes) {
             response.destroy();
-            finish(new Error('Engine session response exceeded its size limit.'));
+            finish(new Error(`${label} response exceeded its size limit.`));
             return;
           }
           chunks.push(chunk);
         });
-        response.once('aborted', () => finish(new Error('Engine session response was interrupted.')));
-        response.once('error', () => finish(new Error('Engine session response failed.')));
+        response.once('aborted', () => finish(new Error(`${label} response was interrupted.`)));
+        response.once('error', () => finish(new Error(`${label} response failed.`)));
         response.once('end', () => {
           if (response.statusCode !== 200) {
-            finish(new Error(`Engine refused session bootstrap (HTTP ${String(response.statusCode || 0)}).`));
+            finish(new Error(refusedStatusMessage(response.statusCode || 0)));
             return;
           }
           const cacheControl = String(response.headers['cache-control'] || '').toLowerCase();
           if (!cacheControl.includes('no-store')) {
-            finish(new Error('Engine session response was not marked no-store.'));
+            finish(new Error(`${label} response was not marked no-store.`));
             return;
           }
-          let body;
+          let parsed;
           try {
-            body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
           } catch {
-            finish(new Error('Engine session response was not valid JSON.'));
+            finish(new Error(`${label} response was not valid JSON.`));
             return;
           }
-          const token = body && body.sessionToken;
-          const ttlS = body && body.expiresInSeconds;
-          if (
-            !body ||
-            Array.isArray(body) ||
-            body.tokenType !== 'Bearer' ||
-            typeof token !== 'string' ||
-            !/^[A-Za-z0-9_-]{32,256}$/.test(token) ||
-            !Number.isInteger(ttlS) ||
-            ttlS < 1 ||
-            ttlS > SESSION_MAX_TTL_S
-          ) {
-            finish(new Error('Engine session response had invalid capability metadata.'));
+          if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+            finish(new Error(`${label} response had the wrong shape.`));
             return;
           }
-          const issuedAt = now();
-          if (!Number.isFinite(issuedAt)) {
-            finish(new Error('Engine session clock is invalid.'));
-            return;
-          }
-          const ttlMs = ttlS * 1_000;
-          const skewMs = Math.min(SESSION_RENEW_SKEW_MS, Math.max(1_000, ttlMs / 4));
-          finish(null, Object.freeze({
-            authorization: `Bearer ${token}`,
-            expiresAtMs: issuedAt + ttlMs,
-            refreshAtMs: issuedAt + Math.max(1, ttlMs - skewMs),
-          }));
+          finish(null, parsed);
         });
       },
     );
     request.once('timeout', () => {
       request.destroy();
-      finish(new Error('Engine session bootstrap timed out.'));
+      finish(new Error(`${label} timed out.`));
     });
-    request.once('error', () => finish(new Error('Engine session bootstrap failed.')));
-    request.end();
+    request.once('error', () => finish(new Error(`${label} failed.`)));
+    request.end(body || undefined);
   });
 }
 
-function requestNativeSourceRegistration(endpoint, rootToken, filePath) {
-  const origin = endpoint && exactEngineOrigin(endpoint.baseUrl);
-  if (origin === null) {
-    return Promise.reject(new Error('Engine endpoint is not an exact 127.0.0.1 HTTP origin.'));
+async function requestEngineSession(endpoint, rootToken, now = () => Date.now()) {
+  const body = await postLoopbackJson(
+    endpoint,
+    rootToken,
+    '/api/session',
+    'Engine session bootstrap',
+    SESSION_HTTP_TIMEOUT_MS,
+    SESSION_RESPONSE_LIMIT,
+    (code) => `Engine refused session bootstrap (HTTP ${String(code)}).`,
+  );
+  const token = body.sessionToken;
+  const ttlS = body.expiresInSeconds;
+  if (
+    body.tokenType !== 'Bearer' ||
+    typeof token !== 'string' ||
+    !/^[A-Za-z0-9_-]{32,256}$/.test(token) ||
+    !Number.isInteger(ttlS) ||
+    ttlS < 1 ||
+    ttlS > SESSION_MAX_TTL_S
+  ) {
+    throw new Error('Engine session response had invalid capability metadata.');
   }
-  if (typeof rootToken !== 'string' || rootToken.length < 1 || rootToken.length > 256) {
-    return Promise.reject(new Error('Engine bootstrap secret is invalid.'));
+  const issuedAt = now();
+  if (!Number.isFinite(issuedAt)) {
+    throw new Error('Engine session clock is invalid.');
   }
+  const ttlMs = ttlS * 1_000;
+  const skewMs = Math.min(SESSION_RENEW_SKEW_MS, Math.max(1_000, ttlMs / 4));
+  return Object.freeze({
+    authorization: `Bearer ${token}`,
+    expiresAtMs: issuedAt + ttlMs,
+    refreshAtMs: issuedAt + Math.max(1, ttlMs - skewMs),
+  });
+}
+
+async function requestNativeSourceRegistration(endpoint, rootToken, filePath) {
   if (
     typeof filePath !== 'string' ||
     filePath.length < 1 ||
@@ -201,89 +212,30 @@ function requestNativeSourceRegistration(endpoint, rootToken, filePath) {
     filePath.includes('\0') ||
     !path.isAbsolute(filePath)
   ) {
-    return Promise.reject(new Error('Native source path is invalid.'));
+    throw new Error('Native source path is invalid.');
   }
-  const body = Buffer.from(JSON.stringify({ path: filePath }), 'utf8');
-  const url = new URL(origin);
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      if (error) reject(error);
-      else if (value) resolve(value);
-      else reject(new Error('Native source registration produced no result.'));
-    };
-    const request = http.request(
-      {
-        hostname: '127.0.0.1',
-        port: Number(url.port),
-        method: 'POST',
-        path: '/api/v1/native-sources',
-        headers: {
-          'X-Hawa-Token': rootToken,
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          'Content-Length': String(body.length),
-        },
-        timeout: NATIVE_SOURCE_HTTP_TIMEOUT_MS,
-      },
-      (response) => {
-        const chunks = [];
-        let bytes = 0;
-        response.on('data', (chunk) => {
-          bytes += chunk.length;
-          if (bytes > NATIVE_SOURCE_RESPONSE_LIMIT) {
-            response.destroy();
-            finish(new Error('Native source registration response exceeded its size limit.'));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        response.once('aborted', () => finish(new Error('Native source registration was interrupted.')));
-        response.once('error', () => finish(new Error('Native source registration response failed.')));
-        response.once('end', () => {
-          if (response.statusCode !== 200) {
-            finish(new Error(`Engine refused the selected file (HTTP ${String(response.statusCode || 0)}).`));
-            return;
-          }
-          const cacheControl = String(response.headers['cache-control'] || '').toLowerCase();
-          if (!cacheControl.includes('no-store')) {
-            finish(new Error('Native source registration response was not marked no-store.'));
-            return;
-          }
-          let parsed;
-          try {
-            parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          } catch {
-            finish(new Error('Native source registration response was not valid JSON.'));
-            return;
-          }
-          if (
-            !parsed ||
-            Array.isArray(parsed) ||
-            typeof parsed.sourceId !== 'string' ||
-            !/^[0-9a-f]{32}$/.test(parsed.sourceId) ||
-            typeof parsed.path !== 'string' ||
-            parsed.path.length < 1 ||
-            parsed.path.length > 32_768 ||
-            parsed.path.includes('\0') ||
-            !path.isAbsolute(parsed.path)
-          ) {
-            finish(new Error('Native source registration response had invalid capability metadata.'));
-            return;
-          }
-          finish(null, Object.freeze({ sourceId: parsed.sourceId, path: parsed.path }));
-        });
-      },
-    );
-    request.once('timeout', () => {
-      request.destroy();
-      finish(new Error('Native source registration timed out.'));
-    });
-    request.once('error', () => finish(new Error('Native source registration failed.')));
-    request.end(body);
-  });
+  const parsed = await postLoopbackJson(
+    endpoint,
+    rootToken,
+    '/api/v1/native-sources',
+    'Native source registration',
+    NATIVE_SOURCE_HTTP_TIMEOUT_MS,
+    NATIVE_SOURCE_RESPONSE_LIMIT,
+    (code) => `Engine refused the selected file (HTTP ${String(code)}).`,
+    { path: filePath },
+  );
+  if (
+    typeof parsed.sourceId !== 'string' ||
+    !/^[0-9a-f]{32}$/.test(parsed.sourceId) ||
+    typeof parsed.path !== 'string' ||
+    parsed.path.length < 1 ||
+    parsed.path.length > 32_768 ||
+    parsed.path.includes('\0') ||
+    !path.isAbsolute(parsed.path)
+  ) {
+    throw new Error('Native source registration response had invalid capability metadata.');
+  }
+  return Object.freeze({ sourceId: parsed.sourceId, path: parsed.path });
 }
 
 module.exports = {

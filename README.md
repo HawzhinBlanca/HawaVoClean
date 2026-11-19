@@ -17,6 +17,13 @@ evidence counts and open human/vendor gates are generated in
 [the release-status snapshot](docs/generated-release-status.md); [STATUS.md](STATUS.md) explains the
 current verdict in plain language.
 
+**Conversational editing (development):** open `Open HawaVoClean.command`, load
+a recording, and describe what to clean, keep or remove. Local chat proposes an
+edit for review before processing. Cloud chat is disabled. AudioGhost sound
+separation is integrated as an optional engine and remains unavailable until
+its gated SAM-Audio model pack is installed. See the
+[implementation and setup notes](docs/audio-assistant-implementation.md).
+
 **Three enhancement cores, honestly labelled.** The default production core
 is a decision-directed spectral Wiener filter — classical DSP, gentle,
 guarded strictly. The optional **studio profile** uses a real neural model:

@@ -56,7 +56,8 @@ export interface PeaksWindow {
   rms_db: number[];
 }
 
-export type Profile = 'studio' | 'lowband' | 'production';
+export type Profile = 'studio_pro' | 'dereverb' | 'studio' | 'lowband' | 'production';
+export type CleanupProfile = Profile;
 
 /** Per-job processing mode (docs/ui-contract.md, Addendum 2, True-10 D4.11). */
 export type JobMode = 'natural' | 'restore' | 'smart_safe';
@@ -92,6 +93,8 @@ export interface SmartSafeStrategyV1 {
 export type ManualRoute =
   | 'production'
   | 'studio'
+  | 'studio_pro'
+  | 'dereverb'
   | 'lowband'
   | 'lowband_then_production'
   | 'restore_source'
@@ -106,9 +109,85 @@ export interface ManualStrategyV1 {
   expertCutoffHz?: number | null | undefined;
   allow_generative_reconstruction: boolean;
   allowGenerativeReconstruction?: boolean | undefined;
+  strength?: number | undefined;
+  time_range?: [number, number] | null | undefined;
+  timeRange?: [number, number] | null | undefined;
 }
 
-export type ProcessingStrategyV1 = SmartSafeStrategyV1 | ManualStrategyV1;
+export interface SeparateStrategyV1 {
+  kind: 'separate';
+  operation: 'extract' | 'remove';
+  prompt: string;
+  model_size: 'small' | 'base' | 'large';
+  quality: 'high';
+  seed: number;
+  cleanup_profile: CleanupProfile | null;
+  device: 'auto' | 'cpu' | 'mps' | 'cuda';
+  strength?: number | undefined;
+  time_range?: [number, number] | null | undefined;
+  timeRange?: [number, number] | null | undefined;
+}
+
+export type ProcessingStrategyV1 = SmartSafeStrategyV1 | ManualStrategyV1 | SeparateStrategyV1;
+
+export interface AudioChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface AudioTimeRange {
+  start_s: number;
+  end_s: number;
+}
+
+export type BandwidthShape = 'unknown' | 'silence' | 'fullband' | 'steep_lowpass';
+
+export interface AcousticContext {
+  duration_s?: number | undefined;
+  sample_rate?: number | undefined;
+  channels?: number | undefined;
+  noise_risk?: number | undefined;
+  reverberation_risk?: number | undefined;
+  music_risk?: number | undefined;
+  hum_confidence?: number | undefined;
+  rumble_confidence?: number | undefined;
+  clipping_risk?: number | undefined;
+  estimated_cutoff_hz?: number | undefined;
+  bandwidth_shape?: BandwidthShape | undefined;
+  noise_floor_db?: number | undefined;
+  integrated_lufs?: number | undefined;
+  available_profiles?: CleanupProfile[] | undefined;
+  separation_available?: boolean | undefined;
+}
+
+export interface AudioPlanRequest {
+  message: string;
+  history: AudioChatMessage[];
+  allow_cloud_text: boolean;
+  acoustic_context?: AcousticContext | null | undefined;
+}
+
+export interface AudioPlan {
+  operation: 'clean' | 'restore' | 'extract' | 'remove' | 'clarify';
+  target: string | null;
+  cleanup_profile: CleanupProfile | null;
+  model_size: 'small' | 'base' | 'large';
+  quality: 'high';
+  strength?: number | undefined;
+  time_range?: AudioTimeRange | null | undefined;
+  explanation: string;
+  provider: 'rules' | 'ollama' | 'openai';
+  needs_clarification: boolean;
+  fallback_reason?: string | null;
+}
+
+export interface AudioAssistantStatus {
+  provider: 'auto' | 'rules' | 'ollama' | 'openai' | 'unconfigured';
+  available?: boolean;
+  reason?: string | null;
+  cloud_text_available?: boolean;
+  local_model?: string;
+}
 
 export interface ProcessingRequestV1 {
   schema_version?: 1 | undefined;
@@ -208,7 +287,7 @@ export interface JobStatus {
    * are byte-compatible with revision 1 — and `cutoff_hz` is null when the
    * cutoff was auto-detected.
    */
-  mode?: JobMode;
+  mode?: JobMode | 'separate';
   speaker_id?: string;
   cutoff_hz?: number | null;
   started_at: string | null;
@@ -440,6 +519,14 @@ export interface HawaVoCleanReport {
   passes?: PassRecord[];
   /** Present only on a restore-mode run (Addendum 2). */
   restoration?: RestorationSection | null;
+  /** Signal validation for separation is not a speech-content guarantee. */
+  separation?: {
+    operation: 'extract' | 'remove';
+    prompt: string;
+    model_size?: string;
+    qualification?: string;
+    [key: string]: unknown;
+  } | null;
 }
 
 // Verdict classes used by the verdict strip. The engine's `final_decision`

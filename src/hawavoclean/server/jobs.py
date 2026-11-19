@@ -114,6 +114,9 @@ class JobRecord:
     conflict_policy: ConflictPolicy = "fail"
     request_hash: str = ""
     mode: str = "natural"
+    separation_options: dict[str, Any] | None = None
+    strength: float | None = None
+    time_range: tuple[float, float] | None = None
     speaker_id: str | None = None
     cutoff_hz: float | None = None
     record_bundle: bool = False
@@ -133,6 +136,7 @@ class JobRecord:
     started_at: str | None = None
     finished_at: str | None = None
     terminal_at: float | None = None
+    last_progress_at: float | None = None
     error: dict[str, str] | None = None
     report: dict[str, Any] | None = None
     artifact_evidence: dict[str, Any] | None = None
@@ -165,6 +169,10 @@ class JobRecord:
             # clients: the restore keys appear only when they mean something.
             out["speaker_id"] = self.speaker_id
             out["cutoff_hz"] = self.cutoff_hz
+        if self.strength is not None:
+            out["strength"] = self.strength
+        if self.time_range is not None:
+            out["time_range"] = [self.time_range[0], self.time_range[1]]
         if self.unit is not None:
             out["unit"] = dict(self.unit)
         if self.idempotency_key is not None:
@@ -202,6 +210,9 @@ class JobRecord:
             "conflict_policy": self.conflict_policy,
             "request_hash": self.request_hash,
             "mode": self.mode,
+            "separation_options": self.separation_options,
+            "strength": self.strength,
+            "time_range": list(self.time_range) if self.time_range is not None else None,
             "speaker_id": self.speaker_id,
             "cutoff_hz": self.cutoff_hz,
             "record_bundle": self.record_bundle,
@@ -258,6 +269,18 @@ class JobRecord:
             conflict_policy=cast(ConflictPolicy, conflict_policy),
             request_hash=str(value.get("request_hash", "")),
             mode=str(value.get("mode", "natural")),
+            separation_options=(
+                dict(value["separation_options"])
+                if isinstance(value.get("separation_options"), dict)
+                else None
+            ),
+            strength=(float(value["strength"]) if value.get("strength") is not None else None),
+            time_range=(
+                (float(value["time_range"][0]), float(value["time_range"][1]))
+                if isinstance(value.get("time_range"), (list, tuple))
+                and len(value["time_range"]) == 2
+                else None
+            ),
             speaker_id=(str(value["speaker_id"]) if value.get("speaker_id") is not None else None),
             cutoff_hz=(float(value["cutoff_hz"]) if value.get("cutoff_hz") is not None else None),
             record_bundle=bool(value.get("record_bundle", False)),
@@ -319,6 +342,9 @@ def default_command(record: JobRecord) -> list[str]:
         if record.source_snapshot_path is not None
         else str(record.input_path)
     )
+    if record.mode == "separate":
+        # The prompt and settings go through stdin, never a process command line.
+        return [sys.executable, "-m", "hawavoclean.audio_edit"]
     cmd = [
         sys.executable,
         "-m",
@@ -333,12 +359,14 @@ def default_command(record: JobRecord) -> list[str]:
     if record.source_snapshot_path is not None and str(record.input_path) != input_arg:
         cmd += ["--original-input-path", str(record.input_path)]
     if record.mode == "restore":
-        # The speaker id is validated at the API boundary (``^[a-z0-9_]{1,64}$``)
-        # before it may reach a child argv, and the profiles dir is resolved
-        # here rather than left to the child's cwd-relative default: the engine
-        # may be launched from anywhere.
-        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]
-        cmd += ["--profiles-dir", str(profiles_root())]
+        cmd += ["--mode", "restore"]
+        if record.speaker_id is not None:
+            # The speaker id is validated at the API boundary (``^[a-z0-9_]{1,64}$``)
+            # before it may reach a child argv, and the profiles dir is resolved
+            # here rather than left to the child's cwd-relative default: the engine
+            # may be launched from anywhere.
+            cmd += ["--speaker-id", str(record.speaker_id)]
+            cmd += ["--profiles-dir", str(profiles_root())]
         if record.cutoff_hz is not None:
             cmd += ["--cutoff-hz", str(record.cutoff_hz)]
     elif record.mode == "smart_safe":
@@ -348,6 +376,11 @@ def default_command(record: JobRecord) -> list[str]:
             cmd += ["--profiles-dir", str(profiles_root())]
         if record.cutoff_hz is not None:
             cmd += ["--cutoff-hz", str(record.cutoff_hz)]
+    if record.mode in ("natural", "restore"):
+        if record.strength is not None and record.strength < 1.0:
+            cmd += ["--strength", str(record.strength)]
+        if record.time_range is not None:
+            cmd += ["--time-range", str(record.time_range[0]), str(record.time_range[1])]
     if record.overwrite:
         cmd.append("--overwrite")
     if record.record_bundle:
@@ -830,6 +863,9 @@ class JobManager:
         profile: str,
         overwrite: bool,
         mode: str = "natural",
+        separation_options: dict[str, Any] | None = None,
+        strength: float | None = None,
+        time_range: tuple[float, float] | None = None,
         speaker_id: str | None = None,
         cutoff_hz: float | None = None,
         idempotency_key: str | None = None,
@@ -839,6 +875,17 @@ class JobManager:
         batch_id: str | None = None,
     ) -> dict[str, Any]:
         """Queue a job or return its prior snapshot for an idempotent retry."""
+
+        if mode == "separate":
+            from hawavoclean.server.contracts import SeparationStrategyV1
+
+            if separation_options is None:
+                raise ValueError("separation settings are required")
+            separation_options = SeparationStrategyV1.model_validate(
+                separation_options
+            ).model_dump()
+        elif separation_options is not None:
+            raise ValueError("separation settings require separate mode")
 
         if idempotency_key is not None:
             if not idempotency_key.strip() or len(idempotency_key) > 128:
@@ -889,11 +936,12 @@ class JobManager:
                 if record_bundle
                 else None
             )
-            request_payload = {
+            request_payload: dict[str, Any] = {
                 "input_path": str(input_path),
                 "output_path": str(output_path),
                 "profile": profile,
                 "mode": mode,
+                "separation_options": separation_options,
                 "speaker_id": speaker_id,
                 "cutoff_hz": cutoff_hz,
                 "conflict_policy": policy,
@@ -902,6 +950,10 @@ class JobManager:
                 "source_sha256": source_sha256,
                 "source_size_bytes": source_size_bytes,
             }
+            if strength is not None:
+                request_payload["strength"] = strength
+            if time_range is not None:
+                request_payload["time_range"] = [time_range[0], time_range[1]]
             request_hash = canonical_request_hash(request_payload)
 
             with self._wake:
@@ -943,6 +995,9 @@ class JobManager:
                 conflict_policy=policy,
                 request_hash=request_hash,
                 mode=mode,
+                separation_options=separation_options,
+                strength=strength,
+                time_range=time_range,
                 speaker_id=speaker_id,
                 cutoff_hz=cutoff_hz,
                 record_bundle=record_bundle,
@@ -1172,6 +1227,47 @@ class JobManager:
             }
             active.update(self._submitting_inputs.keys())
             return active
+
+    def get_queue_depth(self) -> int:
+        """Total number of active jobs currently queued or running."""
+        with self._lock:
+            return sum(1 for r in self._jobs.values() if r.state in ("queued", "running"))
+
+    def check_no_progress_timeouts(self, timeout_s: float = 300.0) -> list[dict[str, Any]]:
+        """Identify any running jobs that have made no progress within timeout_s."""
+        stalled: list[dict[str, Any]] = []
+        now = self._clock()
+        with self._lock:
+            for r in self._jobs.values():
+                if r.state == "running":
+                    last_prog = r.last_progress_at if r.last_progress_at is not None else now
+                    elapsed = now - last_prog
+                    if elapsed > timeout_s:
+                        stalled.append(
+                            {
+                                "job_id": r.job_id,
+                                "elapsed_seconds": round(elapsed, 1),
+                                "threshold_seconds": timeout_s,
+                            }
+                        )
+        return stalled
+
+    def check_process_and_lease_health(self) -> tuple[bool, str | None]:
+        """Verify that worker processes and durable store owner leases are healthy."""
+        with self._lock:
+            if self._persistence_error is not None:
+                return False, f"Durable persistence error: {self._persistence_error}"
+            if self._owner_lease is not None and getattr(self._owner_lease, "_released", False):
+                return False, "Durable job-store owner lease was released unexpectedly"
+            for r in self._jobs.values():
+                if r.state == "running" and r.process is not None:
+                    exit_code = r.process.poll()
+                    if exit_code is not None:
+                        return (
+                            False,
+                            f"Job process {r.job_id} exited prematurely with code {exit_code}",
+                        )
+        return True, None
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -1682,6 +1778,7 @@ class JobManager:
                 record = self._jobs[next_job_id]
                 record.state = "running"
                 record.started_at = _now_iso()
+                record.last_progress_at = self._clock()
                 record.message = "Starting"
                 self._notify_locked(record)
             try:
@@ -1711,7 +1808,7 @@ class JobManager:
         try:
             supervisor = ProcessSupervisor.spawn(
                 cmd,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.PIPE if record.mode == "separate" else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -1748,6 +1845,23 @@ class JobManager:
         )
         stderr_thread.start()
 
+        if record.mode == "separate":
+            assert proc.stdin is not None
+            payload = {
+                "input_path": str(record.source_snapshot_path or record.input_path),
+                "original_input_path": str(record.input_path),
+                "output_path": str(record.output_path),
+                "overwrite": record.overwrite,
+                "options": record.separation_options,
+                "bundle_path": str(record.bundle_path) if record.bundle_path else None,
+            }
+            try:
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                # The normal error-event/exit handling below records startup failure.
+                pass
+
         done_event: dict[str, Any] | None = None
         error_event: dict[str, Any] | None = None
         try:
@@ -1768,6 +1882,7 @@ class JobManager:
                         record.stage = str(event.get("stage", record.stage))
                         record.progress = float(event.get("progress", record.progress))
                         record.message = str(event.get("message", record.message))
+                        record.last_progress_at = self._clock()
                         unit = event.get("unit")
                         if isinstance(unit, dict) and "index" in unit and "total" in unit:
                             record.unit = {

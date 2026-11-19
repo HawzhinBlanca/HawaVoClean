@@ -17,16 +17,18 @@ candidate; a missing preview is a rejection, never an implicit pass.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from dataclasses import dataclass
 from typing import Final, Literal
+
+from hawavoclean.hashing import hash_json_canonical
 
 Route = Literal[
     "preserve",
     "production",
     "studio",
+    "studio_pro",
+    "dereverb",
     "lowband",
     "lowband_then_production",
     "restore_source",
@@ -43,12 +45,16 @@ ROUTES: Final[tuple[Route, ...]] = (
     "restore_source",
     "restore_enrolled",
 )
+OPTIONAL_ROUTES: Final[tuple[Route, ...]] = ("studio_pro", "dereverb")
+ALL_ROUTES: Final[tuple[Route, ...]] = (*ROUTES, *OPTIONAL_ROUTES)
 RESTORE_ROUTES: Final[frozenset[Route]] = frozenset({"restore_source", "restore_enrolled"})
 INTERVENTION_COST: Final[dict[Route, int]] = {
     "preserve": 0,
     "production": 1,
     "lowband": 1,
     "studio": 2,
+    "studio_pro": 2,
+    "dereverb": 2,
     "lowband_then_production": 2,
     "restore_source": 3,
     "restore_enrolled": 4,
@@ -109,6 +115,8 @@ class SmartSafePolicy:
     decision_confidence_min: float = 0.70
     tie_margin_mos: float = 0.05
     intervention_penalty_mos: float = 0.03
+    clean_preserve_mos_min: float = 4.20
+    clean_min_gain_mos: float = 0.15
     stable_boundary_confidence_min: float = 0.80
     uncertain_region_max_s: float = 1.0
 
@@ -129,6 +137,12 @@ class SmartSafePolicy:
             raise ValueError("tie_margin_mos must be finite and non-negative")
         if not math.isfinite(self.intervention_penalty_mos) or self.intervention_penalty_mos < 0.0:
             raise ValueError("intervention_penalty_mos must be finite and non-negative")
+        if not math.isfinite(self.clean_preserve_mos_min) or not (
+            1.0 <= self.clean_preserve_mos_min <= 5.0
+        ):
+            raise ValueError("clean_preserve_mos_min must be finite and between 1 and 5")
+        if not math.isfinite(self.clean_min_gain_mos) or self.clean_min_gain_mos < 0.0:
+            raise ValueError("clean_min_gain_mos must be finite and non-negative")
         if not math.isfinite(self.uncertain_region_max_s) or self.uncertain_region_max_s < 0.0:
             raise ValueError("uncertain_region_max_s must be finite and non-negative")
 
@@ -152,7 +166,7 @@ class CandidateEvidence:
     evidence_sha256: str | None = None
 
     def __post_init__(self) -> None:
-        if self.route not in ROUTES:
+        if self.route not in ALL_ROUTES:
             raise ValueError(f"unknown candidate route: {self.route!r}")
         quality = float(self.predicted_quality_mos)
         if not math.isfinite(quality) or not 1.0 <= quality <= 5.0:
@@ -223,6 +237,7 @@ def eligible_routes(
     restore_policy: RestorePolicy,
     speaker_profile_id: str | None,
     policy: SmartSafePolicy = DEFAULT_POLICY,
+    include_optional: bool = False,
 ) -> dict[Route, tuple[bool, tuple[str, ...]]]:
     """Return canonical route eligibility plus every failed rule."""
 
@@ -242,6 +257,9 @@ def eligible_routes(
     if evidence.crosstalk_risk > policy.crosstalk_risk_max:
         studio_reasons.append("protected crosstalk risk is too high for Studio")
     result["studio"] = (not studio_reasons, tuple(studio_reasons))
+    if include_optional:
+        result["studio_pro"] = (not studio_reasons, tuple(studio_reasons))
+        result["dereverb"] = (not studio_reasons, tuple(studio_reasons))
 
     lowband_reasons = (
         ()
@@ -275,7 +293,8 @@ def eligible_routes(
         enrolled_reasons.append("speaker-match confidence is below the safety threshold")
     result["restore_enrolled"] = (not enrolled_reasons, tuple(enrolled_reasons))
 
-    return {route: result[route] for route in ROUTES}
+    active_routes = ALL_ROUTES if include_optional else ROUTES
+    return {route: result[route] for route in active_routes}
 
 
 def _hard_guard_reasons(candidate: CandidateEvidence) -> tuple[str, ...]:
@@ -323,10 +342,7 @@ def _decision_digest(
             for outcome in outcomes
         ],
     }
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hash_json_canonical(payload, allow_nan=False)
 
 
 def decide_smart_safe(
@@ -352,15 +368,18 @@ def decide_smart_safe(
             raise ValueError(f"duplicate candidate evidence for {candidate.route}")
         by_route[candidate.route] = candidate
 
+    has_optional = any(route in by_route for route in OPTIONAL_ROUTES)
+    eval_routes = ALL_ROUTES if has_optional else ROUTES
     eligibility = eligible_routes(
         evidence,
         restore_policy=restore_policy,
         speaker_profile_id=speaker_profile_id,
         policy=policy,
+        include_optional=has_optional,
     )
     survivors: list[CandidateEvidence] = []
     outcomes: list[CandidateOutcome] = []
-    for route in ROUTES:
+    for route in eval_routes:
         is_eligible, eligibility_reasons = eligibility[route]
         preview = by_route.get(route)
         if not is_eligible:
@@ -412,17 +431,35 @@ def decide_smart_safe(
     )
     best = ranked[0]
     low_confidence = best.prediction_confidence < policy.decision_confidence_min
-    tied = (
-        len(ranked) > 1 and (scores[best.route] - scores[ranked[1].route]) <= policy.tie_margin_mos
+    tied_band = [
+        item
+        for item in ranked
+        if (scores[best.route] - scores[item.route]) <= policy.tie_margin_mos
+    ]
+    tied_cross_tier = len({INTERVENTION_COST[item.route] for item in tied_band}) > 1
+    preserve_survivor = next((item for item in survivors if item.route == "preserve"), None)
+    insufficient_clean_gain = (
+        preserve_survivor is not None
+        and preserve_survivor.predicted_quality_mos >= policy.clean_preserve_mos_min
+        and best.route != "preserve"
+        and (scores[best.route] - scores["preserve"]) < policy.clean_min_gain_mos
     )
-    abstained = low_confidence or tied
-    selected = _least_intervention(survivors) if abstained else best
+    abstained = low_confidence or insufficient_clean_gain or tied_cross_tier
 
     if low_confidence:
+        selected = _least_intervention(survivors)
         reason = "ranker confidence is low; selected the least-modified safe candidate"
-    elif tied:
+    elif insufficient_clean_gain:
+        selected = _least_intervention(survivors)
+        reason = (
+            "input already meets high perceptual quality and no candidate exceeds the "
+            "minimum gain threshold; selected the least-modified safe candidate"
+        )
+    elif tied_cross_tier:
+        selected = _least_intervention(tied_band)
         reason = "safe candidates are effectively tied; selected the least-modified candidate"
     else:
+        selected = best
         reason = "selected the highest-ranked candidate after all hard guards passed"
     canonical_outcomes = tuple(outcomes)
     return SmartSafeDecision(
@@ -452,7 +489,7 @@ class RegionRecommendation:
             raise ValueError("region bounds must be finite")
         if self.start_s < 0.0 or self.end_s <= self.start_s:
             raise ValueError("region bounds must satisfy 0 <= start < end")
-        if self.route not in ROUTES:
+        if self.route not in ALL_ROUTES:
             raise ValueError(f"unknown region route: {self.route!r}")
         object.__setattr__(self, "confidence", _probability(self.confidence, "confidence"))
         object.__setattr__(

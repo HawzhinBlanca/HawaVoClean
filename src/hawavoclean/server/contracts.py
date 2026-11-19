@@ -7,14 +7,32 @@ unsupported strategy can never degrade into some other processing route.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import math
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _to_camel(value: str) -> str:
     head, *tail = value.split("_")
     return head + "".join(part.capitalize() for part in tail)
+
+
+def _reject_bool_number(value: Any) -> Any:
+    if isinstance(value, bool):
+        raise ValueError("Numeric field must not be a boolean")
+    return value
+
+
+def _validate_time_range(value: tuple[float, float] | None) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    start_s, end_s = value
+    if not (math.isfinite(start_s) and math.isfinite(end_s)):
+        raise ValueError("timeRange values must be finite numbers")
+    if start_s < 0.0 or end_s <= start_s or end_s > 86400.0:
+        raise ValueError("timeRange must satisfy 0 <= start < end <= 86400")
+    return (float(start_s), float(end_s))
 
 
 class ContractModel(BaseModel):
@@ -29,6 +47,8 @@ RestorePolicy = Literal["disabled", "source_allowed", "enrolled_only", "auto"]
 ManualRoute = Literal[
     "production",
     "studio",
+    "studio_pro",
+    "dereverb",
     "lowband",
     "lowband_then_production",
     "restore_source",
@@ -70,6 +90,25 @@ class ManualStrategyV1(ContractModel):
     speaker_profile_id: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
     expert_cutoff_hz: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
     allow_generative_reconstruction: bool = False
+    strength: float | None = Field(default=None, ge=0.1, le=1.0, allow_inf_nan=False)
+    time_range: tuple[float, float] | None = None
+
+    @field_validator("strength", mode="before")
+    @classmethod
+    def _validate_strength_type(cls, value: Any) -> Any:
+        return _reject_bool_number(value)
+
+    @field_validator("time_range", mode="before")
+    @classmethod
+    def _reject_bool_time_range(cls, value: Any) -> Any:
+        if isinstance(value, (list, tuple)) and any(isinstance(item, bool) for item in value):
+            raise ValueError("timeRange values must be numbers, not booleans")
+        return value
+
+    @field_validator("time_range")
+    @classmethod
+    def _check_time_range(cls, value: tuple[float, float] | None) -> tuple[float, float] | None:
+        return _validate_time_range(value)
 
     @model_validator(mode="after")
     def validate_route(self) -> ManualStrategyV1:
@@ -87,8 +126,48 @@ class ManualStrategyV1(ContractModel):
         return self
 
 
+class SeparationStrategyV1(ContractModel):
+    """Explicit, experimental sound separation; never an automatic fallback."""
+
+    kind: Literal["separate"]
+    operation: Literal["extract", "remove"]
+    prompt: str = Field(min_length=1, max_length=512)
+    model_size: Literal["small", "base", "large"] = "large"
+    quality: Literal["fast", "balanced", "high"] = "high"
+    seed: int = Field(default=0, ge=0, le=2**31 - 1, strict=True)
+    cleanup_profile: Literal["production", "studio", "studio_pro", "dereverb", "lowband"] | None = (
+        None
+    )
+    device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
+    strength: float = Field(default=1.0, ge=0.1, le=1.0, allow_inf_nan=False)
+    time_range: tuple[float, float] | None = None
+
+    @field_validator("strength", mode="before")
+    @classmethod
+    def _validate_strength_type(cls, value: Any) -> Any:
+        return _reject_bool_number(value)
+
+    @field_validator("time_range", mode="before")
+    @classmethod
+    def _reject_bool_time_range(cls, value: Any) -> Any:
+        if isinstance(value, (list, tuple)) and any(isinstance(item, bool) for item in value):
+            raise ValueError("timeRange values must be numbers, not booleans")
+        return value
+
+    @field_validator("time_range")
+    @classmethod
+    def _check_time_range(cls, value: tuple[float, float] | None) -> tuple[float, float] | None:
+        return _validate_time_range(value)
+
+    @model_validator(mode="after")
+    def validate_prompt(self) -> SeparationStrategyV1:
+        if not self.prompt.strip() or any(ord(c) < 32 for c in self.prompt):
+            raise ValueError("Describe a sound using printable text")
+        return self
+
+
 ProcessingStrategyV1 = Annotated[
-    SmartSafeStrategyV1 | ManualStrategyV1,
+    SmartSafeStrategyV1 | ManualStrategyV1 | SeparationStrategyV1,
     Field(discriminator="kind"),
 ]
 
@@ -247,6 +326,7 @@ __all__ = [
     "ProcessingRequestV1",
     "ProcessingStrategyV1",
     "ProbabilityEstimateV1",
+    "SeparationStrategyV1",
     "SmartAnalysisRequestV1",
     "SmartAnalysisResponseV1",
     "SmartSafeStrategyV1",

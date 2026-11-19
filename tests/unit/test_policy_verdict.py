@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 
 from hawavoclean.config import GuardConfig, PolicyConfig
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.guard.verdict import GuardVerdict
 from hawavoclean.policy.continuity import CONTINUITY_TAPER_MS, resolve_source_continuity
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from hawavoclean.segmentation.types import SpeechUnit
+from tests.support.stubs import FixedProbe
 
 
 @pytest.mark.unit

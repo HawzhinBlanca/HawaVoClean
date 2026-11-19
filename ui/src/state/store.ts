@@ -455,9 +455,12 @@ export const useStore = create<AppState>((set) => ({
     })),
   setCapabilitiesV1: (capabilities) =>
     set((s) => {
-      const restoreCap = capabilities.find(
-        (c) => c.capability_id === 'restore_enrolled' || c.capability_id === 'restore_source',
-      );
+      const activeRestoreId = s.speakerId ? 'restore_enrolled' : 'restore_source';
+      const restoreCap =
+        capabilities.find((c) => c.capability_id === activeRestoreId) ??
+        capabilities.find(
+          (c) => c.capability_id === 'restore_enrolled' || c.capability_id === 'restore_source',
+        );
       const isRestoreBlocked = restoreCap
         ? restoreCap.maturity === 'blocked' || !restoreCap.available
         : false;
@@ -573,6 +576,29 @@ export const useStore = create<AppState>((set) => ({
       currentRunId: null,
     }),
 }));
+
+export const OPTIONAL_CLEANUP_PROFILES = new Set<string>(['studio_pro', 'dereverb']);
+
+/** Fail-closed check: true unless capabilities explicitly advertise route as available and unblocked. */
+export function isRouteUnavailable(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): boolean {
+  return !capabilities?.some(
+    (c) => c.capability_id === routeOrCapId && c.available && c.maturity !== 'blocked',
+  );
+}
+
+/** Fail-closed for optional neural profiles (`studio_pro`, `dereverb`); explicit-block check for baseline routes. */
+export function isProfileUnavailable(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  profile: string,
+): boolean {
+  if (OPTIONAL_CLEANUP_PROFILES.has(profile)) {
+    return isRouteUnavailable(capabilities, profile);
+  }
+  return isRouteBlocked(capabilities, profile);
+}
 
 export function isRouteBlocked(
   capabilities: CapabilityStatusV1[] | null | undefined,

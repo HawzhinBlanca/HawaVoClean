@@ -1,11 +1,9 @@
-"""Unit tests for delay estimation, drift tracking, and phase/magnitude coherence."""
+"""Unit tests for delay estimation."""
 
 import numpy as np
 import pytest
 
-from hawavoclean.alignment.coherence import estimate_coherence
 from hawavoclean.alignment.delay import estimate_gcc_phat_delay
-from hawavoclean.alignment.drift import analyze_local_drift
 
 
 @pytest.mark.unit
@@ -26,21 +24,3 @@ def test_align_and_delay_compensate() -> None:
     res = estimate_gcc_phat_delay(sig, delayed, sr)
     assert len(res.aligned_candidate) == len(sig)
     assert abs(res.delay_samples) == pytest.approx(5.0, abs=0.5)
-
-
-@pytest.mark.unit
-def test_landmark_drift_flat() -> None:
-    sr = 48000
-    sig = np.random.default_rng(42).normal(0.0, 0.2, size=9600).astype(np.float32)
-    res = analyze_local_drift(sig, sig, sr, window_s=0.10, hop_s=0.05)
-    assert res.passed is True
-    assert res.max_window_drift_ms < 1.0
-
-
-@pytest.mark.unit
-def test_coherence_identical() -> None:
-    sig = np.random.default_rng(42).normal(0.0, 0.2, size=4800).astype(np.float32)
-    res = estimate_coherence(sig, sig)
-    assert res.passed is True
-    assert res.phase_coherence == pytest.approx(1.0, abs=1e-3)
-    assert res.magnitude_coherence == pytest.approx(1.0, abs=1e-3)

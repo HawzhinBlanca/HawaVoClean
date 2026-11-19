@@ -323,7 +323,7 @@ explicit release decision in [resolve-runtime-risk.md](resolve-runtime-risk.md).
 1. Preserve the input, output directory (including hidden bundle), command, stderr, and JSON report.
 2. Run `hawavoclean doctor`, `hawavoclean audit-models`, then `hawavoclean verify` if a committed output
    exists.
-3. For server failures, record `/api/health` before shutdown without recording the token; inspect the
+3. For server failures, record `/api/v1/health/signals` before shutdown without recording the token; inspect the
    terminal job's structured error and confirm the job child is gone.
 4. For Resolve failures, keep the installed plugin's `VERSION`, `SHA256SUMS`, `SYMLINKS`, visible error
    page, Resolve version/build, and host/runtime identity. Never include private audio or tokens.
@@ -332,3 +332,174 @@ explicit release decision in [resolve-runtime-risk.md](resolve-runtime-risk.md).
 
 Reports intentionally exclude transcripts and speaker embeddings. Logs and support bundles should
 contain paths only when needed and must never contain audio, credentials, or the loopback token.
+
+## Health signals & alert runbooks
+
+The engine evaluates 8 real-time operational health signals accessible via `GET /api/v1/health/signals`.
+Every alert emitted by the system links to an actionable runbook anchor below and strictly adheres to the
+zero-leakage privacy invariant: alerts contain only opaque UUIDs (`job_id`), numeric metrics, and timestamps.
+
+### Queue depth runbook
+<a id="queue-depth-runbook"></a>
+
+* **Alert IDs:** `QUEUE_DEPTH_WARNING` (depth >= 100), `QUEUE_DEPTH_EXCEEDED` (depth >= 128 / full).
+* **Severity:** Warning when >= 100; Critical when >= 128.
+* **Impact:** Incoming submissions via `POST /api/v1/jobs` are rejected with HTTP 429 (`QueueFullError`).
+* **Operator Action:**
+  1. Query `GET /api/v1/jobs` to inspect the queue breakdown by state (`queued`, `running`, `done`, `failed`).
+  2. If the single worker thread is executing a long audio render, check `no_progress_timeout` to ensure the running child process is actively processing.
+  3. If batch submissions saturated the queue, pause batches with `POST /api/v1/batches/{batch_id}/pause` to allow high-priority interactive jobs to proceed.
+  4. Cancel stalled or unneeded jobs with `POST /api/v1/jobs/{job_id}/cancel`.
+  5. The queue drains automatically in FIFO order once running tasks complete.
+
+### Job timeout runbook
+<a id="job-timeout-runbook"></a>
+
+* **Alert ID:** `JOB_NO_PROGRESS_STALLED`
+* **Severity:** Critical
+* **Trigger:** A running job has emitted no progress events on stdout for more than 300.0 seconds (5 minutes).
+* **Impact:** Worker slot is blocked; queued jobs cannot start.
+* **Operator Action:**
+  1. Identify the stalled `job_id` from the alert metadata.
+  2. Inspect the tail of stderr via `GET /api/v1/jobs/{job_id}`.
+  3. Issue a graceful cancel: `POST /api/v1/jobs/{job_id}/cancel`.
+  4. The supervisor signals SIGTERM, waits 3.0s grace period, and escalates to SIGKILL / Job Object termination to guarantee complete process tree death.
+  5. If the process does not terminate within 10 seconds, restart the engine broker; publication recovery will safely transition incomplete publications to `interrupted`.
+
+### Process & lease loss runbook
+<a id="process-lease-loss-runbook"></a>
+
+* **Alert ID:** `PROCESS_OR_LEASE_LOST`
+* **Severity:** Critical
+* **Trigger:** An active worker process terminated prematurely (non-zero exit or killed before publication finalized) or the durable SQLite job store owner lease was lost.
+* **Impact:** In-flight jobs may be orphaned; durability guarantees are compromised.
+* **Operator Action:**
+  1. Check engine log for `Durable job state update failed` or `Job process exited prematurely`.
+  2. Verify if another engine instance attempted to acquire the owner lock: `~/Library/Application Support/HawaVoClean/jobs.db.owner.lock`.
+  3. Run SQLite integrity check: `sqlite3 ~/Library/Application Support/HawaVoClean/jobs.db "PRAGMA integrity_check;"`.
+  4. If database lock is stale after an ungraceful OS reboot, remove the `.owner.lock` file only when no other `hawavoclean` process is running.
+  5. Restart the engine: `hawavoclean serve`. Startup recovery safely reconciles in-flight records.
+
+### Model pack failure runbook
+<a id="pack-failure-runbook"></a>
+
+* **Alert ID:** `MODEL_PACK_INTEGRITY_FAILED`
+* **Severity:** Critical
+* **Trigger:** Model pack manifest parsing failure, Ed25519 signature trust mismatch, or payload SHA-256 hash corruption.
+* **Impact:** Restore mode (`restore_source` / `restore_enrolled`) is disabled and fails closed.
+* **Operator Action:**
+  1. Inspect installed model pack directory: `hawavoclean audit-models`.
+  2. Check trust store keys and active rotation generation in `~/Library/Application Support/HawaVoClean/model-packs/`.
+  3. If a pack was tampered or corrupted during download, remove the corrupted staging folder: `rm -rf ~/Library/Application Support/HawaVoClean/model-packs/staging/*`.
+  4. Reinstall the signed model pack using `hawavoclean pack install <signed-pack-archive>`.
+  5. Confirm signature and capability status via `GET /api/v1/capabilities`.
+
+### Guard abstention runbook
+<a id="guard-abstention-runbook"></a>
+
+* **Alert ID:** `HIGH_GUARD_ABSTENTION_RATE`
+* **Severity:** Warning
+* **Trigger:** Over the last rolling evaluation window (minimum 5 jobs), Guard R or Smart Safe abstained from neural restoration on > 30% of jobs.
+* **Impact:** Audio processing safely falls back to classical Wiener DD (`production`) or `preserve`, but user-selected restoration mode is bypassed due to acoustic safety guards.
+* **Operator Action:**
+  1. Inspect aggregate metrics in `GET /api/v1/health/signals`.
+  2. Review job reports for the triggered abstention reasons:
+     - High music risk (`music_risk > threshold`).
+     - High crosstalk risk (`crosstalk_risk > threshold`).
+     - Insufficient speaker match confidence (`speaker_match_confidence < 0.85`).
+     - High-frequency speech preservation violation.
+  3. Verify that the input audio files match the declared acoustic profile (e.g. clean dialogue vs background music).
+  4. If speaker mismatch is frequent, check enrolled voice profile calibration using `hawavoclean verify-profile <speaker_id>`.
+
+### Provider fallback runbook
+<a id="provider-fallback-runbook"></a>
+
+* **Alert IDs:** `PROVIDER_FALLBACK_ACTIVE` (fallback count > 0), `EXCESSIVE_PROVIDER_FALLBACK` (rate >= 50%).
+* **Severity:** Warning when > 0; Critical when >= 50%.
+* **Impact:** Neural restoration fell back to classical Wiener DSP due to hardware acceleration or model execution failure. Audio is successfully processed, but neural restoration quality is diminished.
+* **Operator Action:**
+  1. Check hardware accelerator status: Apple Metal / DirectML / CUDA.
+  2. Inspect engine logs for accelerator out-of-memory or driver timeout errors.
+  3. If running on macOS, verify Metal framework accessibility and unified memory pressure (`vm_stat`).
+  4. If running on Windows, verify DirectX 12 / DirectML driver versions.
+  5. Restart the engine broker to clear leaked GPU contexts.
+
+### Disk pressure runbook
+<a id="disk-pressure-runbook"></a>
+
+* **Alert IDs:** `DISK_PRESSURE_WARNING` (free space < 1024 MiB), `DISK_PRESSURE_CRITICAL` (free space < 512 MiB).
+* **Severity:** Warning (< 1024 MiB); Critical (< 512 MiB).
+* **Impact:** Incoming upload requests via `POST /api/upload` fail closed with HTTP 507 (`StoragePressureError`). Active jobs near output write may fail publication.
+* **Operator Action:**
+  1. Trigger immediate upload scavenger: engine automatically removes uploads exceeding TTL (24h) and inputs for finished jobs without active siblings.
+  2. Check work directory storage usage: `du -sh ~/.local/share/HawaVoClean/work/`.
+  3. Clean orphaned scratch directories: `rm -rf ~/.local/share/HawaVoClean/work/scratch/*`.
+  4. Verify the host drive free capacity and free up host storage space.
+  5. If needed, configure a larger work volume using `HAWAVOCLEAN_WORK_DIR=/Volumes/FastDrive/work`.
+
+### Cloud deletion lag runbook
+<a id="cloud-deletion-lag-runbook"></a>
+
+* **Alert ID:** `CLOUD_DELETION_LAG_EXCEEDED`
+* **Severity:** Critical
+* **Trigger:** Expired user uploads or temporary cloud objects exceed the 3600-second (1 hour) grace window past their 24-hour retention TTL without deletion.
+* **Impact:** Potential violation of data retention SLA and cloud storage accumulation.
+* **Operator Action:**
+  1. Query cloud deletion dead-letter queue and worker telemetry.
+  2. Check AWS S3 / Cloudflare R2 lifecycle policy rules and IAM delete permissions.
+  3. Execute manual purge for objects past TTL: `hawavoclean cloud purge --expired-before="24h"`.
+  4. Verify zero cross-tenant object retention remains in cloud object stores.
+
+---
+
+## Operational recovery, data deletion & support procedures (S7.7)
+
+### Disaster recovery & SQLite snapshot restore
+1. **Automated Snapshot Location:** SQLite durable store maintains automated VACUUM INTO snapshots under `~/.local/share/HawaVoClean/backups/jobs-<timestamp>.db`.
+2. **Restore Procedure:**
+   ```bash
+   # Stop engine broker
+   kill -TERM $(cat ~/.local/share/HawaVoClean/rendezvous/engine.json | jq .pid)
+   # Archive damaged database
+   mv ~/.local/share/HawaVoClean/jobs.db ~/.local/share/HawaVoClean/jobs.db.corrupt
+   # Copy verified snapshot
+   cp ~/.local/share/HawaVoClean/backups/jobs-latest.db ~/.local/share/HawaVoClean/jobs.db
+   # Start engine and verify recovery
+   hawavoclean serve
+   ```
+3. **Recovery SLA:** Target Recovery Time Objective (RTO) <= 60 seconds; Recovery Point Objective (RPO) <= 5 minutes.
+
+### User data deletion & right-to-erasure
+To completely wipe all user data, cached audio, model profiles, and durable job history:
+```bash
+# Complete clean-room user data purge
+hawavoclean reset --all --confirm-purge-user-data
+```
+This performs:
+- Atomic removal of all managed uploads in `work/uploads/`.
+- Deletion of all speaker enrollment profiles in `profiles/`.
+- Wipe of `jobs.db` and transaction journals.
+- Zero leftover audio, waveforms, or metadata.
+- Note: User's exported output files (`_clean.wav`) created in user-selected directories are strictly preserved.
+
+### Version rollback procedure
+When rolling back from version $N$ to $N-1$:
+1. Stop the active engine: `POST /api/shutdown` or `kill -TERM`.
+2. Verify that no job is currently in `running` state.
+3. Replace the application binary or PKG:
+   - On macOS: Install previous release PKG or replace `/Applications/HawaVoClean.app`.
+   - On DaVinci Resolve: Run `resolve-plugin/uninstall.sh`, then install previous plugin bundle.
+4. Database backward compatibility: Database schema version 1 is forward and backward compatible. Column additions use `IF NOT EXISTS` and default values.
+5. Verify rollback health: `hawavoclean doctor && hawavoclean verify <sample.wav>`.
+
+### Safe diagnostic bundle generation
+When collecting support diagnostics:
+```bash
+hawavoclean support-bundle --output ~/Desktop/hawavoclean-diagnostics.zip
+```
+The support bundle contains:
+- Exact software version, OS platform, and CPU/GPU architecture.
+- Sanitized `GET /api/v1/health/signals` output.
+- Non-sensitive engine log tail (all audio file names and user paths redacted to `[REDACTED]`).
+- Closed model pack inventory and checksum verification results.
+- **GUARANTEE:** Never contains audio, transcripts, speaker vectors, credentials, or session tokens.

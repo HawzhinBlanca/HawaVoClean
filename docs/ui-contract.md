@@ -421,3 +421,44 @@ byte-compatible with revision 1.
 A done restore job's `report` is a schema-v2 `HawaVoCleanReport` and carries the
 `restoration` section (speaker id, bandwidth estimate with `effective_cutoff_hz` and
 `cutoff_mode`, guard verdicts) — the UI reads it from `report.restoration`.
+
+## Conversational editing extension — 19 November 2026
+
+`GET /api/v1/assistant/status` describes the configured local text planner.
+`POST /api/v1/assistant/plan` accepts `message` (1–2000 characters), optional
+`history` (up to 12 user/assistant text messages), and `allow_cloud_text`
+(false in this implementation). Both routes use the existing API authentication.
+No source path, audio bytes or processing authority is sent to a language model.
+
+The response uses snake_case and contains `operation` (`clean`, `extract`,
+`remove`, `clarify`), nullable `target`, nullable `cleanup_profile`, `model_size`,
+`quality`, `explanation`, `provider`, `needs_clarification` and an optional
+`fallback_reason`. Plans require explicit review; creating a plan never creates
+an audio job. Local AI failures may use the visibly labelled limited-command
+planner. Unsupported or unresolved requests ask for clarification.
+
+The existing v1 job contract additionally accepts this closed strategy:
+
+```json
+{"kind":"separate","operation":"extract","prompt":"speech",
+ "model_size":"large","quality":"high","seed":0,
+ "cleanup_profile":"studio","device":"cpu"}
+```
+
+Snake_case and the standard camelCase aliases are accepted. `operation` is
+extract/remove; prompts are printable text up to 512 characters; `model_size`
+is small/base/large; quality is fast/balanced/high; device is cpu/cuda/mps.
+Cleanup is optional and uses only the existing dialogue profiles. Offline
+execution, opaque source IDs, request identity, queue, cancellation and artifact
+publication rules remain in force. The experimental `separate` capability is
+available only when an installed model passes readiness checks; the exact
+requested model/provider is checked again at submission.
+
+Separation accepts at most 120 seconds, two channels and 256 MiB of input.
+Actual decoded frames are bounded independently of container metadata. Jobs
+report mode `separate`; settings are persisted privately for recovery and passed
+to supervised workers over stdin. Completed reports contain a `separation`
+provenance section. Any speech guard decisions cover only stem cleanup; they do
+not establish semantic fidelity of the mixture-to-stem operation. Original
+recordings remain unchanged. Missing assets and failed workers never produce a
+successful substitute-cleanup result.

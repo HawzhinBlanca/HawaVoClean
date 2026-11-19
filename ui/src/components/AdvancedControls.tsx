@@ -1,7 +1,16 @@
+import type { Profile } from '../api/types';
 import { useStore } from '../state/store';
 import { toggleAdvancedOpen } from '../state/actions';
 import { ProfileControl } from './ProfileControl';
 import { RestoreControl } from './RestoreControl';
+
+const PROFILE_LABEL: Record<Profile, string> = {
+  studio_pro: 'Studio Pro',
+  dereverb: 'Dereverb',
+  studio: 'Studio',
+  lowband: 'Low-band',
+  production: 'Production',
+};
 
 export function AdvancedControls() {
   const advancedOpen = useStore((s) => s.advancedOpen);
@@ -9,7 +18,7 @@ export function AdvancedControls() {
   const mode = useStore((s) => s.mode);
   const speakerId = useStore((s) => s.speakerId);
 
-  const profileLabel = profile.charAt(0).toUpperCase() + profile.slice(1);
+  const profileLabel = PROFILE_LABEL[profile] ?? profile;
   const modeLabel = mode === 'restore' ? `Restore${speakerId ? ` (${speakerId})` : ''}` : 'Natural';
   const summary = `${profileLabel} · ${modeLabel}`;
 

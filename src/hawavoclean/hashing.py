@@ -62,10 +62,20 @@ def hash_numpy(arr: np.ndarray[Any, Any]) -> str:
     return digest.hexdigest()
 
 
-def hash_json_canonical(obj: Any) -> str:
+def canonical_json_bytes(obj: Any, *, ensure_ascii: bool = False, allow_nan: bool = True) -> bytes:
+    """Encode a JSON-serializable object canonically with sorted keys."""
+    return json.dumps(
+        obj,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=ensure_ascii,
+        allow_nan=allow_nan,
+    ).encode("utf-8")
+
+
+def hash_json_canonical(obj: Any, *, allow_nan: bool = True) -> str:
     """Compute SHA-256 hex digest of a JSON-serializable object with sorted keys."""
-    canonical_json = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hash_bytes(canonical_json.encode("utf-8"))
+    return hash_bytes(canonical_json_bytes(obj, allow_nan=allow_nan))
 
 
 def compute_job_id(

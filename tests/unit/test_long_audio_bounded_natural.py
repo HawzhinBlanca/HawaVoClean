@@ -23,9 +23,9 @@ import soundfile as sf
 import hawavoclean.pipeline as pipeline
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks_streaming
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.progress import ProgressEvent
 from hawavoclean.runtime import process_peak_rss_bytes
+from tests.support.stubs import FixedProbe
 
 TWO_GB_BYTES = 2 * 1024 * 1024 * 1024
 FIVE_HUNDRED_MB_BYTES = 500 * 1024 * 1024

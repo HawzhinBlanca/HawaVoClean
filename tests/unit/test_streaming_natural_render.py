@@ -30,11 +30,11 @@ from hawavoclean.finishing.loudness import (
     measure_loudness_and_peaks,
     measure_loudness_and_peaks_streaming,
 )
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.hashing import hash_bytes, hash_file, hash_numpy
 from hawavoclean.paths import profile_config_path
 from hawavoclean.segmentation.types import SpeechUnit
 from hawavoclean.segmentation.utterances import build_speech_units
+from tests.support.stubs import FixedProbe
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"

@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 
 import hawavoclean.enhancement.worker as worker_mod
-from hawavoclean.enhancement.production import NoOpEnhancer, WienerSpectralEnhancer
+from hawavoclean.enhancement.production import WienerSpectralEnhancer
 from hawavoclean.enhancement.protocol import EnhancementResult, EnhancerMetadata
 from hawavoclean.enhancement.worker import (
     FALLBACK_WORKER_RSS_BYTES,
@@ -45,6 +45,7 @@ from hawavoclean.enhancement.worker import (
     shutdown_pool_cache,
 )
 from hawavoclean.errors import WorkerCrashError, WorkerError
+from tests.support.stubs import NoOpEnhancer
 
 SR = 48000
 

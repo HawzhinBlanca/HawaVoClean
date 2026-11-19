@@ -15,7 +15,6 @@ import pytest
 
 from hawavoclean.config import load_config
 from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.guard.verdict import GuardVerdict
 from hawavoclean.paths import profile_config_path
 from hawavoclean.policy.continuity import (
@@ -26,6 +25,7 @@ from hawavoclean.policy.continuity import (
 )
 from hawavoclean.policy.decision import UnitPolicyDecision
 from hawavoclean.segmentation.types import SpeechUnit
+from tests.support.stubs import FixedProbe
 
 SR = 48000
 TAPER_N = int(round(SR * CONTINUITY_TAPER_MS / 1000.0))

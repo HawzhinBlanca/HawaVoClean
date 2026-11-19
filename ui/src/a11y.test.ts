@@ -5,7 +5,9 @@ import axe from 'axe-core';
 import type { AudioAnalysis, HawaVoCleanReport, UnitDecisionRecord } from './api/types';
 import { useStore } from './state/store';
 import { Header } from './components/Header';
+import { AudioAssistant } from './components/AudioAssistant';
 import { EngineBanner } from './components/EngineBanner';
+import { ProfileControl } from './components/ProfileControl';
 import { SmartExplanation } from './components/SmartExplanation';
 import { AdvancedControls } from './components/AdvancedControls';
 import { Transport } from './components/Transport';
@@ -389,5 +391,93 @@ describe('Accessibility & Axe-core Audit (D4.5)', () => {
     });
     const { seriousOrCritical } = await runAxe(host);
     expect(seriousOrCritical).toEqual([]);
+  });
+
+  it('ProfileControl passes axe-core with Studio Pro and Dereverb available and blocked', async () => {
+    useStore.setState({
+      profile: 'dereverb',
+      capabilities: [
+        { capability_id: 'studio_pro', available: true, maturity: 'qualified', providers: ['mps'] },
+        { capability_id: 'dereverb', available: true, maturity: 'qualified', providers: ['mps'] },
+        { capability_id: 'studio', available: true, maturity: 'qualified', providers: ['cpu'] },
+        { capability_id: 'lowband', available: true, maturity: 'qualified', providers: ['cpu'] },
+        { capability_id: 'production', available: true, maturity: 'qualified', providers: ['cpu'] },
+      ],
+    });
+    await act(async () => {
+      root.render(createElement(ProfileControl));
+    });
+    let check = await runAxe(host);
+    expect(check.seriousOrCritical).toEqual([]);
+
+    await act(async () => {
+      useStore.setState({
+        profile: 'studio',
+        capabilities: [
+          {
+            capability_id: 'studio_pro',
+            available: false,
+            maturity: 'blocked',
+            reason: 'MossFormer2_SE_48K weights not installed.',
+          },
+          {
+            capability_id: 'dereverb',
+            available: false,
+            maturity: 'blocked',
+            reason: 'GAP-URGENet weights not installed.',
+          },
+        ],
+      });
+    });
+    check = await runAxe(host);
+    expect(check.seriousOrCritical).toEqual([]);
+  });
+
+  it('AudioAssistant passes axe-core with active waveform region pill and guarded restore plan', async () => {
+    const planAudio = async () => ({
+      operation: 'restore' as const,
+      target: null,
+      cleanup_profile: null,
+      model_size: 'large' as const,
+      quality: 'high' as const,
+      strength: 0.8,
+      time_range: null,
+      explanation: 'Restore missing high frequencies in the selected region.',
+      provider: 'ollama' as const,
+      needs_clarification: false,
+    });
+    const assistantStatus = async () => ({ provider: 'auto' as const, cloud_text_available: false });
+    useStore.setState({
+      engineStatus: 'ready',
+      client: { planAudio, assistantStatus } as unknown as NonNullable<
+        ReturnType<typeof useStore.getState>['client']
+      >,
+      source: { path: '/take1.wav', name: 'take1.wav', sourceId: 'abc', origin: 'file' },
+      original: fakeAnalysis({ duration_s: 60 }),
+      selectionRange: { start: 15, end: 28 },
+      capabilities: [
+        { capability_id: 'studio_pro', available: true, maturity: 'qualified', providers: ['mps'] },
+        { capability_id: 'restore_source', available: true, maturity: 'experimental', providers: ['mps'] },
+      ],
+    });
+    await act(async () => {
+      root.render(createElement(AudioAssistant));
+    });
+    let check = await runAxe(host);
+    expect(check.seriousOrCritical).toEqual([]);
+
+    const textarea = host.querySelector('textarea')!;
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), 'value')?.set;
+    await act(async () => {
+      setter?.call(textarea, 'Restore missing highs');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      host
+        .querySelector('form')
+        ?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    check = await runAxe(host);
+    expect(check.seriousOrCritical).toEqual([]);
   });
 });

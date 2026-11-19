@@ -72,6 +72,7 @@ export function handleKeyDown(e: KeyboardEvent): void {
       else if (running) void cancelJob();
       else if (st.rejection) st.setRejection(null);
       else if (st.selectedUnit) clearSelection();
+      else if (st.selectionRange) st.setSelectionRange(null);
       return;
     }
     case 'ArrowLeft':

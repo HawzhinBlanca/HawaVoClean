@@ -16,6 +16,8 @@ coverage.xml
 
 # HawaVoClean runtime state
 .hawavoclean-work/
+.local-ai/
+checkpoints/
 test_output/
 data/acceptance/outputs/
 data/kurdish_speakers/

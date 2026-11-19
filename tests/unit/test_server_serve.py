@@ -24,6 +24,13 @@ pytestmark = pytest.mark.unit
 REPO = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_server_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep test servers off the user's live desktop job-store lock."""
+    monkeypatch.setenv("HAWAVOCLEAN_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path / "work"))
+
+
 def _get(url: str, token: str | None = "t") -> tuple[int, Any]:
     req = urllib.request.Request(url, headers={"X-Hawa-Token": token} if token else {})
     try:

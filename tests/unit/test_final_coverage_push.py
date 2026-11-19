@@ -7,8 +7,6 @@ import pytest
 
 from hawavoclean.config import EnhancementConfig, HawaVoCleanConfig
 from hawavoclean.errors import ConfigError, PreflightError
-from hawavoclean.model_packs.errors import ModelPackManifestError
-from hawavoclean.model_packs.manifest import _parse_payload, _validated_payload_path
 from hawavoclean.natural_contract import (
     _probe_optional_runtime_contract,
     load_natural_route_contract,
@@ -135,53 +133,3 @@ def test_native_source_registry_authorizes_cleanup_on_vanished(tmp_path: Path) -
     assert reg.authorizes(f) is False
     # Registry should have cleaned up the entry
     assert source.source_id not in reg._entries
-
-
-# --- 3. Model Packs Manifest Edge Cases ---
-
-
-def test_validate_payload_edge_cases() -> None:
-    # 1. Role mismatch
-    with pytest.raises(ModelPackManifestError, match="role mismatch"):
-        _parse_payload(
-            {
-                "role": "verifier",
-                "path": "models/model.onnx",
-                "sha256": "a" * 64,
-                "size_bytes": 100,
-            },
-            role="model",
-            include_role=True,
-        )
-
-    # 2. Invalid sha256
-    with pytest.raises(ModelPackManifestError, match="invalid SHA-256"):
-        _parse_payload(
-            {"path": "models/model.onnx", "sha256": "bad-hash", "size_bytes": 100},
-            role="model",
-            include_role=False,
-        )
-
-    # 3. Non-positive size_bytes
-    with pytest.raises(ModelPackManifestError, match="positive integer"):
-        _parse_payload(
-            {"path": "models/model.onnx", "sha256": "a" * 64, "size_bytes": 0},
-            role="model",
-            include_role=False,
-        )
-
-
-def test_validated_payload_path_edge_cases() -> None:
-    # 1. Empty string
-    with pytest.raises(ModelPackManifestError, match="empty or too long"):
-        _validated_payload_path("")
-
-    # 2. Exceeding 512 bytes
-    long_path = "a" * 513
-    with pytest.raises(ModelPackManifestError, match="empty or too long"):
-        _validated_payload_path(long_path)
-
-    # 3. Non-NFC unicode (NFD composed form)
-    nfd_str = "e\u0301"  # 'é' in decomposed form
-    with pytest.raises(ModelPackManifestError, match="Unicode NFC"):
-        _validated_payload_path(nfd_str)

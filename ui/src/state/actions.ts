@@ -29,6 +29,7 @@ import {
 import {
   getRouteBlockedReason,
   getState,
+  isProfileUnavailable,
   isRouteBlocked,
   jobInFlight,
   useStore,
@@ -1483,7 +1484,21 @@ function uniqueOutputPath(inputPath: string, profile: Profile): string | null {
  */
 let creatingJob = false;
 
-export async function startJob(): Promise<void> {
+const MANUAL_CLEANUP_ROUTES = new Set<string>([
+  'production',
+  'studio',
+  'studio_pro',
+  'dereverb',
+  'lowband',
+]);
+
+function unavailableProfileMessage(route: string): string {
+  if (route === 'studio_pro') return 'Studio Pro is unavailable on this machine.';
+  if (route === 'dereverb') return 'Dereverb is unavailable on this machine.';
+  return 'This cleanup option is unavailable.';
+}
+
+export async function startJob(strategyOverride?: ProcessingStrategyV1): Promise<void> {
   const st = getState();
   if (!st.source) return;
   if (creatingJob || jobInFlight(st.job)) return;
@@ -1498,7 +1513,11 @@ export async function startJob(): Promise<void> {
     st.setStatus('Cannot start a run while the engine is offline — waiting for it to come back');
     return;
   }
-  const profile: Profile = st.profile;
+  const profile: Profile = strategyOverride?.kind === 'separate'
+    ? (strategyOverride.cleanup_profile ?? 'production')
+    : strategyOverride?.kind === 'manual' && MANUAL_CLEANUP_ROUTES.has(strategyOverride.route)
+      ? strategyOverride.route as Profile
+      : st.profile;
   creatingJob = true;
   try {
     const client = requireClient();
@@ -1510,7 +1529,51 @@ export async function startJob(): Promise<void> {
 
     // Fail-closed capability & reconstruction consent checks (True-10 D4.11)
     let strategy: ProcessingStrategyV1;
-    if (st.mode === 'smart_safe') {
+    if (strategyOverride) {
+      if (strategyOverride.kind === 'separate') {
+        const cap = st.capabilities?.find((c) => c.capability_id === 'separate');
+        if (!cap?.available || cap.maturity === 'blocked') {
+          throw new EngineError(503, 'capability_blocked', cap?.reason || 'Sound separation is not installed yet.');
+        }
+        if (
+          strategyOverride.cleanup_profile &&
+          isProfileUnavailable(st.capabilities, strategyOverride.cleanup_profile)
+        ) {
+          const reason =
+            getRouteBlockedReason(st.capabilities, strategyOverride.cleanup_profile) ||
+            unavailableProfileMessage(strategyOverride.cleanup_profile);
+          st.setStatus(`Route ${strategyOverride.cleanup_profile} is blocked: ${reason}`);
+          st.setError(reason, 'Capability blocked');
+          return;
+        }
+        if (!st.original || !Number.isFinite(st.original.duration_s) || st.original.duration_s > 3600 || st.original.channels > 2) {
+          throw new EngineError(422, 'separation_limit', 'Sound separation currently supports recordings up to 60 minutes in mono or stereo.');
+        }
+      } else if (strategyOverride.kind === 'manual' && MANUAL_CLEANUP_ROUTES.has(strategyOverride.route)) {
+        if (isProfileUnavailable(st.capabilities, strategyOverride.route)) {
+          const reason =
+            getRouteBlockedReason(st.capabilities, strategyOverride.route) ||
+            unavailableProfileMessage(strategyOverride.route);
+          st.setStatus(`Route ${strategyOverride.route} is blocked: ${reason}`);
+          st.setError(reason, 'Capability blocked');
+          return;
+        }
+      } else if (strategyOverride.kind === 'manual' && strategyOverride.route === 'restore_source' && strategyOverride.allow_generative_reconstruction) {
+        const cap = st.capabilities?.find((c) => c.capability_id === 'restore_source');
+        if (!cap?.available || cap.maturity === 'blocked') {
+          const reason = cap?.reason || 'Bandwidth restoration is unavailable.';
+          st.setStatus(`Restore is blocked: ${reason}`);
+          st.setError(reason, 'Capability blocked');
+          return;
+        }
+      } else {
+        throw new EngineError(422, 'bad_request', 'This assistant plan is not a supported edit.');
+      }
+      if (typeof client.createV1Jobs !== 'function') {
+        throw new EngineError(503, 'capability_blocked', 'Update the audio engine to use the assistant.');
+      }
+      strategy = strategyOverride;
+    } else if (st.mode === 'smart_safe') {
       if (isRouteBlocked(st.capabilities, 'smart_safe')) {
         const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
         st.setStatus(`Smart Safe is blocked: ${reason || 'unqualified'}`);
@@ -1543,10 +1606,10 @@ export async function startJob(): Promise<void> {
         allow_generative_reconstruction: true,
       };
     } else {
-      if (isRouteBlocked(st.capabilities, profile)) {
+      if (isProfileUnavailable(st.capabilities, profile)) {
         const reason = getRouteBlockedReason(st.capabilities, profile);
         st.setStatus(`Route ${profile} is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || `Route ${profile} is blocked`, 'Capability blocked');
+        st.setError(reason || unavailableProfileMessage(profile), 'Capability blocked');
         return;
       }
       strategy = {
@@ -1598,6 +1661,14 @@ export async function startJob(): Promise<void> {
         ...restore,
       });
       jobItem = { jobId: res.job_id, outputPath: res.output_path, reportPath: res.report_path };
+    }
+
+    // An assistant plan belongs to the recording it was reviewed against.
+    // A source swap while the server accepts the job must not attach that
+    // old recording's edit to the newly opened clip.
+    if (strategyOverride && getState().source !== st.source) {
+      if (typeof client.cancelV1Job === 'function') await client.cancelV1Job(jobItem.jobId);
+      throw new EngineError(409, 'source_changed', 'The recording changed. Review a new plan before applying it.');
     }
 
     // Only now, with a job id in hand, is the previous run's result really
@@ -1756,10 +1827,10 @@ export async function submitBatch(
         allow_generative_reconstruction: true,
       };
     } else {
-      if (isRouteBlocked(st.capabilities, st.profile)) {
+      if (isProfileUnavailable(st.capabilities, st.profile)) {
         const reason = getRouteBlockedReason(st.capabilities, st.profile);
         st.setStatus(`Route ${st.profile} is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || `Route ${st.profile} is blocked`, 'Capability blocked');
+        st.setError(reason || unavailableProfileMessage(st.profile), 'Capability blocked');
         return;
       }
       strategy = {
@@ -2613,6 +2684,47 @@ export function togglePlay(): void {
 
 export function seekTo(time: number): void {
   getPlayer().seek(time);
+}
+
+function currentPlayheadTime(): number {
+  const player = getPlayer();
+  const hasDeck =
+    typeof player.hasDeck === 'function' &&
+    (player.hasDeck('original') || player.hasDeck('cleaned'));
+  const raw = hasDeck && Number.isFinite(player.time) ? player.time : getState().currentTime;
+  const dur = getState().original?.duration_s ?? getState().duration ?? 0;
+  const clamped = Math.max(0, dur > 0 ? Math.min(dur, raw) : raw);
+  return Math.round(clamped * 100) / 100;
+}
+
+/** Mark the region start at the current playhead time (preserving a later end, else clip end). */
+export function markSelectionStart(): void {
+  const st = getState();
+  const dur = st.original?.duration_s ?? st.duration ?? 0;
+  if (!(dur > 0)) return;
+  const t = currentPlayheadTime();
+  const sel = st.selectionRange;
+  const end = sel && Number.isFinite(sel.end) && sel.end > t ? Math.min(dur, sel.end) : dur;
+  if (end <= t) return;
+  st.setSelectionRange({ start: t, end: Math.round(end * 100) / 100 });
+}
+
+/** Mark the region end at the current playhead time (preserving an earlier start, else 0). */
+export function markSelectionEnd(): void {
+  const st = getState();
+  const dur = st.original?.duration_s ?? st.duration ?? 0;
+  if (!(dur > 0)) return;
+  const t = currentPlayheadTime();
+  if (!(t > 0)) return;
+  const sel = st.selectionRange;
+  const start = sel && Number.isFinite(sel.start) && sel.start < t ? Math.max(0, sel.start) : 0;
+  if (t <= start) return;
+  st.setSelectionRange({ start: Math.round(start * 100) / 100, end: t });
+}
+
+/** Clear the active waveform time-range selection. */
+export function clearSelectionRange(): void {
+  getState().setSelectionRange(null);
 }
 
 /** D2 · Plays only the current selection range. Auto-pauses at the end. */

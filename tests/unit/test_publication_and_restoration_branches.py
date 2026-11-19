@@ -75,7 +75,7 @@ def test_read_generation_manifest_errors(tmp_path: Path) -> None:
         return "c" * 64
 
     with (
-        patch("hawavoclean.publication._sha256_file", side_effect=mock_sha),
+        patch("hawavoclean.publication.hash_file", side_effect=mock_sha),
         pytest.raises(PublicationError, match="does not derive its ID"),
     ):
         _verify_generation(gen_dir)

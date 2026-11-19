@@ -507,50 +507,49 @@ def test_unknown_route_raises_value_error() -> None:
 
 
 def test_estimate_candidate_mos_near_silent_and_evidence_weighting() -> None:
-    """_estimate_candidate_mos covers silence, studio risks, and rumble/restore boosts."""
+    """_estimate_candidate_mos uses perceptual audio scoring (no hardcoded route tables)."""
     sr = 48000
     silent_audio = np.zeros(sr // 2, dtype=np.float32)
-    audio = _make_speech_signal(duration_s=0.5, sr=sr)
+    audio = _make_speech_signal(duration_s=1.0, sr=sr)
+    rng = np.random.default_rng(7)
+    noisy_audio = np.clip(
+        audio + rng.standard_normal(len(audio)).astype(np.float32) * 0.18, -1.0, 1.0
+    ).astype(np.float32)
     engine = SmartSafePreviewEngine(allow_research_restore=True)
 
-    # 1. Near-silent audio produces default score 3.0
+    # 1. Near-silent audio produces neutral score 3.0
     ev_silent = engine.generate_preview(
         "production", silent_audio, sr, acoustic_evidence=_evidence()
     )
     assert ev_silent.evidence.predicted_quality_mos == 3.0
 
-    # 2. Studio with high crosstalk and music risk penalizes MOS
+    # 2. Real waveform scoring: identical audio yields identical MOS regardless of route label
     from hawavoclean.smart_safe.preview import _estimate_candidate_mos
 
-    ev_risky = _evidence(speech_dominance=0.72, music_risk=0.19, crosstalk_risk=0.19)
-    ev_clean = _evidence(speech_dominance=0.98, music_risk=0.01, crosstalk_risk=0.01)
-    mos_risky, _ = _estimate_candidate_mos(
-        "studio", audio, audio, guards_passed=True, evidence=ev_risky
+    ev = _evidence()
+    mos_preserve, _ = _estimate_candidate_mos(
+        "preserve", audio, audio, guards_passed=True, evidence=ev, sample_rate=sr
     )
-    mos_clean, _ = _estimate_candidate_mos(
-        "studio", audio, audio, guards_passed=True, evidence=ev_clean
-    )
-    assert mos_risky < mos_clean
-
-    # 3. Lowband and lowband_then_production with rumble confidence boost
-    ev_rumble = _evidence(rumble_confidence=0.98)
-    mos_lb, _ = _estimate_candidate_mos(
-        "lowband", audio, audio, guards_passed=True, evidence=ev_rumble
-    )
-    mos_lb_prod, _ = _estimate_candidate_mos(
-        "lowband_then_production", audio, audio, guards_passed=True, evidence=ev_rumble
-    )
-    assert mos_lb >= 3.75
-    assert mos_lb_prod >= 4.0
-
-    # 4. Restore enrolled with verified speaker match
-    ev_enrolled = _evidence(
-        band_limited_confidence=0.98, speaker_match_verified=True, speaker_match_confidence=0.99
+    mos_studio, _ = _estimate_candidate_mos(
+        "studio", audio, audio, guards_passed=True, evidence=ev, sample_rate=sr
     )
     mos_enrolled, _ = _estimate_candidate_mos(
-        "restore_enrolled", audio, audio, guards_passed=True, evidence=ev_enrolled
+        "restore_enrolled", audio, audio, guards_passed=True, evidence=ev, sample_rate=sr
     )
-    assert mos_enrolled >= 4.2
+    assert mos_preserve == mos_studio == mos_enrolled
+
+    # 3. Clean speech scores strictly higher than heavily noisy audio
+    mos_noisy, _ = _estimate_candidate_mos(
+        "production", audio, noisy_audio, guards_passed=True, evidence=ev, sample_rate=sr
+    )
+    assert mos_preserve > mos_noisy
+
+    # 4. Failed hard guard always floors MOS to 1.50
+    mos_failed, conf_failed = _estimate_candidate_mos(
+        "studio", audio, audio, guards_passed=False, evidence=ev, sample_rate=sr
+    )
+    assert mos_failed == 1.50
+    assert conf_failed == 0.95
 
 
 def test_core_exception_handling_in_preview_generation(monkeypatch: pytest.MonkeyPatch) -> None:

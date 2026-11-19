@@ -15,7 +15,13 @@ import { chooseStep, formatSeconds, formatTime, tickLabel, timeTicksIn } from '.
 import { waveView } from '../render/viewWindow';
 import type { WaveKind } from '../render/waveformProtocol';
 import '../render/waveZoom.css';
-import { seekTo } from '../state/actions';
+import {
+  clearSelectionRange,
+  markSelectionEnd,
+  markSelectionStart,
+  seekTo,
+} from '../state/actions';
+import { useI18n } from '../state/i18n';
 import { channelName, reportChannels } from '../state/selection';
 import { getState, useStore } from '../state/store';
 import { VerdictStrip } from './VerdictStrip';
@@ -75,6 +81,7 @@ interface DetailKey {
 }
 
 export function WaveformDisplay() {
+  const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const displayRef = useRef<HTMLDivElement | null>(null);
@@ -311,12 +318,18 @@ export function WaveformDisplay() {
     const selOv = selOverlayRef.current;
     if (selOv) {
       const sel = getState().selectionRange;
-      if (sel && dur > 0 && span > 0) {
+      if (sel && sel.end > sel.start && dur > 0 && span > 0) {
         const left = ((sel.start - v.start) / span) * 100;
         const right = ((sel.end - v.start) / span) * 100;
-        selOv.style.display = '';
-        selOv.style.left = `${Math.max(0, left)}%`;
-        selOv.style.width = `${Math.min(100, right) - Math.max(0, left)}%`;
+        if (right <= 0 || left >= 100) {
+          selOv.style.display = 'none';
+        } else {
+          const clampedLeft = Math.max(0, left);
+          const clampedRight = Math.min(100, right);
+          selOv.style.display = '';
+          selOv.style.left = `${clampedLeft}%`;
+          selOv.style.width = `${Math.max(0, clampedRight - clampedLeft)}%`;
+        }
       } else {
         selOv.style.display = 'none';
       }
@@ -734,17 +747,24 @@ export function WaveformDisplay() {
     [timeAt, setSelectionRange],
   );
 
-  const onPointerUp = useCallback((e: PointerEvent<HTMLDivElement>) => {
-    if (selDragStart.current !== null) {
-      selDragStart.current = null;
-      release(e.currentTarget, e.pointerId);
-      return;
-    }
-    if (dragging.current) {
-      dragging.current = false;
-      release(e.currentTarget, e.pointerId);
-    }
-  }, []);
+  const onPointerUp = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (selDragStart.current !== null) {
+        selDragStart.current = null;
+        const sel = getState().selectionRange;
+        if (sel && sel.end - sel.start < 0.05) {
+          setSelectionRange(null);
+        }
+        release(e.currentTarget, e.pointerId);
+        return;
+      }
+      if (dragging.current) {
+        dragging.current = false;
+        release(e.currentTarget, e.pointerId);
+      }
+    },
+    [setSelectionRange],
+  );
 
   const onPointerLeave = useCallback(() => {
     hostRef.current?.setHover(null);
@@ -800,33 +820,27 @@ export function WaveformDisplay() {
           panBy(1);
           break;
         case 'Escape':
-          // D2: clear selection range
-          setSelectionRange(null);
+          // D2: clear selection range only when one is active; otherwise let
+          // the global keyboard map handle Escape (e.g. cancelling a running job).
+          if (!getState().selectionRange) return;
+          clearSelectionRange();
           break;
         case 'i':
         case 'I':
-          // D2: NLE in-point — set selection start to current time
-          {
-            const t = getState().currentTime;
-            const sel = getState().selectionRange;
-            setSelectionRange({ start: t, end: sel?.end ?? t });
-          }
+          // D2: NLE in-point — set selection start to live playhead time
+          markSelectionStart();
           break;
         case 'o':
         case 'O':
-          // D2: NLE out-point — set selection end to current time
-          {
-            const t = getState().currentTime;
-            const sel = getState().selectionRange;
-            setSelectionRange({ start: sel?.start ?? t, end: t });
-          }
+          // D2: NLE out-point — set selection end to live playhead time
+          markSelectionEnd();
           break;
         default:
           return;
       }
       e.preventDefault();
     },
-    [panBy, setSelectionRange],
+    [panBy],
   );
 
   /**
@@ -942,13 +956,15 @@ export function WaveformDisplay() {
   }, []);
 
   const hasData = Boolean(original);
+  const hasSelection = Boolean(selectionRange && selectionRange.end > selectionRange.start);
 
   return (
     <section className="panel wavepanel" ref={panelRef} aria-label="Waveform">
       <p className="sr-only" id="wave-view-help">
         Plus and minus zoom about the centre, zero fits the whole clip, Page Up
         and Page Down move one windowful, Home and End go to the start and the
-        end. Left and right arrows seek the transport.
+        end. Left and right arrows seek the transport. Shift plus drag, or I and
+        O, select a time region; Escape clears it.
       </p>
       <div className="panel-head">
         <h2 className="panel-title">
@@ -956,6 +972,39 @@ export function WaveformDisplay() {
           {source ? <span className="sub">· {source.name}</span> : null}
         </h2>
         <div className="wave-legend-head">
+          <span className="wave-region" role="group" aria-label="Waveform region picker">
+            <button
+              type="button"
+              className="wave-fit wave-mark"
+              onClick={markSelectionStart}
+              disabled={!hasData}
+              aria-label="Mark region start at playhead"
+              title="Mark region start (I) · or Shift+drag on waveform"
+            >
+              {t.markStart}
+            </button>
+            <button
+              type="button"
+              className="wave-fit wave-mark"
+              onClick={markSelectionEnd}
+              disabled={!hasData}
+              aria-label="Mark region end at playhead"
+              title="Mark region end (O) · or Shift+drag on waveform"
+            >
+              {t.markEnd}
+            </button>
+            {hasSelection ? (
+              <button
+                type="button"
+                className="wave-fit wave-mark-clear"
+                onClick={clearSelectionRange}
+                aria-label="Clear selected region"
+                title="Clear selected region (Esc)"
+              >
+                {t.clearRegion}
+              </button>
+            ) : null}
+          </span>
           <span className="wave-zoom">
             <span className="range" ref={rangeRef} data-testid="zoom-range">
               No clip

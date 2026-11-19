@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.pipeline import run_pipeline
+from tests.support.stubs import FixedProbe
 
 
 @pytest.mark.unit

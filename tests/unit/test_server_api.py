@@ -37,6 +37,9 @@ def work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Point the profiles root away from the checkout: health's speaker list
     # must be what a test stages, not whatever the repo's profiles/ holds.
     monkeypatch.setenv("HAWAVOCLEAN_PROFILES_DIR", str(tmp_path / "profiles"))
+    # Isolate optional LavaSR weights so maturity-blocked contract tests are
+    # independent of host-local cached checkpoints.
+    monkeypatch.setenv("HAWAVOCLEAN_LAVASR_MODEL_DIR", str(tmp_path / "no-lavasr"))
     return tmp_path
 
 
@@ -205,8 +208,10 @@ def test_v1_capabilities_are_maturity_bound_not_file_presence(
     assert capabilities["preserve"]["maturity"] == "blocked"
     assert "Smart Safe candidate" in capabilities["preserve"]["reason"]
     assert capabilities["smart_analysis"]["maturity"] == "experimental"
-    assert capabilities["smart_safe"]["maturity"] == "qualified"
+    assert capabilities["smart_safe"]["maturity"] == "experimental"
     assert capabilities["smart_safe"]["available"] is True
+    assert capabilities["smart_safe"].get("reason")
+    assert "studio_pro" in capabilities
     assert capabilities["restore_source"]["available"] is False
     assert capabilities["restore_enrolled"]["available"] is False
     assert client.get("/api/health", headers=H).json()["restore_available"] is False

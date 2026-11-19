@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Actions } from './components/Actions';
+import { AudioAssistant } from './components/AudioAssistant';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
@@ -184,6 +185,7 @@ export default function App() {
                 the section stays: it names the landmark, which is a different
                 job from being a stop in the heading list. */}
             <h2 className="sr-only">Processing controls</h2>
+            <AudioAssistant />
             <SmartExplanation />
             <ProcessButton />
             <Transport />

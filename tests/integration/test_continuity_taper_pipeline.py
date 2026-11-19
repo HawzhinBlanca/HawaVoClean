@@ -19,7 +19,6 @@ import hawavoclean.pipeline as pipeline_module
 from hawavoclean.assembly.stitch import assemble_channel_timeline
 from hawavoclean.audio.decode import decode_audio_to_memmap
 from hawavoclean.config import load_config
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.guard.verdict import GuardVerdict
 from hawavoclean.paths import profile_config_path
 from hawavoclean.pipeline import run_pipeline
@@ -32,6 +31,7 @@ from hawavoclean.policy.continuity import (
 from hawavoclean.policy.decision import UnitPolicyDecision, evaluate_unit_policy
 from hawavoclean.report.schema import HawaVoCleanReport
 from hawavoclean.segmentation.types import SpeechUnit
+from tests.support.stubs import FixedProbe
 
 FIXTURE = Path("tests/fixtures/sample_sorani_podcast.wav")
 SR = 48000

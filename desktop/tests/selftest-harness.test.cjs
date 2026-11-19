@@ -24,7 +24,7 @@ function resultFixture() {
     remoteBlocked: true,
     popupBlocked: true,
     nodeHidden: true,
-    topLevelKeys: ['app', 'diagnostics', 'engine', 'files', 'host', 'session', 'updates'],
+    topLevelKeys: ['app', 'engine', 'files', 'host', 'session'],
     app: { name: 'HawaVoClean', version: '3.3.0', packaged: true },
     renderer: {
       contract: 'hawavoclean-react-v1',
@@ -47,15 +47,6 @@ function resultFixture() {
       moduleScriptCount: 1,
       documentTitle: 'HawaVoClean',
     },
-    diagnostics: {
-      status: 'ready',
-      optIn: false,
-      canExport: false,
-      reason: 'Opt-in required to retain diagnostics',
-      pendingErrorCount: 0,
-      telemetryEgress: 'none',
-    },
-    updates: { status: 'disabled', reason: 'release_feed_not_configured', canCheck: false },
   };
 }
 

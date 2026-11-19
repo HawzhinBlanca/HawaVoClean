@@ -426,6 +426,13 @@ describe('Escape — stop the innermost thing that is happening', () => {
     expect(getState().highlightRange).toBeNull();
   });
 
+  it('clears an active waveform region selection when idle and no unit is selected', () => {
+    armed();
+    getState().setSelectionRange({ start: 10, end: 22 });
+    press('Escape');
+    expect(getState().selectionRange).toBeNull();
+  });
+
   it('is swallowed even when there is nothing to stop', () => {
     const ev = press('Escape');
     expect(ev.defaultPrevented).toBe(true);

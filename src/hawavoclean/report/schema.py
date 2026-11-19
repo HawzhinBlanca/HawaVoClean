@@ -234,6 +234,7 @@ class HawaVoCleanReport(ReportBaseModel):
     #: this list is the journey, including any auto-discarded pass.
     passes: list[PassRecord] = Field(default_factory=list)
     restoration: dict[str, Any] | None = None
+    separation: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def release_matches_schema(self) -> "HawaVoCleanReport":

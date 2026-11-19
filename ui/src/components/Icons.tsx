@@ -115,14 +115,6 @@ export function IconWarn({ size, ...rest }: P) {
   );
 }
 
-export function IconSpark({ size, ...rest }: P) {
-  return (
-    <svg {...base(size, rest)}>
-      <path d="M8 2v3M8 11v3M2 8h3M11 8h3M4 4l2 2M10 10l2 2M12 4l-2 2M6 10l-2 2" />
-    </svg>
-  );
-}
-
 export function IconBolt({ size, ...rest }: P) {
   return (
     <svg {...base(size, rest)}>

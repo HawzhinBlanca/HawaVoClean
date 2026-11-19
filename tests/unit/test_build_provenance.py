@@ -1,6 +1,5 @@
 """Adversarial coverage for build and installed-distribution provenance."""
 
-import hashlib
 import io
 import json
 import subprocess
@@ -12,6 +11,7 @@ from typing import Any
 import pytest
 
 import hawavoclean.provenance as provenance
+from hawavoclean.hashing import hash_json_canonical
 from hawavoclean.provenance import ProvenanceError
 from hawavoclean.release import RELEASE_IDENTITY
 
@@ -26,13 +26,13 @@ def _valid_identity(artifact_type: str = "source-tree") -> dict[str, Any]:
         "dependency_lock_sha256": "b" * 64,
         "release_identity_sha256": RELEASE_IDENTITY.identity_sha256,
     }
-    base["build_id"] = hashlib.sha256(provenance._canonical(base)).hexdigest()
+    base["build_id"] = hash_json_canonical(base)
     return base
 
 
 def _recompute(value: dict[str, Any]) -> dict[str, Any]:
     base = {key: item for key, item in value.items() if key != "build_id"}
-    value["build_id"] = hashlib.sha256(provenance._canonical(base)).hexdigest()
+    value["build_id"] = hash_json_canonical(base)
     return value
 
 

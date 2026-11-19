@@ -556,7 +556,7 @@ def test_concurrent_publishers_serialize_to_one_complete_generation(tmp_path: Pa
     [
         ("copy", publication, "_copy_fsync"),
         ("write", publication, "_write_bytes_fsync"),
-        ("directory-fsync", publication, "_fsync_directory"),
+        ("directory-fsync", publication, "flush_directory"),
         ("rename-no-replace", publication, "rename_new_path"),
         ("replace", publication, "replace_path"),
         ("staging-cleanup", shutil, "rmtree"),

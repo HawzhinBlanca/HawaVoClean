@@ -3,7 +3,12 @@ import { useEffect, useRef } from 'react';
 import type { JobStage, JobStatus } from '../api/types';
 import { cancelJob, startJob } from '../state/actions';
 import { useReducedMotion } from '../state/reducedMotion';
-import { getRouteBlockedReason, isRouteBlocked, useStore } from '../state/store';
+import {
+  getRouteBlockedReason,
+  isProfileUnavailable,
+  isRouteBlocked,
+  useStore,
+} from '../state/store';
 import { IconBolt, IconCheck, IconWarn } from './Icons';
 import '../styles/process.css';
 
@@ -219,8 +224,15 @@ export function ProcessButton() {
   const restoreBlockedReason = restoreBlocked ? getRouteBlockedReason(capabilities, restoreCapId) : null;
   const restoreMissingConsent = isRestore && !reconstructionConsent;
 
-  const naturalBlocked = mode === 'natural' && isRouteBlocked(capabilities, profile);
-  const naturalBlockedReason = naturalBlocked ? getRouteBlockedReason(capabilities, profile) : null;
+  const naturalBlocked = mode === 'natural' && isProfileUnavailable(capabilities, profile);
+  const naturalBlockedReason = naturalBlocked
+    ? (getRouteBlockedReason(capabilities, profile) ??
+      (profile === 'studio_pro'
+        ? 'Studio Pro is unavailable on this machine.'
+        : profile === 'dereverb'
+          ? 'Dereverb is unavailable on this machine.'
+          : null))
+    : null;
 
   const smartSafeBlocked = mode === 'smart_safe' && isRouteBlocked(capabilities, 'smart_safe');
   const smartSafeBlockedReason = smartSafeBlocked ? getRouteBlockedReason(capabilities, 'smart_safe') : null;
@@ -291,7 +303,9 @@ export function ProcessButton() {
     const s = status?.report?.summary;
     cells = [
       { k: 'Result', v: 'Complete' },
-      { k: 'Units', v: s ? `${s.enhanced ?? 0} / ${s.units_total ?? 0}` : '—', num: true },
+      status?.report?.separation
+        ? { k: 'Edit', v: status.report.separation.operation === 'extract' ? 'Extract' : 'Remove' }
+        : { k: 'Units', v: s ? `${s.enhanced ?? 0} / ${s.units_total ?? 0}` : '—', num: true },
       { k: 'Took', v: fmtElapsed(finalSec), num: true },
     ];
   } else if (state === 'failed') {

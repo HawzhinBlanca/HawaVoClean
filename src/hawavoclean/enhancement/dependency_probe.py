@@ -13,6 +13,7 @@ versa).
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 from typing import Any
@@ -109,9 +110,118 @@ def probe_lowband_runtime_contract() -> None:
     _probe_deepfilternet_runtime_contract()
 
 
+def probe_studio_pro_runtime_contract() -> None:
+    """Validate Studio Pro's MossFormer2_SE_48K imports and SHA-256 weight lock.
+
+    Deliberately model-cold: verifies required Python/native symbols and
+    streams the checkpoint through SHA-256 without constructing the neural
+    network or allocating tensor weights. All failure messages are path-free.
+    """
+
+    try:
+        import torch
+    except Exception as exc:
+        raise RuntimeDependencyContractError(
+            f"torch import failed ({type(exc).__name__})"
+        ) from None
+    for attribute in ("device", "from_numpy", "no_grad", "stft", "istft", "load"):
+        _require_callable(torch, attribute, f"torch.{attribute}")
+
+    try:
+        ta_kaldi = importlib.import_module("torchaudio.compliance.kaldi")
+        ta_functional = importlib.import_module("torchaudio.functional")
+    except Exception as exc:
+        raise RuntimeDependencyContractError(
+            f"torchaudio import failed ({type(exc).__name__})"
+        ) from None
+    _require_callable(ta_kaldi, "fbank", "torchaudio.compliance.kaldi.fbank")
+    _require_callable(ta_functional, "compute_deltas", "torchaudio.functional.compute_deltas")
+
+    try:
+        arch_mod = importlib.import_module("hawavoclean.enhancement.mossformer2_arch")
+    except Exception as exc:
+        raise RuntimeDependencyContractError(
+            f"mossformer2_arch import failed ({type(exc).__name__})"
+        ) from None
+    _require_callable(
+        arch_mod,
+        "MossFormer2SE48K",
+        "hawavoclean.enhancement.mossformer2_arch.MossFormer2SE48K",
+    )
+    _require_callable(
+        arch_mod,
+        "extract_mossformer2_features",
+        "hawavoclean.enhancement.mossformer2_arch.extract_mossformer2_features",
+    )
+    _require_callable(
+        arch_mod,
+        "apply_mossformer2_mask",
+        "hawavoclean.enhancement.mossformer2_arch.apply_mossformer2_mask",
+    )
+
+    from hawavoclean.enhancement.studio_pro import verify_studio_pro_weights
+
+    weights_ok, reason = verify_studio_pro_weights()
+    if not weights_ok:
+        raise RuntimeDependencyContractError(reason)
+
+
+def probe_dereverb_runtime_contract() -> None:
+    """Validate Dereverb's pure-PyTorch TF-GridNetV3 imports and SHA-256 weight lock.
+
+    Deliberately model-cold: verifies required Python/native symbols and
+    streams ``Predictor.pt`` through SHA-256 without constructing the neural
+    network or allocating tensor weights. All failure messages are path-free.
+    """
+
+    try:
+        import torch
+    except Exception as exc:
+        raise RuntimeDependencyContractError(
+            f"torch import failed ({type(exc).__name__})"
+        ) from None
+    for attribute in ("device", "from_numpy", "inference_mode", "stft", "istft", "load"):
+        _require_callable(torch, attribute, f"torch.{attribute}")
+
+    try:
+        importlib.import_module("torchaudio")
+    except Exception as exc:
+        raise RuntimeDependencyContractError(
+            f"torchaudio import failed ({type(exc).__name__})"
+        ) from None
+
+    try:
+        dereverb_mod = importlib.import_module("hawavoclean.enhancement.dereverb_neural")
+    except Exception as exc:
+        raise RuntimeDependencyContractError(
+            f"dereverb_neural import failed ({type(exc).__name__})"
+        ) from None
+    _require_callable(
+        dereverb_mod,
+        "NeuralDereverbCore",
+        "hawavoclean.enhancement.dereverb_neural.NeuralDereverbCore",
+    )
+    _require_callable(
+        dereverb_mod,
+        "load_dereverb_model",
+        "hawavoclean.enhancement.dereverb_neural.load_dereverb_model",
+    )
+    _require_callable(
+        dereverb_mod,
+        "verify_dereverb_weights",
+        "hawavoclean.enhancement.dereverb_neural.verify_dereverb_weights",
+    )
+
+    weights_ok, reason = dereverb_mod.verify_dereverb_weights()
+    if not weights_ok:
+        raise RuntimeDependencyContractError(reason)
+
+
 __all__ = [
     "RuntimeDependencyContractError",
     "install_torchaudio_compat",
+    "probe_dereverb_runtime_contract",
     "probe_lowband_runtime_contract",
+    "probe_studio_pro_runtime_contract",
     "probe_studio_runtime_contract",
 ]

@@ -1,6 +1,6 @@
 // Tiny WebGL2 helpers shared by the waveform worker.
 
-export function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
+function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
   const sh = gl.createShader(type);
   if (!sh) throw new Error('createShader failed');
   gl.shaderSource(sh, src);
@@ -13,7 +13,7 @@ export function compileShader(gl: WebGL2RenderingContext, type: number, src: str
   return sh;
 }
 
-export function createProgram(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
+function createProgram(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
   const prog = gl.createProgram();
   if (!prog) throw new Error('createProgram failed');
   const v = compileShader(gl, gl.VERTEX_SHADER, vs);
@@ -82,7 +82,7 @@ export function deleteFbo(gl: WebGL2RenderingContext, fbo: Fbo): void {
   gl.deleteTexture(fbo.tex);
 }
 
-export function hexToRgb(hex: string): [number, number, number] {
+function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace('#', '');
   const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];

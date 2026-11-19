@@ -75,7 +75,7 @@ def test_operational_limits_are_the_live_server_defaults() -> None:
 def test_model_documentation_names_every_locked_core_and_parameter_identity() -> None:
     provenance = _text(ROOT / "docs" / "model-provenance.md")
     locks = sorted((ROOT / "src" / "hawavoclean" / "resources" / "models").glob("*-core.lock.toml"))
-    assert len(locks) == 3
+    assert len(locks) == 5
     for path in locks:
         lock = tomllib.loads(_text(path))
         assert lock["core_id"] in provenance

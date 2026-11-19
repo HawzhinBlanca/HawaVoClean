@@ -7,12 +7,9 @@ const IPC = Object.freeze({
   engineEndpoint: 'hawa:engine:endpoint',
   pickAudioFiles: 'hawa:files:pick-audio',
   registerDroppedFile: 'hawa:files:register-dropped',
-  pickFolder: 'hawa:files:pick-folder',
   chooseExportPath: 'hawa:files:choose-export',
   reveal: 'hawa:files:reveal',
   appInfo: 'hawa:app:info',
-  diagnosticsState: 'hawa:diagnostics:state',
-  updateState: 'hawa:updates:state',
   clearLocalData: 'hawa:session:clear-local-data',
 });
 type ExportRequest = Readonly<{
@@ -46,7 +43,6 @@ const bridge = Object.freeze({
       return paths[0] ?? null;
     },
     pickAudioFiles: () => invoke<readonly string[]>(IPC.pickAudioFiles),
-    pickFolder: () => invoke<string | null>(IPC.pickFolder),
     chooseExportPath: (request: ExportRequest) => invoke<string | null>(IPC.chooseExportPath, request),
     async registerDroppedFile(file: File): Promise<{ sourceId: string; path: string } | null> {
       try {
@@ -62,23 +58,11 @@ const bridge = Object.freeze({
     pathForFile(): null {
       return null;
     },
-    revealInFolder: (filePath: string) => invoke<void>(IPC.reveal, filePath),
     // Compatibility with the existing UI name on both macOS and Windows.
     revealInFinder: (filePath: string) => invoke<void>(IPC.reveal, filePath),
   }),
   app: Object.freeze({
     getInfo: () => invoke(IPC.appInfo),
-  }),
-  diagnostics: Object.freeze({
-    getState: () => invoke(IPC.diagnosticsState),
-    setOptIn: (optIn: boolean) => invoke(IPC.diagnosticsState, { action: 'setOptIn', optIn }),
-    exportPayload: () => invoke(IPC.diagnosticsState, { action: 'export' }),
-  }),
-  updates: Object.freeze({
-    getState: () => invoke(IPC.updateState),
-    checkForUpdates: () => invoke(IPC.updateState, { action: 'check' }),
-    applyUpdate: () => invoke(IPC.updateState, { action: 'apply' }),
-    rollback: (version?: string) => invoke(IPC.updateState, { action: 'rollback', version }),
   }),
   session: Object.freeze({
     clearLocalData: () => invoke(IPC.clearLocalData),

@@ -5,6 +5,8 @@ fork or copy the React application. Development uses the repository `.venv/bin/h
 engine by default; an alternative command must be supplied as a JSON array in
 `HAWAVOCLEAN_DESKTOP_ENGINE_COMMAND`.
 
+For this source checkout on macOS, double-click **Open HawaVoClean.command** in the repository root. The launcher opens the native Electron window, builds missing UI/desktop assets using already-installed local tools, and starts the private cached Ollama service only when its local chat installation exists and its loopback endpoint is not running. It downloads nothing, keeps cloud chat disabled, and stops only the processes it started when the app closes. Run `.venv/bin/python scripts/run_local_audio_app.py --check` to inspect readiness without launching anything. This is a source-development launcher, not a signed or notarized release application.
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm test

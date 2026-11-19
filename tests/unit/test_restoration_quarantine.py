@@ -200,8 +200,9 @@ def test_doctor_declares_production_capabilities(
     code = _run_cli(monkeypatch, "doctor")
     assert code == int(ExitCode.SUCCESS)
     out = capsys.readouterr().out
-    assert "Production capabilities: Natural routes active" in out
-    assert "Restore and Smart Safe quarantined (BLOCKED)" in out
+    assert "/api/v1/capabilities" in out
+    assert "source/enrolled Restore requires qualified signed packs" in out
+    assert "Smart Safe quarantined" not in out
 
 
 def test_profile_contract_dimension_mismatch_fails_preflight(tmp_path: Path) -> None:

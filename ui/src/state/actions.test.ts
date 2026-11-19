@@ -342,6 +342,194 @@ describe('startJob', () => {
   });
 });
 
+describe('reviewed assistant edits', () => {
+  const separation = {
+    kind: 'separate' as const, operation: 'extract' as const, prompt: 'speech',
+    model_size: 'large' as const, quality: 'high' as const, seed: 0,
+    cleanup_profile: null, device: 'cpu' as const,
+  };
+  const v1Answer = { schemaVersion: 1, jobs: [{ jobId: 'j1', outputPath: '/out/a.wav', reportPath: '/out/a.hawavoclean.json', sourceId: 'src1' }] };
+
+  it('submits separation as its own explicit strategy and keeps the selected source identity', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setSource({ path: '/a.wav', name: 'a.wav', origin: 'upload', sourceId: 'src1' });
+    store.useStore.setState({ capabilities: [{ capability_id: 'separate', available: true, maturity: 'experimental' }] });
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+    await actions.startJob(separation);
+    expect(client.createV1Jobs).toHaveBeenCalledWith(expect.objectContaining({ source_ids: ['src1'], strategy: separation, execution_policy: 'offline_only' }));
+    expect(client.createJob).not.toHaveBeenCalled();
+    expect(store.useStore.getState().job?.id).toBe('j1');
+  });
+
+  it('refuses separation without an installed capability and preserves the prior result', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setCleaned(analysis(), '/out/old.wav');
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+    await actions.startJob(separation);
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+    expect(store.useStore.getState().cleanedPath).toBe('/out/old.wav');
+    expect(store.useStore.getState().error).toBeTruthy();
+  });
+
+  it('enforces the separation duration bound while preserving the long-file cleanup route', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setOriginal(analysis({ duration_s: 3601 }));
+    store.useStore.setState({ capabilities: [{ capability_id: 'separate', available: true, maturity: 'experimental' }] });
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+    await actions.startJob(separation);
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+    await actions.startJob({ kind: 'manual', route: 'studio', allow_generative_reconstruction: false });
+    expect(client.createV1Jobs).toHaveBeenCalledOnce();
+  });
+
+  it('uses the reviewed cleanup route rather than the previous manual controls', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setMode('restore');
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+    await actions.startJob({ kind: 'manual', route: 'studio', allow_generative_reconstruction: false });
+    expect(client.createV1Jobs).toHaveBeenCalledWith(expect.objectContaining({ strategy: { kind: 'manual', route: 'studio', allow_generative_reconstruction: false } }));
+  });
+
+  it('cancels an accepted edit rather than attaching it to a newly opened recording', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    client.cancelV1Job = vi.fn(async () => ({ ok: true }));
+    client.createV1Jobs = vi.fn(async () => {
+      store.useStore.getState().setSource({ path: '/new.wav', name: 'new.wav', origin: 'upload', sourceId: 'src2' });
+      return v1Answer;
+    });
+    await actions.startJob({ kind: 'manual', route: 'studio', allow_generative_reconstruction: false });
+    expect(client.cancelV1Job).toHaveBeenCalledWith('j1');
+    expect(store.useStore.getState().job).toBeNull();
+    expect(store.useStore.getState().source?.path).toBe('/new.wav');
+  });
+
+  it('submits studio_pro directly from profile switcher when available and blocks when unavailable', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setProfile('studio_pro');
+    store.useStore.setState({
+      capabilities: [
+        { capability_id: 'studio_pro', available: false, maturity: 'blocked', reason: 'Weights missing' },
+      ],
+    });
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+
+    await actions.startJob();
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+    expect(store.useStore.getState().error).toContain('Weights missing');
+
+    store.useStore.setState({
+      error: null,
+      capabilities: [
+        { capability_id: 'studio_pro', available: true, maturity: 'qualified', providers: ['mps'] },
+      ],
+    });
+    await actions.startJob();
+    expect(client.createV1Jobs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        strategy: { kind: 'manual', route: 'studio_pro', allow_generative_reconstruction: false },
+      }),
+    );
+  });
+
+  it('allows restore_source override when available and fails closed when unavailable', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+
+    const restoreStrategy = {
+      kind: 'manual' as const,
+      route: 'restore_source' as const,
+      allow_generative_reconstruction: true,
+      strength: 0.7,
+      time_range: [5, 15] as [number, number],
+    };
+
+    // Missing capability must fail closed.
+    await actions.startJob(restoreStrategy);
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+
+    store.useStore.setState({
+      capabilities: [
+        { capability_id: 'restore_source', available: true, maturity: 'experimental', providers: ['mps'] },
+      ],
+    });
+    await actions.startJob(restoreStrategy);
+    expect(client.createV1Jobs).toHaveBeenCalledWith(
+      expect.objectContaining({ strategy: restoreStrategy }),
+    );
+  });
+
+  it('fails closed on studio_pro strategyOverride when capabilities omits studio_pro', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.setState({
+      capabilities: [
+        { capability_id: 'production', available: true, maturity: 'qualified' },
+        { capability_id: 'studio', available: true, maturity: 'qualified' },
+        { capability_id: 'separate', available: true, maturity: 'experimental' },
+      ],
+    });
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+
+    await actions.startJob({
+      kind: 'manual',
+      route: 'studio_pro',
+      allow_generative_reconstruction: false,
+    });
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+    expect(store.useStore.getState().error).toContain('Studio Pro is unavailable');
+
+    await actions.startJob({
+      ...separation,
+      cleanup_profile: 'studio_pro',
+    });
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+  });
+
+  it('submits dereverb when available and fails closed when capabilities omits dereverb', async () => {
+    const { actions, store, client } = await boot();
+    armed(store);
+    store.useStore.getState().setProfile('dereverb');
+    store.useStore.setState({
+      capabilities: [
+        { capability_id: 'production', available: true, maturity: 'qualified' },
+        { capability_id: 'studio', available: true, maturity: 'qualified' },
+      ],
+    });
+    client.createV1Jobs = vi.fn(async () => v1Answer);
+
+    await actions.startJob();
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+    expect(store.useStore.getState().error).toContain('Dereverb is unavailable');
+
+    await actions.startJob({
+      kind: 'manual',
+      route: 'dereverb',
+      allow_generative_reconstruction: false,
+    });
+    expect(client.createV1Jobs).not.toHaveBeenCalled();
+
+    store.useStore.setState({
+      error: null,
+      capabilities: [
+        { capability_id: 'dereverb', available: true, maturity: 'qualified', providers: ['mps'] },
+      ],
+    });
+    await actions.startJob();
+    expect(client.createV1Jobs).toHaveBeenCalledWith(
+      expect.objectContaining({
+        strategy: { kind: 'manual', route: 'dereverb', allow_generative_reconstruction: false },
+      }),
+    );
+  });
+});
+
 describe('the job status stream', () => {
   it('narrates progress with the unit counter', async () => {
     const { actions, store } = await boot();

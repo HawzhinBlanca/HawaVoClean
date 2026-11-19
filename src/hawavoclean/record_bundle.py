@@ -42,7 +42,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from hawavoclean.errors import PublicationError
-from hawavoclean.hashing import hash_file
+from hawavoclean.hashing import canonical_json_bytes, hash_file, hash_json_canonical
 from hawavoclean.platform_fs import (
     exclusive_file_lock,
     flush_directory,
@@ -177,13 +177,7 @@ class ProcessingRecord:
 
 
 def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
+    return canonical_json_bytes(value, allow_nan=False)
 
 
 def _regular_file(path: Path, *, label: str, maximum_bytes: int) -> os.stat_result:
@@ -215,7 +209,7 @@ def _validate_wave_header(raw: bytes) -> None:
 
 
 def _content_digest(files: dict[str, dict[str, object]]) -> str:
-    return hashlib.sha256(_canonical_json(files)).hexdigest()
+    return hash_json_canonical(files, allow_nan=False)
 
 
 def _zip_info(name: str) -> zipfile.ZipInfo:

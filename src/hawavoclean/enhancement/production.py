@@ -167,38 +167,3 @@ class WienerSpectralEnhancer(Enhancer):
             output_samples=len(enhanced_out),
             warnings=[],
         )
-
-
-class NoOpEnhancer(Enhancer):
-    """No-op passthrough enhancer for baseline comparisons and unit testing."""
-
-    def __init__(self, sample_rate: int = 48000) -> None:
-        self._sample_rate = sample_rate
-        self._metadata = EnhancerMetadata(
-            core_id="noop-enhancer",
-            version="1.0.0",
-            algorithm="identity passthrough",
-            sample_rate=sample_rate,
-            phase_coherent=True,
-            params_hash=hash_json_canonical({"algorithm": "noop"}),
-        )
-
-    @property
-    def metadata(self) -> EnhancerMetadata:
-        return self._metadata
-
-    def warmup(self) -> None:
-        pass
-
-    def enhance(
-        self,
-        waveform: np.ndarray[Any, np.dtype[np.float32]],
-        sample_rate: int,
-    ) -> EnhancementResult:
-        return EnhancementResult(
-            waveform=waveform.copy(),
-            sample_rate=sample_rate,
-            model_runtime_ms=0.5,
-            input_samples=len(waveform),
-            output_samples=len(waveform),
-        )

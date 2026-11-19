@@ -64,15 +64,12 @@ test('IPC surface is fixed, unique, and contains no generic transport', () => {
   assert.equal(new Set(values).size, values.length);
   assert.deepEqual(values.sort(), [
     'hawa:app:info',
-    'hawa:diagnostics:state',
     'hawa:engine:endpoint',
     'hawa:files:choose-export',
     'hawa:files:pick-audio',
-    'hawa:files:pick-folder',
     'hawa:files:register-dropped',
     'hawa:files:reveal',
     'hawa:session:clear-local-data',
-    'hawa:updates:state',
   ]);
   assert.ok(values.every((value) => !value.includes('*') && !value.includes('eval')));
   const compiledPreload = fs.readFileSync(path.join(__dirname, '..', 'dist', 'preload.js'), 'utf8');

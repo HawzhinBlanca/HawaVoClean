@@ -1141,46 +1141,6 @@ kbd {
   height: 100%;
 }
 
-.spectrum-legend {
-  display: flex;
-  gap: 10px;
-  flex: none;
-}
-
-.spectrum-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--fs-label);
-  font-weight: var(--fw-medium);
-  letter-spacing: var(--ls-caps);
-  color: var(--fg-3);
-}
-
-.spectrum-legend i {
-  width: 10px;
-  height: 2px;
-  border-radius: var(--r-xxs);
-}
-
-.spectrum-legend .orig i {
-  background: var(--amber);
-  box-shadow: 0 0 5px var(--amber-glow);
-}
-
-.spectrum-legend .clean i {
-  background: var(--cyan);
-  box-shadow: 0 0 5px var(--cyan-glow);
-}
-
-.spectrum-legend .live i {
-  background: var(--fg-2);
-}
-
-.spectrum-legend .off {
-  opacity: 0.35;
-}
-
 .metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1451,14 +1411,6 @@ kbd {
  * rather than as a web progress spinner. */
 .process .ring .track {
   stroke: #05060a;
-}
-
-.process .ring .track-lip {
-  stroke: rgba(255, 255, 255, 0.07);
-}
-
-.process .ring .track-hi {
-  stroke: rgba(255, 255, 255, 0.06);
 }
 
 .process .ring .bar {
@@ -2964,7 +2916,6 @@ kbd {
 .clipinfo .origin,
 .wave-legend span,
 .verdict-legend span,
-.spectrum-legend span,
 .insp-stats .stat .caps,
 .insp-verdict,
 .insp-idhead .pill,

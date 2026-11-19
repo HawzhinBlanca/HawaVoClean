@@ -34,7 +34,7 @@ dev = [
     "hypothesis>=6.98.0",
     "ruff>=0.3.0",
     "mypy>=1.9.0",
-    "httpx2>=2.0",
+    "httpx>=0.27.0",
 ]
 ui = [
     "fastapi>=0.115",
@@ -42,11 +42,7 @@ ui = [
     "uvicorn>=0.30",
 ]
 restoration = [
-    "einops>=0.7.0",
-    "python-box>=7.0.0",
     "safetensors>=0.4.0",
-    "timm>=0.9.0",
-    "torchdiffeq>=0.2.4",
 ]
 metrics = [
     "pesq>=0.0.4",

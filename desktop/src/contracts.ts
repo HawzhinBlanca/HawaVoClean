@@ -8,12 +8,9 @@ export const IPC = Object.freeze({
   engineEndpoint: 'hawa:engine:endpoint',
   pickAudioFiles: 'hawa:files:pick-audio',
   registerDroppedFile: 'hawa:files:register-dropped',
-  pickFolder: 'hawa:files:pick-folder',
   chooseExportPath: 'hawa:files:choose-export',
   reveal: 'hawa:files:reveal',
   appInfo: 'hawa:app:info',
-  diagnosticsState: 'hawa:diagnostics:state',
-  updateState: 'hawa:updates:state',
   clearLocalData: 'hawa:session:clear-local-data',
 } as const);
 
@@ -47,87 +44,6 @@ export type AppInfo = Readonly<{
   platform: NodeJS.Platform;
   arch: string;
   packaged: boolean;
-}>;
-
-export type DiagnosticsState = Readonly<{
-  status: 'ready' | 'disabled' | 'enabled' | 'unavailable';
-  optIn: boolean;
-  canExport: boolean;
-  reason?: string | undefined;
-  pendingErrorCount?: number | undefined;
-  telemetryEgress?: 'none' | undefined;
-}>;
-
-export type UpdateStatus =
-  | 'disabled'
-  | 'idle'
-  | 'checking'
-  | 'available'
-  | 'downloading'
-  | 'staged'
-  | 'up-to-date'
-  | 'error';
-
-export type UpdateState = Readonly<{
-  status: UpdateStatus;
-  currentVersion?: string;
-  stagedVersion?: string;
-  activeJobBlocking?: boolean;
-  canCheck: boolean;
-  canApply?: boolean;
-  reason?: string;
-  releaseNotes?: string;
-  channel?: string;
-}>;
-
-export type RequiredElectronFuses = Readonly<{
-  runAsNode?: boolean;
-  onlyLoadAppFromAsar?: boolean;
-  enableEmbeddedAsarIntegrityValidation?: boolean;
-  enableCookieEncryption?: boolean;
-  enableNodeOptionsEnvironmentVariable?: boolean;
-  enableNodeCliInspectArguments?: boolean;
-  grantFileProtocolExtraPrivileges?: boolean;
-}>;
-
-export type UpdateManifest = Readonly<{
-  schemaVersion: 1;
-  product: 'hawavoclean';
-  version: string;
-  minSupportedVersion: string;
-  releaseDate: string;
-  channel: 'stable' | 'beta';
-  target: string;
-  sha256: string;
-  signature: string;
-  notes: string;
-  downloadUrl: string;
-  requiredFuses?: RequiredElectronFuses;
-}>;
-
-export type MigrationDefinition = Readonly<{
-  version: number;
-  name: string;
-  up: (db: any) => void;
-  down?: (db: any) => void;
-}>;
-
-export type MigrationResult = Readonly<{
-  ok: boolean;
-  fromVersion: number;
-  toVersion: number;
-  appliedCount: number;
-  backupPath?: string;
-  error?: string;
-  rolledBack?: boolean;
-}>;
-
-export type RollbackResult = Readonly<{
-  ok: boolean;
-  previousVersion: string;
-  currentVersion: string;
-  restored: boolean;
-  error?: string;
 }>;
 
 export type ClearLocalDataResult = Readonly<{

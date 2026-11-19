@@ -1138,25 +1138,6 @@ def test_paths_binary_resolution_full_fallbacks(
 
 
 @pytest.mark.unit
-def test_model_packs_store_inspect_branches(tmp_path: Path) -> None:
-    from hawavoclean.model_packs.store import ModelPackStore
-    from hawavoclean.model_packs.trust import TrustStore
-
-    store = ModelPackStore(tmp_path / "packs")
-    trust = TrustStore([])
-
-    # Invalid pack_id pattern
-    cap_bad = store.inspect("INVALID!PACK", trust)
-    assert not cap_bad.usable
-    assert cap_bad.reason_code == "invalid_pack_id"
-
-    # Pack not installed
-    cap_none = store.inspect("valid_pack_id", trust)
-    assert not cap_none.usable
-    assert cap_none.reason_code == "pack_not_installed"
-
-
-@pytest.mark.unit
 def test_bandwidth_detector_extended_branches() -> None:
     from hawavoclean.restoration.bandwidth import BandwidthDetector
 

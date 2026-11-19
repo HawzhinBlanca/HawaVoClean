@@ -9,7 +9,6 @@ generation and are regular, self-contained files on both POSIX and Windows.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import shutil
@@ -22,6 +21,7 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from hawavoclean.errors import PublicationError
+from hawavoclean.hashing import canonical_json_bytes, hash_file, hash_json_canonical
 from hawavoclean.platform_fs import (
     exclusive_file_lock,
     flush_directory,
@@ -100,24 +100,6 @@ def publication_exists(destination_audio_path: Path | str) -> bool:
     return False
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        while block := stream.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
-        "utf-8"
-    )
-
-
-def _fsync_directory(path: Path) -> None:
-    flush_directory(path)
-
-
 def _write_bytes_fsync(path: Path, data: bytes) -> None:
     with open(path, "xb") as stream:
         stream.write(data)
@@ -140,7 +122,7 @@ def _replace_json(path: Path, value: object) -> None:
     try:
         _write_bytes_fsync(temporary, encoded)
         replace_path(temporary, path)
-        _fsync_directory(path.parent)
+        flush_directory(path.parent)
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()
@@ -203,20 +185,20 @@ def _ensure_bundle(paths: PublicationPaths) -> None:
             staging / _OWNER_FILE,
             json.dumps(expected, sort_keys=True, indent=2).encode("utf-8") + b"\n",
         )
-        _fsync_directory(generations)
-        _fsync_directory(staging)
+        flush_directory(generations)
+        flush_directory(staging)
         with contextlib.suppress(FileExistsError):
             rename_new_path(staging, paths.bundle)
             # Another serialized process can only win before our flock on
             # filesystems whose locking implementation is not process-wide.
-        _fsync_directory(paths.audio.parent)
+        flush_directory(paths.audio.parent)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     _ensure_bundle(paths)
 
 
 def _artifact_record(path: Path, filename: str) -> dict[str, object]:
-    return {"filename": filename, "size_bytes": path.stat().st_size, "sha256": _sha256_file(path)}
+    return {"filename": filename, "size_bytes": path.stat().st_size, "sha256": hash_file(path)}
 
 
 def _validate_report_audio(report_path: Path, audio_sha256: str) -> None:
@@ -256,10 +238,10 @@ def _verify_generation(generation: Path) -> dict[str, Any]:
             raise PublicationError(f"Generation artifact is missing or unsafe: {artifact}")
         if record.get("size_bytes") != artifact.stat().st_size:
             raise PublicationError(f"Generation artifact size mismatch: {artifact}")
-        if record.get("sha256") != _sha256_file(artifact):
+        if record.get("sha256") != hash_file(artifact):
             raise PublicationError(f"Generation artifact digest mismatch: {artifact}")
     payload = {"schema_version": _BUNDLE_SCHEMA, "artifacts": artifacts}
-    if hashlib.sha256(_canonical_bytes(payload)).hexdigest() != generation.name:
+    if hash_json_canonical(payload) != generation.name:
         raise PublicationError(
             f"Generation manifest content does not derive its ID: {manifest_path}"
         )
@@ -287,13 +269,13 @@ def _prepare_generation(
             "txt": _artifact_record(summary, _FILES["txt"]),
         }
         payload = {"schema_version": _BUNDLE_SCHEMA, "artifacts": artifacts}
-        generation_id = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+        generation_id = hash_json_canonical(payload)
         manifest: dict[str, Any] = {**payload, "generation_id": generation_id}
         _write_bytes_fsync(
             staging / "manifest.json",
             json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8") + b"\n",
         )
-        _fsync_directory(staging)
+        flush_directory(staging)
         _checkpoint("generation_files_durable")
 
         destination = paths.generations / generation_id
@@ -355,7 +337,7 @@ def _replace_regular_file(source: Path, destination: Path) -> None:
     try:
         _copy_fsync(source, temporary)
         replace_path(temporary, destination)
-        _fsync_directory(destination.parent)
+        flush_directory(destination.parent)
     finally:
         with contextlib.suppress(OSError):
             temporary.unlink()
@@ -370,7 +352,7 @@ def _public_roles(paths: PublicationPaths) -> tuple[tuple[str, Path], ...]:
 
 
 def _matches_known_generation(paths: PublicationPaths, role: str, public: Path) -> bool:
-    digest = _sha256_file(public)
+    digest = hash_file(public)
     for candidate in paths.generations.iterdir():
         if (
             not re_full_sha256(candidate.name)
@@ -401,7 +383,7 @@ def _repair_public_exports(paths: PublicationPaths, current_id: str) -> None:
         elif _lexists(public):
             if is_reparse_or_symlink(public) or not public.is_file():
                 raise PublicationError(f"Public output is not a regular file: {public}")
-            if _sha256_file(public) == record["sha256"]:
+            if hash_file(public) == record["sha256"]:
                 continue
             if not _matches_known_generation(paths, role, public):
                 raise PublicationError(
@@ -415,13 +397,15 @@ def _replace_current(paths: PublicationPaths, generation_id: str) -> None:
     temporary = paths.bundle / f".{_CURRENT}.{uuid.uuid4().hex}.tmp"
     try:
         encoded = (
-            _canonical_bytes({"schema_version": _POINTER_SCHEMA, "generation_id": generation_id})
+            canonical_json_bytes(
+                {"schema_version": _POINTER_SCHEMA, "generation_id": generation_id}
+            )
             + b"\n"
         )
         _write_bytes_fsync(temporary, encoded)
         replace_path(temporary, paths.current)
         _checkpoint("pointer_replaced")
-        _fsync_directory(paths.bundle)
+        flush_directory(paths.bundle)
         _checkpoint("pointer_durable")
     finally:
         with contextlib.suppress(OSError):
@@ -452,7 +436,7 @@ def _complete_legacy_migration(paths: PublicationPaths) -> str | None:
                 raise PublicationError(f"Unexpected dangling output alias: {public}")
             with contextlib.suppress(FileNotFoundError):
                 public.unlink()
-        _fsync_directory(paths.audio.parent)
+        flush_directory(paths.audio.parent)
         return None
     if not all(exists for exists, _ in states):
         raise PublicationError(
@@ -493,7 +477,7 @@ def _verify_public(paths: PublicationPaths, expected_generation: str) -> None:
     for role, public in _public_roles(paths):
         if is_reparse_or_symlink(public) or not public.is_file():
             raise PublicationError(f"Public output is not a regular file: {public}")
-        if _sha256_file(public) != manifest["artifacts"][role]["sha256"]:
+        if hash_file(public) != manifest["artifacts"][role]["sha256"]:
             raise PublicationError(f"Public output does not match committed generation: {public}")
 
 
@@ -693,7 +677,7 @@ def publish_output_generation(
             recovered = False
             try:
                 if _read_current_id(paths) == generation_id:
-                    _fsync_directory(paths.bundle)
+                    flush_directory(paths.bundle)
                     _repair_public_exports(paths, generation_id)
                     _replace_json(
                         paths.transaction,

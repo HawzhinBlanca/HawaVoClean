@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from hawavoclean.enhancement.production import NoOpEnhancer
 from hawavoclean.enhancement.worker import IsolatedEnhancementWorker, _worker_process_entry
+from tests.support.stubs import NoOpEnhancer
 
 
 class _ExplodingInit:

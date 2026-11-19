@@ -1,10 +1,8 @@
-"""DSP edge branches: stitch, resample, coherence, drift, limiter, encode."""
+"""DSP edge branches: stitch, resample, limiter, encode."""
 
 import numpy as np
 import pytest
 
-from hawavoclean.alignment.coherence import estimate_coherence
-from hawavoclean.alignment.drift import analyze_local_drift
 from hawavoclean.assembly.stitch import assemble_channel_timeline
 from hawavoclean.audio.resample import resample_audio
 from hawavoclean.finishing.limiter import apply_lookahead_limiter
@@ -41,32 +39,6 @@ def test_resample_same_rate_with_target() -> None:
     stereo = np.ones((2, 100), dtype=np.float32)
     up = resample_audio(stereo, 24000, SR)
     assert up.shape[0] == 2 and up.shape[1] == 200
-
-
-def test_coherence_short_input_passes_trivially() -> None:
-    x = np.ones(100, dtype=np.float32)
-    res = estimate_coherence(x, x)
-    assert res.passed and res.phase_coherence == 1.0
-
-
-def test_coherence_detects_scrambled_phase() -> None:
-    rng = np.random.default_rng(0)
-    t = np.arange(SR) / SR
-    x = np.asarray(0.4 * np.sin(2 * np.pi * 300 * t), dtype=np.float32)
-    scrambled = np.asarray(rng.permutation(x), dtype=np.float32)
-    res = estimate_coherence(x, scrambled, expected_phase_coherent=True)
-    assert not res.passed
-
-
-def test_drift_measurement_paths() -> None:
-    t = np.arange(SR * 2) / SR
-    x = np.asarray(0.4 * np.sin(2 * np.pi * 220 * t), dtype=np.float32)
-    res_same = analyze_local_drift(x, x, SR)
-    assert res_same.max_window_drift_ms == pytest.approx(0.0, abs=1.0)
-
-    short = np.ones(100, dtype=np.float32)
-    res_short = analyze_local_drift(short, short, SR)
-    assert res_short is not None
 
 
 def test_limiter_trivial_branches() -> None:

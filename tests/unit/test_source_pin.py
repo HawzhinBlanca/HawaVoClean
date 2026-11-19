@@ -18,9 +18,9 @@ from hawavoclean.audio.decode import (
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.audio.types import AudioBuffer, AudioProbeResult
 from hawavoclean.errors import MediaPreflightError, MediaPreflightReason
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.hashing import hash_file, hash_numpy
 from hawavoclean.source_pin import PinnedSource, remove_source_snapshot_tree
+from tests.support.stubs import FixedProbe
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"

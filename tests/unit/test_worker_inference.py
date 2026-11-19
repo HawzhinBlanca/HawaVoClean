@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from hawavoclean.enhancement.production import NoOpEnhancer
 from hawavoclean.enhancement.worker import IsolatedEnhancementWorker
+from tests.support.stubs import NoOpEnhancer
 
 
 @pytest.mark.unit

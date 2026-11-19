@@ -2,13 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
-
-class BaseFrozenModel(BaseModel):
-    """Base model with strict forbidden extra fields and frozen immutability."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
+from hawavoclean.config import BaseFrozenModel
 
 
 class RestorationGuardConfig(BaseFrozenModel):
@@ -16,7 +12,6 @@ class RestorationGuardConfig(BaseFrozenModel):
 
     protected_band_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
     ctc_threshold: float = Field(default=0.25, ge=0.0, le=1.0)
-    highband_event_threshold: float = Field(default=0.30, ge=0.0, le=1.0)
     harmonic_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
     speaker_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
 
@@ -36,7 +31,6 @@ class RestorationConfig(BaseFrozenModel):
     cutoff_mode: Literal["auto", "explicit"] = "auto"
     cutoff_confidence_min: float = Field(default=0.80, ge=0.0, le=1.0)
     transition_hz: float = Field(default=500.0, ge=50.0, le=2000.0)
-    process_non_speech: bool = False
     deterministic: bool = True
     guard: RestorationGuardConfig = Field(default_factory=RestorationGuardConfig)
 

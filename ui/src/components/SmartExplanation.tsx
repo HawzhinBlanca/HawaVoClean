@@ -20,7 +20,7 @@ export function SmartExplanation() {
           <span className="se-title">Step 1: Add Media</span>
         </div>
         <p className="se-body">
-          Drop any Kurdish speech audio or video file above to begin. HawaVoClean will inspect noise floor, speech dynamics, and recommend optimal processing.
+          Drop an audio or video recording above to begin. Describe your edit in the assistant, or use the dialogue cleanup controls.
         </p>
       </div>
     );
@@ -40,6 +40,24 @@ export function SmartExplanation() {
     );
   }
 
+  if (report?.separation) {
+    const separation = report.separation;
+    return (
+      <div className="smart-explanation done" role="region" aria-label="Sound separation result">
+        <div className="se-header">
+          <IconCheck size={14} />
+          <span className="se-title">Sound separation complete</span>
+          <span className="se-badge med">Experimental</span>
+        </div>
+        <p className="se-body">
+          {separation.operation === 'extract' ? 'Kept' : 'Removed'}: {separation.prompt}.
+          {' '}Signal checks cover the output format and timeline. They do not verify word retention or which sounds the model selected.
+          {' '}Compare Original vs Cleaned below and listen before exporting.
+        </p>
+      </div>
+    );
+  }
+
   if (report) {
     const s = report.summary;
     const enhanced = s.enhanced ?? 0;
@@ -51,8 +69,8 @@ export function SmartExplanation() {
       <div className="smart-explanation done" role="region" aria-label="Smart verification report">
         <div className="se-header">
           <IconCheck size={14} />
-          <span className="se-title">Processing Verified</span>
-          <span className="se-badge safe">Guard R: Safe</span>
+          <span className="se-title">Processing complete</span>
+          <span className="se-badge safe">Guard decisions recorded</span>
         </div>
         <div className="se-metrics">
           <div className="se-metric">
@@ -71,7 +89,7 @@ export function SmartExplanation() {
           ) : null}
         </div>
         <p className="se-body">
-          Zero phoneme damage: all speech units verified against linguistic safety bounds.
+          Signal checks guided which speech units were enhanced or preserved. They do not verify spoken words.
           {loudnessMatch && Number.isFinite(gainOffsetDb) && Math.abs(gainOffsetDb) > 0.05
             ? ` Level-matched A/B (${gainOffsetDb > 0 ? '+' : ''}${gainOffsetDb.toFixed(1)} dB on Cleaned) active below to eliminate volume bias.`
             : ' Compare Original vs Cleaned below, then export your Master WAV.'}
@@ -129,13 +147,13 @@ export function SmartExplanation() {
         </div>
         <div className="se-metric">
           <span className="se-metric-label">Strategy</span>
-          <span className="se-metric-val mono">{profile.toUpperCase()} · {mode.toUpperCase()}</span>
+          <span className="se-metric-val mono">{profile.replace('_', ' ').toUpperCase()} · {mode.toUpperCase()}</span>
         </div>
       </div>
       <p className="se-body">
         {mode === 'restore'
           ? 'HawaRestore-KD will rebuild missing upper harmonics above cutoff with generative reconstruction.'
-          : 'Smart Safe will preserve natural Kurdish phonetics, eliminate ambient noise, and verify zero phoneme loss with Guard R.'}
+          : 'Dialogue cleanup reduces noise with signal checks and preserves the original where an enhancement is rejected. Listen to the result to assess speech quality.'}
       </p>
       {isMp4 ? (
         <div className="se-mp4-notice" role="note" aria-label="MP4 dialogue extraction note">

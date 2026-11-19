@@ -58,7 +58,6 @@ from hawavoclean.restoration.report import (
 #: without the restore extra installed.
 _TORCH_BACKED: dict[str, str] = {
     "HawaRestoreKD": "hawavoclean.restoration.hawarestore_kd",
-    "UniverSRBaseline": "hawavoclean.restoration.universr_upstream",
     "compute_code_provenance": "hawavoclean.restoration.checkpoint",
     "compute_dependency_provenance": "hawavoclean.restoration.checkpoint",
     "load_safe_checkpoint": "hawavoclean.restoration.checkpoint",
@@ -110,7 +109,6 @@ __all__ = [
     "SegmentRestorationDecision",
     "SpeakerF0Stats",
     "SpeakerProfile",
-    "UniverSRBaseline",
     "compute_code_provenance",
     "compute_dependency_provenance",
     "compute_transition_mask",

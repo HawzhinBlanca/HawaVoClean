@@ -18,7 +18,6 @@ storage layer independent of the server's mutable runtime types.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import sqlite3
@@ -30,6 +29,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+
+from hawavoclean.hashing import hash_json_canonical
 
 ConflictPolicy = Literal["unique", "fail", "replace"]
 NONTERMINAL_STATES: frozenset[str] = frozenset({"queued", "running"})
@@ -77,15 +78,7 @@ def _now_iso() -> str:
 
 def canonical_request_hash(payload: dict[str, Any]) -> str:
     """Stable identity for the request an idempotency key represents."""
-
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hash_json_canonical(payload, allow_nan=False)
 
 
 def output_key(path: Path) -> str:

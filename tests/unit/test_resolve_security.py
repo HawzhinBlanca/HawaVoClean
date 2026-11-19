@@ -60,7 +60,8 @@ def test_permissions_network_and_ipc_fail_closed() -> None:
     assert "url.origin === engineOrigin" in auth
     assert "url.pathname.startsWith('/api/')" in auth
     assert "IPC sender is not the trusted HawaVoClean renderer" in main
-    assert main.count("requireTrustedIpcSender(event);") == 9
+    assert main.count("ipcMain.handle(") == 10
+    assert main.count("requireTrustedIpcSender(event);") == main.count("ipcMain.handle(")
 
 
 def test_preload_exposes_only_the_declared_narrow_bridge() -> None:

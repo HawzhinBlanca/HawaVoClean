@@ -21,9 +21,9 @@ import hawavoclean.pipeline as pipeline_mod
 from hawavoclean.enhancement.protocol import EnhancementResult, EnhancerMetadata
 from hawavoclean.enhancement.worker import IsolatedEnhancementWorker
 from hawavoclean.errors import AmbiguousStereoError, PublicationError, WorkerError
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.pipeline import run_pipeline
 from hawavoclean.publication import publication_exists, publication_paths
+from tests.support.stubs import FixedProbe
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"

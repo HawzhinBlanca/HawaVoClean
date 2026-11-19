@@ -64,11 +64,13 @@ from hawavoclean.server.contracts import (
     JobStatusResponseV1,
     ManualStrategyV1,
     ProcessingRequestV1,
+    SeparationStrategyV1,
     SmartAnalysisRequestV1,
     SmartAnalysisResponseV1,
     SmartSafeStrategyV1,
     UnitOverrideRequestV1,
 )
+from hawavoclean.server.health_signals import HealthSignalsService
 from hawavoclean.server.job_store import IdempotencyConflictError, OutputConflictError
 from hawavoclean.server.job_store import canonical_request_hash as request_hash
 from hawavoclean.server.jobs import TERMINAL_STATES, JobManager, JobRecord, QueueFullError
@@ -94,10 +96,15 @@ logger = get_logger("server")
 PROFILES: tuple[str, ...] = ("studio", "lowband", "production")
 _OUTPUT_SUFFIX = {
     "studio": "_studio",
+    "studio_pro": "_studio_pro",
+    "dereverb": "_dereverb",
     "lowband": "_lowband",
     "production": "_clean",
     "development": "_dev",
     "smart_safe": "_clean",
+    "extract": "_extracted",
+    "remove": "_removed",
+    "restore_source": "_restored",
 }
 _AUDIO_MIME = {
     ".wav": "audio/wav",
@@ -757,7 +764,7 @@ class JobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     input_path: str
-    profile: Literal["studio", "lowband", "production", "development"]
+    profile: Literal["studio", "studio_pro", "dereverb", "lowband", "production", "development"]
     output_path: str | None = None
     overwrite: bool = False
     conflict_policy: Literal["unique", "fail", "replace"] | None = None
@@ -791,6 +798,17 @@ def available_speakers() -> list[str]:
     return sorted(p.name for p in entries if (p / "profile.json").is_file())
 
 
+def _redact_capability_detail(detail: str) -> str:
+    """Strip local config/model/home roots from capability failure reasons."""
+    for root, label in (
+        (config_dir(), "<config-dir>"),
+        (models_dir(), "<model-dir>"),
+        (Path.home(), "<home>"),
+    ):
+        detail = detail.replace(str(root), label)
+    return detail
+
+
 def _natural_route_capability(profile: str) -> CapabilityStatusV1:
     """Inspect one route without loading an enhancer or neural checkpoint."""
 
@@ -800,12 +818,7 @@ def _natural_route_capability(profile: str) -> CapabilityStatusV1:
         # Capability inspection is a fail-closed trust boundary.  A corrupt
         # config, absent optional dependency, missing/tampered lock or weight,
         # or unexpected inspection failure must never become false readiness.
-        detail = str(exc).strip() or type(exc).__name__
-        for root, label in (
-            (config_dir(), "<config-dir>"),
-            (models_dir(), "<model-dir>"),
-        ):
-            detail = detail.replace(str(root), label)
+        detail = _redact_capability_detail(str(exc).strip() or type(exc).__name__)
         return CapabilityStatusV1(
             capability_id=profile,
             available=False,
@@ -826,23 +839,105 @@ def _natural_route_capability(profile: str) -> CapabilityStatusV1:
     )
 
 
+def _restore_source_capability() -> CapabilityStatusV1:
+    """Inspect guarded source-conditioned restoration (LavaSR v2) model-cold."""
+    from hawavoclean.restoration.neural_bwe import (
+        LAVASR_MODEL_DIR_ENV,
+        probe_neural_bwe_runtime,
+    )
+    from hawavoclean.runtime import resolve_device
+
+    explicit_dir = os.environ.get(LAVASR_MODEL_DIR_ENV)
+
+    def _sanitize(text: str) -> str:
+        clean = _redact_capability_detail(text)
+        if explicit_dir:
+            clean = clean.replace(explicit_dir, "<lavasr-model-dir>")
+            with contextlib.suppress(OSError, ValueError):
+                clean = clean.replace(str(Path(explicit_dir).resolve()), "<lavasr-model-dir>")
+        return clean
+
+    try:
+        ok, reason = probe_neural_bwe_runtime()
+    except Exception as exc:
+        detail = _sanitize(str(exc).strip() or type(exc).__name__)
+        return CapabilityStatusV1(
+            capability_id="restore_source",
+            available=False,
+            maturity="blocked",
+            reason=f"Source restoration runtime probe failed: {detail}",
+        )
+    if not ok:
+        detail = _sanitize(str(reason).strip() or "LavaSR v2 runtime unavailable")
+        return CapabilityStatusV1(
+            capability_id="restore_source",
+            available=False,
+            maturity="blocked",
+            reason=detail,
+        )
+    device = resolve_device("auto", preference=("mps", "cuda", "cpu")).resolved
+    return CapabilityStatusV1(
+        capability_id="restore_source",
+        available=True,
+        maturity="experimental",
+        reason=(
+            "Experimental guarded 48 kHz bandwidth extension "
+            "(Apache-2.0 LavaSR v2; observed 0..cutoff band mathematically locked); "
+            "requires explicit reconstruction consent."
+        ),
+        providers=[device],
+    )
+
+
 def capabilities_v1() -> CapabilitiesResponseV1:
     """Truthful runtime maturity; never infer product readiness from loose files."""
 
     natural_routes = [
-        _natural_route_capability(profile) for profile in ("production", "studio", "lowband")
+        _natural_route_capability(profile)
+        for profile in ("production", "studio", "studio_pro", "dereverb", "lowband")
     ]
+    from hawavoclean.guard.perceptual_mos import perceptual_scorer_status
+    from hawavoclean.separation import probe_separation_capabilities
+
+    separation = probe_separation_capabilities(device="auto")
+    scorer = perceptual_scorer_status()
+    smart_safe_available = bool(scorer.get("available", True))
+    raw_maturity = str(scorer.get("maturity", "experimental"))
+    smart_safe_maturity: Literal["qualified", "experimental", "blocked"] = (
+        "qualified"
+        if raw_maturity == "qualified" and bool(scorer.get("qualified_ranker", False))
+        else "blocked"
+        if not smart_safe_available or raw_maturity == "blocked"
+        else "experimental"
+    )
+    raw_providers = scorer.get("providers")
+    smart_safe_providers = (
+        [str(item) for item in raw_providers]
+        if isinstance(raw_providers, (list, tuple)) and raw_providers
+        else ["cpu"]
+    )
+    smart_safe_reason = (
+        str(scorer.get("reason"))
+        if scorer.get("reason")
+        else (
+            "Smart Safe remains experimental until a signed Sorani listener-calibrated ranker ships"
+        )
+    )
 
     return CapabilitiesResponseV1(
         capabilities=[
             CapabilityStatusV1(
+                capability_id="separate",
+                available=separation.available,
+                maturity="experimental" if separation.available else "blocked",
+                reason=separation.reason,
+                providers=list(separation.providers),
+            ),
+            CapabilityStatusV1(
                 capability_id="preserve",
                 available=False,
                 maturity="blocked",
-                reason=(
-                    "Preserve is a Smart Safe candidate, but qualified Smart Safe routing "
-                    "is not yet available through the versioned job API"
-                ),
+                reason=("Preserve is an internal Smart Safe candidate, not a standalone route"),
             ),
             *natural_routes,
             CapabilityStatusV1(
@@ -863,16 +958,12 @@ def capabilities_v1() -> CapabilitiesResponseV1:
             ),
             CapabilityStatusV1(
                 capability_id="smart_safe",
-                available=True,
-                maturity="qualified",
-                providers=["cpu"],
+                available=smart_safe_available,
+                maturity=smart_safe_maturity,
+                reason=smart_safe_reason,
+                providers=smart_safe_providers,
             ),
-            CapabilityStatusV1(
-                capability_id="restore_source",
-                available=False,
-                maturity="blocked",
-                reason="No qualified signed source-conditioned Sorani Restore pack is installed",
-            ),
+            _restore_source_capability(),
             CapabilityStatusV1(
                 capability_id="restore_enrolled",
                 available=False,
@@ -1080,6 +1171,7 @@ def _job_status_v1(snapshot: dict[str, Any]) -> JobStatusResponseV1:
             "decode": "analyzing",
             "segment": "analyzing",
             "enhance": "rendering",
+            "restore": "rendering",
             "guard": "guarding",
             "finish": "guarding",
             "publish": "publishing",
@@ -1336,8 +1428,14 @@ def create_app(
         yield
         await asyncio.to_thread(manager.shutdown)
 
+    health_signals = HealthSignalsService(
+        job_manager=manager,
+        upload_store=upload_store,
+    )
+
     app = FastAPI(title="HawaVoClean engine", version=__version__, lifespan=lifespan)
     app.state.job_manager = manager
+    app.state.health_signals = health_signals
     app.state.token = token
     app.state.ui_dir = ui_dir
     app.state.max_upload_bytes = upload_limit
@@ -1346,6 +1444,7 @@ def create_app(
     app.state.sessions = sessions
     app.state.native_sources = native_sources
     app.state.analysis_slots = asyncio.Semaphore(max_concurrent_analyses)
+    app.state.assistant_slots = asyncio.Semaphore(1)
     app.state.legacy_telemetry = {
         "total_invocations": 0,
         "routes": {},
@@ -1546,6 +1645,10 @@ def create_app(
                 ),
             },
         }
+
+    @app.get("/api/v1/health/signals")
+    async def health_signals_endpoint(_request: Request) -> dict[str, Any]:
+        return health_signals.evaluate_all()
 
     @app.get("/api/v1/telemetry/legacy")
     async def legacy_telemetry(_request: Request) -> dict[str, Any]:
@@ -1795,18 +1898,43 @@ def create_app(
             "override": req.decision,
         }
 
+    @app.get("/api/v1/assistant/status")
+    async def audio_assistant_status() -> dict[str, Any]:
+        from hawavoclean.assistant import assistant_status
+
+        return assistant_status()
+
+    # Planning only: no audio bytes, source paths, or processing authority are
+    # passed to a language model. Execution still uses the closed job contract.
+    from hawavoclean.assistant import AudioPlanRequest
+
+    @app.post("/api/v1/assistant/plan")
+    async def audio_assistant_plan(req: AudioPlanRequest) -> dict[str, Any]:
+        from hawavoclean.assistant import plan_audio
+
+        try:
+            async with app.state.assistant_slots:
+                plan = await asyncio.to_thread(plan_audio, req)
+        except (ValueError, RuntimeError) as exc:
+            raise ApiError(503, "assistant_unavailable", str(exc)) from exc
+        return plan.model_dump(mode="json")
+
     @app.post("/api/v1/jobs", status_code=202)
     async def create_v1_jobs(req: ProcessingRequestV1) -> dict[str, Any]:
         """Versioned, idempotent batch submission for currently qualified local routes."""
 
         if req.execution_policy == "cloud_allowed":
             raise ApiError(503, "capability_blocked", "cloud execution is not deployed")
+        separation_options: dict[str, Any] | None = None
+        submit_cutoff_hz: float | None = None
+        submit_strength: float | None = None
+        submit_time_range: tuple[float, float] | None = None
         if isinstance(req.strategy, SmartSafeStrategyV1):
             smart_cap = next(
                 (c for c in capabilities_v1().capabilities if c.capability_id == "smart_safe"),
                 None,
             )
-            if smart_cap is None or not smart_cap.available or smart_cap.maturity != "qualified":
+            if smart_cap is None or not smart_cap.available or smart_cap.maturity == "blocked":
                 raise ApiError(
                     503,
                     "capability_blocked",
@@ -1818,25 +1946,78 @@ def create_app(
             submit_profile = "production"
             submit_speaker_id = req.strategy.speaker_profile_id
             output_profile = "smart_safe"
+        elif isinstance(req.strategy, SeparationStrategyV1):
+            from hawavoclean.separation import probe_runtime
+
+            status = await asyncio.to_thread(
+                probe_runtime,
+                model_size=req.strategy.model_size,
+                device=req.strategy.device,
+                prompt=req.strategy.prompt,
+                operation=req.strategy.operation,
+            )
+            if not status.available:
+                raise ApiError(503, "capability_blocked", status.reason)
+            if req.strategy.cleanup_profile is not None:
+                cleanup = _natural_route_capability(req.strategy.cleanup_profile)
+                if not cleanup.available:
+                    raise ApiError(
+                        503, "capability_blocked", cleanup.reason or "Cleanup unavailable"
+                    )
+            separation_options = req.strategy.model_dump(mode="json")
+            submit_mode = "separate"
+            submit_profile = req.strategy.cleanup_profile or "production"
+            submit_speaker_id = None
+            output_profile = "extract" if req.strategy.operation == "extract" else "remove"
         elif isinstance(req.strategy, ManualStrategyV1):
-            if req.strategy.route not in {"production", "studio", "lowband"}:
+            if req.strategy.route == "restore_source":
+                restore_cap = _restore_source_capability()
+                if not restore_cap.available or restore_cap.maturity == "blocked":
+                    raise ApiError(
+                        503,
+                        "capability_blocked",
+                        restore_cap.reason or "restore_source capability is unavailable",
+                    )
+                clean_profile = "production"
+                for candidate_profile in ("studio_pro", "studio"):
+                    candidate_cap = _natural_route_capability(candidate_profile)
+                    if candidate_cap.available and candidate_cap.maturity == "qualified":
+                        clean_profile = candidate_profile
+                        break
+                submit_mode = "restore"
+                submit_profile = clean_profile
+                submit_speaker_id = None
+                submit_cutoff_hz = req.strategy.expert_cutoff_hz
+                submit_strength = req.strategy.strength
+                submit_time_range = req.strategy.time_range
+                output_profile = "restore_source"
+            elif req.strategy.route in {
+                "production",
+                "studio",
+                "studio_pro",
+                "dereverb",
+                "lowband",
+            }:
+                route_capability = _natural_route_capability(req.strategy.route)
+                if not route_capability.available or route_capability.maturity != "qualified":
+                    reason = (
+                        route_capability.reason
+                        if route_capability.reason
+                        else f"route {req.strategy.route!r} is not runnable"
+                    )
+                    raise ApiError(503, "capability_blocked", reason)
+                submit_mode = "natural"
+                submit_profile = req.strategy.route
+                submit_speaker_id = req.strategy.speaker_profile_id
+                submit_strength = req.strategy.strength
+                submit_time_range = req.strategy.time_range
+                output_profile = req.strategy.route
+            else:
                 raise ApiError(
                     503,
                     "capability_blocked",
                     f"route {req.strategy.route!r} is not production-qualified",
                 )
-            route_capability = _natural_route_capability(req.strategy.route)
-            if not route_capability.available or route_capability.maturity != "qualified":
-                reason = (
-                    route_capability.reason
-                    if route_capability.reason
-                    else f"route {req.strategy.route!r} is not runnable"
-                )
-                raise ApiError(503, "capability_blocked", reason)
-            submit_mode = "natural"
-            submit_profile = req.strategy.route
-            submit_speaker_id = req.strategy.speaker_profile_id
-            output_profile = req.strategy.route
         else:
             raise ApiError(
                 503,
@@ -1882,6 +2063,21 @@ def create_app(
                 )
                 if source is None:
                     raise ApiError(404, "not_found", f"unknown or expired sourceId: {source_id}")
+                if separation_options is not None:
+                    from hawavoclean.separation import MAX_DURATION_S, MAX_FILE_SIZE_BYTES
+
+                    # Reject unsupported media before source pinning or model load.
+                    try:
+                        await asyncio.to_thread(
+                            probe_audio,
+                            source,
+                            max_sample_rate=192000,
+                            max_duration_s=MAX_DURATION_S,
+                            max_channels=2,
+                            max_file_size_bytes=MAX_FILE_SIZE_BYTES,
+                        )
+                    except HawaVoCleanError as exc:
+                        raise ApiError(422, "unsupported_media", str(exc)) from exc
                 sources.append(source)
 
             batch_id = f"b_{batch_hash[:16]}"
@@ -1900,7 +2096,11 @@ def create_app(
                             profile=submit_profile,
                             overwrite=req.conflict_policy == "replace",
                             mode=submit_mode,
+                            separation_options=separation_options,
+                            strength=submit_strength,
+                            time_range=submit_time_range,
                             speaker_id=submit_speaker_id,
+                            cutoff_hz=submit_cutoff_hz,
                             idempotency_key=item_keys[index],
                             conflict_policy=req.conflict_policy,
                             request_context_hash=batch_hash,

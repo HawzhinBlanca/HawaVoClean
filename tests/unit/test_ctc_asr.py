@@ -3,7 +3,8 @@
 import numpy as np
 import pytest
 
-from hawavoclean.guard.spectral_probe import SORANI_VOCAB, FixedProbe, SpectralSignatureProbe
+from hawavoclean.guard.spectral_probe import SORANI_VOCAB, SpectralSignatureProbe
+from tests.support.stubs import FixedProbe
 
 
 @pytest.mark.unit

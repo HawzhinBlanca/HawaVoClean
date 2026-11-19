@@ -96,4 +96,30 @@ describe('AdvancedControls', () => {
     const panel = host.querySelector('#advanced-controls-panel');
     expect(panel).not.toBeNull();
   });
+
+  it('formats Studio Pro and Low-band labels cleanly in the collapsed summary', async () => {
+    useStore.setState({
+      advancedOpen: false,
+      profile: 'studio_pro',
+      mode: 'natural',
+    });
+
+    await act(async () => {
+      root.render(createElement(AdvancedControls));
+    });
+
+    const toggle = host.querySelector<HTMLButtonElement>('.advanced-toggle');
+    expect(toggle?.textContent).toContain('Studio Pro · Natural');
+    expect(toggle?.textContent).not.toContain('Studio_pro');
+
+    await act(async () => {
+      useStore.setState({ profile: 'dereverb' });
+    });
+    expect(toggle?.textContent).toContain('Dereverb · Natural');
+
+    await act(async () => {
+      useStore.setState({ profile: 'lowband' });
+    });
+    expect(toggle?.textContent).toContain('Low-band · Natural');
+  });
 });

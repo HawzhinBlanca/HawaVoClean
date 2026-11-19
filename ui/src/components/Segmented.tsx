@@ -56,7 +56,7 @@ export function Segmented<T extends string>({
   // Two of these can be on screen at once (Profile and Mode), so the
   // description ids have to be unique per instance, not per option value.
   const groupId = useId();
-  const [thumb, setThumb] = useState<{ x: number; w: number } | null>(null);
+  const [thumb, setThumb] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
 
   /**
    * Arrow keys move the selection and the focus together, wrapping, skipping
@@ -110,7 +110,12 @@ export function Segmented<T extends string>({
     const measure = (): void => {
       const btn = root.querySelector<HTMLButtonElement>(`button[data-value="${CSS.escape(value)}"]`);
       if (!btn) return;
-      setThumb({ x: btn.offsetLeft, w: btn.offsetWidth });
+      setThumb({
+        x: btn.offsetLeft,
+        y: btn.offsetTop,
+        w: btn.offsetWidth,
+        h: btn.offsetHeight,
+      });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -140,7 +145,18 @@ export function Segmented<T extends string>({
         // bonus the compositor adds when it can.
         <span
           className={`thumb${thumbClassName ? ` ${thumbClassName}` : ''}`}
-          style={{ left: 0, width: thumb.w, transform: `translateX(${thumb.x}px)` }}
+          style={
+            thumb.h > 0
+              ? {
+                  left: 0,
+                  top: 0,
+                  bottom: 'auto',
+                  width: thumb.w,
+                  height: thumb.h,
+                  transform: `translate(${thumb.x}px, ${thumb.y}px)`,
+                }
+              : { left: 0, width: thumb.w, transform: `translateX(${thumb.x}px)` }
+          }
         />
       ) : null}
       {options.map((o, i) => (

@@ -300,7 +300,8 @@ def test_restoration_benchmark_manifest_flag_overrides_positional(
 def test_process_restore_without_speaker_id_exits_4(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """--mode restore without --speaker-id is refused before any audio is touched."""
+    """--mode restore without --speaker-id is refused when source restoration weights are absent."""
+    monkeypatch.setenv("HAWAVOCLEAN_LAVASR_MODEL_DIR", str(tmp_path / "no-lavasr"))
     out_wav = tmp_path / "out.wav"
     code = _run_cli(
         monkeypatch,

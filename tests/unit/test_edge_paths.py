@@ -18,7 +18,7 @@ from hawavoclean.errors import CalibrationError, ConfigError
 from hawavoclean.finishing.loudness import compute_static_master_gain, measure_loudness_and_peaks
 from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
 from hawavoclean.guard.calibration import load_calibration_artifact
-from hawavoclean.guard.spectral_probe import FixedProbe
+from tests.support.stubs import FixedProbe
 
 SR = 48000
 

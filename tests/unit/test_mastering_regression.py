@@ -11,8 +11,8 @@ import pytest
 import soundfile as sf
 
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.pipeline import run_pipeline
+from tests.support.stubs import FixedProbe
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "sample_sorani_podcast.wav"

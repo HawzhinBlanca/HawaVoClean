@@ -5,6 +5,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EngineClient, EngineError } from './client';
+import type { AudioPlan } from './types';
 
 const BASE = 'http://127.0.0.1:8765';
 
@@ -42,6 +43,84 @@ describe('endpoint handling', () => {
   it('strips trailing slashes so no URL ever doubles up', () => {
     expect(new EngineClient({ baseUrl: `${BASE}///` }).baseUrl).toBe(BASE);
     expect(client().eventsUrl('j1')).toBe(`${BASE}/api/jobs/j1/events`);
+  });
+});
+
+describe('reviewable audio plans', () => {
+  const plan: AudioPlan = {
+    operation: 'extract', target: 'speech', cleanup_profile: 'studio', model_size: 'large',
+    quality: 'high', explanation: 'Keep the speech, then clean the dialogue.',
+    provider: 'ollama', needs_clarification: false,
+  };
+
+  it('posts text and bounded conversation to the planning endpoint without creating a job', async () => {
+    const fetchFn = mockFetch(res(200, JSON.stringify(plan)));
+    const ac = new AbortController();
+    const result = await client().planAudio({ message: 'Keep the voice', history: [], allow_cloud_text: false }, ac.signal);
+    expect(result).toEqual(plan);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/v1/assistant/plan`);
+    expect(lastInit(fetchFn).signal).toBe(ac.signal);
+    expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual({ message: 'Keep the voice', history: [], allow_cloud_text: false });
+  });
+
+  it.each([
+    { ...plan, operation: 'run_command' },
+    { ...plan, target: null },
+    { ...plan, target: '' },
+    { ...plan, cleanup_profile: 'unregistered' },
+    { ...plan, needs_clarification: true },
+    { ...plan, quality: 'fast' },
+    { ...plan, explanation: '' },
+    { ...plan, operation: 'clean', target: 'speech' },
+    { ...plan, operation: 'clean', target: null, cleanup_profile: null },
+    { ...plan, operation: 'restore', target: null, cleanup_profile: 'studio' },
+    { ...plan, strength: 0.05 },
+    { ...plan, strength: 1.5 },
+    { ...plan, time_range: { start_s: 20, end_s: 10 } },
+    { ...plan, operation: 'clarify', target: null, cleanup_profile: null, needs_clarification: true, time_range: { start_s: 1, end_s: 5 } },
+  ])('rejects an ambiguous or unsupported executable plan: %j', async (invalid) => {
+    mockFetch(res(200, JSON.stringify(invalid)));
+    await expect(client().planAudio({ message: 'Keep the voice', history: [], allow_cloud_text: false })).rejects.toMatchObject({ code: 'bad_plan' });
+  });
+
+  it('accepts studio_pro, restore, strength, and time_range plans', async () => {
+    const richPlan: AudioPlan = {
+      ...plan,
+      operation: 'clean',
+      target: null,
+      cleanup_profile: 'studio_pro',
+      strength: 0.75,
+      time_range: { start_s: 10, end_s: 25 },
+    };
+    mockFetch(res(200, JSON.stringify(richPlan)));
+    const got = await client().planAudio({
+      message: 'Clean from 0:10 to 0:25',
+      history: [],
+      allow_cloud_text: false,
+      acoustic_context: { duration_s: 60, noise_risk: 0.8, available_profiles: ['studio_pro'] },
+    });
+    expect(got).toEqual(richPlan);
+
+    const dereverbPlan: AudioPlan = {
+      ...plan,
+      operation: 'clean',
+      target: null,
+      cleanup_profile: 'dereverb',
+    };
+    mockFetch(res(200, JSON.stringify(dereverbPlan)));
+    const gotDereverb = await client().planAudio({
+      message: 'Remove room echo',
+      history: [],
+      allow_cloud_text: false,
+      acoustic_context: { duration_s: 60, reverberation_risk: 0.7, available_profiles: ['dereverb'] },
+    });
+    expect(gotDereverb).toEqual(dereverbPlan);
+  });
+
+  it('accepts a clarification without pretending there is an executable action', async () => {
+    mockFetch(res(200, JSON.stringify({ ...plan, operation: 'clarify', target: null, cleanup_profile: null, needs_clarification: true })));
+    expect((await client().planAudio({ message: 'Fix it', history: [], allow_cloud_text: false })).operation).toBe('clarify');
   });
 });
 
