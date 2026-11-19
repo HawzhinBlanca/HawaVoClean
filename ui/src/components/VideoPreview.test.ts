@@ -217,6 +217,64 @@ describe('VideoPreview', () => {
     expect(host.querySelector('.vp-error')?.textContent).toContain('audio playback continues');
   });
 
+  it('ignores delayed async seeked events from programmatic sync seeks without feeding back to onSeek', async () => {
+    const onSeek = vi.fn();
+    const playSpy = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    try {
+      await act(async () => {
+        root.render(
+          createElement(VideoPreview, {
+            videoUrl: 'http://127.0.0.1:8765/api/file?path=/clip.mp4',
+            currentTime: 10.0,
+            playing: true,
+            onSeek,
+            collapsed: false,
+            onToggleCollapse: vi.fn(),
+            duration: 60,
+          }),
+        );
+      });
+
+      const video = host.querySelector<HTMLVideoElement>('video')!;
+      expect(video.currentTime).toBeCloseTo(10.0, 2);
+
+      // Flush microtasks & advance DualPlayer clock by >40ms before async `seeked` arrives
+      await Promise.resolve();
+      await Promise.resolve();
+      await act(async () => {
+        root.render(
+          createElement(VideoPreview, {
+            videoUrl: 'http://127.0.0.1:8765/api/file?path=/clip.mp4',
+            currentTime: 10.12,
+            playing: true,
+            onSeek,
+            collapsed: false,
+            onToggleCollapse: vi.fn(),
+            duration: 60,
+          }),
+        );
+      });
+
+      // Simulate browser firing `seeked` for the settled programmatic seek at 10.12s
+      // (even after safeTime has moved on by >40ms) -> must NOT fire onSeek loop
+      video.currentTime = 10.12;
+      await act(async () => {
+        video.dispatchEvent(new Event('seeked'));
+      });
+      expect(onSeek).not.toHaveBeenCalled();
+
+      // Genuine user-initiated seek after programmatic seek settled MUST still call onSeek
+      video.currentTime = 24.5;
+      await act(async () => {
+        video.dispatchEvent(new Event('seeked'));
+      });
+      expect(onSeek).toHaveBeenCalledTimes(1);
+      expect(onSeek).toHaveBeenCalledWith(24.5);
+    } finally {
+      playSpy.mockRestore();
+    }
+  });
+
   it('passes axe-core WCAG 2.2 AA accessibility checks in collapsed and expanded states', async () => {
     await act(async () => {
       root.render(

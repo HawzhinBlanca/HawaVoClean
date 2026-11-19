@@ -973,3 +973,85 @@ describe('pro audition engine — Live LUFS + Peak Meter', () => {
     expect(reset.truePeakHoldDbfs).toBe(-70);
   });
 });
+
+describe('active-deck reload continuity & region preview offset alignment', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('retains wantPlaying and seeks to pending position when reloading active cleaned deck', async () => {
+    await bothReady(30);
+    player.setActive('cleaned');
+    player.seek(5.5);
+    await player.play();
+    expect(player.playing).toBe(true);
+    expect(el('cleaned').currentTime).toBeCloseTo(5.5, 2);
+
+    // Reload active 'cleaned' deck with cache-busted re-stitched master URL
+    const RESTITCHED = 'http://127.0.0.1:8765/api/audio?path=/out/master.wav&v=abc';
+    engine({ [OK]: 206, [RESTITCHED]: 206 });
+    const cleanEl = el('cleaned');
+    const playSpy = vi.spyOn(cleanEl, 'play');
+
+    player.load('cleaned', RESTITCHED, 30);
+    // Immediate seek + play while deck is still 'loading' (as actions.ts does)
+    player.seek(5.5);
+    await player.play();
+
+    // Simulate browser resetting src to 0 & paused when setSrc runs, then wait for attach
+    await settle();
+
+    expect(player.isReady('cleaned')).toBe(true);
+    expect(player.activeDeck).toBe('cleaned');
+    expect(cleanEl.currentTime).toBeCloseTo(5.5, 2);
+    expect(playSpy).toHaveBeenCalled();
+    expect(player.playing).toBe(true);
+  });
+
+  it('keeps full duration, loop bounds, and A/B alignment when cleaned deck holds an offset region preview', async () => {
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    const PREVIEW = 'http://127.0.0.1:8765/api/audio?path=/tmp/preview_9_12.wav';
+    engine({ [OK]: 206, [PREVIEW]: 206 });
+    start();
+    player.load('original', OK, 12);
+    await settle();
+    Object.defineProperty(el('original'), 'duration', { configurable: true, value: 12 });
+
+    // Load 3s preview of [9s, 12s] onto cleaned deck with regionOffsetS = 9
+    player.load('cleaned', PREVIEW, 3, 9);
+    player.setLoopRange([9, 12]);
+    player.setLoopEnabled(true);
+    player.seek(9);
+    player.setActive('cleaned');
+    await settle();
+    Object.defineProperty(el('cleaned'), 'duration', { configurable: true, value: 3 });
+
+    // Full timeline duration must NOT collapse to 3s
+    expect(player.duration).toBeCloseTo(12, 3);
+    expect(player.activeDeck).toBe('cleaned');
+    // Timeline t=9.0s maps to original=9.0s, cleaned=0.0s
+    expect(el('original').currentTime).toBeCloseTo(9.0, 2);
+    expect(el('cleaned').currentTime).toBeCloseTo(0.0, 2);
+    expect(player.time).toBeCloseTo(9.0, 2);
+
+    // Advance 1.5s into preview (cleaned=1.5 -> timeline=10.5) and switch to original
+    el('cleaned').currentTime = 1.5;
+    player.setActive('original');
+    expect(el('original').currentTime).toBeCloseTo(10.5, 2);
+
+    // Play and advance past loopEnd (12.0s) -> loops both decks back to 9.0 / 0.0
+    player.setActive('cleaned');
+    await player.play();
+    el('cleaned').currentTime = 3.05; // timeline 12.05 >= loopEnd 12.0
+    const cb = rafQueue.shift();
+    cb?.(16);
+    expect(el('original').currentTime).toBeCloseTo(9.0, 2);
+    expect(el('cleaned').currentTime).toBeCloseTo(0.0, 2);
+  });
+});

@@ -14,6 +14,7 @@ export function Transport() {
   const gainOffsetDb = useStore((s) => s.gainOffsetDb);
   const setGainOffsetDb = useStore((s) => s.setGainOffsetDb);
   const cleaned = useStore((s) => s.cleanedPath);
+  const previewActive = useStore((s) => s.previewActive);
   const artifacts = useStore((s) => s.artifacts);
   const deckFault = useStore((s) => s.deckFault);
   const original = useStore((s) => s.original);
@@ -97,7 +98,8 @@ export function Transport() {
   // over by a later run — while the report that names it is still on screen,
   // and in that case there is nothing to switch to.
   const masterServed =
-    Boolean(cleaned) && artifacts?.master !== false && deckFault?.deck !== 'cleaned';
+    ((Boolean(cleaned) && artifacts?.master !== false) || previewActive) &&
+    deckFault?.deck !== 'cleaned';
   // Key bindings live in one map (App.useKeyboardMap) so Space/A/B/D/L cannot be
   // claimed twice; this component only draws the transport.
   const mixPct = Math.round(wetDryMix * 100);
@@ -125,26 +127,6 @@ export function Transport() {
           { value: 'cleaned', label: 'Cleaned', className: 'clean', disabled: !masterServed },
         ]}
       />
-      <button
-        type="button"
-        className={`btn-level-match${loudnessMatch && masterServed ? ' on' : ''}`}
-        disabled={!hasAudio || !masterServed}
-        onClick={toggleLoudnessMatch}
-        aria-pressed={loudnessMatch}
-        aria-label="Level match A/B loudness"
-        title={
-          hasAudio && masterServed
-            ? `Level match A/B: ${loudnessMatch ? 'ON' : 'OFF'} (${gainOffsetDb >= 0 ? '+' : ''}${gainOffsetDb.toFixed(1)} dB on Cleaned) — eliminates loudness bias`
-            : 'Level match requires both Original and Cleaned audio'
-        }
-      >
-        <span className="lm-label">Level Match</span>
-        {masterServed && Number.isFinite(gainOffsetDb) && Math.abs(gainOffsetDb) > 0.05 ? (
-          <span className="lm-badge mono">
-            {gainOffsetDb > 0 ? `+${gainOffsetDb.toFixed(1)}` : gainOffsetDb.toFixed(1)} dB
-          </span>
-        ) : null}
-      </button>
       <span className="timecode">
         {clock.t}
         <span className="dim dur"> / {clock.d}</span>
@@ -160,6 +142,27 @@ export function Transport() {
           gap: '6px',
         }}
       >
+        <button
+          type="button"
+          className={`btn-level-match${loudnessMatch && masterServed ? ' on' : ''}`}
+          disabled={!hasAudio || !masterServed}
+          onClick={toggleLoudnessMatch}
+          aria-pressed={loudnessMatch}
+          aria-label="Level match A/B loudness"
+          title={
+            hasAudio && masterServed
+              ? `Level match A/B: ${loudnessMatch ? 'ON' : 'OFF'} (${gainOffsetDb >= 0 ? '+' : ''}${gainOffsetDb.toFixed(1)} dB on Cleaned) — eliminates loudness bias`
+              : 'Level match requires both Original and Cleaned audio'
+          }
+          style={{ minHeight: '28px', height: '28px', padding: '0 8px' }}
+        >
+          <span className="lm-label">Level Match</span>
+          {masterServed && Number.isFinite(gainOffsetDb) && Math.abs(gainOffsetDb) > 0.05 ? (
+            <span className="lm-badge mono">
+              {gainOffsetDb > 0 ? `+${gainOffsetDb.toFixed(1)}` : gainOffsetDb.toFixed(1)} dB
+            </span>
+          ) : null}
+        </button>
         <button
           type="button"
           className={`btn-level-match btn-delta${deltaMode && masterServed ? ' on' : ''}`}

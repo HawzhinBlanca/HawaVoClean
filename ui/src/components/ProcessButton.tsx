@@ -503,7 +503,7 @@ export function ProcessButton() {
 
       <span className="text">
         <span className="title">{title}</span>
-        <span className="face" id="process-readout">
+        <span className="face" id="process-readout" aria-hidden="true">
           <span className={railCls} aria-hidden="true">
             {STAGE_ORDER.map((s, i) => (
               <i

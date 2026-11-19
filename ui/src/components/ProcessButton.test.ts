@@ -245,9 +245,12 @@ describe('the button itself', () => {
     await armed();
     await withStatus(status('done'));
     await render();
-    // The visible face is a readout; the accessible name has to be the verb.
+    // The visible face is a readout; the accessible name has to be the verb,
+    // and `#process-readout` is `aria-hidden="true"` so WCAG 2.5.3 Label in Name
+    // sees only the action title while `aria-describedby` still exposes the readout.
     expect(button()?.getAttribute('aria-label')).toBe('PROCESS AGAIN');
     expect(button()?.getAttribute('aria-describedby')).toBe('process-readout');
+    expect(host.querySelector('#process-readout')?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('offers RETRY and reads Interrupted when a run is interrupted after engine restart', async () => {

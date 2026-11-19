@@ -435,15 +435,22 @@ export function SpectrogramDisplay({
     renderer.render(activeTile, v.start, v.end, scale, effectiveMode);
   }, [activeTile, effectiveMode, getEffectiveView, scale]);
 
+  const redrawRef = useRef<() => void>(() => {});
+  redrawRef.current = redraw;
+
   const scheduleRedraw = useCallback(() => {
     if (redrawTimer.current !== null) window.clearTimeout(redrawTimer.current);
     redrawTimer.current = window.setTimeout(() => {
       redrawTimer.current = null;
-      redraw();
+      redrawRef.current();
     }, REDRAW_DEBOUNCE_MS);
-  }, [redraw]);
+  }, []);
 
-  // Mount/unmount StftCanvasRenderer whenever the spectrogram body is shown/hidden.
+  const scheduleRedrawRef = useRef<() => void>(scheduleRedraw);
+  scheduleRedrawRef.current = scheduleRedraw;
+
+  // Mount/unmount StftCanvasRenderer ONLY when the spectrogram body is shown/hidden
+  // so tile arrivals and scale/mode changes never tear down the WebGL2 context.
   useEffect(() => {
     if (!visible) {
       rendererRef.current?.dispose();
@@ -459,9 +466,9 @@ export function SpectrogramDisplay({
 
     const unsub = waveView.subscribe(() => {
       setViewTick((n) => n + 1);
-      scheduleRedraw();
+      scheduleRedrawRef.current();
     });
-    redraw();
+    redrawRef.current();
 
     return () => {
       unsub();
@@ -472,14 +479,14 @@ export function SpectrogramDisplay({
       renderer.dispose();
       rendererRef.current = null;
     };
-  }, [visible, redraw, scheduleRedraw]);
+  }, [visible]);
 
   // Redraw when active tile, view mode, or frequency scale changes.
   useEffect(() => {
     if (!visible) return;
     lastRenderKey.current = '';
-    redraw();
-  }, [visible, activeTile, effectiveMode, scale, redraw]);
+    redrawRef.current();
+  }, [visible, activeTile, effectiveMode, scale]);
 
   // ── 2D Time x Frequency Box Selection pointer handlers ────────────────────
 
@@ -543,21 +550,25 @@ export function SpectrogramDisplay({
     const span = v.end - v.start;
     if (!(span > 0)) return;
 
-    const xLo = Math.min(dragRect.x0, x1);
-    const xHi = Math.max(dragRect.x0, x1);
-    const yTop = Math.min(dragRect.y0, y1);
-    const yBot = Math.max(dragRect.y0, y1);
+    const xLo = Math.min(1 - 0.002, Math.min(dragRect.x0, x1));
+    const xHi = Math.min(1, Math.max(Math.max(dragRect.x0, x1), xLo + 0.002));
+    const yTop = Math.min(1 - 0.005, Math.min(dragRect.y0, y1));
+    const yBot = Math.min(1, Math.max(Math.max(dragRect.y0, y1), yTop + 0.005));
 
-    const startS = v.start + xLo * span;
-    const endS = v.start + Math.max(xHi, xLo + 0.002) * span;
-    const fHighHz = normYToFreq(yTop, scale, MIN_FREQ_HZ, maxFreqHz);
-    const fLowHz = normYToFreq(Math.min(1, Math.max(yBot, yTop + 0.005)), scale, MIN_FREQ_HZ, maxFreqHz);
+    const startS = Math.max(v.start, Math.min(v.end, v.start + xLo * span));
+    const endS = Math.max(v.start, Math.min(v.end, v.start + xHi * span));
+    const fA = normYToFreq(yTop, scale, MIN_FREQ_HZ, maxFreqHz);
+    const fB = normYToFreq(yBot, scale, MIN_FREQ_HZ, maxFreqHz);
+    const fLowHz = Math.min(fA, fB);
+    const fHighHz = Math.max(fA, fB);
+
+    if (!(endS > startS) || !(fHighHz > fLowHz)) return;
 
     emitSelection({
-      startS: Math.max(v.start, Math.min(v.end, startS)),
-      endS: Math.max(v.start, Math.min(v.end, endS)),
-      fLowHz: Math.min(fLowHz, fHighHz),
-      fHighHz: Math.max(fLowHz, fHighHz),
+      startS,
+      endS,
+      fLowHz,
+      fHighHz,
     });
   };
 

@@ -772,6 +772,7 @@ kbd {
   display: grid;
   grid-template-rows: 30px minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr);
+  min-height: 170px;
 }
 
 .wave-body {
@@ -1398,11 +1399,12 @@ kbd {
 /* control panel */
 .controls {
   display: grid;
-  grid-template-rows: auto auto auto auto;
+  grid-auto-rows: auto;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--pad-4);
   padding: var(--pad-5);
   min-width: 0;
+  min-height: max-content;
 }
 
 .row-between {
@@ -1464,6 +1466,10 @@ kbd {
   background-image: var(--brushed), var(--metal-raised);
   box-shadow: var(--elev-2);
   z-index: 0;
+}
+
+.seg.ab button {
+  padding: 0 9px;
 }
 
 .seg.ab button.on.orig {
@@ -1655,7 +1661,7 @@ kbd {
 /* transport */
 .transport {
   display: grid;
-  grid-template-columns: auto auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: center;
   gap: var(--pad-2);
 }
@@ -1869,7 +1875,7 @@ kbd {
   border-radius: var(--r-md);
   background: var(--panel-2);
   border: 1px solid var(--hair);
-  overflow: hidden;
+  min-height: max-content;
   margin-top: 4px;
 }
 
@@ -2007,6 +2013,7 @@ kbd {
   white-space: nowrap;
   justify-self: end;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
 }
 
@@ -2227,11 +2234,41 @@ kbd {
    waveform out of the window. */
 .left {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(170px, 1fr) auto;
   grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: auto;
   gap: var(--gap);
   min-height: 0;
   min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: auto;
+  scrollbar-color: auto;
+}
+
+.left::-webkit-scrollbar {
+  width: 8px;
+}
+
+.left::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.5);
+  box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.8);
+}
+
+.left::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: var(--r-sm);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Keep the waveform trace legible above its time/legend overlays when the STFT
+   spectrogram panel is expanded on shorter desktop viewports (e.g. 1280x800). */
+@media (max-height: 860px) {
+  .left:has(.spectrogram-body) > .wavepanel {
+    min-height: 240px;
+  }
 }
 
 .inspector {

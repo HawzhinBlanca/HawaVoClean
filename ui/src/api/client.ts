@@ -823,11 +823,16 @@ export class EngineClient {
     );
     const extractedRaw = raw.extractedPaths ?? raw.extracted_paths;
     const extractedPaths = Array.isArray(extractedRaw) ? extractedRaw.map((p) => String(p)) : [];
+    const sourceIdsRaw = raw.sourceIds ?? raw.source_ids;
+    const sourceIds = Array.isArray(sourceIdsRaw)
+      ? sourceIdsRaw.map((id) => (typeof id === 'string' ? id : String(id ?? '')))
+      : undefined;
     const outDirRaw = raw.outDir ?? raw.out_dir;
     return {
       ...(typeof raw.path === 'string' ? { path: raw.path } : {}),
       ...(typeof outDirRaw === 'string' ? { outDir: outDirRaw } : {}),
       extractedPaths,
+      ...(sourceIds ? { sourceIds } : {}),
     };
   }
 

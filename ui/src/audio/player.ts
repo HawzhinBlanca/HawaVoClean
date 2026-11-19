@@ -175,6 +175,14 @@ export class DualPlayer {
   private engineLive: (() => boolean) | null = null;
   /** A `setActive` that arrived while the deck was still fetching. */
   private pendingActive: Deck | null = null;
+  /** Timeline start offset (seconds) when a deck holds a region preview clip rather than t=0. */
+  private offset: Record<Deck, number> = { original: 0, cleaned: 0 };
+  /** True when a deck holds an ephemeral region preview slice so `duration` keeps the full clip length. */
+  private isPreviewDeck: Record<Deck, boolean> = { original: false, cleaned: false };
+  /** Timeline position (seconds) to apply as soon as a loading/reloading deck attaches. */
+  private pendingSeekTime: Record<Deck, number | null> = { original: null, cleaned: null };
+  /** Deferred deck-local seek applied on `loadedmetadata` if `readyState` was 0 during `afterAttach`. */
+  private seekOnMeta: Record<Deck, number | null> = { original: null, cleaned: null };
   /** The last published fault per deck, cleared when the deck is asked for again. */
   private faults: Record<Deck, DeckFault | null> = { original: null, cleaned: null };
   private listeners = new Set<Listener>();
@@ -213,6 +221,13 @@ export class DualPlayer {
         }
       });
       el.addEventListener('loadedmetadata', () => {
+        const deferred = this.seekOnMeta[deck];
+        if (deferred !== null) {
+          this.seekOnMeta[deck] = null;
+          if (this.state[deck] === 'ready' && Math.abs(el.currentTime - deferred) > SYNC_TOLERANCE_S) {
+            el.currentTime = deferred;
+          }
+        }
         this.judgeDuration(deck);
         this.emit();
       });
@@ -539,11 +554,24 @@ export class DualPlayer {
     return null;
   }
 
+  private deckToTimeline(deck: Deck, deckTime: number): number {
+    return deckTime + this.offset[deck];
+  }
+
+  private timelineToDeck(deck: Deck, timelineTime: number): number {
+    const raw = timelineTime - this.offset[deck];
+    const d = this.els[deck].duration;
+    if (Number.isFinite(d) && d > 0) {
+      return Math.max(0, Math.min(d, raw));
+    }
+    return Math.max(0, raw);
+  }
+
   private restartLoopAt(loopStart: number): void {
     for (const deck of ['original', 'cleaned'] as const) {
       if (this.state[deck] !== 'ready') continue;
       const el = this.els[deck];
-      el.currentTime = loopStart;
+      el.currentTime = this.timelineToDeck(deck, loopStart);
       if (this.wantPlaying && el.paused) {
         void el.play().catch(() => undefined);
       }
@@ -759,19 +787,45 @@ export class DualPlayer {
    * that decodes to nothing be caught (see {@link judgeDuration}); `null` keeps
    * only the "zero length is never playable" half of that check.
    */
-  load(deck: Deck, url: string | null, expectedDuration: number | null = null): void {
+  load(
+    deck: Deck,
+    url: string | null,
+    expectedDuration: number | null = null,
+    regionOffsetS?: number,
+  ): void {
     if (url === null) {
       this.retire(deck);
       return;
     }
+    const isPreview = regionOffsetS !== undefined;
+    const safeOffset =
+      isPreview && Number.isFinite(regionOffsetS) && regionOffsetS > 0 ? regionOffsetS : 0;
     // Asking for a deck again is a fresh attempt: whatever it failed at last
     // time is no longer the current answer.
     this.faults[deck] = null;
     this.expected[deck] = expectedDuration;
-    if (this.wanted[deck] === url && this.state[deck] !== 'empty') return;
+    if (
+      this.wanted[deck] === url &&
+      this.offset[deck] === safeOffset &&
+      this.isPreviewDeck[deck] === isPreview &&
+      this.state[deck] !== 'empty'
+    ) {
+      return;
+    }
+    // Preserve timeline position when reloading the currently active deck
+    // (e.g. live unit re-stitch or spectral box repair while playing/scrubbed).
+    const prevActiveTime =
+      deck === this.active && this.state[deck] === 'ready' ? this.time : null;
     this.wanted[deck] = url;
+    this.offset[deck] = safeOffset;
+    this.isPreviewDeck[deck] = isPreview;
     this.durationJudged[deck] = false;
     this.probeFailed[deck] = false;
+    this.seekOnMeta[deck] = null;
+    this.pendingSeekTime[deck] =
+      prevActiveTime !== null && Number.isFinite(prevActiveTime) && prevActiveTime > 0
+        ? prevActiveTime
+        : null;
     // Re-selecting a run whose master is still on the element: revive it
     // instead of re-fetching, so no request is made at all.
     if (this.attached[deck] === url) {
@@ -925,10 +979,21 @@ export class DualPlayer {
   private afterAttach(deck: Deck): void {
     const el = this.els[deck];
     this.applyMuteFallback();
-    // Keep a freshly loaded deck aligned with the current transport position.
-    const t = this.els[this.active].currentTime;
-    if (deck !== this.active && Number.isFinite(t) && t > 0) {
-      el.currentTime = t;
+    // Apply any pending seek recorded across an active-deck reload, or keep a
+    // freshly loaded inactive deck aligned with the current transport position.
+    const pendingSeek = this.pendingSeekTime[deck];
+    this.pendingSeekTime[deck] = null;
+    if (pendingSeek !== null && Number.isFinite(pendingSeek)) {
+      const deckT = this.timelineToDeck(deck, pendingSeek);
+      el.currentTime = deckT;
+      if (el.readyState < 1 && deckT > 0) this.seekOnMeta[deck] = deckT;
+    } else if (deck !== this.active) {
+      const t = this.time;
+      if (Number.isFinite(t) && t > 0) {
+        const deckT = this.timelineToDeck(deck, t);
+        el.currentTime = deckT;
+        if (el.readyState < 1 && deckT > 0) this.seekOnMeta[deck] = deckT;
+      }
     }
     if (this.pendingActive === deck) {
       this.pendingActive = null;
@@ -937,8 +1002,11 @@ export class DualPlayer {
       if (this.ctx && this.gains) {
         this.applyTargetGain();
       }
-      if (this.wantPlaying && deck !== this.active) {
+      if (this.wantPlaying) {
         void el.play().catch(() => undefined);
+        if (deck === this.active) {
+          this.startTicker();
+        }
       }
     }
     this.emit();
@@ -969,6 +1037,10 @@ export class DualPlayer {
   private takeOutOfService(deck: Deck, keepPlaying: boolean): Deck | null {
     this.epoch[deck] += 1; // supersede any in-flight attach
     this.wanted[deck] = null;
+    this.offset[deck] = 0;
+    this.isPreviewDeck[deck] = false;
+    this.pendingSeekTime[deck] = null;
+    this.seekOnMeta[deck] = null;
     this.state[deck] = 'empty';
     this.deltaModeEnabled = false;
     if (this.pendingActive === deck) this.pendingActive = null;
@@ -1067,33 +1139,43 @@ export class DualPlayer {
     this.deltaModeEnabled = false;
     const from = this.els[prev];
     const to = this.els[deck];
-    // Common-region bounds: ensure neither deck compares past the end of the shorter take.
     const maxTime = this.duration;
-    if (maxTime > 0 && from.currentTime > maxTime) {
-      from.currentTime = maxTime;
+    let timelineTime = this.deckToTimeline(prev, from.currentTime);
+    if (!Number.isFinite(timelineTime)) timelineTime = 0;
+    if (maxTime > 0 && timelineTime > maxTime) {
+      timelineTime = maxTime;
     }
-    if (maxTime > 0 && to.currentTime > maxTime) {
-      to.currentTime = maxTime;
+    const expectedFrom = this.timelineToDeck(prev, timelineTime);
+    if (Number.isFinite(from.currentTime) && Math.abs(from.currentTime - expectedFrom) > SYNC_TOLERANCE_S) {
+      from.currentTime = expectedFrom;
     }
+    const expectedTo = this.timelineToDeck(deck, timelineTime);
     // A/B has to stay sample-locked; when both decks are in memory (the normal
     // case) this correction costs nothing at all.
-    if (Math.abs(to.currentTime - from.currentTime) > SYNC_TOLERANCE_S) {
-      to.currentTime = from.currentTime;
+    if (Math.abs(to.currentTime - expectedTo) > SYNC_TOLERANCE_S) {
+      to.currentTime = expectedTo;
     }
     this.applyTargetGain();
     if (this.wantPlaying && to.paused) {
       void to.play().catch(() => undefined);
+      this.startTicker();
     }
     this.emit();
   }
 
   async play(): Promise<void> {
-    if (this.state[this.active] !== 'ready') return;
+    if (this.state[this.active] === 'empty') return;
     this.ensureGraph();
     if (this.ctx && this.ctx.state === 'suspended') {
       await this.ctx.resume();
     }
     this.wantPlaying = true;
+    // Active deck is reloading (e.g. live unit re-stitch or spectral repair):
+    // retain wantPlaying so `afterAttach` resumes playback seamlessly.
+    if (this.state[this.active] !== 'ready') {
+      this.emit();
+      return;
+    }
     if (this.loopEnabledFlag && this.loopRangeValue) {
       const bounds = this.effectiveLoopBounds();
       if (bounds) {
@@ -1106,13 +1188,14 @@ export class DualPlayer {
     } else if (this.duration > 0 && this.time >= this.duration) {
       this.seek(0);
     }
-    const t = this.els[this.active].currentTime;
+    const t = this.time;
     const plays: Promise<void>[] = [];
     for (const deck of ['original', 'cleaned'] as const) {
       if (this.state[deck] !== 'ready') continue;
       const el = this.els[deck];
-      if (deck !== this.active && Math.abs(el.currentTime - t) > SYNC_TOLERANCE_S) {
-        el.currentTime = t;
+      const expected = this.timelineToDeck(deck, t);
+      if (deck !== this.active && Math.abs(el.currentTime - expected) > SYNC_TOLERANCE_S) {
+        el.currentTime = expected;
       }
       plays.push(el.play().catch(() => undefined));
     }
@@ -1136,14 +1219,24 @@ export class DualPlayer {
     const d = this.duration;
     const t = Math.max(0, Math.min(d > 0 ? d : time, time));
     for (const deck of ['original', 'cleaned'] as const) {
-      if (this.state[deck] === 'ready') this.els[deck].currentTime = t;
+      this.seekOnMeta[deck] = null;
+      if (this.state[deck] === 'ready') {
+        this.els[deck].currentTime = this.timelineToDeck(deck, t);
+        this.pendingSeekTime[deck] = null;
+      } else if (this.state[deck] === 'loading') {
+        this.pendingSeekTime[deck] = t;
+      }
     }
     this.emit();
   }
 
   get time(): number {
+    if (this.state[this.active] === 'loading') {
+      const pending = this.pendingSeekTime[this.active];
+      if (pending !== null && Number.isFinite(pending)) return pending;
+    }
     const t = this.els[this.active].currentTime;
-    return Number.isFinite(t) ? t : 0;
+    return Number.isFinite(t) ? this.deckToTimeline(this.active, t) : 0;
   }
 
   get duration(): number {
@@ -1159,10 +1252,13 @@ export class DualPlayer {
         : null;
 
     if (dOrig !== null && dClean !== null) {
+      if (this.isPreviewDeck.cleaned || this.isPreviewDeck.original) {
+        return dOrig;
+      }
       return Math.min(dOrig, dClean);
     }
     if (dOrig !== null) return dOrig;
-    if (dClean !== null) return dClean;
+    if (dClean !== null) return dClean + this.offset.cleaned;
     return 0;
   }
 
@@ -1214,32 +1310,33 @@ export class DualPlayer {
       const b = this.els[other];
       const maxTime = this.duration;
       const bothReady = this.bothDecksReady();
+      const tA = this.deckToTimeline(this.active, a.currentTime);
+      const tB = this.deckToTimeline(other, b.currentTime);
       if (this.loopEnabledFlag) {
         const bounds = this.effectiveLoopBounds();
         if (bounds) {
           const [loopStart, loopEnd] = bounds;
-          if (a.currentTime >= loopEnd || (bothReady && b.currentTime >= loopEnd)) {
+          if (tA >= loopEnd || (bothReady && tB >= loopEnd)) {
             this.restartLoopAt(loopStart);
             this.raf = window.requestAnimationFrame(tick);
             return;
           }
         }
       }
-      if (bothReady && maxTime > 0 && (a.currentTime >= maxTime || b.currentTime >= maxTime)) {
+      if (bothReady && maxTime > 0 && (tA >= maxTime || tB >= maxTime)) {
         this.wantPlaying = false;
         this.pauseAll();
-        if (a.currentTime > maxTime) a.currentTime = maxTime;
-        if (b.currentTime > maxTime) b.currentTime = maxTime;
+        if (tA > maxTime) a.currentTime = this.timelineToDeck(this.active, maxTime);
+        if (tB > maxTime) b.currentTime = this.timelineToDeck(other, maxTime);
         this.emit();
         return;
       }
       // Drift guard: keep the inactive deck within tolerance of the active one.
-      if (
-        this.state[other] === 'ready' &&
-        !b.paused &&
-        Math.abs(a.currentTime - b.currentTime) > 0.08
-      ) {
-        b.currentTime = a.currentTime;
+      if (this.state[other] === 'ready' && !b.paused) {
+        const expectedB = this.timelineToDeck(other, tA);
+        if (Math.abs(b.currentTime - expectedB) > 0.08) {
+          b.currentTime = expectedB;
+        }
       }
       this.emit();
       this.raf = window.requestAnimationFrame(tick);

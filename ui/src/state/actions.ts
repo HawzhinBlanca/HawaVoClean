@@ -863,6 +863,10 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   player.seek(0);
   player.claimOnly('original', null);
   player.load('cleaned', null);
+  unitOverrideEpoch += 1;
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
+  extractTrackEpoch += 1;
   st.resetForNewSource();
   // A refusal is answered by the load that follows it. The multi-file note is
   // not a refusal — it explains *this* load ("3 files were dropped, the first
@@ -3106,6 +3110,8 @@ async function syncOverrideMapDiff(prev: UnitOverrideMap, next: UnitOverrideMap)
   }
 }
 
+let unitOverrideEpoch = 0;
+
 async function applyUnitOverrideInternal(
   unitId: number,
   decision: UnitOverrideMapValue,
@@ -3151,9 +3157,21 @@ async function applyUnitOverrideInternal(
     return;
   }
 
+  const myEpoch = ++unitOverrideEpoch;
+  const expectedSourcePath = st.source?.path ?? st.original?.path ?? null;
+
   try {
     const res = await client.overrideUnit(jobId, { unitId, decision });
     const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== unitOverrideEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== jobId
+    ) {
+      return;
+    }
     if (cur.report) {
       let nextReport = cur.report;
       let nextSelected = cur.selectedUnit;
@@ -3209,7 +3227,13 @@ async function applyUnitOverrideInternal(
       void analyzeCleaned(cur.cleanedPath)
         .then((analysis) => {
           const latest = getState();
-          if (latest.cleanedPath === cur.cleanedPath && analysis) {
+          const latestJobId = latest.job?.id ?? latest.report?.job_id ?? null;
+          if (
+            myEpoch === unitOverrideEpoch &&
+            latestJobId === jobId &&
+            latest.cleanedPath === cur.cleanedPath &&
+            analysis
+          ) {
             latest.setCleaned(analysis, cur.cleanedPath);
             syncPlayerLoudnessMatch();
           }
@@ -3219,7 +3243,17 @@ async function applyUnitOverrideInternal(
       cur.setStatus(`Unit ${unitId} updated (${decision.replace(/_/g, ' ')})`);
     }
   } catch (e) {
-    getState().setStatus(`Override recorded locally · ${describeError(e)}`);
+    const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== unitOverrideEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== jobId
+    ) {
+      return;
+    }
+    cur.setStatus(`Override recorded locally · ${describeError(e)}`);
   }
 }
 
@@ -3444,6 +3478,9 @@ export async function exportWithDelivery(
 
 const MAX_PREVIEW_WINDOW_S = 15.0;
 const DEFAULT_PREVIEW_WINDOW_S = 6.0;
+let previewEpoch = 0;
+let spectralRepairEpoch = 0;
+let extractTrackEpoch = 0;
 
 function resolveClientAudioUrl(
   client: EngineClient,
@@ -3462,7 +3499,8 @@ function resolveClientAudioUrl(
 
 /**
  * Render an instant warm region preview (`POST /api/v1/preview`), load it onto
- * the cleaned deck, enable looping over [startS, endS], switch to the cleaned
+ * the cleaned deck offset-aligned at `startS` without clobbering the full-master
+ * `cleanedPath`, enable looping over `[startS, endS]`, switch to the cleaned
  * deck, and report render latency + warm-cache status.
  */
 export async function previewRegion(): Promise<RegionPreviewResponse | null> {
@@ -3510,6 +3548,10 @@ export async function previewRegion(): Promise<RegionPreviewResponse | null> {
 
   if (!(endS > startS)) return null;
 
+  const myEpoch = ++previewEpoch;
+  const expectedSourcePath = st.source.path;
+  const expectedJobId = st.job?.id ?? st.report?.job_id ?? null;
+
   st.setStatus(`Rendering warm preview (${startS.toFixed(1)}s–${endS.toFixed(1)}s)…`);
   try {
     const res = await client.renderRegionPreview({
@@ -3521,33 +3563,51 @@ export async function previewRegion(): Promise<RegionPreviewResponse | null> {
       ambienceFloorDb: st.rackSettings.ambienceFloorDb,
     });
     const cur = getState();
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== previewEpoch ||
+      cur.source?.path !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
     const audioUrl = resolveClientAudioUrl(client, res.audioUrl, res.previewPath);
     if (!audioUrl) {
       cur.setStatus('Preview finished with no playable audio URL');
       return res;
     }
+    const previewDur = res.durationS > 0 ? res.durationS : endS - startS;
+    const boundedEndS = startS + previewDur;
     cur.setDeckFault(null);
-    if (res.previewPath) {
-      cur.setCleaned(cur.cleaned, res.previewPath);
-    }
-    player.load('cleaned', audioUrl, res.durationS > 0 ? res.durationS : endS - startS);
+    // Keep full-master `cleanedPath` intact so Save/Export never exports a short region preview.
+    cur.setPreviewActive(true);
+    player.load('cleaned', audioUrl, previewDur, startS);
     if (typeof player.setLoopRange === 'function') {
-      player.setLoopRange([startS, endS]);
+      player.setLoopRange([startS, boundedEndS]);
     }
     if (typeof player.setLoopEnabled === 'function') {
       player.setLoopEnabled(true);
     }
+    player.seek(startS);
     player.setActive('cleaned');
     cur.setAbMode('cleaned');
     const ms = Math.round(res.renderMs);
     const cacheTag = res.warmHit ? 'warm hit' : 'cold render';
     cur.setStatus(
-      `Preview ready · ${ms} ms (${cacheTag}) · loop ${startS.toFixed(1)}s–${endS.toFixed(1)}s`,
+      `Preview ready · ${ms} ms (${cacheTag}) · loop ${startS.toFixed(1)}s–${boundedEndS.toFixed(1)}s`,
     );
     return res;
   } catch (e) {
-    const msg = describeError(e);
     const cur = getState();
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== previewEpoch ||
+      cur.source?.path !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
+    const msg = describeError(e);
     cur.setError(msg, 'Preview error');
     cur.setStatus(`Preview failed · ${msg}`);
     return null;
@@ -3577,6 +3637,10 @@ export async function applySpectralBoxRepair(
     return null;
   }
 
+  const myEpoch = ++spectralRepairEpoch;
+  const expectedSourcePath = st.source?.path ?? st.original?.path ?? null;
+  const expectedJobId = st.job?.id ?? st.report?.job_id ?? null;
+
   st.setStatus(
     `Attenuating ${Math.round(box.fLowHz)}–${Math.round(box.fHighHz)} Hz (${box.startS.toFixed(1)}s–${box.endS.toFixed(1)}s)…`,
   );
@@ -3590,6 +3654,15 @@ export async function applySpectralBoxRepair(
       attenuationDb,
     });
     const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== spectralRepairEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
     const audioUrl = resolveClientAudioUrl(client, res.audioUrl, res.outputPath);
     cur.setDeckFault(null);
     if (res.outputPath) {
@@ -3621,7 +3694,13 @@ export async function applySpectralBoxRepair(
       void analyzeCleaned(res.outputPath)
         .then((analysis) => {
           const latest = getState();
-          if (latest.cleanedPath === res.outputPath && analysis) {
+          const latestSourcePath = latest.source?.path ?? latest.original?.path ?? null;
+          if (
+            myEpoch === spectralRepairEpoch &&
+            latestSourcePath === expectedSourcePath &&
+            latest.cleanedPath === res.outputPath &&
+            analysis
+          ) {
             latest.setCleaned(analysis, res.outputPath);
             syncPlayerLoudnessMatch();
           }
@@ -3630,8 +3709,17 @@ export async function applySpectralBoxRepair(
     }
     return res;
   } catch (e) {
-    const msg = describeError(e);
     const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== spectralRepairEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
+    const msg = describeError(e);
     cur.setError(msg, 'Spectral repair error');
     cur.setStatus(`Spectral repair failed · ${msg}`);
     return null;
@@ -3653,25 +3741,42 @@ export async function extractAndLoadTrack(
     st.setStatus('Track extraction unavailable — engine is offline');
     return null;
   }
+  const myEpoch = ++extractTrackEpoch;
+  const expectedSourcePath = st.source?.path ?? null;
   const label = trackName ? `${trackName} (ch ${trackIndex + 1})` : `track ${trackIndex + 1}`;
   st.setStatus(`Extracting ${label}…`);
   try {
     const res = await client.extractTracks(path, [trackIndex]);
-    const extractedPath = res.extractedPaths[0];
-    if (!extractedPath) {
-      st.setError('No audio file was produced for the selected track.', 'Track extract failed');
-      st.setStatus('Track extraction produced no output');
+    const cur = getState();
+    if (
+      myEpoch !== extractTrackEpoch ||
+      (expectedSourcePath !== null && cur.source?.path !== expectedSourcePath)
+    ) {
       return null;
     }
+    const extractedPath = res.extractedPaths[0];
+    if (!extractedPath) {
+      cur.setError('No audio file was produced for the selected track.', 'Track extract failed');
+      cur.setStatus('Track extraction produced no output');
+      return null;
+    }
+    const extractedSourceId = res.sourceIds?.[0] || undefined;
     await loadSource({
       path: extractedPath,
       name: baseName(extractedPath),
       origin: 'file',
+      ...(extractedSourceId ? { sourceId: extractedSourceId } : {}),
     });
     return extractedPath;
   } catch (e) {
-    const msg = describeError(e);
     const cur = getState();
+    if (
+      myEpoch !== extractTrackEpoch ||
+      (expectedSourcePath !== null && cur.source?.path !== expectedSourcePath)
+    ) {
+      return null;
+    }
+    const msg = describeError(e);
     cur.setError(msg, 'Track extract failed');
     cur.setStatus(`Track extraction failed · ${msg}`);
     return null;

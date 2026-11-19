@@ -144,12 +144,13 @@ export default function App() {
   const dragOver = useDragWatch();
   const abMode = useStore((s) => s.abMode);
   const cleanedPath = useStore((s) => s.cleanedPath);
+  const previewActive = useStore((s) => s.previewActive);
   const batch = useStore((s) => s.batch);
   const takes = useStore((s) => s.takes);
   const activeTakeId = useStore((s) => s.activeTakeId);
   const engineStatus = useStore((s) => s.engineStatus);
   const offlineSince = useStore((s) => s.engineOfflineSince);
-  const deck = abMode === 'cleaned' && cleanedPath ? 'cleaned' : 'original';
+  const deck = abMode === 'cleaned' && (cleanedPath || previewActive) ? 'cleaned' : 'original';
   const effectiveActiveTake =
     abMode === 'original' ? 'original' : (activeTakeId ?? takes[takes.length - 1]?.id ?? 'original');
   // The banner is a *row* of the shell grid, never an overlay: a bar that

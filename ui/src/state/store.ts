@@ -248,6 +248,8 @@ export interface AppState {
   job: JobInfo | null;
   report: HawaVoCleanReport | null;
   cleanedPath: string | null;
+  /** True while the cleaned deck holds an ephemeral warm region preview rather than the full master. */
+  previewActive: boolean;
 
   abMode: AbMode;
   /** Whether loudness-matched A/B comparison is active (D4.2). */
@@ -348,6 +350,7 @@ export interface AppState {
   setAnalyzing(v: boolean): void;
   setOriginal(a: AudioAnalysis | null): void;
   setCleaned(a: AudioAnalysis | null, path: string | null): void;
+  setPreviewActive(active: boolean): void;
   setProfile(p: Profile): void;
   setCapabilities(speakers: string[], restoreAvailable: boolean): void;
   setCapabilitiesV1(capabilities: CapabilityStatusV1[]): void;
@@ -426,6 +429,7 @@ export const useStore = create<AppState>((set) => ({
   job: null,
   report: null,
   cleanedPath: null,
+  previewActive: false,
 
   abMode: 'original',
   loudnessMatch: true,
@@ -493,7 +497,8 @@ export const useStore = create<AppState>((set) => ({
   setAnalyzing: (analyzing) => set({ analyzing }),
   setOriginal: (original) =>
     set({ original, duration: original ? original.duration_s : 0 }),
-  setCleaned: (cleaned, cleanedPath) => set({ cleaned, cleanedPath }),
+  setCleaned: (cleaned, cleanedPath) => set({ cleaned, cleanedPath, previewActive: false }),
+  setPreviewActive: (previewActive) => set({ previewActive }),
   setProfile: (profile) => set({ profile }),
   // Capabilities can change under a made selection, so this reconciles rather
   // than just stores: a speaker the engine no longer offers cannot stay
@@ -642,6 +647,7 @@ export const useStore = create<AppState>((set) => ({
       original: null,
       cleaned: null,
       cleanedPath: null,
+      previewActive: false,
       job: null,
       report: null,
       abMode: 'original',

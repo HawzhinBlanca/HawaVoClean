@@ -1256,9 +1256,11 @@ export class SpectrumRenderer {
     }
     ctx.textAlign = 'right';
     const spacing = (p.h / (DB_LINES.length - 1)) | 0;
-    const everyOther = spacing < 17;
+    // When the plot is shallow (< 80 px), step by 48 dB (0 / -48 / -96) so y-axis
+    // labels never stack on top of one another.
+    const labelStride = p.h < 80 ? 4 : spacing < 17 ? 2 : 1;
     for (let i = 0; i < DB_LINES.length; i++) {
-      if (everyOther && i % 2 === 1) continue;
+      if (i % labelStride !== 0) continue;
       const db = DB_LINES[i] ?? 0;
       const y = this.yOf(db, p);
       ctx.fillText(DB_LABEL[i] ?? '', p.x - 6, Math.min(p.y + p.h - 4, Math.max(p.y + 4, y)));

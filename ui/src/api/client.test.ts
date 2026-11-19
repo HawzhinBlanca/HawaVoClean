@@ -887,6 +887,7 @@ describe('v1 capabilities and jobs (True-10 D4.11)', () => {
           path: '/field/poly.wav',
           outDir: '/work/extracted_tracks/poly_abc',
           extractedPaths: ['/work/extracted_tracks/poly_abc/ch01_Boom.wav'],
+          sourceIds: ['src-poly-ch01'],
         }),
       ),
     );
@@ -898,6 +899,7 @@ describe('v1 capabilities and jobs (True-10 D4.11)', () => {
         body: JSON.stringify({ path: '/field/poly.wav', trackIndices: [0] }),
       }),
     );
+    expect(extracted.sourceIds).toEqual(['src-poly-ch01']);
     expect(extracted.extractedPaths).toEqual(['/work/extracted_tracks/poly_abc/ch01_Boom.wav']);
 
     fetchFn.mockResolvedValueOnce(

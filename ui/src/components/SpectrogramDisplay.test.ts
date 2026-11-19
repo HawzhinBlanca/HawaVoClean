@@ -5,7 +5,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import axe from 'axe-core';
 import type { AudioAnalysis } from '../api/types';
-import { SPECTRAL_SELECTION_EVENT, type SpectralSelection } from '../render/stftSpectrogram';
+import { SPECTRAL_SELECTION_EVENT, StftCanvasRenderer, type SpectralSelection } from '../render/stftSpectrogram';
 import { useStore } from '../state/store';
 import { SpectrogramDisplay } from './SpectrogramDisplay';
 
@@ -388,5 +388,101 @@ describe('SpectrogramDisplay component', () => {
       },
     });
     expect(results.violations).toEqual([]);
+  });
+
+  it('does not dispose or recreate StftCanvasRenderer when switching view mode or frequency scale', () => {
+    const disposeSpy = vi.spyOn(StftCanvasRenderer.prototype, 'dispose');
+    try {
+      act(() => {
+        useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', origin: 'file' });
+        useStore.getState().setOriginal(mockAnalysis({ duration_s: 4.0 }));
+        useStore.getState().setCleaned(mockAnalysis({ path: '/out.wav', duration_s: 4.0 }), '/out.wav');
+        root.render(createElement(SpectrogramDisplay));
+      });
+
+      const showBtn = host.querySelector<HTMLButtonElement>('button.wave-fit')!;
+      act(() => showBtn.click());
+      expect(disposeSpy).toHaveBeenCalledTimes(0);
+
+      const buttons = () => [...host.querySelectorAll<HTMLButtonElement>('.spectrogram-seg-btn')];
+      act(() => buttons().find((b) => b.textContent === 'Cleaned')?.click());
+      act(() => buttons().find((b) => b.textContent === 'Removed (Δ)')?.click());
+      act(() => buttons().find((b) => b.textContent === 'Mel')?.click());
+      act(() => buttons().find((b) => b.textContent === 'Linear')?.click());
+      // Zero context teardowns across mode/scale switches
+      expect(disposeSpy).toHaveBeenCalledTimes(0);
+
+      // Disposes cleanly once hidden
+      act(() => showBtn.click());
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      disposeSpy.mockRestore();
+    }
+  });
+
+  it('clamps right-edge and bottom-edge drags so emitted 2D selection is never degenerate', () => {
+    const received: Array<SpectralSelection | null> = [];
+    const onProp = vi.fn((sel: SpectralSelection | null) => received.push(sel));
+
+    act(() => {
+      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', origin: 'file' });
+      useStore.getState().setOriginal(mockAnalysis({ duration_s: 10.0, sample_rate: 48000 }));
+      root.render(createElement(SpectrogramDisplay, { onSpectralSelectionChange: onProp }));
+    });
+    act(() => host.querySelector<HTMLButtonElement>('button.wave-fit')?.click());
+
+    const stage = host.querySelector<HTMLDivElement>('.spectrogram-stage')!;
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 160,
+      right: 400,
+      bottom: 160,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    // Vertical drag directly along right edge (x = 400 -> x0=1, x1=1)
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 400, clientY: 20, pointerId: 1 }),
+      );
+    });
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointermove', { bubbles: true, button: 0, clientX: 400, clientY: 120, pointerId: 1 }),
+      );
+    });
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: 400, clientY: 120, pointerId: 1 }),
+      );
+    });
+
+    // Horizontal drag directly along bottom edge (y = 160 -> y0=1, y1=1)
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 80, clientY: 160, pointerId: 2 }),
+      );
+    });
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointermove', { bubbles: true, button: 0, clientX: 280, clientY: 160, pointerId: 2 }),
+      );
+    });
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: 280, clientY: 160, pointerId: 2 }),
+      );
+    });
+
+    expect(received).toHaveLength(2);
+    for (const sel of received) {
+      expect(sel).not.toBeNull();
+      expect(sel!.endS).toBeGreaterThan(sel!.startS);
+      expect(sel!.fHighHz).toBeGreaterThan(sel!.fLowHz);
+    }
   });
 });

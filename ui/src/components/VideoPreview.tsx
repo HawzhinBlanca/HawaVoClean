@@ -53,7 +53,7 @@ export function VideoPreview({
 }: VideoPreviewProps) {
   const uid = useId();
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const programmaticSeekRef = useRef(false);
+  const lastProgrammaticTargetRef = useRef<number | null>(null);
   const [mediaDuration, setMediaDuration] = useState<number>(0);
   const [hasError, setHasError] = useState(false);
 
@@ -66,6 +66,7 @@ export function VideoPreview({
   useEffect(() => {
     setHasError(false);
     setMediaDuration(0);
+    lastProgrammaticTargetRef.current = null;
   }, [normalizedUrl]);
 
   // Keep <video> frame-synced within 40 ms of DualPlayer's playback clock.
@@ -79,15 +80,13 @@ export function VideoPreview({
     const drift = Math.abs(video.currentTime - targetTime);
 
     if (drift > VIDEO_SYNC_DRIFT_THRESHOLD_S) {
-      programmaticSeekRef.current = true;
+      lastProgrammaticTargetRef.current = targetTime;
       try {
         video.currentTime = targetTime;
       } catch {
+        lastProgrammaticTargetRef.current = null;
         // Ignore seek errors before metadata is ready; onLoadedMetadata will resync.
       }
-      queueMicrotask(() => {
-        programmaticSeekRef.current = false;
-      });
     }
   }, [safeTime, collapsed, normalizedUrl, hasError, effectiveDuration]);
 
@@ -175,21 +174,33 @@ export function VideoPreview({
               if (Number.isFinite(el.duration) && el.duration > 0) {
                 setMediaDuration(el.duration);
               }
-              if (Math.abs(el.currentTime - safeTime) > VIDEO_SYNC_DRIFT_THRESHOLD_S) {
-                programmaticSeekRef.current = true;
+              const targetTime =
+                Number.isFinite(el.duration) && el.duration > 0
+                  ? Math.min(safeTime, el.duration)
+                  : safeTime;
+              if (Math.abs(el.currentTime - targetTime) > VIDEO_SYNC_DRIFT_THRESHOLD_S) {
+                lastProgrammaticTargetRef.current = targetTime;
                 try {
-                  el.currentTime = safeTime;
+                  el.currentTime = targetTime;
                 } catch {
+                  lastProgrammaticTargetRef.current = null;
                   // Ignore if not seekable yet.
                 }
-                queueMicrotask(() => {
-                  programmaticSeekRef.current = false;
-                });
               }
             }}
             onSeeked={(e) => {
-              if (programmaticSeekRef.current || !onSeek) return;
               const nextTime = e.currentTarget.currentTime;
+              const pendingTarget = lastProgrammaticTargetRef.current;
+              if (pendingTarget !== null) {
+                lastProgrammaticTargetRef.current = null;
+                if (
+                  !Number.isFinite(nextTime) ||
+                  Math.abs(nextTime - pendingTarget) <= VIDEO_SYNC_DRIFT_THRESHOLD_S
+                ) {
+                  return;
+                }
+              }
+              if (!onSeek) return;
               if (
                 Number.isFinite(nextTime) &&
                 Math.abs(nextTime - safeTime) > VIDEO_SYNC_DRIFT_THRESHOLD_S

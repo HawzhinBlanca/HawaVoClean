@@ -754,6 +754,7 @@ export interface TrackExtractResponse {
   path?: string | undefined;
   outDir?: string | undefined;
   extractedPaths: string[];
+  sourceIds?: string[] | undefined;
 }
 
 export interface SpectralRepairRequest {

@@ -127,7 +127,10 @@ export function handleKeyDown(e: KeyboardEvent): void {
       // Same condition the A/B control draws itself with: a path is not a deck,
       // and a master the engine can no longer serve is not switchable to by
       // keyboard either.
-      if (st.cleanedPath && st.artifacts?.master !== false && st.deckFault?.deck !== 'cleaned') {
+      if (
+        ((st.cleanedPath && st.artifacts?.master !== false) || st.previewActive) &&
+        st.deckFault?.deck !== 'cleaned'
+      ) {
         setAb('cleaned');
       }
       break;
@@ -135,8 +138,7 @@ export function handleKeyDown(e: KeyboardEvent): void {
       // Toggle Delta ("Listen to Removed") audition when cleaned deck is ready.
       const cleanedReady =
         hasAudio &&
-        Boolean(st.cleanedPath) &&
-        st.artifacts?.master !== false &&
+        ((Boolean(st.cleanedPath) && st.artifacts?.master !== false) || st.previewActive) &&
         st.deckFault?.deck !== 'cleaned';
       if (cleanedReady) {
         e.preventDefault();

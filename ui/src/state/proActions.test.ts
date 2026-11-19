@@ -7,6 +7,7 @@ import { DEFAULT_STUDIO_RACK_SETTINGS } from './presets';
 import { getState, useStore } from './store';
 import {
   applySpectralBoxRepair,
+  applyUnitOverride,
   cleanTrackWithMarkersInResolve,
   exportWithDelivery,
   extractAndLoadTrack,
@@ -292,8 +293,11 @@ describe('Last-Mile Pro Bridges actions', () => {
         ambienceFloorDb: -45,
       },
     });
-    // Increase clip duration to 40s to test the 15s clamp
-    useStore.setState({ original: { ...makeAnalysis('/in/clip.wav'), duration_s: 40 } });
+    // Increase clip duration to 40s to test the 15s clamp and preserve existing master cleanedPath
+    useStore.setState({
+      original: { ...makeAnalysis('/in/clip.wav'), duration_s: 40 },
+      cleanedPath: '/out/full_master.wav',
+    });
 
     const res = await previewRegion();
     expect(renderRegionPreview).toHaveBeenCalledWith({
@@ -308,10 +312,15 @@ describe('Last-Mile Pro Bridges actions', () => {
       'cleaned',
       'http://127.0.0.1:8765/api/audio?path=%2Ftmp%2Fprev_1.wav',
       15,
+      2,
     );
     expect(mockPlayer.setLoopRange).toHaveBeenCalledWith([2, 17]);
     expect(mockPlayer.setLoopEnabled).toHaveBeenCalledWith(true);
+    expect(mockPlayer.seek).toHaveBeenCalledWith(2);
     expect(mockPlayer.setActive).toHaveBeenCalledWith('cleaned');
+    // Must NEVER clobber the full-master cleanedPath with a short region preview
+    expect(getState().cleanedPath).toBe('/out/full_master.wav');
+    expect(getState().previewActive).toBe(true);
     expect(getState().abMode).toBe('cleaned');
     expect(getState().statusLine).toContain('43 ms');
     expect(getState().statusLine).toContain('warm hit');
@@ -404,9 +413,10 @@ describe('Last-Mile Pro Bridges actions', () => {
     expect(res?.outputPath).toBe('/work/repaired.wav');
   });
 
-  it('extractAndLoadTrack calls extractTracks and loads the extracted mono WAV onto the deck', async () => {
+  it('extractAndLoadTrack calls extractTracks, forwards sourceId, and loads the extracted mono WAV onto the deck', async () => {
     const extractTracks = vi.fn(async () => ({
       extractedPaths: ['/work/extracted_tracks/poly/ch02_Lav.wav'],
+      sourceIds: ['src-extracted-lav-2'],
     }));
     const analyze = vi.fn(async () => makeAnalysis('/work/extracted_tracks/poly/ch02_Lav.wav'));
     const client = {
@@ -428,6 +438,126 @@ describe('Last-Mile Pro Bridges actions', () => {
     expect(out).toBe('/work/extracted_tracks/poly/ch02_Lav.wav');
     expect(getState().source?.path).toBe('/work/extracted_tracks/poly/ch02_Lav.wav');
     expect(getState().source?.name).toBe('ch02_Lav.wav');
+    expect(getState().source?.sourceId).toBe('src-extracted-lav-2');
+  });
+
+  it('drops stale async responses in previewRegion, applySpectralBoxRepair, applyUnitOverride, and extractAndLoadTrack when clip/job changes mid-flight', async () => {
+    let resolvePreview!: (v: unknown) => void;
+    let resolveRepair!: (v: unknown) => void;
+    let resolveOverride!: (v: unknown) => void;
+    let resolveExtract!: (v: unknown) => void;
+
+    const client = {
+      baseUrl: '',
+      fileUrl: (p: string) => `/api/audio?path=${encodeURIComponent(p)}`,
+      analyze: vi.fn(async () => makeAnalysis('/in/new_clip.wav')),
+      renderRegionPreview: vi.fn(
+        () =>
+          new Promise((r) => {
+            resolvePreview = r;
+          }),
+      ),
+      repairSpectralBox: vi.fn(
+        () =>
+          new Promise((r) => {
+            resolveRepair = r;
+          }),
+      ),
+      overrideUnit: vi.fn(
+        () =>
+          new Promise((r) => {
+            resolveOverride = r;
+          }),
+      ),
+      extractTracks: vi.fn(
+        () =>
+          new Promise((r) => {
+            resolveExtract = r;
+          }),
+      ),
+    } as unknown as EngineClient;
+
+    useStore.setState({
+      engineStatus: 'ready',
+      client,
+      source: { path: '/in/clip_a.wav', name: 'clip_a.wav', origin: 'file' },
+      original: makeAnalysis('/in/clip_a.wav'),
+      cleanedPath: '/out/clip_a_clean.wav',
+      report: makeReport('job-a'),
+      job: {
+        id: 'job-a',
+        outputPath: '/out/clip_a_clean.wav',
+        reportPath: '/out/clip_a.json',
+        status: null,
+        streamConnected: false,
+      },
+      spectralSelection: { startS: 1, endS: 3, fLowHz: 200, fHighHz: 800 },
+    });
+
+    const pPrev = previewRegion();
+    const pRep = applySpectralBoxRepair();
+    const pOv = applyUnitOverride(1, 'force_original');
+    const pExt = extractAndLoadTrack('/in/clip_a.wav', 0, 'Boom');
+
+    // User switches to a different clip & job while all 4 requests are in flight
+    useStore.setState({
+      source: { path: '/in/clip_b.wav', name: 'clip_b.wav', origin: 'file' },
+      original: makeAnalysis('/in/clip_b.wav'),
+      cleanedPath: '/out/clip_b_clean.wav',
+      report: makeReport('job-b'),
+      job: {
+        id: 'job-b',
+        outputPath: '/out/clip_b_clean.wav',
+        reportPath: '/out/clip_b.json',
+        status: null,
+        streamConnected: false,
+      },
+    });
+    vi.clearAllMocks();
+
+    resolvePreview({
+      previewPath: '/tmp/stale_prev.wav',
+      audioUrl: '/api/audio?path=%2Ftmp%2Fstale_prev.wav',
+      renderMs: 20,
+      warmHit: true,
+      metricsBefore: { lufs: -22, noiseFloorDb: -40 },
+      metricsAfter: { lufs: -22, noiseFloorDb: -56 },
+      durationS: 6,
+    });
+    resolveRepair({
+      outputPath: '/work/stale_repaired.wav',
+      audioUrl: '/api/audio?path=%2Fwork%2Fstale_repaired.wav',
+      startS: 1,
+      endS: 3,
+      fLowHz: 200,
+      fHighHz: 800,
+      attenuationDb: 24,
+      renderMs: 30,
+    });
+    resolveOverride({
+      jobId: 'job-a',
+      unitIndex: 1,
+      unitId: 1,
+      oldDecision: 'enhanced',
+      newDecision: 'original_reverted',
+      override: 'force_original',
+      restitched: true,
+      masterSha256: 'stale-sha',
+    });
+    resolveExtract({
+      extractedPaths: ['/work/extracted_tracks/stale.wav'],
+      sourceIds: ['src-stale'],
+    });
+
+    const [prevRes, repRes, , extRes] = await Promise.all([pPrev, pRep, pOv, pExt]);
+    expect(prevRes).toBeNull();
+    expect(repRes).toBeNull();
+    expect(extRes).toBeNull();
+    // Stale responses must NOT touch the new clip's player or state
+    expect(mockPlayer.load).not.toHaveBeenCalled();
+    expect(getState().source?.path).toBe('/in/clip_b.wav');
+    expect(getState().cleanedPath).toBe('/out/clip_b_clean.wav');
+    expect(getState().previewActive).toBe(false);
   });
 
   it('cleanTrackWithMarkersInResolve forwards cleaned path and report to bridge.resolve.batchCleanTrack', async () => {

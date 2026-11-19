@@ -111,6 +111,15 @@ describe('Transport pro audition controls', () => {
 
     expect(mixSlider).toBeNull();
     expect(meter).not.toBeNull();
+
+    // Row 1 holds only Play, A/B switch, and Timecode; Level Match lives in `.transport-pro` (row 2)
+    // so `.timecode` never overlaps `.btn-level-match` at 326–366 px right-column widths.
+    const transportEl = host.querySelector('.transport')!;
+    const row1DirectChildren = [...transportEl.children].filter(
+      (el) => !el.classList.contains('transport-pro') && !el.classList.contains('deckfault'),
+    );
+    expect(row1DirectChildren).toHaveLength(3);
+    expect(host.querySelector('.transport-pro > button.btn-level-match')).not.toBeNull();
   });
 
   it('enables Removed, Loop, and Wet/Dry Mix when both decks are served and wires them to DualPlayer', async () => {
