@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import os
 import subprocess
@@ -252,7 +253,7 @@ class JobRecord:
         if self.state in {"failed", "interrupted"} and self.error is not None:
             out["error"] = dict(self.error)
         if self.state == "done" and self.report is not None:
-            out["report"] = self.report
+            out["report"] = copy.deepcopy(self.report)
         if self.state == "done" and self.artifact_evidence is not None:
             # Internal/API artifact resolution needs all three job-bound
             # digests.  Audio alone is ambiguous when deterministic renders
@@ -555,6 +556,8 @@ class JobManager:
         # boundary while ordinary submit calls reuse their existing locking.
         self._lock = threading.RLock()
         self._wake = threading.Condition(self._lock)
+        self._override_locks_guard = threading.Lock()
+        self._override_locks: dict[str, tuple[threading.Lock, int]] = {}
         self._subscribers: dict[str, list[_Subscriber]] = {}
         self._terminal_callbacks: list[TerminalCallback] = []
         self._pending_terminal: deque[JobRecord] = deque()
@@ -1304,6 +1307,26 @@ class JobManager:
             self._prune_locked()
             return [r.snapshot() for r in self._jobs.values()]
 
+    @contextlib.contextmanager
+    def override_lock(self, job_id: str) -> Iterator[None]:
+        """Serialize unit override read-modify-write operations for ``job_id``."""
+        with self._override_locks_guard:
+            lock, waiters = self._override_locks.get(job_id, (threading.Lock(), 0))
+            self._override_locks[job_id] = (lock, waiters + 1)
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            with self._override_locks_guard:
+                entry = self._override_locks.get(job_id)
+                if entry is not None:
+                    registered, waiters = entry
+                    if registered is lock and waiters <= 1:
+                        del self._override_locks[job_id]
+                    elif registered is lock:
+                        self._override_locks[job_id] = (registered, waiters - 1)
+
     def update_completed_override(
         self,
         job_id: str,
@@ -1316,8 +1339,13 @@ class JobManager:
             record = self._jobs.get(job_id)
             if record is None or record.state != "done":
                 return None
-            record.report = updated_report
-            if recapture_artifacts and not record.record_bundle:
+            if record.record_bundle:
+                raise ValueError(
+                    "sealed processing records cannot be mutated in-place; "
+                    "run without record bundle to edit units"
+                )
+            record.report = copy.deepcopy(updated_report)
+            if recapture_artifacts:
                 self._capture_nonbundle_artifacts(record)
             self._notify_locked(record)
             return record.snapshot()

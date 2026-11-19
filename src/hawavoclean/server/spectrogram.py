@@ -26,6 +26,7 @@ from hawavoclean.server.analysis import cached_probe
 SpectrogramScale = Literal["log", "mel", "linear"]
 
 _VALID_SCALES: frozenset[str] = frozenset({"log", "mel", "linear"})
+MAX_SPECTROGRAM_WINDOW_S = 300.0
 MAX_TILE_WIDTH_COLS = 4096
 MAX_TILE_N_BINS = 1024
 MIN_N_FFT = 64
@@ -98,6 +99,11 @@ def _validate_tile_params(
         raise ValueError(f"start_s must be >= 0, got {start_s}")
     if end_s <= start_s:
         raise ValueError(f"end_s must be greater than start_s, got ({start_s}, {end_s})")
+    if end_s - start_s > MAX_SPECTROGRAM_WINDOW_S:
+        raise ValueError(
+            f"Spectrogram window duration ({end_s - start_s:.2f}s) exceeds maximum "
+            f"{MAX_SPECTROGRAM_WINDOW_S:.1f}s"
+        )
     if isinstance(width_cols, bool) or not 1 <= width_cols <= MAX_TILE_WIDTH_COLS:
         raise ValueError(f"width_cols must be in 1..{MAX_TILE_WIDTH_COLS}, got {width_cols!r}")
     if isinstance(n_bins, bool) or not 1 <= n_bins <= MAX_TILE_N_BINS:

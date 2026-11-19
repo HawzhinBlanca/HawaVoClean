@@ -220,3 +220,24 @@ def test_spectrogram_tile_edge_grids_and_upsampling(tmp_path: Path) -> None:
     )
     assert delta.sample_rate == 48000
     assert delta.decode_grid().shape == (32, 16)
+
+
+def test_spectrogram_rejects_unbounded_window_duration(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+
+    from hawavoclean.server.contracts import SpectrogramRequestV1
+    from hawavoclean.server.spectrogram import MAX_SPECTROGRAM_WINDOW_S
+
+    wav = _write_tones_wav(tmp_path / "short_oom.wav", [(440.0, 0.2)], duration_s=0.5)
+    assert MAX_SPECTROGRAM_WINDOW_S == 300.0
+
+    with pytest.raises(ValueError, match="exceeds maximum"):
+        compute_spectrogram_tile(wav, start_s=0.0, end_s=300.5)
+
+    with pytest.raises(ValueError, match="exceeds maximum"):
+        compute_delta_spectrogram_tile(wav, wav, start_s=10.0, end_s=310.5)
+
+    with pytest.raises(ValidationError):
+        SpectrogramRequestV1.model_validate(
+            {"path": str(wav), "mode": "original", "startS": 0.0, "endS": 300.1}
+        )

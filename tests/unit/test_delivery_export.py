@@ -426,3 +426,46 @@ def test_export_delivery_artifact_path_validation_and_atomic_cleanup(tmp_path: P
 
     # No stray temp files left behind.
     assert [p.name for p in tmp_path.iterdir()] == ["master.wav"]
+
+
+@pytest.mark.unit
+def test_export_delivery_artifact_rejects_symlink_escape_and_bad_extension(
+    tmp_path: Path,
+) -> None:
+    master_wav = tmp_path / "master.wav"
+    sf.write(str(master_wav), np.zeros((256, 1), dtype=np.float32), SR, subtype="PCM_24")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.wav"
+    sentinel = b"DO_NOT_OVERWRITE_SENTINEL"
+    victim.write_bytes(sentinel)
+
+    exports = tmp_path / "exports"
+    exports.mkdir()
+
+    # Final component symlink pointing outside -> rejected, victim never overwritten.
+    symlink_dest = exports / "escape.wav"
+    symlink_dest.symlink_to(victim)
+    with pytest.raises(ValueError, match="symlink"):
+        export_delivery_artifact(master_wav, symlink_dest, fmt="wav24")
+    assert victim.read_bytes() == sentinel
+
+    # Symlinked ancestor directory pointing outside -> rejected, nothing written outside.
+    symlink_dir = exports / "link_dir"
+    symlink_dir.symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        export_delivery_artifact(master_wav, symlink_dir / "nested.wav", fmt="wav24")
+    assert not (outside / "nested.wav").exists()
+
+    # Extension mismatch against format -> rejected.
+    with pytest.raises(ValueError, match="extension"):
+        export_delivery_artifact(master_wav, exports / "bad.txt", fmt="wav24")
+    with pytest.raises(ValueError, match="extension"):
+        export_delivery_artifact(master_wav, exports / "bad.wav", fmt="flac")
+    with pytest.raises(ValueError, match="extension"):
+        export_delivery_artifact(master_wav, exports / "bad.wav", fmt="aac")
+    with pytest.raises(ValueError, match="extension"):
+        export_delivery_artifact(
+            master_wav, exports / "bad.txt", fmt="video_mux", source_media_path=master_wav
+        )

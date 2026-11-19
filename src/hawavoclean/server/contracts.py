@@ -46,8 +46,10 @@ class ContractModel(BaseModel):
 RestorePolicy = Literal["disabled", "source_allowed", "enrolled_only", "auto"]
 DeliveryPresetV1 = Literal["match_input", "ebu_r128", "atsc_a85", "podcast", "streaming"]
 ExportFormatV1 = Literal["wav24", "wav32f", "flac", "aac", "video_mux"]
+PreviewProfileV1 = Literal["production", "studio", "studio_pro", "dereverb", "lowband"]
 SpectrogramModeV1 = Literal["original", "cleaned", "delta"]
 SpectrogramScaleV1 = Literal["log", "mel", "linear"]
+MAX_SPECTROGRAM_WINDOW_S = 300.0
 
 _ALLOWED_PRO_REPAIR_KEYS: frozenset[str] = frozenset(
     {
@@ -388,7 +390,7 @@ class RegionPreviewRequestV1(ContractModel):
     path: str = Field(min_length=1, max_length=32_768)
     start_s: float = Field(ge=0.0, allow_inf_nan=False)
     end_s: float = Field(gt=0.0, allow_inf_nan=False)
-    profile: str = Field(default="production", min_length=1, max_length=64)
+    profile: PreviewProfileV1 = "production"
     strength: float = Field(default=1.0, ge=0.0, le=1.0, allow_inf_nan=False)
     ambience_floor_db: float | None = Field(default=None, ge=-120.0, le=-12.0, allow_inf_nan=False)
     include_perceptual_mos: bool = False
@@ -438,6 +440,11 @@ class SpectrogramRequestV1(ContractModel):
     def validate_spectrogram(self) -> SpectrogramRequestV1:
         if self.end_s <= self.start_s:
             raise ValueError("endS must be greater than startS")
+        if self.end_s - self.start_s > MAX_SPECTROGRAM_WINDOW_S:
+            raise ValueError(
+                f"Spectrogram window duration ({self.end_s - self.start_s:.2f}s) exceeds maximum "
+                f"{MAX_SPECTROGRAM_WINDOW_S:.1f}s"
+            )
         if self.mode == "delta" and self.cleaned_path is None:
             raise ValueError("cleanedPath is required when mode is 'delta'")
         if self.db_floor is not None and self.db_ceil is not None and self.db_floor >= self.db_ceil:
@@ -518,7 +525,9 @@ __all__ = [
     "ExportFormatV1",
     "JobLifecycleStateV1",
     "JobStatusResponseV1",
+    "MAX_SPECTROGRAM_WINDOW_S",
     "ManualStrategyV1",
+    "PreviewProfileV1",
     "ProcessingRecordEvidenceV1",
     "ProcessingRequestV1",
     "ProcessingStrategyV1",

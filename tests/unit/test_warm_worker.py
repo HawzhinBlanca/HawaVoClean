@@ -409,3 +409,37 @@ def test_warm_worker_edge_branches(tmp_path: Path) -> None:
         render_region_preview(
             RegionPreviewRequest(source_path=stereo_src, start_s=float("nan"), end_s=0.5)
         )
+
+
+def test_preview_profile_path_traversal_and_arbitrary_toml_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pydantic import ValidationError
+
+    from hawavoclean.server.contracts import RegionPreviewRequestV1
+    from hawavoclean.server.warm_worker import resolve_preview_core_id
+
+    # Create a real TOML outside config_dir to prove traversal cannot load it.
+    outside_toml = tmp_path / "evil.toml"
+    outside_toml.write_text("[enhancement]\ncore_id = 'wiener-dd-48k-v1'\n", encoding="utf-8")
+    fake_cfg_dir = tmp_path / "configs"
+    fake_cfg_dir.mkdir()
+    monkeypatch.setenv("HAWAVOCLEAN_CONFIG_DIR", str(fake_cfg_dir))
+
+    for hostile_profile in (
+        "../../etc/passwd",
+        "../evil",
+        str(outside_toml.with_suffix("")),
+        "arbitrary_profile",
+    ):
+        with pytest.raises(ValidationError):
+            RegionPreviewRequestV1.model_validate(
+                {"path": "/tmp/a.wav", "startS": 0.0, "endS": 1.0, "profile": hostile_profile}
+            )
+        with pytest.raises(ValueError, match="Unknown preview profile"):
+            resolve_preview_core_id(hostile_profile)
+
+    # Even for a built-in profile name, a symlink escaping config_dir is rejected.
+    (fake_cfg_dir / "production.toml").symlink_to(outside_toml)
+    with pytest.raises(ValueError, match="Unknown preview profile"):
+        resolve_preview_core_id("production")

@@ -6,6 +6,7 @@ import math
 import os
 import struct
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,11 +25,20 @@ from hawavoclean.finishing.loudness import (
     measure_loudness_and_peaks,
 )
 from hawavoclean.paths import ffmpeg_bin_path
+from hawavoclean.platform_fs import is_reparse_or_symlink
 
 Float32Array = np.ndarray[Any, np.dtype[np.float32]]
 
 DeliveryPreset = Literal["match_input", "ebu_r128", "atsc_a85", "podcast", "streaming"]
 ExportFormat = Literal["wav24", "wav32f", "flac", "aac", "video_mux"]
+
+EXPORT_FORMAT_EXTENSIONS: dict[ExportFormat, frozenset[str]] = {
+    "wav24": frozenset({".wav"}),
+    "wav32f": frozenset({".wav"}),
+    "flac": frozenset({".flac"}),
+    "aac": frozenset({".m4a", ".aac"}),
+    "video_mux": frozenset({".mp4", ".mov", ".mkv"}),
+}
 
 _WAV_CLASSIC_LIMIT_BYTES = (1 << 32) - 1
 _WAV_HEADER_RESERVE_BYTES = 1 << 20
@@ -591,6 +601,55 @@ def _validate_path_string(path: Path, label: str) -> Path:
     return Path(path).resolve()
 
 
+def _is_system_prefix(candidate: Path) -> bool:
+    """Return True if ``candidate`` is a host/system root alias (e.g. macOS ``/var``)."""
+    for anchor in (Path.home(), Path(tempfile.gettempdir()), Path("/tmp")):
+        if anchor == candidate or anchor.is_relative_to(candidate):
+            return True
+    return False
+
+
+def _validate_dest_path(path: Path, fmt: ExportFormat) -> Path:
+    """Validate destination path without resolving a final symlink component."""
+    raw = str(path)
+    if not raw or "\x00" in raw:
+        raise ValueError(f"Invalid dest_path path: {path!r}")
+    dest_raw = Path(path)
+    if not dest_raw.name or dest_raw.name in (".", ".."):
+        raise ValueError(f"Invalid dest_path path: {path!r}")
+    if is_reparse_or_symlink(dest_raw):
+        raise ValueError(f"Destination path must not be a symlink or reparse point: {dest_raw}")
+    for ancestor in dest_raw.parents:
+        if ancestor == ancestor.parent or _is_system_prefix(ancestor):
+            continue
+        if is_reparse_or_symlink(ancestor):
+            raise ValueError(
+                f"Destination path ancestor must not be a symlink or reparse point: {ancestor}"
+            )
+    parent = dest_raw.parent.resolve()
+    dest_no_follow = parent / dest_raw.name
+    if is_reparse_or_symlink(dest_no_follow):
+        raise ValueError(
+            f"Destination path must not be a symlink or reparse point: {dest_no_follow}"
+        )
+    for ancestor in dest_no_follow.parents:
+        if ancestor == ancestor.parent:
+            continue
+        if is_reparse_or_symlink(ancestor):
+            raise ValueError(
+                f"Destination path ancestor must not be a symlink or reparse point: {ancestor}"
+            )
+    if dest_no_follow.is_dir():
+        raise ValueError(f"Destination path is a directory: {dest_no_follow}")
+    allowed_exts = EXPORT_FORMAT_EXTENSIONS[fmt]
+    if dest_no_follow.suffix.lower() not in allowed_exts:
+        raise ValueError(
+            f"Destination extension {dest_no_follow.suffix!r} is not valid for format {fmt!r}; "
+            f"expected one of {sorted(allowed_exts)}"
+        )
+    return dest_no_follow
+
+
 def _export_soundfile(
     master_resolved: Path,
     tmp_path: Path,
@@ -678,12 +737,10 @@ def export_delivery_artifact(
         raise ValueError(f"Unsupported export format: {fmt!r}")
 
     master_resolved = _validate_path_string(master_wav, "master_wav")
-    dest_resolved = _validate_path_string(dest_path, "dest_path")
+    dest_resolved = _validate_dest_path(dest_path, fmt)
 
     if not master_resolved.is_file():
         raise FileNotFoundError(f"Master WAV not found: {master_resolved}")
-    if dest_resolved.is_dir():
-        raise ValueError(f"Destination path is a directory: {dest_resolved}")
     if dest_resolved == master_resolved:
         raise ValueError("Destination path must not overwrite master_wav in place")
 
@@ -793,6 +850,10 @@ def export_delivery_artifact(
         if not tmp_path.is_file() or tmp_path.stat().st_size == 0:
             raise OutputValidationError(f"Export produced an empty artifact: {dest_resolved}")
 
+        if is_reparse_or_symlink(dest_resolved):
+            raise ValueError(
+                f"Destination path must not be a symlink or reparse point: {dest_resolved}"
+            )
         os.replace(tmp_path, dest_resolved)
         return dest_resolved
     except Exception:

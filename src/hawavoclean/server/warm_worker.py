@@ -38,7 +38,7 @@ from hawavoclean.enhancement.protocol import Enhancer
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks
 from hawavoclean.finishing.pro_repair import apply_room_tone_floor
 from hawavoclean.guard.perceptual_mos import PerceptualQualityScorer
-from hawavoclean.paths import profile_config_path, work_root
+from hawavoclean.paths import config_dir, profile_config_path, work_root
 from hawavoclean.runtime import memory_budget_mb, process_peak_rss_bytes
 from hawavoclean.server.analysis import FLOOR_DB, cached_probe
 
@@ -47,6 +47,9 @@ DEFAULT_PREVIEW_SAMPLE_RATE = 48000
 DEFAULT_MAX_PREVIEW_FILES = 64
 DEFAULT_PREVIEW_MAX_AGE_S = 3600.0
 _BYTES_PER_MIB = 1024 * 1024
+ALLOWED_PREVIEW_PROFILES: frozenset[str] = frozenset(
+    {"production", "studio", "studio_pro", "dereverb", "lowband"}
+)
 
 
 @dataclass
@@ -363,13 +366,19 @@ def resolve_preview_core_id(profile: str, core_id: str | None = None) -> tuple[s
         return core_id, DEFAULT_PREVIEW_SAMPLE_RATE
     if profile in CORE_REGISTRY:
         return profile, DEFAULT_PREVIEW_SAMPLE_RATE
-
-    cfg_path = profile_config_path(profile)
-    if not cfg_path.is_file():
+    if profile not in ALLOWED_PREVIEW_PROFILES:
         raise ValueError(
             f"Unknown preview profile {profile!r}; expected a built-in profile or registered core_id"
         )
-    cfg = load_config(cfg_path, is_production=False, activate=False)
+
+    expected_dir = config_dir().resolve()
+    cfg_path = profile_config_path(profile)
+    resolved_cfg = cfg_path.resolve()
+    if resolved_cfg.parent != expected_dir or not resolved_cfg.is_file():
+        raise ValueError(
+            f"Unknown preview profile {profile!r}; expected a built-in profile or registered core_id"
+        )
+    cfg = load_config(resolved_cfg, is_production=False, activate=False)
     return cfg.enhancement.core_id, int(cfg.enhancement.model_sample_rate)
 
 

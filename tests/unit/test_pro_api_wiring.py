@@ -841,3 +841,450 @@ def test_v1_spectral_repair_endpoint_audio_access_and_policy(
         },
     )
     assert r_bad_att.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 8. Security & Reliability Audit Regressions (#124 Findings #1 - #5)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_export_rejects_symlink_escape_immutable_gen_dir_and_bad_ext(
+    real_client: TestClient, work: Path
+) -> None:
+    import tempfile
+
+    src = _speech_like_wav(work / "audit_export_src.wav", seconds=1.5, noise_level=0.02)
+    sess_h = _session_headers(real_client)
+
+    # Upload & complete a real job so the master has an immutable generation dir.
+    upload = real_client.post(
+        "/api/upload",
+        headers=sess_h,
+        files={"file": ("audit_export.wav", src.read_bytes(), "audio/wav")},
+    )
+    assert upload.status_code == 200
+    source_id = upload.json()["source_id"]
+
+    submit = real_client.post(
+        "/api/v1/jobs",
+        headers=sess_h,
+        json={
+            "schemaVersion": 1,
+            "sourceIds": [source_id],
+            "strategy": {
+                "kind": "manual",
+                "route": "production",
+                "allowGenerativeReconstruction": False,
+            },
+            "executionPolicy": "offline_only",
+            "conflictPolicy": "unique",
+            "recordBundle": False,
+            "idempotencyKey": "audit-export-symlink-job",
+        },
+    )
+    assert submit.status_code == 202, submit.text
+    job_id = submit.json()["jobs"][0]["jobId"]
+    done = _wait_done(real_client, job_id)
+    assert done["state"] == "done", done
+    public_master = Path(done["output_path"])
+    from hawavoclean.publication import resolve_committed_publication
+
+    committed = resolve_committed_publication(public_master)
+    assert committed is not None
+    immutable_master = committed[0]
+    assert immutable_master.parent != public_master.parent
+
+    exports_dir = (work / "exports").resolve()
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="hawa-audit-outside-") as outside_str:
+        outside_dir = Path(outside_str).resolve()
+        victim = outside_dir / "victim.wav"
+        sentinel = b"OUTSIDE_VICTIM_SENTINEL"
+        victim.write_bytes(sentinel)
+
+        # 1. Symlink destination inside exports/ pointing outside allowed roots -> 403 for both root & session.
+        sym_dest = exports_dir / "escape.wav"
+        sym_dest.symlink_to(victim)
+        for hdrs in (H, sess_h):
+            resp = real_client.post(
+                "/api/v1/export",
+                headers=hdrs,
+                json={
+                    "masterPath": str(public_master),
+                    "destPath": str(sym_dest),
+                    "format": "wav24",
+                },
+            )
+            assert resp.status_code == 403, resp.text
+            assert victim.read_bytes() == sentinel
+
+        # 2. Symlinked ancestor dir inside exports/ pointing outside -> 403, nothing created outside.
+        sym_dir = exports_dir / "sym_out"
+        sym_dir.symlink_to(outside_dir)
+        for hdrs in (H, sess_h):
+            resp = real_client.post(
+                "/api/v1/export",
+                headers=hdrs,
+                json={
+                    "masterPath": str(public_master),
+                    "destPath": str(sym_dir / "sneaky.wav"),
+                    "format": "wav24",
+                },
+            )
+            assert resp.status_code == 403, resp.text
+            assert not (outside_dir / "sneaky.wav").exists()
+
+    # 3. Non-root session must NOT write inside the internal immutable generation dir.
+    imm_dest = immutable_master.parent / "tamper.wav"
+    r_imm = real_client.post(
+        "/api/v1/export",
+        headers=sess_h,
+        json={
+            "masterPath": str(public_master),
+            "destPath": str(imm_dest),
+            "format": "wav24",
+        },
+    )
+    assert r_imm.status_code == 403, r_imm.text
+    assert not imm_dest.exists()
+
+    # 4. Extension mismatch against requested format -> 400.
+    r_bad_ext = real_client.post(
+        "/api/v1/export",
+        headers=sess_h,
+        json={
+            "masterPath": str(public_master),
+            "destPath": str(exports_dir / "wrong_ext.sh"),
+            "format": "wav24",
+        },
+    )
+    assert r_bad_ext.status_code == 400, r_bad_ext.text
+    assert not (exports_dir / "wrong_ext.sh").exists()
+
+    # 5. Legitimate web-mode export by non-root session is downloadable via /api/audio (200 & 206),
+    # while unrelated sibling files and swapped symlinks remain 403.
+    r_ok = real_client.post(
+        "/api/v1/export",
+        headers=sess_h,
+        json={
+            "masterPath": str(public_master),
+            "destPath": str(exports_dir / "delivery_ok.wav"),
+            "format": "wav24",
+            "deliveryPreset": "match_input",
+        },
+    )
+    assert r_ok.status_code == 200, r_ok.text
+    out_path = Path(r_ok.json()["outputPath"])
+    assert out_path.is_file()
+
+    dl = real_client.get("/api/audio", params={"path": str(out_path)}, headers=sess_h)
+    assert dl.status_code == 200
+    assert dl.content[:4] == b"RIFF"
+
+    dl_range = real_client.get(
+        "/api/audio",
+        params={"path": str(out_path)},
+        headers={**sess_h, "Range": "bytes=0-15"},
+    )
+    assert dl_range.status_code == 206
+    assert len(dl_range.content) == 16
+
+    unrelated = exports_dir / "unrelated_secret.wav"
+    unrelated.write_bytes(b"RIFF0000WAVE")
+    assert (
+        real_client.get("/api/audio", params={"path": str(unrelated)}, headers=sess_h).status_code
+        == 403
+    )
+
+    # Swapping a previously authorized delivery export to a symlink revokes access immediately.
+    out_path.unlink()
+    out_path.symlink_to(unrelated)
+    assert (
+        real_client.get("/api/audio", params={"path": str(out_path)}, headers=sess_h).status_code
+        == 403
+    )
+
+
+def test_audit_preview_profile_traversal_and_spectrogram_window_cap(
+    real_client: TestClient, work: Path
+) -> None:
+    src = _speech_like_wav(work / "audit_prev_spec.wav", seconds=1.0)
+
+    # Preview rejects traversal and arbitrary profile names.
+    for bad_profile in ("../../etc/passwd", "../production", "/etc/hosts", "evil_profile"):
+        r_prev = real_client.post(
+            "/api/v1/preview",
+            headers=H,
+            json={"path": str(src), "startS": 0.0, "endS": 0.5, "profile": bad_profile},
+        )
+        assert r_prev.status_code in (400, 422), (bad_profile, r_prev.status_code, r_prev.text)
+
+    # Spectrogram rejects > 300s window duration cleanly before decoding.
+    r_oom = real_client.post(
+        "/api/v1/spectrogram",
+        headers=H,
+        json={"path": str(src), "mode": "original", "startS": 0.0, "endS": 3600.0},
+    )
+    assert r_oom.status_code in (400, 422), r_oom.text
+
+    r_oom_delta = real_client.post(
+        "/api/v1/spectrogram",
+        headers=H,
+        json={
+            "path": str(src),
+            "cleanedPath": str(src),
+            "mode": "delta",
+            "startS": 10.0,
+            "endS": 311.0,
+        },
+    )
+    assert r_oom_delta.status_code in (400, 422), r_oom_delta.text
+
+
+def test_audit_non_root_session_extracted_polywav_audio_analyze_and_jobs(
+    real_client: TestClient, work: Path
+) -> None:
+    poly = _make_polywav(work / "session_poly.wav", seconds=1.2)
+    sess_h = _session_headers(real_client)
+
+    # Upload Poly-WAV as non-root session.
+    up = real_client.post(
+        "/api/upload",
+        headers=sess_h,
+        files={"file": ("session_poly.wav", poly.read_bytes(), "audio/wav")},
+    )
+    assert up.status_code == 200, up.text
+    uploaded_path = up.json()["path"]
+
+    # Inspect and extract tracks into default managed work_root()/extracted_tracks.
+    r_insp = real_client.post(
+        "/api/v1/tracks/inspect",
+        headers=sess_h,
+        json={"path": uploaded_path},
+    )
+    assert r_insp.status_code == 200, r_insp.text
+    assert r_insp.json()["trackCount"] == 4
+
+    r_ext = real_client.post(
+        "/api/v1/tracks/extract",
+        headers=sess_h,
+        json={"path": uploaded_path, "trackIndices": [0, 2]},
+    )
+    assert r_ext.status_code == 200, r_ext.text
+    body = r_ext.json()
+    ext_paths = body["extractedPaths"]
+    ext_source_ids = body["sourceIds"]
+    assert len(ext_paths) == 2
+    assert len(ext_source_ids) == 2
+    assert all(len(sid) == 32 for sid in ext_source_ids)
+
+    # Non-root session can read via /api/audio (200 & 206) and analyze extracted tracks.
+    a0 = real_client.get("/api/audio", params={"path": ext_paths[0]}, headers=sess_h)
+    assert a0.status_code == 200
+    assert a0.content[:4] == b"RIFF"
+
+    a0_range = real_client.get(
+        "/api/audio",
+        params={"path": ext_paths[0]},
+        headers={**sess_h, "Range": "bytes=0-15"},
+    )
+    assert a0_range.status_code == 206
+    assert len(a0_range.content) == 16
+
+    an = real_client.post("/api/analyze", headers=sess_h, json={"path": ext_paths[0]})
+    assert an.status_code == 200, an.text
+
+    # Non-root session can submit /api/v1/jobs using extracted track sourceIds.
+    for idx, src_ref in enumerate(ext_source_ids):
+        sub = real_client.post(
+            "/api/v1/jobs",
+            headers=sess_h,
+            json={
+                "schemaVersion": 1,
+                "sourceIds": [src_ref],
+                "strategy": {
+                    "kind": "manual",
+                    "route": "production",
+                    "allowGenerativeReconstruction": False,
+                },
+                "executionPolicy": "offline_only",
+                "conflictPolicy": "unique",
+                "recordBundle": False,
+                "idempotencyKey": f"audit-extracted-track-job-{idx}",
+            },
+        )
+        assert sub.status_code == 202, sub.text
+        done = _wait_done(real_client, sub.json()["jobs"][0]["jobId"])
+        assert done["state"] == "done", done
+
+    # Symlink placed inside work/extracted_tracks pointing outside must still be rejected with 403.
+    sym_track = (work / "extracted_tracks" / "symlink_escape.wav").resolve()
+    sym_track.symlink_to(poly)
+    assert (
+        real_client.get("/api/audio", params={"path": str(sym_track)}, headers=sess_h).status_code
+        == 403
+    )
+
+
+def test_audit_override_concurrent_serialization_and_record_bundle_409(
+    real_client: TestClient, work: Path
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    src = _speech_like_wav(work / "audit_override_src.wav", seconds=2.0, noise_level=0.025)
+    upload = real_client.post(
+        "/api/upload",
+        headers=H,
+        files={"file": ("audit_override.wav", src.read_bytes(), "audio/wav")},
+    )
+    assert upload.status_code == 200
+    source_id = upload.json()["source_id"]
+
+    # 1. Sealed record_bundle=True job MUST refuse override with 409 and keep all artifacts intact.
+    sub_bundle = real_client.post(
+        "/api/v1/jobs",
+        headers=H,
+        json={
+            "schemaVersion": 1,
+            "sourceIds": [source_id],
+            "strategy": {
+                "kind": "manual",
+                "route": "production",
+                "allowGenerativeReconstruction": False,
+            },
+            "executionPolicy": "offline_only",
+            "conflictPolicy": "unique",
+            "recordBundle": True,
+            "idempotencyKey": "audit-sealed-bundle-job",
+        },
+    )
+    assert sub_bundle.status_code == 202, sub_bundle.text
+    bundle_job_id = sub_bundle.json()["jobs"][0]["jobId"]
+    done_bundle = _wait_done(real_client, bundle_job_id)
+    assert done_bundle["state"] == "done", done_bundle
+    assert done_bundle["record_bundle"] is True
+
+    master_before = real_client.get(f"/api/v1/jobs/{bundle_job_id}/artifacts/master", headers=H)
+    record_before = real_client.get(f"/api/v1/jobs/{bundle_job_id}/artifacts/record", headers=H)
+    assert master_before.status_code == 200
+    assert record_before.status_code == 200
+
+    refused = real_client.post(
+        f"/api/v1/jobs/{bundle_job_id}/override",
+        headers=H,
+        json={"unitIndex": 0, "decision": "force_original"},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"] == "sealed_record_bundle"
+
+    # Artifacts remain verifiable and byte-identical after refused override.
+    master_after = real_client.get(f"/api/v1/jobs/{bundle_job_id}/artifacts/master", headers=H)
+    record_after = real_client.get(f"/api/v1/jobs/{bundle_job_id}/artifacts/record", headers=H)
+    report_after = real_client.get(f"/api/v1/jobs/{bundle_job_id}/artifacts/report", headers=H)
+    summary_after = real_client.get(f"/api/v1/jobs/{bundle_job_id}/artifacts/summary", headers=H)
+    assert master_after.status_code == 200 and master_after.content == master_before.content
+    assert record_after.status_code == 200 and record_after.content == record_before.content
+    assert report_after.status_code == 200
+    assert summary_after.status_code == 200
+
+    # 2. Concurrent overrides on a mutable (record_bundle=False) job serialize cleanly without lost updates.
+    # Build a 34.0s clip (> hard_max_group_s=30s) with a 1.5s silent gap so segmentation yields >= 2 speech units.
+    sr = 48000
+    n_two = int(34.0 * sr)
+    t_two = np.arange(n_two, dtype=np.float64) / float(sr)
+    rng_two = np.random.default_rng(7)
+    env_two = np.zeros(n_two, dtype=np.float64)
+    env_two[int(0.2 * sr) : int(16.5 * sr)] = 1.0
+    env_two[int(18.0 * sr) : int(33.5 * sr)] = 1.0
+    voice_two = env_two * (
+        0.20 * np.sin(2.0 * np.pi * 165.0 * t_two)
+        + 0.12 * np.sin(2.0 * np.pi * 330.0 * t_two)
+        + 0.06 * np.sin(2.0 * np.pi * 660.0 * t_two)
+    )
+    noise_two = env_two * 0.02 * rng_two.standard_normal(n_two)
+    two_unit_src = work / "audit_override_two_units.wav"
+    sf.write(
+        str(two_unit_src),
+        (voice_two + noise_two).astype(np.float32),
+        sr,
+        format="WAV",
+        subtype="PCM_24",
+    )
+
+    upload2 = real_client.post(
+        "/api/upload",
+        headers=H,
+        files={"file": ("audit_override_live.wav", two_unit_src.read_bytes(), "audio/wav")},
+    )
+    assert upload2.status_code == 200
+    live_source_id = upload2.json()["source_id"]
+
+    sub_live = real_client.post(
+        "/api/v1/jobs",
+        headers=H,
+        json={
+            "schemaVersion": 1,
+            "sourceIds": [live_source_id],
+            "strategy": {
+                "kind": "manual",
+                "route": "production",
+                "allowGenerativeReconstruction": False,
+            },
+            "executionPolicy": "offline_only",
+            "conflictPolicy": "unique",
+            "recordBundle": False,
+            "idempotencyKey": "audit-concurrent-override-job",
+        },
+    )
+    assert sub_live.status_code == 202, sub_live.text
+    live_job_id = sub_live.json()["jobs"][0]["jobId"]
+    done_live = _wait_done(real_client, live_job_id)
+    assert done_live["state"] == "done", done_live
+    units = done_live["report"]["units"]
+    speech_units = [u for u in units if u.get("is_speech")]
+    assert len(speech_units) >= 2, f"Expected >=2 speech units, got {len(speech_units)}"
+    uid_a = int(speech_units[0]["unit_id"])
+    uid_b = int(speech_units[1]["unit_id"])
+
+    # Verify JobRecord.snapshot() returns an isolated deep copy of report.
+    from typing import cast
+
+    app_state = cast(Any, real_client.app).state
+    snap1 = app_state.job_manager.get_status(live_job_id)
+    assert snap1 is not None
+    snap1["report"]["units"][0]["final_decision"] = "CORRUPTED_LOCAL_COPY"
+    snap2 = app_state.job_manager.get_status(live_job_id)
+    assert snap2 is not None
+    assert snap2["report"]["units"][0]["final_decision"] != "CORRUPTED_LOCAL_COPY"
+
+    def _post_override(uid: int, decision: str) -> int:
+        res = real_client.post(
+            f"/api/v1/jobs/{live_job_id}/override",
+            headers=H,
+            json={"unitId": uid, "decision": decision},
+        )
+        assert res.status_code == 200, res.text
+        return int(res.status_code)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_a = pool.submit(_post_override, uid_a, "force_original")
+        f_b = pool.submit(_post_override, uid_b, "force_enhanced")
+        assert f_a.result() == 200
+        assert f_b.result() == 200
+
+    final_status = real_client.get(f"/api/v1/jobs/{live_job_id}", headers=H).json()
+    by_id = {int(u["unit_id"]): u for u in final_status["report"]["units"]}
+    assert by_id[uid_a]["manual_override"] == "force_original"
+    assert by_id[uid_a]["final_decision"] == "reverted"
+    assert by_id[uid_b]["manual_override"] == "force_enhanced"
+    assert by_id[uid_b]["final_decision"] == "enhanced"
+
+    # Master artifact matches the latest serialized report SHA-256.
+    import hashlib
+
+    final_art = real_client.get(f"/api/v1/jobs/{live_job_id}/artifacts/master", headers=H)
+    assert final_art.status_code == 200
+    assert (
+        hashlib.sha256(final_art.content).hexdigest() == final_status["report"]["output"]["sha256"]
+    )

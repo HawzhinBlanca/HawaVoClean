@@ -7,6 +7,7 @@ and serves with uvicorn. Routes, shapes and rules: ``docs/ui-contract.md``.
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import hmac
 import ipaddress
@@ -17,10 +18,12 @@ import os
 import re
 import secrets
 import socket
+import stat
 import sys
 import tempfile
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import asdict
 from http.cookies import SimpleCookie
@@ -43,6 +46,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from hawavoclean import __version__
 from hawavoclean.audio.decode import decode_audio, iter_decode_audio
 from hawavoclean.audio.delivery import (
+    EXPORT_FORMAT_EXTENSIONS,
     DeliveryPreset,
     ExportFormat,
     apply_delivery_loudness,
@@ -1406,6 +1410,107 @@ def _session_output_path(input_path: Path, profile: str, raw_output: str) -> Pat
     return output
 
 
+_MAX_MANAGED_DELIVERY_EXPORTS = 256
+
+
+class _DeliveryOutputRegistry:
+    """Bounded, thread-safe registry of delivery exports authorized for non-root reads."""
+
+    def __init__(self, maximum: int = _MAX_MANAGED_DELIVERY_EXPORTS) -> None:
+        self._maximum = maximum
+        self._entries: OrderedDict[Path, tuple[int, int]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def record(self, path: Path) -> None:
+        """Record an exact non-symlink regular file created by ``POST /api/v1/export``."""
+        if is_reparse_or_symlink(path):
+            return
+        try:
+            canonical = path.parent.resolve() / path.name
+            if is_reparse_or_symlink(canonical):
+                return
+            info = os.lstat(canonical)
+        except (OSError, ValueError):
+            return
+        if not stat.S_ISREG(info.st_mode):
+            return
+        identity = (int(info.st_dev), int(info.st_ino))
+        with self._lock:
+            self._entries[canonical] = identity
+            self._entries.move_to_end(canonical)
+            while len(self._entries) > self._maximum:
+                self._entries.popitem(last=False)
+
+    def resolve_authorized_path(self, raw: str) -> Path | None:
+        """Return the canonical path iff ``raw`` still points to a recorded regular export."""
+        if not raw or not raw.strip():
+            return None
+        raw_path = Path(raw)
+        if not raw_path.is_absolute() or is_reparse_or_symlink(raw_path):
+            return None
+        try:
+            canonical = raw_path.parent.resolve() / raw_path.name
+        except (OSError, ValueError):
+            return None
+        if is_reparse_or_symlink(canonical):
+            return None
+        with self._lock:
+            expected = self._entries.get(canonical)
+            if expected is None:
+                return None
+            try:
+                info = os.lstat(canonical)
+            except OSError:
+                self._entries.pop(canonical, None)
+                return None
+            if (
+                is_reparse_or_symlink(canonical)
+                or not stat.S_ISREG(info.st_mode)
+                or (int(info.st_dev), int(info.st_ino)) != expected
+            ):
+                self._entries.pop(canonical, None)
+                return None
+            self._entries.move_to_end(canonical)
+            return canonical
+
+
+def _is_system_prefix_path(candidate: Path) -> bool:
+    """Return True if ``candidate`` is a host/system root alias (e.g. macOS ``/var``)."""
+    for anchor in (Path.home(), Path(tempfile.gettempdir()), Path("/tmp")):
+        if anchor == candidate or anchor.is_relative_to(candidate):
+            return True
+    return False
+
+
+def _reject_export_destination_symlink(raw_path: str, dest_resolved: Path) -> None:
+    """Refuse symlinks/reparse points on the final component or any non-system ancestor."""
+    raw = Path(raw_path)
+    if is_reparse_or_symlink(raw) or is_reparse_or_symlink(dest_resolved):
+        raise PathPolicyError(
+            403,
+            "forbidden",
+            "export destination must not be a symlink or reparse point",
+        )
+    for ancestor in raw.parents:
+        if ancestor == ancestor.parent or _is_system_prefix_path(ancestor):
+            continue
+        if is_reparse_or_symlink(ancestor):
+            raise PathPolicyError(
+                403,
+                "forbidden",
+                "export destination ancestor must not be a symlink or reparse point",
+            )
+    for ancestor in dest_resolved.parents:
+        if ancestor == ancestor.parent:
+            continue
+        if is_reparse_or_symlink(ancestor):
+            raise PathPolicyError(
+                403,
+                "forbidden",
+                "export destination ancestor must not be a symlink or reparse point",
+            )
+
+
 def _is_managed_preview_file(raw: str, resolved: Path) -> bool:
     """Return True iff ``resolved`` is a regular managed preview/spectral WAV in ``work_root/previews``."""
     preview_dir = (work_root() / "previews").resolve()
@@ -1417,6 +1522,33 @@ def _is_managed_preview_file(raw: str, resolved: Path) -> bool:
         and resolved.name.startswith(("preview_", "spectral_"))
         and resolved.suffix == ".wav"
     )
+
+
+def _is_managed_extracted_track_file(raw: str, resolved: Path) -> bool:
+    """Return True iff ``resolved`` is a regular non-symlink WAV under ``work_root/extracted_tracks``."""
+    extracted_root = (work_root() / "extracted_tracks").resolve()
+    raw_path = Path(raw)
+    if not (
+        resolved.is_relative_to(extracted_root)
+        and resolved != extracted_root
+        and resolved.is_file()
+        and resolved.suffix.lower() == ".wav"
+        and not is_reparse_or_symlink(raw_path)
+        and not is_reparse_or_symlink(resolved)
+    ):
+        return False
+    cur = resolved.parent
+    while cur != extracted_root and cur != cur.parent:
+        if is_reparse_or_symlink(cur):
+            return False
+        cur = cur.parent
+    if raw_path.is_relative_to(extracted_root):
+        raw_cur = raw_path.parent
+        while raw_cur != extracted_root and raw_cur != raw_cur.parent:
+            if is_reparse_or_symlink(raw_cur):
+                return False
+            raw_cur = raw_cur.parent
+    return True
 
 
 def _run_spectral_box_repair(
@@ -1518,8 +1650,9 @@ def _default_export_dest_path(
         "flac": ".flac",
         "aac": ".m4a",
         "video_mux": (
-            source_resolved.suffix
-            if source_resolved is not None and source_resolved.suffix
+            source_resolved.suffix.lower()
+            if source_resolved is not None
+            and source_resolved.suffix.lower() in EXPORT_FORMAT_EXTENSIONS["video_mux"]
             else ".mp4"
         ),
     }
@@ -1528,8 +1661,8 @@ def _default_export_dest_path(
     fmt_tag = f"_{fmt}" if fmt in ("wav24", "wav32f") else ""
     base_stem = public_master.stem
     candidate = public_master.parent / f"{base_stem}{preset_tag}{fmt_tag}{ext}"
-    if candidate.resolve() == master_resolved or (
-        source_resolved is not None and candidate.resolve() == source_resolved
+    if candidate in {master_resolved, public_master} or (
+        source_resolved is not None and candidate == source_resolved
     ):
         candidate = public_master.parent / f"{base_stem}{preset_tag}_{fmt}_export{ext}"
     return resolve_client_output_path(str(candidate))
@@ -1914,6 +2047,8 @@ def create_app(
         upload_store=upload_store,
     )
 
+    delivery_exports = _DeliveryOutputRegistry()
+
     app = FastAPI(title="HawaVoClean engine", version=__version__, lifespan=lifespan)
     app.state.job_manager = manager
     app.state.health_signals = health_signals
@@ -1924,6 +2059,7 @@ def create_app(
     app.state.upload_lock = asyncio.Lock()
     app.state.sessions = sessions
     app.state.native_sources = native_sources
+    app.state.delivery_exports = delivery_exports
     app.state.analysis_slots = asyncio.Semaphore(max_concurrent_analyses)
     app.state.preview_slots = asyncio.Semaphore(2)
     app.state.assistant_slots = asyncio.Semaphore(1)
@@ -1969,8 +2105,16 @@ def create_app(
             if artifact is not None:
                 return artifact
 
+        delivery_export = delivery_exports.resolve_authorized_path(raw)
+        if delivery_export is not None:
+            return delivery_export
+
         resolved = resolve_client_path(raw, must_exist=True)
-        if upload_store.authorizes(resolved) or _is_managed_preview_file(raw, resolved):
+        if (
+            upload_store.authorizes(resolved)
+            or _is_managed_preview_file(raw, resolved)
+            or _is_managed_extracted_track_file(raw, resolved)
+        ):
             return resolved
         raise PathPolicyError(
             403,
@@ -2413,12 +2557,12 @@ def create_app(
         effective_preset: DeliveryPreset = req.delivery_preset or "match_input"
         if req.dest_path is not None:
             dest_resolved = resolve_client_output_path(req.dest_path)
+            _reject_export_destination_symlink(req.dest_path, dest_resolved)
             if _auth_kind(request) != "root":
                 exports_root = (work_root() / "exports").resolve()
-                allowed_parents = {
-                    master_resolved.parent,
-                    public_output_path(req.master_path).parent,
-                }
+                # Never authorize writing into an internal immutable generation directory;
+                # only allow the public output directory, source directory, or managed exports root.
+                allowed_parents = {public_output_path(req.master_path).parent}
                 if source_resolved is not None:
                     allowed_parents.add(source_resolved.parent)
                 if dest_resolved.parent not in allowed_parents and not (
@@ -2438,10 +2582,20 @@ def create_app(
                 effective_preset,
                 source_resolved,
             )
+            _reject_export_destination_symlink(str(dest_resolved), dest_resolved)
+
+        allowed_exts = EXPORT_FORMAT_EXTENSIONS[req.format]
+        if dest_resolved.suffix.lower() not in allowed_exts:
+            raise ApiError(
+                400,
+                "bad_request",
+                f"export destination extension {dest_resolved.suffix!r} is not valid for "
+                f"format {req.format!r}; expected one of {sorted(allowed_exts)}",
+            )
 
         try:
             async with app.state.analysis_slots:
-                return await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     _run_delivery_export,
                     master_resolved=master_resolved,
                     dest_resolved=dest_resolved,
@@ -2458,6 +2612,9 @@ def create_app(
             raise ApiError(503, "unavailable", str(exc)) from exc
         except OutputValidationError as exc:
             raise ApiError(422, "export_failed", str(exc)) from exc
+
+        delivery_exports.record(Path(str(result["outputPath"])))
+        return result
 
     @app.post("/api/v1/tracks/inspect")
     async def inspect_tracks_v1(request: Request, req: TrackInspectRequestV1) -> dict[str, Any]:
@@ -2506,11 +2663,169 @@ def create_app(
             raise ApiError(400, "bad_request", str(exc)) from exc
         except FileNotFoundError as exc:
             raise ApiError(404, "not_found", str(exc)) from exc
+        source_ids = [native_sources.register(str(p)).source_id for p in extracted]
         return {
             "path": str(resolved),
             "outDir": str(target_dir),
             "extractedPaths": [str(p) for p in extracted],
+            "sourceIds": source_ids,
         }
+
+    def _apply_unit_override_sync(job_id: str, req: UnitOverrideRequestV1) -> dict[str, Any]:
+        with manager.override_lock(job_id):
+            snapshot = manager.get_status(job_id)
+            if snapshot is None:
+                raise ApiError(404, "not_found", f"unknown job: {job_id}")
+            state = snapshot.get("state")
+            if state not in {"done", "completed"}:
+                raise ApiError(409, "invalid_state", f"job {job_id} is {state}, not completed")
+            if bool(snapshot.get("record_bundle", False)):
+                raise ApiError(
+                    409,
+                    "sealed_record_bundle",
+                    "sealed processing records cannot be mutated in-place; "
+                    "run without record bundle to edit units",
+                )
+            report = snapshot.get("report")
+            report_file: Path | None = None
+            if report is None:
+                raw_path = snapshot.get("report_path")
+                if raw_path:
+                    p = Path(raw_path)
+                    if p.is_file():
+                        try:
+                            report = json.loads(p.read_text())
+                            report_file = p
+                        except Exception as e:
+                            logger.warning(f"Could not load report from {p}: {e}")
+            if report is None or not isinstance(report, dict):
+                raise ApiError(409, "invalid_state", f"job {job_id} has no report")
+
+            units = report.get("units", [])
+            if not isinstance(units, list):
+                raise ApiError(409, "invalid_state", f"job {job_id} report has no units list")
+
+            target_idx: int | None = None
+            if req.unit_index is not None:
+                if req.unit_index >= len(units):
+                    raise ApiError(
+                        400,
+                        "invalid_unit",
+                        f"unit_index {req.unit_index} out of range (0..{len(units) - 1})",
+                    )
+                target_idx = req.unit_index
+            elif req.unit_id is not None:
+                for idx_u, candidate_u in enumerate(units):
+                    if isinstance(candidate_u, dict) and candidate_u.get("unit_id") == req.unit_id:
+                        target_idx = idx_u
+                        break
+                if target_idx is None:
+                    raise ApiError(
+                        400,
+                        "invalid_unit",
+                        f"unit_id {req.unit_id} not found in job {job_id}",
+                    )
+            assert target_idx is not None
+
+            job_slice_dir: Path | None = None
+            with contextlib.suppress(ValueError):
+                candidate_dir = UnitSliceStore(work_root()).job_dir(job_id)
+                if _has_complete_unit_slices(candidate_dir, units):
+                    job_slice_dir = candidate_dir
+
+            if job_slice_dir is not None:
+                try:
+                    result = _live_restitch_unit_override(
+                        job_id=job_id,
+                        snapshot=snapshot,
+                        report=report,
+                        units=units,
+                        target_idx=target_idx,
+                        req=req,
+                        job_slice_dir=job_slice_dir,
+                        manager=manager,
+                    )
+                except ValueError as exc:
+                    raise ApiError(400, "invalid_override", str(exc)) from exc
+                logger.info(
+                    "Unit %d of job %s live-restitched: %s -> %s (override=%s, %.1f ms)",
+                    target_idx,
+                    job_id,
+                    result["old_decision"],
+                    result["new_decision"],
+                    req.decision,
+                    result["restitchMs"],
+                )
+                return result
+
+            updated_report = copy.deepcopy(report)
+            updated_units = updated_report.get("units", [])
+            assert isinstance(updated_units, list)
+            unit = updated_units[target_idx]
+            unit_id_val = int(unit.get("unit_id", target_idx))
+            old_decision = unit.get("final_decision", "unknown")
+
+            if req.decision == "auto":
+                # Restore the automatic guard decision (remove override)
+                unit.pop("manual_override", None)
+                # Restore original decision from guard verdict
+                verdict = unit.get("guard_a_verdict", "FAIL")
+                if verdict == "PASS":
+                    unit["final_decision"] = "enhanced"
+                    unit["decision_reason"] = "guard PASS (auto restored)"
+                else:
+                    unit["final_decision"] = "reverted"
+                    unit["decision_reason"] = f"guard {verdict} (auto restored)"
+            elif req.decision == "force_original":
+                unit["final_decision"] = "reverted"
+                unit["manual_override"] = "force_original"
+                unit["decision_reason"] = f"manual override: force_original (was {old_decision})"
+            elif req.decision == "force_enhanced":
+                unit["final_decision"] = "enhanced"
+                unit["manual_override"] = "force_enhanced"
+                unit["decision_reason"] = f"manual override: force_enhanced (was {old_decision})"
+            elif req.decision == "custom_strength":
+                assert req.strength is not None
+                unit["chosen_strength"] = round(float(req.strength), 4)
+                unit["final_decision"] = "reverted" if req.strength == 0.0 else "enhanced"
+                unit["manual_override"] = f"custom_strength:{req.strength:.3f}"
+                unit["decision_reason"] = (
+                    f"manual override: custom_strength={req.strength} (was {old_decision})"
+                )
+
+            # Update the summary counts
+            enhanced_count = sum(1 for u in updated_units if u.get("final_decision") == "enhanced")
+            reverted_count = sum(1 for u in updated_units if u.get("final_decision") == "reverted")
+            if "summary" in updated_report and isinstance(updated_report["summary"], dict):
+                updated_report["summary"]["enhanced"] = enhanced_count
+                updated_report["summary"]["reverted"] = reverted_count
+
+            if report_file is not None:
+                try:
+                    _atomic_write_json(report_file, updated_report)
+                except Exception as e:
+                    logger.warning(f"Could not persist updated report to {report_file}: {e}")
+
+            manager.update_completed_override(job_id, updated_report, recapture_artifacts=False)
+
+            logger.info(
+                "Unit %d of job %s: %s → %s (override=%s)",
+                target_idx,
+                job_id,
+                old_decision,
+                unit["final_decision"],
+                req.decision,
+            )
+
+            return {
+                "job_id": job_id,
+                "unit_index": target_idx,
+                "unit_id": unit_id_val,
+                "old_decision": old_decision,
+                "new_decision": unit["final_decision"],
+                "override": req.decision,
+                "restitched": False,
+            }
 
     @app.post("/api/v1/jobs/{job_id}/override")
     async def override_v1_unit(job_id: str, req: UnitOverrideRequestV1) -> dict[str, Any]:
@@ -2521,150 +2836,7 @@ def create_app(
         artifact hashes. When slices are absent (legacy or mock jobs), falls back
         to metadata-only report override with ``restitched: false``.
         """
-        snapshot = manager.get_status(job_id)
-        if snapshot is None:
-            raise ApiError(404, "not_found", f"unknown job: {job_id}")
-        state = snapshot.get("state")
-        if state not in {"done", "completed"}:
-            raise ApiError(409, "invalid_state", f"job {job_id} is {state}, not completed")
-        report = snapshot.get("report")
-        report_file: Path | None = None
-        if report is None:
-            raw_path = snapshot.get("report_path")
-            if raw_path:
-                p = Path(raw_path)
-                if p.is_file():
-                    try:
-                        report = json.loads(p.read_text())
-                        report_file = p
-                    except Exception as e:
-                        logger.warning(f"Could not load report from {p}: {e}")
-        if report is None or not isinstance(report, dict):
-            raise ApiError(409, "invalid_state", f"job {job_id} has no report")
-
-        units = report.get("units", [])
-        if not isinstance(units, list):
-            raise ApiError(409, "invalid_state", f"job {job_id} report has no units list")
-
-        target_idx: int | None = None
-        if req.unit_index is not None:
-            if req.unit_index >= len(units):
-                raise ApiError(
-                    400,
-                    "invalid_unit",
-                    f"unit_index {req.unit_index} out of range (0..{len(units) - 1})",
-                )
-            target_idx = req.unit_index
-        elif req.unit_id is not None:
-            for idx_u, candidate_u in enumerate(units):
-                if isinstance(candidate_u, dict) and candidate_u.get("unit_id") == req.unit_id:
-                    target_idx = idx_u
-                    break
-            if target_idx is None:
-                raise ApiError(
-                    400,
-                    "invalid_unit",
-                    f"unit_id {req.unit_id} not found in job {job_id}",
-                )
-        assert target_idx is not None
-
-        job_slice_dir: Path | None = None
-        with contextlib.suppress(ValueError):
-            candidate_dir = UnitSliceStore(work_root()).job_dir(job_id)
-            if _has_complete_unit_slices(candidate_dir, units):
-                job_slice_dir = candidate_dir
-
-        if job_slice_dir is not None:
-            try:
-                result = await asyncio.to_thread(
-                    _live_restitch_unit_override,
-                    job_id=job_id,
-                    snapshot=snapshot,
-                    report=report,
-                    units=units,
-                    target_idx=target_idx,
-                    req=req,
-                    job_slice_dir=job_slice_dir,
-                    manager=manager,
-                )
-            except ValueError as exc:
-                raise ApiError(400, "invalid_override", str(exc)) from exc
-            logger.info(
-                "Unit %d of job %s live-restitched: %s -> %s (override=%s, %.1f ms)",
-                target_idx,
-                job_id,
-                result["old_decision"],
-                result["new_decision"],
-                req.decision,
-                result["restitchMs"],
-            )
-            return result
-
-        unit = units[target_idx]
-        unit_id_val = int(unit.get("unit_id", target_idx))
-        old_decision = unit.get("final_decision", "unknown")
-
-        if req.decision == "auto":
-            # Restore the automatic guard decision (remove override)
-            unit.pop("manual_override", None)
-            # Restore original decision from guard verdict
-            verdict = unit.get("guard_a_verdict", "FAIL")
-            if verdict == "PASS":
-                unit["final_decision"] = "enhanced"
-                unit["decision_reason"] = "guard PASS (auto restored)"
-            else:
-                unit["final_decision"] = "reverted"
-                unit["decision_reason"] = f"guard {verdict} (auto restored)"
-        elif req.decision == "force_original":
-            unit["final_decision"] = "reverted"
-            unit["manual_override"] = "force_original"
-            unit["decision_reason"] = f"manual override: force_original (was {old_decision})"
-        elif req.decision == "force_enhanced":
-            unit["final_decision"] = "enhanced"
-            unit["manual_override"] = "force_enhanced"
-            unit["decision_reason"] = f"manual override: force_enhanced (was {old_decision})"
-        elif req.decision == "custom_strength":
-            assert req.strength is not None
-            unit["chosen_strength"] = round(float(req.strength), 4)
-            unit["final_decision"] = "reverted" if req.strength == 0.0 else "enhanced"
-            unit["manual_override"] = f"custom_strength:{req.strength:.3f}"
-            unit["decision_reason"] = (
-                f"manual override: custom_strength={req.strength} (was {old_decision})"
-            )
-
-        # Update the summary counts
-        enhanced_count = sum(1 for u in units if u.get("final_decision") == "enhanced")
-        reverted_count = sum(1 for u in units if u.get("final_decision") == "reverted")
-        if "summary" in report and isinstance(report["summary"], dict):
-            report["summary"]["enhanced"] = enhanced_count
-            report["summary"]["reverted"] = reverted_count
-
-        if report_file is not None:
-            try:
-                report_file.write_text(json.dumps(report, indent=2) + "\n")
-            except Exception as e:
-                logger.warning(f"Could not persist updated report to {report_file}: {e}")
-
-        manager.update_completed_override(job_id, report, recapture_artifacts=False)
-
-        logger.info(
-            "Unit %d of job %s: %s → %s (override=%s)",
-            target_idx,
-            job_id,
-            old_decision,
-            unit["final_decision"],
-            req.decision,
-        )
-
-        return {
-            "job_id": job_id,
-            "unit_index": target_idx,
-            "unit_id": unit_id_val,
-            "old_decision": old_decision,
-            "new_decision": unit["final_decision"],
-            "override": req.decision,
-            "restitched": False,
-        }
+        return await asyncio.to_thread(_apply_unit_override_sync, job_id, req)
 
     @app.get("/api/v1/assistant/status")
     async def audio_assistant_status() -> dict[str, Any]:
