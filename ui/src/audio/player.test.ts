@@ -713,3 +713,263 @@ describe('common-region time bounding (D4.2)', () => {
     expect(player.duration).toBeCloseTo(32, 3);
   });
 });
+
+// --- Pro Audition Engine: Delta, Loop, Wet/Dry Mix, Live LUFS/Peak Meter ---
+
+interface MockGainNode {
+  gain: {
+    value: number;
+    lastTarget: number;
+    cancelScheduledValues: ReturnType<typeof vi.fn>;
+    setValueAtTime: ReturnType<typeof vi.fn>;
+    linearRampToValueAtTime: ReturnType<typeof vi.fn>;
+  };
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+}
+
+function installMockWebAudio(timeDomainSamples?: Float32Array) {
+  const gainNodes: MockGainNode[] = [];
+  let samples = timeDomainSamples ?? new Float32Array(2048);
+
+  const analyser = {
+    fftSize: samples.length,
+    smoothingTimeConstant: 0.78,
+    minDecibels: -100,
+    maxDecibels: 0,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    getFloatTimeDomainData: vi.fn((target: Float32Array) => {
+      const n = Math.min(target.length, samples.length);
+      for (let i = 0; i < n; i++) target[i] = samples[i] ?? 0;
+      for (let i = n; i < target.length; i++) target[i] = 0;
+    }),
+  };
+
+  class MockAudioContext {
+    currentTime = 1.0;
+    sampleRate = 48000;
+    state: AudioContextState = 'running';
+    destination = {};
+    resume = vi.fn(async () => undefined);
+    close = vi.fn(async () => undefined);
+    createAnalyser = vi.fn(() => analyser);
+    createMediaElementSource = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() }));
+    createGain = vi.fn(() => {
+      const param = {
+        value: 1,
+        lastTarget: 1,
+        cancelScheduledValues: vi.fn(),
+        setValueAtTime: vi.fn((v: number) => {
+          param.value = v;
+        }),
+        linearRampToValueAtTime: vi.fn((v: number) => {
+          param.value = v;
+          param.lastTarget = v;
+        }),
+      };
+      const node: MockGainNode = {
+        gain: param,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      gainNodes.push(node);
+      return node;
+    });
+  }
+
+  vi.stubGlobal('AudioContext', MockAudioContext);
+  return {
+    gainNodes,
+    analyser,
+    setSamples(next: Float32Array) {
+      samples = next;
+    },
+  };
+}
+
+describe('pro audition engine — Delta ("Listen to Removed")', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('requires both decks ready and sums Original (+1) + Cleaned (-gainOffset) in WebAudio', async () => {
+    const audio = installMockWebAudio();
+    await bothReady(30);
+    player.setLoudnessMatch(true, -20, -18); // -2 dB on cleaned
+    await player.play();
+
+    // Gain nodes created in order: original, cleaned, deltaInverter (-1), deltaGain
+    expect(audio.gainNodes).toHaveLength(4);
+    const [origGain, cleanGain, deltaInverter, deltaGain] = audio.gainNodes;
+    expect(deltaInverter?.gain.value).toBe(-1);
+
+    player.setDeltaMode(true);
+    expect(player.snapshot().deltaMode).toBe(true);
+    expect(origGain?.gain.value).toBeCloseTo(1.0, 4);
+    expect(cleanGain?.gain.value).toBeCloseTo(0, 4);
+    expect(deltaGain?.gain.value).toBeCloseTo(Math.pow(10, -2 / 20), 4);
+
+    // Toggling off restores active deck ('original')
+    player.toggleDeltaMode();
+    expect(player.snapshot().deltaMode).toBe(false);
+    expect(origGain?.gain.value).toBeCloseTo(1.0, 4);
+    expect(deltaGain?.gain.value).toBeCloseTo(0, 4);
+  });
+
+  it('refuses Delta mode when only one deck is ready and auto-disables on deck retire', async () => {
+    engine({ [OK]: 206 });
+    start();
+    player.load('original', OK);
+    await settle();
+
+    player.setDeltaMode(true);
+    expect(player.snapshot().deltaMode).toBe(false);
+
+    // Load second deck -> delta works; retire second deck -> delta disables cleanly
+    engine({ [OK]: 206, [GONE]: 206 });
+    player.load('cleaned', GONE);
+    await settle();
+    player.setDeltaMode(true);
+    expect(player.snapshot().deltaMode).toBe(true);
+
+    player.load('cleaned', null);
+    expect(player.snapshot().deltaMode).toBe(false);
+  });
+
+  it('fails soft without throwing when WebAudio is unavailable', async () => {
+    expect(window.AudioContext).toBeUndefined();
+    await bothReady(30);
+    await player.play();
+    expect(() => player.setDeltaMode(true)).not.toThrow();
+    expect(player.snapshot().deltaMode).toBe(true);
+    expect(el('original').muted).toBe(false);
+    expect(el('cleaned').muted).toBe(true);
+  });
+});
+
+describe('pro audition engine — Loop Region playback', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('seeks both decks back to loopStart when playback reaches loopEnd', async () => {
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    await bothReady(30);
+    player.setLoopRange([4.5, 10.0]);
+    player.setLoopEnabled(true);
+    expect(player.snapshot().loopEnabled).toBe(true);
+    expect(player.snapshot().loopRange).toEqual([4.5, 10.0]);
+
+    await player.play();
+    // Play snaps inside loopRange if starting at 0
+    expect(el('original').currentTime).toBeCloseTo(4.5, 3);
+    expect(el('cleaned').currentTime).toBeCloseTo(4.5, 3);
+
+    // Advance past loopEnd and pump one animation frame
+    el('original').currentTime = 10.05;
+    el('cleaned').currentTime = 10.05;
+    const cb = rafQueue.shift();
+    cb?.(16);
+
+    expect(el('original').currentTime).toBeCloseTo(4.5, 3);
+    expect(el('cleaned').currentTime).toBeCloseTo(4.5, 3);
+    expect(player.playing).toBe(true);
+  });
+
+  it('loops full clip on ended when loopRange is null and sanitizes invalid ranges', async () => {
+    await bothReady(20);
+    player.setLoopRange([10, 5]); // invalid: end <= start
+    expect(player.snapshot().loopRange).toBeNull();
+
+    player.setLoopEnabled(true);
+    await player.play();
+    el('original').currentTime = 20;
+    el('cleaned').currentTime = 20;
+    el('original').dispatchEvent(new Event('ended'));
+
+    expect(el('original').currentTime).toBe(0);
+    expect(el('cleaned').currentTime).toBe(0);
+  });
+});
+
+describe('pro audition engine — Live Wet/Dry Mix Preview', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('blends Original (1 - mix) and Cleaned (mix * levelMatchGain) when on cleaned deck', async () => {
+    const audio = installMockWebAudio();
+    await bothReady(30);
+    player.setLoudnessMatch(true, -18, -24); // +6 dB on cleaned
+    const expectedGain = Math.pow(10, 6 / 20);
+    await player.play();
+
+    const [origGain, cleanGain, , deltaGain] = audio.gainNodes;
+    player.setActive('cleaned');
+    player.setWetDryMix(0.35);
+
+    expect(player.snapshot().wetDryMix).toBeCloseTo(0.35, 4);
+    expect(origGain?.gain.value).toBeCloseTo(0.65, 4);
+    expect(cleanGain?.gain.value).toBeCloseTo(0.35 * expectedGain, 4);
+    expect(deltaGain?.gain.value).toBe(0);
+
+    // Clamping outside [0, 1]
+    player.setWetDryMix(2.5);
+    expect(player.snapshot().wetDryMix).toBe(1);
+    player.setWetDryMix(-0.5);
+    expect(player.snapshot().wetDryMix).toBe(0);
+  });
+});
+
+describe('pro audition engine — Live LUFS + Peak Meter', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns clean finite floor when no AudioContext exists', async () => {
+    expect(window.AudioContext).toBeUndefined();
+    await bothReady(10);
+    const levels = player.getLiveMeterLevels();
+    expect(Number.isFinite(levels.momentaryLufs)).toBe(true);
+    expect(Number.isFinite(levels.shortTermLufs)).toBe(true);
+    expect(Number.isFinite(levels.peakDbfs)).toBe(true);
+    expect(Number.isFinite(levels.truePeakHoldDbfs)).toBe(true);
+    expect(levels.momentaryLufs).toBe(-70);
+    expect(levels.peakDbfs).toBe(-70);
+  });
+
+  it('computes LUFS, peak dBFS, and peak hold from AnalyserNode and resets peak hold', async () => {
+    // 1 kHz sine at 0.5 amplitude (-6.02 dBFS peak, mean square = 0.125 -> ~-9.72 LUFS)
+    const buf = new Float32Array(8192);
+    for (let i = 0; i < buf.length; i++) {
+      buf[i] = 0.5 * Math.sin((2 * Math.PI * 1000 * i) / 48000);
+    }
+    const audio = installMockWebAudio(buf);
+    await bothReady(10);
+    await player.play();
+
+    const loud = player.getLiveMeterLevels();
+    expect(loud.peakDbfs).toBeCloseTo(20 * Math.log10(0.5), 1);
+    expect(loud.momentaryLufs).toBeCloseTo(-0.691 + 10 * Math.log10(0.125), 1);
+    expect(loud.shortTermLufs).toBeCloseTo(-0.691 + 10 * Math.log10(0.125), 1);
+    expect(loud.truePeakHoldDbfs).toBeGreaterThanOrEqual(loud.peakDbfs - 0.05);
+
+    // Silence after loud frame: peak drops, peak hold stays latched
+    audio.setSamples(new Float32Array(8192));
+    const quiet = player.getLiveMeterLevels();
+    expect(quiet.peakDbfs).toBe(-70);
+    expect(quiet.truePeakHoldDbfs).toBeCloseTo(loud.truePeakHoldDbfs, 1);
+
+    // Resetting peak hold clears latch back to floor
+    player.resetPeakHold();
+    const reset = player.getLiveMeterLevels();
+    expect(reset.truePeakHoldDbfs).toBe(-70);
+  });
+});

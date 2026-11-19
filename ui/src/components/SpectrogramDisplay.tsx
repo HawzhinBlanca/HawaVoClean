@@ -1,171 +1,249 @@
 /**
- * D3 · Scrollable time-frequency spectrogram that tracks the waveform view.
+ * Pro Interactive 2D STFT Spectrogram Display.
  *
- * Uses the peaks data already in the store (min/max/rms per bucket) to render
- * a spectrogram-like energy display that scrolls with the waveform. This is
- * not a true STFT spectrogram (which would require raw sample access), but
- * an RMS energy heatmap that gives a useful time-energy overview.
- *
- * When toggled visible, it shows a time-axis energy heatmap coloured by RMS
- * level, sync'd to the waveform's view window via waveView subscriptions.
+ * Features:
+ *  - Genuine 2D STFT rendering via `StftCanvasRenderer` (WebGL2 texture upload
+ *    with automatic lossless Canvas 2D `ImageData` fallback).
+ *  - Supports server-provided 2D uint8 STFT tiles (`[nBins x widthCols]`),
+ *    client-side radix-2 FFT STFT from PCM (`computeClientStft`), and
+ *    analysis-backed 2D fallback (`synthesizeTileFromAnalysis`).
+ *  - View mode switcher: Original / Cleaned / Removed (Δ).
+ *  - Frequency scale switcher: Log / Mel / Linear (20 Hz – 24 kHz) with axis ticks.
+ *  - Interactive 2D Time x Frequency box selection with Hz + timecode chip,
+ *    Clear control, and `hawa:spectral-selection` CustomEvent dispatch.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
+import {
+  computeClientStft,
+  computeDeltaTile,
+  DEFAULT_DB_CEIL,
+  DEFAULT_DB_FLOOR,
+  formatFreqHz,
+  freqToNormY,
+  getFrequencyTicks,
+  MAX_FREQ_HZ,
+  MIN_FREQ_HZ,
+  normYToFreq,
+  SPECTRAL_SELECTION_EVENT,
+  StftCanvasRenderer,
+  synthesizeTileFromAnalysis,
+  type FrequencyScale,
+  type SpectralSelection,
+  type SpectrogramViewMode,
+  type StftTile,
+} from '../render/stftSpectrogram';
+import { formatTime } from '../render/ticks';
 import { waveView } from '../render/viewWindow';
 import '../render/spectrogram.css';
-import { getState, useStore } from '../state/store';
+import { useStore } from '../state/store';
 
-// ── colour map (magma-inspired, 256 entries) ──────────────────────
-function buildColourMap(): Uint8ClampedArray {
-  const map = new Uint8ClampedArray(256 * 4);
-  for (let i = 0; i < 256; i++) {
-    const t = i / 255;
-    // Magma-inspired: black → deep purple → hot pink → orange → yellow
-    let r: number, g: number, b: number;
-    if (t < 0.25) {
-      const s = t / 0.25;
-      r = Math.round(s * 40);
-      g = Math.round(s * 10);
-      b = Math.round(30 + s * 80);
-    } else if (t < 0.5) {
-      const s = (t - 0.25) / 0.25;
-      r = Math.round(40 + s * 140);
-      g = Math.round(10 + s * 20);
-      b = Math.round(110 + s * 20);
-    } else if (t < 0.75) {
-      const s = (t - 0.5) / 0.25;
-      r = Math.round(180 + s * 60);
-      g = Math.round(30 + s * 100);
-      b = Math.round(130 - s * 80);
-    } else {
-      const s = (t - 0.75) / 0.25;
-      r = Math.round(240 + s * 15);
-      g = Math.round(130 + s * 125);
-      b = Math.round(50 + s * 140);
-    }
-    map[i * 4 + 0] = Math.min(255, r);
-    map[i * 4 + 1] = Math.min(255, g);
-    map[i * 4 + 2] = Math.min(255, b);
-    map[i * 4 + 3] = 255;
-  }
-  return map;
-}
-const COLOUR_MAP = buildColourMap();
+const SPEC_HEIGHT = 160;
+const REDRAW_DEBOUNCE_MS = 40;
+const MIN_DRAG_PX = 4;
 
-const DB_FLOOR = -60;
-const DB_CEIL = 0;
-const SPEC_HEIGHT = 96;
-const REDRAW_DEBOUNCE_MS = 80;
-
-/**
- * Render an energy heatmap from peak data. Each column is a time bucket,
- * each row is an amplitude band. Brighter = louder.
- */
-function renderEnergyMap(
-  peakMin: number[],
-  peakMax: number[],
-  _rmsDb: number[],
-  viewStart: number,
-  viewEnd: number,
-  totalDuration: number,
-  width: number,
-  height: number,
-): ImageData | null {
-  if (width < 1 || height < 1 || peakMin.length === 0) return null;
-
-  const n = peakMin.length;
-  const img = new ImageData(width, height);
-
-  for (let x = 0; x < width; x++) {
-    // Map pixel column to time, then to bucket index
-    const t = viewStart + (x / width) * (viewEnd - viewStart);
-    const bucketF = (t / totalDuration) * n;
-    const bucket = Math.max(0, Math.min(n - 1, Math.floor(bucketF)));
-
-    const lo = peakMin[bucket] ?? 0;
-    const hi = peakMax[bucket] ?? 0;
-    const amplitude = Math.max(Math.abs(lo), Math.abs(hi));
-
-    // Convert amplitude to dB
-    const db = amplitude > 0 ? 20 * Math.log10(amplitude) : DB_FLOOR;
-    const normDb = Math.max(0, Math.min(1, (db - DB_FLOOR) / (DB_CEIL - DB_FLOOR)));
-
-    // For each row, paint a gradient based on how much of the column's
-    // energy reaches this "frequency" (actually amplitude) band
-    for (let y = 0; y < height; y++) {
-      const bandPos = (height - 1 - y) / height; // 0 = bottom (low), 1 = top (high)
-      // Energy falls off as we go higher — more energy at bottom
-      const energy = normDb * Math.exp(-bandPos * 3.0);
-      const ci = Math.round(Math.max(0, Math.min(1, energy)) * 255) * 4;
-      const pi = (y * width + x) * 4;
-      img.data[pi + 0] = COLOUR_MAP[ci + 0] ?? 0;
-      img.data[pi + 1] = COLOUR_MAP[ci + 1] ?? 0;
-      img.data[pi + 2] = COLOUR_MAP[ci + 2] ?? 0;
-      img.data[pi + 3] = 255;
-    }
-  }
-
-  return img;
+export interface SpectrogramDisplayProps {
+  /** Optional server-computed 2D STFT tile for Original (`uint8 [nBins x widthCols]`). */
+  originalTile?: StftTile | null;
+  /** Optional server-computed 2D STFT tile for Cleaned (`uint8 [nBins x widthCols]`). */
+  cleanedTile?: StftTile | null;
+  /** Optional raw mono PCM fallback for client-side radix-2 FFT STFT (Original). */
+  originalPcm?: Float32Array | null;
+  /** Optional raw mono PCM fallback for client-side radix-2 FFT STFT (Cleaned). */
+  cleanedPcm?: Float32Array | null;
+  /** Optional listener invoked whenever the 2D time x frequency box selection changes. */
+  onSpectralSelectionChange?: (selection: SpectralSelection | null) => void;
 }
 
-export function SpectrogramDisplay() {
+interface DragRect {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  startPxX: number;
+  startPxY: number;
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+function formatTimecodeShort(seconds: number): string {
+  const s = Number.isFinite(seconds) && seconds >= 0 ? seconds : 0;
+  const whole = Math.floor(s);
+  const hundredths = Math.floor((s - whole) * 100);
+  return `${formatTime(whole, false)}.${String(hundredths).padStart(2, '0')}`;
+}
+
+function modeLabel(mode: SpectrogramViewMode): string {
+  if (mode === 'cleaned') return 'Cleaned';
+  if (mode === 'delta') return 'Removed (Δ)';
+  return 'Original';
+}
+
+export function SpectrogramDisplay({
+  originalTile = null,
+  cleanedTile = null,
+  originalPcm = null,
+  cleanedPcm = null,
+  onSpectralSelectionChange,
+}: SpectrogramDisplayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const rendererRef = useRef<StftCanvasRenderer | null>(null);
   const redrawTimer = useRef<number | null>(null);
-  const lastKey = useRef('');
+  const lastRenderKey = useRef('');
+
   const abMode = useStore((s) => s.abMode);
   const original = useStore((s) => s.original);
   const cleaned = useStore((s) => s.cleaned);
+
   const [visible, setVisible] = useState(false);
+  const [viewMode, setViewMode] = useState<SpectrogramViewMode>(abMode);
+  const [scale, setScale] = useState<FrequencyScale>('log');
+  const [selection, setSelection] = useState<SpectralSelection | null>(null);
+  const [dragRect, setDragRect] = useState<DragRect | null>(null);
+  const [, setViewTick] = useState(0);
 
   const hasData = original !== null;
+  const hasCleaned = cleaned !== null || cleanedTile !== null || cleanedPcm !== null;
+
+  // Sync spectrogram view mode with global A/B deck changes.
+  useEffect(() => {
+    if (abMode === 'cleaned' && hasCleaned) {
+      setViewMode('cleaned');
+    } else if (abMode === 'original') {
+      setViewMode('original');
+    }
+  }, [abMode, hasCleaned]);
+
+  // Fall back to Original if Cleaned disappears.
+  useEffect(() => {
+    if (!hasCleaned && viewMode !== 'original') {
+      setViewMode('original');
+    }
+  }, [hasCleaned, viewMode]);
+
+  // Clear stale 2D selection when a new source clip is loaded.
+  const sourcePath = original?.path ?? null;
+  useEffect(() => {
+    setSelection(null);
+    setDragRect(null);
+  }, [sourcePath]);
+
+  const effectiveMode: SpectrogramViewMode =
+    viewMode === 'original' || !hasCleaned ? 'original' : viewMode;
+
+  const sampleRate = original?.sample_rate ?? cleaned?.sample_rate ?? 48000;
+  const maxFreqHz = Math.min(MAX_FREQ_HZ, Math.max(MIN_FREQ_HZ + 1, sampleRate / 2));
+
+  // Resolve 2D STFT tiles: server tile > client-side radix-2 STFT PCM > analysis fallback.
+  const resolvedOrigTile = useMemo<StftTile | null>(() => {
+    if (originalTile) return originalTile;
+    if (originalPcm && originalPcm.length > 0) {
+      return computeClientStft(originalPcm, sampleRate, 0, {
+        dbFloor: DEFAULT_DB_FLOOR,
+        dbCeil: DEFAULT_DB_CEIL,
+      });
+    }
+    if (original) {
+      return synthesizeTileFromAnalysis(original, {
+        dbFloor: DEFAULT_DB_FLOOR,
+        dbCeil: DEFAULT_DB_CEIL,
+      });
+    }
+    return null;
+  }, [originalTile, originalPcm, original, sampleRate]);
+
+  const resolvedCleanTile = useMemo<StftTile | null>(() => {
+    if (cleanedTile) return cleanedTile;
+    if (cleanedPcm && cleanedPcm.length > 0) {
+      return computeClientStft(cleanedPcm, cleaned?.sample_rate ?? sampleRate, 0, {
+        dbFloor: DEFAULT_DB_FLOOR,
+        dbCeil: DEFAULT_DB_CEIL,
+      });
+    }
+    if (cleaned) {
+      return synthesizeTileFromAnalysis(cleaned, {
+        dbFloor: DEFAULT_DB_FLOOR,
+        dbCeil: DEFAULT_DB_CEIL,
+      });
+    }
+    return null;
+  }, [cleanedTile, cleanedPcm, cleaned, sampleRate]);
+
+  const activeTile = useMemo<StftTile | null>(() => {
+    if (effectiveMode === 'delta' && resolvedOrigTile && resolvedCleanTile) {
+      return computeDeltaTile(resolvedOrigTile, resolvedCleanTile);
+    }
+    if (effectiveMode === 'cleaned' && resolvedCleanTile) {
+      return resolvedCleanTile;
+    }
+    return resolvedOrigTile;
+  }, [effectiveMode, resolvedOrigTile, resolvedCleanTile]);
+
+  const ticks = useMemo(
+    () => getFrequencyTicks(scale, MIN_FREQ_HZ, maxFreqHz),
+    [scale, maxFreqHz],
+  );
+
+  const getEffectiveView = useCallback((): { start: number; end: number } => {
+    const v = waveView.view;
+    if (v.end > v.start) return v;
+    const dur = activeTile ? activeTile.endS - activeTile.startS : (original?.duration_s ?? 0);
+    const start = activeTile?.startS ?? 0;
+    return { start, end: start + Math.max(0, dur) };
+  }, [activeTile, original]);
+
+  const emitSelection = useCallback(
+    (next: SpectralSelection | null) => {
+      setSelection(next);
+      onSpectralSelectionChange?.(next);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent<SpectralSelection | null>(SPECTRAL_SELECTION_EVENT, {
+            detail: next,
+            bubbles: true,
+          }),
+        );
+      }
+    },
+    [onSpectralSelectionChange],
+  );
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const renderer = rendererRef.current;
+    if (!canvas || !renderer) return;
 
-    const st = getState();
-    const v = waveView.view;
+    const v = getEffectiveView();
     const span = v.end - v.start;
-    if (!(span > 0)) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!(span > 0) || !activeTile) {
+      renderer.clear();
       return;
     }
-
-    // Choose which deck's peak data to visualize
-    const data = st.abMode === 'cleaned' && st.cleaned ? st.cleaned : st.original;
-    if (!data) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      return;
-    }
-
-    const key = `${st.abMode}:${v.start.toFixed(4)}:${v.end.toFixed(4)}`;
-    if (key === lastKey.current) return;
-    lastKey.current = key;
 
     const dpr = window.devicePixelRatio || 1;
-    const w = Math.round(canvas.clientWidth * dpr);
-    const h = Math.round(canvas.clientHeight * dpr);
+    const cssW = canvas.clientWidth || 400;
+    const cssH = canvas.clientHeight || SPEC_HEIGHT;
+    const w = Math.max(1, Math.round(cssW * dpr));
+    const h = Math.max(1, Math.round(cssH * dpr));
     if (canvas.width !== w) canvas.width = w;
     if (canvas.height !== h) canvas.height = h;
 
-    const img = renderEnergyMap(
-      data.peaks.min,
-      data.peaks.max,
-      data.rms_db,
-      v.start,
-      v.end,
-      data.duration_s,
-      w,
-      h,
-    );
+    const key = `${effectiveMode}:${scale}:${v.start.toFixed(4)}:${v.end.toFixed(4)}:${w}x${h}:${activeTile.widthCols}x${activeTile.nBins}`;
+    if (key === lastRenderKey.current) return;
+    lastRenderKey.current = key;
 
-    if (img) {
-      ctx.putImageData(img, 0, 0);
-    } else {
-      ctx.clearRect(0, 0, w, h);
-    }
-  }, []);
+    renderer.render(activeTile, v.start, v.end, scale, effectiveMode);
+  }, [activeTile, effectiveMode, getEffectiveView, scale]);
 
   const scheduleRedraw = useCallback(() => {
     if (redrawTimer.current !== null) window.clearTimeout(redrawTimer.current);
@@ -175,59 +253,307 @@ export function SpectrogramDisplay() {
     }, REDRAW_DEBOUNCE_MS);
   }, [redraw]);
 
-  // Subscribe to view changes
+  // Mount/unmount StftCanvasRenderer whenever the spectrogram body is shown/hidden.
   useEffect(() => {
-    if (!visible) return;
-    const unsub = waveView.subscribe(scheduleRedraw);
-    scheduleRedraw();
+    if (!visible) {
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
+      lastRenderKey.current = '';
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const renderer = new StftCanvasRenderer(canvas);
+    rendererRef.current = renderer;
+    lastRenderKey.current = '';
+
+    const unsub = waveView.subscribe(() => {
+      setViewTick((n) => n + 1);
+      scheduleRedraw();
+    });
+    redraw();
+
     return () => {
       unsub();
       if (redrawTimer.current !== null) {
         window.clearTimeout(redrawTimer.current);
         redrawTimer.current = null;
       }
+      renderer.dispose();
+      rendererRef.current = null;
     };
-  }, [visible, scheduleRedraw]);
+  }, [visible, redraw, scheduleRedraw]);
 
-  // Redraw when deck changes
+  // Redraw when active tile, view mode, or frequency scale changes.
   useEffect(() => {
-    if (visible) {
-      lastKey.current = '';
-      scheduleRedraw();
+    if (!visible) return;
+    lastRenderKey.current = '';
+    redraw();
+  }, [visible, activeTile, effectiveMode, scale, redraw]);
+
+  // ── 2D Time x Frequency Box Selection pointer handlers ────────────────────
+
+  const getStageBox = (): { left: number; top: number; width: number; height: number } => {
+    const el = stageRef.current;
+    if (!el) return { left: 0, top: 0, width: 400, height: SPEC_HEIGHT };
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
     }
-  }, [abMode, original, cleaned, visible, scheduleRedraw]);
+    return {
+      left: rect.left,
+      top: rect.top,
+      width: el.clientWidth || 400,
+      height: el.clientHeight || SPEC_HEIGHT,
+    };
+  };
+
+  const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (e.button !== 0) return;
+    const box = getStageBox();
+    const x = clamp01((e.clientX - box.left) / box.width);
+    const y = clamp01((e.clientY - box.top) / box.height);
+    if (typeof e.currentTarget.setPointerCapture === 'function') {
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Synthetic pointer events in tests may not have an active pointer id.
+      }
+    }
+    setDragRect({
+      x0: x,
+      y0: y,
+      x1: x,
+      y1: y,
+      startPxX: e.clientX,
+      startPxY: e.clientY,
+    });
+  };
+
+  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!dragRect) return;
+    const box = getStageBox();
+    const x = clamp01((e.clientX - box.left) / box.width);
+    const y = clamp01((e.clientY - box.top) / box.height);
+    setDragRect((prev) => (prev ? { ...prev, x1: x, y1: y } : null));
+  };
+
+  const commitDrag = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (!dragRect) return;
+    const box = getStageBox();
+    const x1 = clamp01((e.clientX - box.left) / box.width);
+    const y1 = clamp01((e.clientY - box.top) / box.height);
+    const dxPx = Math.abs(e.clientX - dragRect.startPxX);
+    const dyPx = Math.abs(e.clientY - dragRect.startPxY);
+    setDragRect(null);
+
+    if (dxPx < MIN_DRAG_PX && dyPx < MIN_DRAG_PX) return;
+
+    const v = getEffectiveView();
+    const span = v.end - v.start;
+    if (!(span > 0)) return;
+
+    const xLo = Math.min(dragRect.x0, x1);
+    const xHi = Math.max(dragRect.x0, x1);
+    const yTop = Math.min(dragRect.y0, y1);
+    const yBot = Math.max(dragRect.y0, y1);
+
+    const startS = v.start + xLo * span;
+    const endS = v.start + Math.max(xHi, xLo + 0.002) * span;
+    const fHighHz = normYToFreq(yTop, scale, MIN_FREQ_HZ, maxFreqHz);
+    const fLowHz = normYToFreq(Math.min(1, Math.max(yBot, yTop + 0.005)), scale, MIN_FREQ_HZ, maxFreqHz);
+
+    emitSelection({
+      startS: Math.max(v.start, Math.min(v.end, startS)),
+      endS: Math.max(v.start, Math.min(v.end, endS)),
+      fLowHz: Math.min(fLowHz, fHighHz),
+      fHighHz: Math.max(fLowHz, fHighHz),
+    });
+  };
+
+  const handleStageKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (e.key === 'Escape' && selection) {
+      e.preventDefault();
+      emitSelection(null);
+    }
+  };
+
+  // Compute selection overlay CSS box (live drag preview takes precedence over committed box).
+  const overlayStyle = useMemo(() => {
+    if (dragRect) {
+      const left = Math.min(dragRect.x0, dragRect.x1) * 100;
+      const width = Math.abs(dragRect.x1 - dragRect.x0) * 100;
+      const top = Math.min(dragRect.y0, dragRect.y1) * 100;
+      const height = Math.abs(dragRect.y1 - dragRect.y0) * 100;
+      return {
+        left: `${left}%`,
+        width: `${width}%`,
+        top: `${top}%`,
+        height: `${height}%`,
+      };
+    }
+    if (!selection) return null;
+    const v = getEffectiveView();
+    const span = v.end - v.start;
+    if (!(span > 0)) return null;
+    const x0 = clamp01((selection.startS - v.start) / span);
+    const x1 = clamp01((selection.endS - v.start) / span);
+    if (x1 <= x0) return null;
+    const yTop = freqToNormY(selection.fHighHz, scale, MIN_FREQ_HZ, maxFreqHz);
+    const yBot = freqToNormY(selection.fLowHz, scale, MIN_FREQ_HZ, maxFreqHz);
+    return {
+      left: `${x0 * 100}%`,
+      width: `${(x1 - x0) * 100}%`,
+      top: `${Math.min(yTop, yBot) * 100}%`,
+      height: `${Math.max(1, Math.abs(yBot - yTop) * 100)}%`,
+    };
+  }, [dragRect, selection, getEffectiveView, scale, maxFreqHz]);
 
   if (!hasData) return null;
 
+  const dbFloor = activeTile?.dbFloor ?? DEFAULT_DB_FLOOR;
+  const dbCeil = activeTile?.dbCeil ?? DEFAULT_DB_CEIL;
+
   return (
-    <section className="panel spectrogram-panel" aria-label="Energy map">
+    <section className="panel spectrogram-panel" aria-label="STFT Spectrogram">
       <div className="panel-head">
         <h2 className="panel-title">
-          <span>Energy Map</span>
-          <span className="sub">· {abMode === 'cleaned' && cleaned ? 'Cleaned' : 'Original'}</span>
+          <span>Spectrogram</span>
+          <span className="sub">· {modeLabel(effectiveMode)}</span>
         </h2>
-        <button
-          type="button"
-          className="wave-fit"
-          onClick={() => setVisible((v) => !v)}
-          title={visible ? 'Hide energy map' : 'Show energy map'}
-        >
-          {visible ? 'HIDE' : 'SHOW'}
-        </button>
+
+        <div className="spectrogram-controls">
+          <div className="spectrogram-seg" role="group" aria-label="Spectrogram view mode">
+            <button
+              type="button"
+              className={`spectrogram-seg-btn orig${effectiveMode === 'original' ? ' on' : ''}`}
+              aria-pressed={effectiveMode === 'original'}
+              onClick={() => setViewMode('original')}
+            >
+              Original
+            </button>
+            <button
+              type="button"
+              className={`spectrogram-seg-btn${effectiveMode === 'cleaned' ? ' on' : ''}`}
+              aria-pressed={effectiveMode === 'cleaned'}
+              disabled={!hasCleaned}
+              onClick={() => setViewMode('cleaned')}
+            >
+              Cleaned
+            </button>
+            <button
+              type="button"
+              className={`spectrogram-seg-btn delta${effectiveMode === 'delta' ? ' on' : ''}`}
+              aria-pressed={effectiveMode === 'delta'}
+              disabled={!hasCleaned}
+              onClick={() => setViewMode('delta')}
+              title="Spectral difference: Original minus Cleaned"
+            >
+              Removed (Δ)
+            </button>
+          </div>
+
+          <div className="spectrogram-seg" role="group" aria-label="Frequency scale">
+            {(['log', 'mel', 'linear'] as const).map((sc) => (
+              <button
+                key={sc}
+                type="button"
+                className={`spectrogram-seg-btn${scale === sc ? ' on' : ''}`}
+                aria-pressed={scale === sc}
+                onClick={() => setScale(sc)}
+              >
+                {sc === 'log' ? 'Log' : sc === 'mel' ? 'Mel' : 'Linear'}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="wave-fit"
+            aria-expanded={visible}
+            onClick={() => setVisible((v) => !v)}
+            title={visible ? 'Hide STFT spectrogram' : 'Show STFT spectrogram'}
+          >
+            {visible ? 'HIDE' : 'SHOW'}
+          </button>
+        </div>
       </div>
+
       {visible && (
         <div className="spectrogram-body">
-          <canvas
-            ref={canvasRef}
-            className="spectrogram-canvas"
-            role="img"
-            aria-label={`Time-energy heatmap of the ${abMode} signal`}
-            style={{ width: '100%', height: `${SPEC_HEIGHT}px` }}
-          />
-          <div className="spectrogram-legend" aria-hidden="true">
-            <span className="lo">{DB_FLOOR} dB</span>
-            <div className="spectrogram-gradient" />
-            <span className="hi">{DB_CEIL} dB</span>
+          <div className="spectrogram-plot-wrap" style={{ height: `${SPEC_HEIGHT}px` }}>
+            <div className="spectrogram-axis" aria-hidden="true">
+              {ticks.map((tick) => (
+                <span
+                  key={tick.hz}
+                  className="spectrogram-axis-tick"
+                  style={{ top: `${tick.normY * 100}%` }}
+                >
+                  {tick.label}
+                </span>
+              ))}
+            </div>
+
+            <div
+              ref={stageRef}
+              className="spectrogram-stage"
+              tabIndex={0}
+              role="region"
+              aria-label={`Interactive 2D ${scale} spectrogram of ${modeLabel(effectiveMode)} signal. Drag to select a time and frequency region, press Escape to clear.`}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={commitDrag}
+              onPointerCancel={() => setDragRect(null)}
+              onKeyDown={handleStageKeyDown}
+            >
+              <canvas
+                ref={canvasRef}
+                className="spectrogram-canvas"
+                role="img"
+                aria-label={`2D STFT spectrogram of ${modeLabel(effectiveMode)} signal (${scale} scale)`}
+                style={{ width: '100%', height: `${SPEC_HEIGHT}px` }}
+              />
+              {ticks.map((tick) => (
+                <div
+                  key={tick.hz}
+                  className="spectrogram-grid-line"
+                  aria-hidden="true"
+                  style={{ top: `${tick.normY * 100}%` }}
+                />
+              ))}
+              {overlayStyle && (
+                <div
+                  className="spectrogram-selection-box"
+                  aria-hidden="true"
+                  style={overlayStyle}
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="spectrogram-footer">
+            <div className="spectrogram-legend" aria-hidden="true">
+              <span className="lo">{dbFloor} dB</span>
+              <div className={`spectrogram-gradient${effectiveMode === 'delta' ? ' delta' : ''}`} />
+              <span className="hi">{dbCeil} dB</span>
+            </div>
+
+            {selection && (
+              <div className="spectrogram-selection-chip" role="status" aria-live="polite">
+                <span>
+                  {formatTimecodeShort(selection.startS)} – {formatTimecodeShort(selection.endS)} ·{' '}
+                  {formatFreqHz(selection.fLowHz)} – {formatFreqHz(selection.fHighHz)}
+                </span>
+                <button
+                  type="button"
+                  className="spectrogram-clear-btn"
+                  aria-label="Clear spectral selection"
+                  onClick={() => emitSelection(null)}
+                >
+                  Clear
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
