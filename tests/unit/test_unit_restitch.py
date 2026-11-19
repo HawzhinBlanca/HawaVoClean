@@ -348,3 +348,131 @@ def test_unit_slice_store_and_restitch_edge_cases(tmp_path: Path) -> None:
     jdir = store.job_dir("job_edge")
     os.utime(jdir, (10.0, 10.0))
     assert "job_edge" in store.cleanup()
+
+
+def test_unit_restitch_corruption_error_cleanup_and_branch_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typing import cast
+
+    from hawavoclean.server import unit_restitch
+    from hawavoclean.server.unit_restitch import _blend_strength, load_unit_slice
+
+    # _blend_strength <= 0.0 returns original copy.
+    orig = _tone(1600, 440.0, 0.5)
+    cand = _tone(1600, 440.0, 0.2)
+    np.testing.assert_array_equal(_blend_strength(orig, cand, 0.0), orig)
+
+    store = UnitSliceStore(work_dir=tmp_path, max_jobs=4, max_age_s=3600.0)
+    jdir = store.job_dir("job_branches")
+    store.save_unit("job_branches", 0, orig, cand)
+
+    # Non-file subdir and unrelated file inside job_dir are ignored by list_units.
+    (jdir / "subdir").mkdir()
+    (jdir / "notes.txt").write_text("ignore", encoding="utf-8")
+    assert store.list_units("job_branches") == [(0, 0)]
+
+    # Regular file inside unit_slices base_dir is ignored by cleanup().
+    (store.base_dir / "stray.txt").write_text("ignore", encoding="utf-8")
+    assert store.cleanup() == []
+
+    # Non-dict meta_json, truncated .npz, non-1D array, NaN array, non-scalar has_candidate fail closed.
+    bad_meta_path = jdir / "unit_000001_ch0.npz"
+    np.savez(
+        bad_meta_path,
+        original=orig,
+        candidate=cand,
+        has_candidate=np.asarray(True, dtype=np.bool_),
+        meta_json=np.frombuffer(b"[1,2,3]", dtype=np.uint8),
+    )
+    with pytest.raises(ValueError, match="Corrupt unit metadata"):
+        load_unit_slice(jdir, 1)
+
+    bad_flag_path = jdir / "unit_000002_ch0.npz"
+    np.savez(
+        bad_flag_path,
+        original=orig,
+        candidate=cand,
+        has_candidate=np.asarray([True, False], dtype=np.bool_),
+        meta_json=np.frombuffer(b"{}", dtype=np.uint8),
+    )
+    with pytest.raises(ValueError, match="Corrupt cached slice"):
+        load_unit_slice(jdir, 2)
+
+    bad_orig_path = jdir / "unit_000003_ch0.npz"
+    np.savez(
+        bad_orig_path,
+        original=np.asarray([0.1, float("nan")], dtype=np.float32),
+        candidate=cand,
+        has_candidate=np.asarray(True, dtype=np.bool_),
+        meta_json=np.frombuffer(b"{}", dtype=np.uint8),
+    )
+    with pytest.raises(ValueError, match="Corrupt original waveform"):
+        load_unit_slice(jdir, 3)
+
+    bad_cand_path = jdir / "unit_000004_ch0.npz"
+    np.savez(
+        bad_cand_path,
+        original=orig,
+        candidate=np.asarray([0.1, float("inf")], dtype=np.float32),
+        has_candidate=np.asarray(True, dtype=np.bool_),
+        meta_json=np.frombuffer(b"{}", dtype=np.uint8),
+    )
+    with pytest.raises(ValueError, match="Corrupt candidate waveform"):
+        load_unit_slice(jdir, 4)
+
+    # Symlinked slice file refused.
+    sym_slice = jdir / "unit_000005_ch0.npz"
+    try:
+        sym_slice.symlink_to(jdir / "unit_000000_ch0.npz")
+    except OSError:
+        pass
+    else:
+        with pytest.raises(ValueError, match="symlinked cached slice"):
+            load_unit_slice(jdir, 5)
+
+    # Unsupported override action rejected cleanly.
+    recs = [
+        {
+            "unit_id": 0,
+            "channel": 0,
+            "start_sample": 0,
+            "end_sample": 1600,
+            "is_speech": True,
+            "final_decision": "ENHANCED",
+            "chosen_strength": 1.0,
+        }
+    ]
+    with pytest.raises(ValueError, match="Unsupported override action"):
+        restitch_master_with_overrides(
+            jdir,
+            recs,
+            {0: (cast(UnitOverrideAction, "bogus_action"), None)},
+            tmp_path / "m_bad.wav",
+        )
+
+    # Failed os.replace in save_unit_slice_to_dir cleans up temp file.
+    orig_replace = os.replace
+
+    def _fail_replace(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("replace blocked")
+
+    monkeypatch.setattr(os, "replace", _fail_replace)
+    with pytest.raises(OSError, match="replace blocked"):
+        store.save_unit("job_fail_save", 0, orig, cand)
+    assert not list(store.job_dir("job_fail_save").glob("*.tmp"))
+
+    # Failed encode_audio during restitch leaves existing master WAV untouched and removes temp file.
+    monkeypatch.setattr(os, "replace", orig_replace)
+    master = tmp_path / "existing_master.wav"
+    sentinel = b"EXISTING_MASTER_SENTINEL"
+    master.write_bytes(sentinel)
+
+    def _fail_encode(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("encode boom")
+
+    monkeypatch.setattr(unit_restitch, "encode_audio", _fail_encode)
+    with pytest.raises(OSError, match="encode boom"):
+        restitch_master_with_overrides(jdir, recs, {}, master)
+    assert master.read_bytes() == sentinel
+    assert not list(tmp_path.glob("*.tmp.wav"))

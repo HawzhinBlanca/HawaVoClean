@@ -19,6 +19,7 @@ import re
 import shutil
 import threading
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -30,6 +31,7 @@ from hawavoclean.audio.encode import encode_audio
 from hawavoclean.audio.types import AudioBuffer
 from hawavoclean.hashing import hash_file
 from hawavoclean.paths import work_root
+from hawavoclean.platform_fs import is_reparse_or_symlink
 from hawavoclean.policy.continuity import CONTINUITY_TAPER_MS, apply_continuity_taper
 from hawavoclean.segmentation.types import SpeechUnit
 
@@ -137,22 +139,37 @@ def load_unit_slice(
     *,
     channel: int = 0,
 ) -> UnitSlice:
-    """Load one cached unit slice from ``job_dir``."""
+    """Load one cached unit slice from ``job_dir``, failing closed on corruption."""
     target_path = Path(job_dir).resolve() / _slice_filename(unit_id, channel)
+    if is_reparse_or_symlink(target_path):
+        raise ValueError(f"Refusing symlinked cached slice for unit {unit_id} channel {channel}")
     if not target_path.is_file():
-        raise FileNotFoundError(
-            f"Cached slice not found for unit {unit_id} channel {channel}: {target_path}"
+        raise FileNotFoundError(f"Cached slice not found for unit {unit_id} channel {channel}")
+    try:
+        with np.load(target_path, allow_pickle=False) as archive:
+            orig_arr = np.ascontiguousarray(archive["original"], dtype=np.float32)
+            has_cand_arr = np.asarray(archive["has_candidate"])
+            if has_cand_arr.ndim != 0:
+                raise ValueError("has_candidate flag must be a scalar")
+            has_candidate = bool(has_cand_arr.item())
+            cand_arr: np.ndarray[Any, np.dtype[np.float32]] | None = (
+                np.ascontiguousarray(archive["candidate"], dtype=np.float32)
+                if has_candidate
+                else None
+            )
+            raw_meta = archive["meta_json"].tobytes().decode("utf-8")
+            meta = json.loads(raw_meta)
+    except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile, UnicodeDecodeError) as exc:
+        raise ValueError(f"Corrupt cached slice for unit {unit_id} channel {channel}") from exc
+
+    if orig_arr.ndim != 1 or not np.all(np.isfinite(orig_arr)):
+        raise ValueError(f"Corrupt original waveform in slice for unit {unit_id} channel {channel}")
+    if cand_arr is not None and (cand_arr.ndim != 1 or not np.all(np.isfinite(cand_arr))):
+        raise ValueError(
+            f"Corrupt candidate waveform in slice for unit {unit_id} channel {channel}"
         )
-    with np.load(target_path, allow_pickle=False) as archive:
-        orig_arr = np.ascontiguousarray(archive["original"], dtype=np.float32)
-        has_candidate = bool(archive["has_candidate"].item())
-        cand_arr: np.ndarray[Any, np.dtype[np.float32]] | None = (
-            np.ascontiguousarray(archive["candidate"], dtype=np.float32) if has_candidate else None
-        )
-        raw_meta = archive["meta_json"].tobytes().decode("utf-8")
-        meta = json.loads(raw_meta)
-        if not isinstance(meta, dict):
-            raise ValueError(f"Corrupt unit metadata in {target_path}")
+    if not isinstance(meta, dict):
+        raise ValueError(f"Corrupt unit metadata for unit {unit_id} channel {channel}")
     return UnitSlice(
         unit_id=unit_id,
         channel=channel,
@@ -277,6 +294,61 @@ class UnitSliceStore:
         return removed
 
 
+def _validate_slice_lengths(
+    unit_slice: UnitSlice,
+    *,
+    unit_id: int,
+    channel: int,
+    start_sample: int,
+    end_sample: int,
+    core_len: int,
+) -> None:
+    """Fail closed if a cached slice is empty or tampered beyond safe framing bounds."""
+    orig_len = int(unit_slice.original.shape[0])
+    if orig_len == 0:
+        raise ValueError(
+            f"Corrupt cached slice for unit {unit_id} channel {channel}: empty original"
+        )
+    if unit_slice.candidate is not None and int(unit_slice.candidate.shape[0]) == 0:
+        raise ValueError(
+            f"Corrupt cached slice for unit {unit_id} channel {channel}: empty candidate"
+        )
+
+    meta = unit_slice.unit_meta
+    if "start_sample" in meta and "end_sample" in meta:
+        meta_start = meta.get("start_sample")
+        meta_end = meta.get("end_sample")
+        if (
+            isinstance(meta_start, bool)
+            or isinstance(meta_end, bool)
+            or not isinstance(meta_start, int)
+            or not isinstance(meta_end, int)
+            or meta_start != start_sample
+            or meta_end != end_sample
+        ):
+            raise ValueError(
+                f"Cached slice sample bounds mismatch for unit {unit_id} channel {channel}"
+            )
+        if orig_len != core_len or (
+            unit_slice.candidate is not None and int(unit_slice.candidate.shape[0]) != core_len
+        ):
+            raise ValueError(
+                f"Tampered cached slice length for unit {unit_id} channel {channel}: "
+                f"expected {core_len} samples"
+            )
+        return
+
+    max_delta = max(1024, core_len // 2)
+    if abs(orig_len - core_len) > max_delta or (
+        unit_slice.candidate is not None
+        and abs(int(unit_slice.candidate.shape[0]) - core_len) > max_delta
+    ):
+        raise ValueError(
+            f"Tampered cached slice length for unit {unit_id} channel {channel}: "
+            f"expected ~{core_len} samples"
+        )
+
+
 def _fit_waveform_length(
     wave: np.ndarray[Any, np.dtype[np.float32]],
     target_len: int,
@@ -373,6 +445,14 @@ def restitch_master_with_overrides(
         total_samples = max(total_samples, end_sample)
 
         unit_slice = load_unit_slice(resolved_job_dir, unit_id=unit_id, channel=ch)
+        _validate_slice_lengths(
+            unit_slice,
+            unit_id=unit_id,
+            channel=ch,
+            start_sample=start_sample,
+            end_sample=end_sample,
+            core_len=core_len,
+        )
         orig = _fit_waveform_length(unit_slice.original, core_len)
         cand = (
             _fit_waveform_length(unit_slice.candidate, core_len)

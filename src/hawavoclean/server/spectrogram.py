@@ -299,7 +299,7 @@ def _decode_window_mono(
     duration_s = probe.samples / float(probe.sample_rate)
     if start_s >= duration_s:
         raise ValueError(
-            f"start_s {start_s:.4f}s is at or past the end of {resolved} ({duration_s:.4f}s)"
+            f"start_s {start_s:.4f}s is at or past the end of audio ({duration_s:.4f}s)"
         )
     clamped_end_s = min(end_s, duration_s)
     start_sample, end_sample = window_sample_bounds(probe, start_s, clamped_end_s)

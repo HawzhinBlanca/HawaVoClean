@@ -443,3 +443,103 @@ def test_preview_profile_path_traversal_and_arbitrary_toml_rejected(
     (fake_cfg_dir / "production.toml").symlink_to(outside_toml)
     with pytest.raises(ValueError, match="Unknown preview profile"):
         resolve_preview_core_id("production")
+
+
+def test_warm_worker_additional_branches_and_cleanup_hardening(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+
+    from hawavoclean.server import warm_worker
+
+    # 1. TTL eviction inside get_or_load (both pre-load and post-load) + post-load memory cap + empty clear.
+    now = [100.0]
+    rss = [100 * 1024 * 1024]
+
+    def adv_factory(core_id: str, sr: int) -> _DummyEnhancer:
+        if core_id == "core-slow":
+            now[0] += 100.0  # expire previously cached core while loading
+            rss[0] = 2000 * 1024 * 1024
+        elif core_id == "core-mem":
+            rss[0] = 2000 * 1024 * 1024
+        return _DummyEnhancer(core_id=core_id, sample_rate=sr)
+
+    cache = WarmCoreCache(
+        max_cores=3,
+        idle_ttl_s=50.0,
+        memory_limit_mb=512,
+        core_factory=adv_factory,
+        clock=lambda: now[0],
+        rss_bytes_fn=lambda: rss[0],
+    )
+    assert cache.clear() == 0
+
+    cache.get_or_load("core-a", sample_rate=48000)
+    now[0] += 60.0  # triggers pre-load TTL eviction inside get_or_load
+    cache.get_or_load("core-b", sample_rate=48000)
+    assert cache.stats()["ttl_evictions"] == 1
+
+    # Post-load TTL eviction while constructing core-slow
+    cache.get_or_load("core-slow", sample_rate=48000)
+    assert cache.stats()["ttl_evictions"] == 2
+
+    # Post-load memory cap eviction while keeping the newly loaded core
+    rss[0] = 100 * 1024 * 1024
+    cache.clear()
+    cache.get_or_load("core-keep", sample_rate=48000)
+    cache.get_or_load("core-mem", sample_rate=48000)
+    assert cache.stats()["memory_evictions"] >= 1
+    assert [c["core_id"] for c in cache.stats()["cores"]] == ["core-mem"]
+
+    # 2. cleanup_preview_dir prunes both preview_* and spectral_* WAVs, honors protect, skips symlinks.
+    pdir = tmp_path / "mixed_previews"
+    pdir.mkdir()
+    base_ts = time.time() - 10.0
+    protected = pdir / "spectral_keepme.wav"
+    protected.write_bytes(b"RIFF")
+    os.utime(protected, (base_ts - 5.0, base_ts - 5.0))
+    for i in range(4):
+        p = pdir / f"preview_{i}.wav"
+        s = pdir / f"spectral_{i}.wav"
+        p.write_bytes(b"RIFF")
+        s.write_bytes(b"RIFF")
+        os.utime(p, (base_ts + i, base_ts + i))
+        os.utime(s, (base_ts + i + 0.5, base_ts + i + 0.5))
+
+    sym = pdir / "preview_symlink.wav"
+    try:
+        sym.symlink_to(protected)
+    except OSError:
+        sym = None  # type: ignore[assignment]
+
+    removed = cleanup_preview_dir(pdir, max_files=3, max_age_s=0.0, protect=protected)
+    assert removed == 6
+    assert protected.is_file()
+    remaining_regular = [
+        e.name
+        for e in pdir.iterdir()
+        if e.is_file() and not e.is_symlink() and e.name.startswith(("preview_", "spectral_"))
+    ]
+    assert len(remaining_regular) == 3
+    assert "spectral_keepme.wav" in remaining_regular
+
+    # 3. Failed encode_audio during render_region_preview cleans up temp file.
+    src = _write_noisy_speech_wav(tmp_path / "fail_enc.wav", duration_s=1.0)
+    fail_dir = tmp_path / "fail_previews"
+
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(warm_worker, "encode_audio", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        render_region_preview(
+            RegionPreviewRequest(
+                source_path=src,
+                start_s=0.0,
+                end_s=0.5,
+                core_id="wiener-dd-48k-v1",
+                output_dir=fail_dir,
+            ),
+            cache=WarmCoreCache(core_factory=lambda c, r: _DummyEnhancer(core_id=c, sample_rate=r)),
+        )
+    assert not list(fail_dir.glob("*.tmp.wav"))

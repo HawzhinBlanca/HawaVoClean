@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import struct
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -89,6 +90,11 @@ def _wait_done(client: TestClient, job_id: str, timeout: float = 60.0) -> dict[s
     raise AssertionError(f"job {job_id} never reached terminal state: {snap}")
 
 
+def _outside_allowed_path(*parts: str) -> str:
+    """Construct a cross-platform absolute path outside home, /Volumes, and work_root."""
+    return str(Path(Path.cwd().anchor, *parts))
+
+
 def _session_headers(client: TestClient) -> dict[str, str]:
     res = client.post(SESSION_PATH, headers=H)
     assert res.status_code == 200
@@ -166,7 +172,12 @@ def test_v1_preview_path_policy_and_validation(real_client: TestClient, work: Pa
     r_forbidden = real_client.post(
         "/api/v1/preview",
         headers=H,
-        json={"path": "/etc/hosts", "startS": 0.0, "endS": 0.5, "profile": "production"},
+        json={
+            "path": _outside_allowed_path("etc", "hosts"),
+            "startS": 0.0,
+            "endS": 0.5,
+            "profile": "production",
+        },
     )
     assert r_forbidden.status_code == 403
     assert r_forbidden.json()["error"] == "forbidden"
@@ -251,10 +262,11 @@ def test_v1_spectrogram_original_cleaned_delta_and_policy(
     assert r_missing_clean.status_code == 400
 
     # Path policy enforced on both path and cleanedPath -> 403
+    outside_passwd = _outside_allowed_path("etc", "passwd")
     r_bad_path = real_client.post(
         "/api/v1/spectrogram",
         headers=H,
-        json={"path": "/etc/passwd", "mode": "original", "startS": 0.0, "endS": 1.0},
+        json={"path": outside_passwd, "mode": "original", "startS": 0.0, "endS": 1.0},
     )
     assert r_bad_path.status_code == 403
 
@@ -263,7 +275,7 @@ def test_v1_spectrogram_original_cleaned_delta_and_policy(
         headers=H,
         json={
             "path": str(orig),
-            "cleanedPath": "/etc/passwd",
+            "cleanedPath": outside_passwd,
             "mode": "delta",
             "startS": 0.0,
             "endS": 1.0,
@@ -331,7 +343,7 @@ def test_v1_export_delivery_presets_metadata_and_policy(
         headers=H,
         json={
             "masterPath": str(master),
-            "destPath": "/etc/hawavoclean_forbidden.wav",
+            "destPath": _outside_allowed_path("etc", "hawavoclean_forbidden.wav"),
             "format": "wav24",
         },
     )
@@ -399,13 +411,21 @@ def test_v1_tracks_inspect_extract_and_policy(real_client: TestClient, work: Pat
         assert info.channels == 1
 
     # Path policy rejection on inspect & extract -> 403
-    r_forbid_in = real_client.post("/api/v1/tracks/inspect", headers=H, json={"path": "/etc/hosts"})
+    r_forbid_in = real_client.post(
+        "/api/v1/tracks/inspect",
+        headers=H,
+        json={"path": _outside_allowed_path("etc", "hosts")},
+    )
     assert r_forbid_in.status_code == 403
 
     r_forbid_out = real_client.post(
         "/api/v1/tracks/extract",
         headers=H,
-        json={"path": str(poly), "trackIndices": [0], "outDir": "/etc/forbidden_stems"},
+        json={
+            "path": str(poly),
+            "trackIndices": [0],
+            "outDir": _outside_allowed_path("etc", "forbidden_stems"),
+        },
     )
     assert r_forbid_out.status_code == 403
 
@@ -528,7 +548,7 @@ def test_unit_slice_dir_evicted_with_terminal_job_pruning(work: Path) -> None:
     now = [1000.0]
     manager = JobManager(
         command_factory=lambda rec: [
-            "python3",
+            sys.executable,
             "-c",
             (
                 "import json, sys; "
@@ -783,7 +803,7 @@ def test_v1_spectral_repair_endpoint_audio_access_and_policy(
         "/api/v1/spectral-repair",
         headers=H,
         json={
-            "path": "/etc/hosts",
+            "path": _outside_allowed_path("etc", "hosts"),
             "startS": 0.0,
             "endS": 0.5,
             "fLowHz": 500.0,

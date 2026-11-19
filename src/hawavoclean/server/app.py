@@ -17,6 +17,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import socket
 import stat
 import sys
@@ -143,6 +144,7 @@ from hawavoclean.server.unit_restitch import (
 )
 from hawavoclean.server.warm_worker import (
     RegionPreviewRequest,
+    cleanup_preview_dir,
     render_region_preview,
 )
 from hawavoclean.smart_safe import analyze_audio_stream
@@ -192,6 +194,9 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 # client that declares nothing. Override with ``HAWAVOCLEAN_MAX_UPLOAD_BYTES``
 # (0 disables the cap) or ``create_app(max_upload_bytes=...)``.
 DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024 * 1024
+DEFAULT_MAX_JSON_BODY_BYTES = 1 * 1024 * 1024
+DEFAULT_MAX_EXTRACTED_TRACK_DIRS = 64
+DEFAULT_EXTRACTED_TRACK_MAX_AGE_S = 3600.0
 DEFAULT_MAX_CONCURRENT_UPLOADS = 2
 DEFAULT_MAX_CONCURRENT_ANALYSES = 2
 MAX_SMART_ANALYSIS_DURATION_S = 6 * 60 * 60.0
@@ -711,29 +716,60 @@ class UploadSizeLimitMiddleware:
         max_bytes: int,
         path: str = UPLOAD_PATH,
         max_concurrent: int = DEFAULT_MAX_CONCURRENT_UPLOADS,
+        max_json_bytes: int = DEFAULT_MAX_JSON_BODY_BYTES,
     ) -> None:
-        if max_bytes < 1 or max_concurrent < 1:
+        if max_bytes < 1 or max_concurrent < 1 or max_json_bytes < 1:
             raise ValueError("upload byte and concurrency limits must be positive")
         self.app = app
         self.max_bytes = max_bytes
         self.path = path
         self.max_concurrent = max_concurrent
+        self.max_json_bytes = max_json_bytes
         self._active = 0
         self._lock = asyncio.Lock()
 
-    def _too_large(self, seen: int) -> StarletteHTTPException:
+    def _too_large(self, seen: int, *, limit: int | None = None) -> StarletteHTTPException:
+        cap = self.max_bytes if limit is None else limit
         return StarletteHTTPException(
             status_code=413,
-            detail=f"upload exceeds the {self.max_bytes} byte limit ({seen} bytes)",
+            detail=f"request body exceeds the {cap} byte limit ({seen} bytes)",
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if (
-            scope["type"] != "http"
-            or scope.get("method") != "POST"
-            or str(scope.get("path", "")) != self.path
-        ):
+        if scope["type"] != "http" or scope.get("method") != "POST":
             await self.app(scope, receive, send)
+            return
+
+        req_path = str(scope.get("path", ""))
+        if req_path != self.path:
+            if not req_path.startswith("/api/"):
+                await self.app(scope, receive, send)
+                return
+            declared_json = Headers(scope=scope).get("content-length")
+            if (
+                declared_json is not None
+                and declared_json.isdigit()
+                and int(declared_json) > self.max_json_bytes
+            ):
+                response = error_response(
+                    413,
+                    "payload_too_large",
+                    f"request body declares {int(declared_json)} bytes, over the {self.max_json_bytes} byte limit",
+                )
+                await response(scope, receive, send)
+                return
+            seen_json = 0
+
+            async def counted_json() -> Any:
+                nonlocal seen_json
+                message = await receive()
+                if message["type"] == "http.request":
+                    seen_json += len(message.get("body", b""))
+                    if seen_json > self.max_json_bytes:
+                        raise self._too_large(seen_json, limit=self.max_json_bytes)
+                return message
+
+            await self.app(scope, counted_json, send)
             return
 
         async with self._lock:
@@ -1511,6 +1547,70 @@ def _reject_export_destination_symlink(raw_path: str, dest_resolved: Path) -> No
             )
 
 
+def _sanitize_api_error(detail: str, *paths: Path | None) -> str:
+    """Strip host directory prefixes and resolved paths from client-facing error messages."""
+    clean = detail
+    for path in paths:
+        if path is None:
+            continue
+        clean = clean.replace(str(path), "<path>")
+        with contextlib.suppress(OSError, ValueError):
+            clean = clean.replace(str(path.resolve()), "<path>")
+    for root, label in (
+        (work_root(), "<work-dir>"),
+        (config_dir(), "<config-dir>"),
+        (models_dir(), "<model-dir>"),
+        (Path.home(), "<home>"),
+    ):
+        clean = clean.replace(str(root), label)
+        with contextlib.suppress(OSError, ValueError):
+            clean = clean.replace(str(root.resolve()), label)
+    return clean
+
+
+def cleanup_extracted_tracks_dir(
+    extracted_root: Path,
+    *,
+    max_dirs: int = DEFAULT_MAX_EXTRACTED_TRACK_DIRS,
+    max_age_s: float = DEFAULT_EXTRACTED_TRACK_MAX_AGE_S,
+    protect: Path | None = None,
+) -> int:
+    """Prune expired or excess managed track extraction directories safely."""
+    if not extracted_root.is_dir():
+        return 0
+    now = time.time()
+    protected_name = protect.name if protect is not None else None
+    protected_present = False
+    candidates: list[tuple[float, str, Path]] = []
+    for entry in extracted_root.iterdir():
+        if is_reparse_or_symlink(entry) or not entry.is_dir():
+            continue
+        if protected_name is not None and entry.name == protected_name:
+            protected_present = True
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        candidates.append((mtime, entry.name, entry))
+
+    removed = 0
+    survivors: list[tuple[float, str, Path]] = []
+    for mtime, name, entry in candidates:
+        if max_age_s > 0.0 and (now - mtime) > max_age_s:
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+        else:
+            survivors.append((mtime, name, entry))
+
+    survivors.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    keep_budget = max(0, max_dirs - (1 if protected_present else 0))
+    for _mtime, _name, entry in survivors[keep_budget:]:
+        shutil.rmtree(entry, ignore_errors=True)
+        removed += 1
+    return removed
+
+
 def _is_managed_preview_file(raw: str, resolved: Path) -> bool:
     """Return True iff ``resolved`` is a regular managed preview/spectral WAV in ``work_root/previews``."""
     preview_dir = (work_root() / "previews").resolve()
@@ -1520,7 +1620,7 @@ def _is_managed_preview_file(raw: str, resolved: Path) -> bool:
         and not is_reparse_or_symlink(Path(raw))
         and not is_reparse_or_symlink(resolved)
         and resolved.name.startswith(("preview_", "spectral_"))
-        and resolved.suffix == ".wav"
+        and resolved.suffix.lower() == ".wav"
     )
 
 
@@ -1604,6 +1704,8 @@ def _run_spectral_box_repair(
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+    cleanup_preview_dir(preview_dir, protect=final_path)
 
     output_path_str = str(final_path)
     render_ms = round((time.perf_counter() - t0) * 1000.0, 3)
@@ -1784,7 +1886,14 @@ def _live_restitch_unit_override(
 
     auto_units_path = job_slice_dir / "auto_units.json"
     if auto_units_path.is_file():
-        auto_units: list[dict[str, Any]] = json.loads(auto_units_path.read_text(encoding="utf-8"))
+        loaded_auto = json.loads(auto_units_path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(loaded_auto, list)
+            or not loaded_auto
+            or not all(isinstance(item, dict) for item in loaded_auto)
+        ):
+            raise ValueError("Corrupt auto_units metadata in slice cache")
+        auto_units: list[dict[str, Any]] = loaded_auto
     else:
         auto_units = [dict(u) for u in units]
         _atomic_write_json(auto_units_path, auto_units)
@@ -2452,9 +2561,15 @@ def create_app(
             async with app.state.preview_slots:
                 result = await asyncio.to_thread(render_region_preview, preview_req)
         except ValueError as exc:
-            raise ApiError(400, "bad_request", str(exc)) from exc
+            raise ApiError(400, "bad_request", _sanitize_api_error(str(exc), source_path)) from exc
         except FileNotFoundError as exc:
-            raise ApiError(404, "not_found", str(exc)) from exc
+            raise ApiError(404, "not_found", _sanitize_api_error(str(exc), source_path)) from exc
+        except MediaPreflightError as exc:
+            raise ApiError(
+                400, exc.reason.value, _sanitize_api_error(str(exc), source_path)
+            ) from exc
+        except sf.SoundFileError as exc:
+            raise ApiError(400, "bad_request", "audio file could not be decoded") from exc
 
         metrics_before: dict[str, Any] = {
             "lufs": result.before_lufs,
@@ -2526,9 +2641,19 @@ def create_app(
                         db_ceil=db_ceil,
                     )
         except ValueError as exc:
-            raise ApiError(400, "bad_request", str(exc)) from exc
+            raise ApiError(
+                400, "bad_request", _sanitize_api_error(str(exc), orig_path, cleaned_path)
+            ) from exc
         except FileNotFoundError as exc:
-            raise ApiError(404, "not_found", str(exc)) from exc
+            raise ApiError(
+                404, "not_found", _sanitize_api_error(str(exc), orig_path, cleaned_path)
+            ) from exc
+        except MediaPreflightError as exc:
+            raise ApiError(
+                400, exc.reason.value, _sanitize_api_error(str(exc), orig_path, cleaned_path)
+            ) from exc
+        except sf.SoundFileError as exc:
+            raise ApiError(400, "bad_request", "audio file could not be decoded") from exc
         return tile.to_dict()
 
     @app.post("/api/v1/spectral-repair")
@@ -2539,11 +2664,15 @@ def create_app(
             async with app.state.preview_slots:
                 return await asyncio.to_thread(_run_spectral_box_repair, source_path, req)
         except ValueError as exc:
-            raise ApiError(400, "bad_request", str(exc)) from exc
+            raise ApiError(400, "bad_request", _sanitize_api_error(str(exc), source_path)) from exc
         except FileNotFoundError as exc:
-            raise ApiError(404, "not_found", str(exc)) from exc
+            raise ApiError(404, "not_found", _sanitize_api_error(str(exc), source_path)) from exc
         except MediaPreflightError as exc:
-            raise ApiError(400, exc.reason.value, str(exc)) from exc
+            raise ApiError(
+                400, exc.reason.value, _sanitize_api_error(str(exc), source_path)
+            ) from exc
+        except sf.SoundFileError as exc:
+            raise ApiError(400, "bad_request", "audio file could not be decoded") from exc
 
     @app.post("/api/v1/export")
     async def export_delivery_v1(request: Request, req: DeliveryExportRequestV1) -> dict[str, Any]:
@@ -2592,6 +2721,17 @@ def create_app(
                 f"export destination extension {dest_resolved.suffix!r} is not valid for "
                 f"format {req.format!r}; expected one of {sorted(allowed_exts)}",
             )
+        if os.path.lexists(dest_resolved):
+            try:
+                dest_stat = os.lstat(dest_resolved)
+            except OSError as exc:
+                raise ApiError(400, "bad_request", "export destination is not accessible") from exc
+            if not stat.S_ISREG(dest_stat.st_mode):
+                raise ApiError(
+                    400,
+                    "bad_request",
+                    "export destination exists and is not a regular file",
+                )
 
         try:
             async with app.state.analysis_slots:
@@ -2605,13 +2745,37 @@ def create_app(
                     preserve_metadata=req.preserve_metadata,
                 )
         except ValueError as exc:
-            raise ApiError(400, "bad_request", str(exc)) from exc
+            raise ApiError(
+                400,
+                "bad_request",
+                _sanitize_api_error(str(exc), master_resolved, dest_resolved, source_resolved),
+            ) from exc
         except FileNotFoundError as exc:
-            raise ApiError(404, "not_found", str(exc)) from exc
+            raise ApiError(
+                404,
+                "not_found",
+                _sanitize_api_error(str(exc), master_resolved, dest_resolved, source_resolved),
+            ) from exc
+        except MediaPreflightError as exc:
+            raise ApiError(
+                400,
+                exc.reason.value,
+                _sanitize_api_error(str(exc), master_resolved, dest_resolved, source_resolved),
+            ) from exc
+        except sf.SoundFileError as exc:
+            raise ApiError(400, "bad_request", "audio file could not be decoded") from exc
         except PreflightError as exc:
-            raise ApiError(503, "unavailable", str(exc)) from exc
+            raise ApiError(
+                503,
+                "unavailable",
+                _sanitize_api_error(str(exc), master_resolved, dest_resolved, source_resolved),
+            ) from exc
         except OutputValidationError as exc:
-            raise ApiError(422, "export_failed", str(exc)) from exc
+            raise ApiError(
+                422,
+                "export_failed",
+                _sanitize_api_error(str(exc), master_resolved, dest_resolved, source_resolved),
+            ) from exc
 
         delivery_exports.record(Path(str(result["outputPath"])))
         return result
@@ -2624,9 +2788,11 @@ def create_app(
             async with app.state.analysis_slots:
                 tracks = await asyncio.to_thread(inspect_polywav_tracks, resolved)
         except ValueError as exc:
-            raise ApiError(400, "bad_request", str(exc)) from exc
+            raise ApiError(400, "bad_request", _sanitize_api_error(str(exc), resolved)) from exc
         except FileNotFoundError as exc:
-            raise ApiError(404, "not_found", str(exc)) from exc
+            raise ApiError(404, "not_found", _sanitize_api_error(str(exc), resolved)) from exc
+        except sf.SoundFileError as exc:
+            raise ApiError(400, "bad_request", "audio file could not be decoded") from exc
         return {
             "path": str(resolved),
             "trackCount": len(tracks),
@@ -2640,6 +2806,13 @@ def create_app(
         extracted_root = (work_root() / "extracted_tracks").resolve()
         if req.out_dir is not None:
             target_dir = resolve_client_path(req.out_dir, must_exist=False)
+            _reject_export_destination_symlink(req.out_dir, target_dir)
+            if os.path.lexists(target_dir) and not target_dir.is_dir():
+                raise ApiError(
+                    400,
+                    "bad_request",
+                    "extract outDir exists and is not a directory",
+                )
             if _auth_kind(request) != "root" and not (
                 target_dir == resolved.parent
                 or target_dir.is_relative_to(resolved.parent)
@@ -2660,9 +2833,21 @@ def create_app(
                     extract_polywav_tracks, resolved, req.track_indices, target_dir
                 )
         except ValueError as exc:
-            raise ApiError(400, "bad_request", str(exc)) from exc
+            raise ApiError(
+                400, "bad_request", _sanitize_api_error(str(exc), resolved, target_dir)
+            ) from exc
         except FileNotFoundError as exc:
-            raise ApiError(404, "not_found", str(exc)) from exc
+            raise ApiError(
+                404, "not_found", _sanitize_api_error(str(exc), resolved, target_dir)
+            ) from exc
+        except sf.SoundFileError as exc:
+            raise ApiError(400, "bad_request", "audio file could not be decoded") from exc
+
+        if req.out_dir is None or (
+            target_dir != extracted_root and target_dir.parent == extracted_root
+        ):
+            cleanup_extracted_tracks_dir(extracted_root, protect=target_dir)
+
         source_ids = [native_sources.register(str(p)).source_id for p in extracted]
         return {
             "path": str(resolved),
@@ -2746,7 +2931,17 @@ def create_app(
                         manager=manager,
                     )
                 except ValueError as exc:
-                    raise ApiError(400, "invalid_override", str(exc)) from exc
+                    raise ApiError(
+                        400,
+                        "invalid_override",
+                        _sanitize_api_error(str(exc), job_slice_dir),
+                    ) from exc
+                except FileNotFoundError as exc:
+                    raise ApiError(
+                        409,
+                        "slice_cache_unavailable",
+                        "cached unit slice is missing",
+                    ) from exc
                 logger.info(
                     "Unit %d of job %s live-restitched: %s -> %s (override=%s, %.1f ms)",
                     target_idx,

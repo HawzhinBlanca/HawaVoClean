@@ -39,6 +39,7 @@ from hawavoclean.finishing.loudness import measure_loudness_and_peaks
 from hawavoclean.finishing.pro_repair import apply_room_tone_floor
 from hawavoclean.guard.perceptual_mos import PerceptualQualityScorer
 from hawavoclean.paths import config_dir, profile_config_path, work_root
+from hawavoclean.platform_fs import is_reparse_or_symlink
 from hawavoclean.runtime import memory_budget_mb, process_peak_rss_bytes
 from hawavoclean.server.analysis import FLOOR_DB, cached_probe
 
@@ -208,6 +209,10 @@ class WarmCoreCache:
                 self._entries.move_to_end(core_id)
                 self._hits += 1
                 return raced.enhancer, True
+            if raced is not None:
+                self._entries.pop(core_id, None)
+                self._evictions += 1
+                evicted_after_load = True
 
             while len(self._entries) >= self._max_cores:
                 self._entries.popitem(last=False)
@@ -421,29 +426,43 @@ def _fit_length(
     return np.ascontiguousarray(np.pad(arr, (0, target_len - n), mode="constant"), dtype=np.float32)
 
 
+_MANAGED_PREVIEW_PREFIXES: tuple[str, ...] = ("preview_", "spectral_")
+
+
 def cleanup_preview_dir(
     preview_dir: Path,
     *,
     max_files: int = DEFAULT_MAX_PREVIEW_FILES,
     max_age_s: float = DEFAULT_PREVIEW_MAX_AGE_S,
+    protect: Path | None = None,
 ) -> int:
-    """Prune old or excess managed preview WAV files safely inside ``preview_dir``."""
+    """Prune old or excess managed preview/spectral WAV files safely inside ``preview_dir``."""
     if not preview_dir.is_dir():
         return 0
     now = time.time()
-    candidates: list[tuple[float, Path]] = []
+    protected_name = protect.name if protect is not None else None
+    protected_present = False
+    candidates: list[tuple[float, str, Path]] = []
     for entry in preview_dir.iterdir():
-        if not entry.is_file() or entry.suffix != ".wav" or not entry.name.startswith("preview_"):
+        if (
+            is_reparse_or_symlink(entry)
+            or not entry.is_file()
+            or entry.suffix.lower() != ".wav"
+            or not entry.name.startswith(_MANAGED_PREVIEW_PREFIXES)
+        ):
+            continue
+        if protected_name is not None and entry.name == protected_name:
+            protected_present = True
             continue
         try:
             mtime = entry.stat().st_mtime
         except OSError:
             continue
-        candidates.append((mtime, entry))
+        candidates.append((mtime, entry.name, entry))
 
     removed = 0
-    survivors: list[tuple[float, Path]] = []
-    for mtime, entry in candidates:
+    survivors: list[tuple[float, str, Path]] = []
+    for mtime, name, entry in candidates:
         if max_age_s > 0.0 and (now - mtime) > max_age_s:
             try:
                 entry.unlink(missing_ok=True)
@@ -451,10 +470,11 @@ def cleanup_preview_dir(
             except OSError:
                 pass
         else:
-            survivors.append((mtime, entry))
+            survivors.append((mtime, name, entry))
 
-    survivors.sort(key=lambda item: item[0], reverse=True)
-    for _mtime, entry in survivors[max(0, max_files) :]:
+    survivors.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    keep_budget = max(0, max_files - (1 if protected_present else 0))
+    for _mtime, _name, entry in survivors[keep_budget:]:
         try:
             entry.unlink(missing_ok=True)
             removed += 1
@@ -581,7 +601,6 @@ def render_region_preview(
         else (work_root() / "previews").resolve()
     )
     preview_dir.mkdir(parents=True, exist_ok=True)
-    cleanup_preview_dir(preview_dir)
 
     key_material = (
         f"{source_path}:{request.start_s:.6f}:{clamped_end_s:.6f}:"
@@ -604,6 +623,8 @@ def render_region_preview(
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+    cleanup_preview_dir(preview_dir, protect=final_path)
 
     actual_duration_s = round(n_samples / float(target_sr), 4)
     render_ms = round((time.perf_counter() - t0) * 1000.0, 3)

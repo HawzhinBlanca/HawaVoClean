@@ -241,3 +241,98 @@ def test_spectrogram_rejects_unbounded_window_duration(tmp_path: Path) -> None:
         SpectrogramRequestV1.model_validate(
             {"path": str(wav), "mode": "original", "startS": 0.0, "endS": 300.1}
         )
+
+
+def test_spectrogram_internal_edge_branches(tmp_path: Path) -> None:
+    from typing import cast
+
+    from hawavoclean.server.spectrogram import (
+        _compute_stft_db_grid,
+        _freq_resample_matrix,
+        _resample_time_axis,
+    )
+
+    wav = _write_tones_wav(tmp_path / "edge_spec.wav", [(440.0, 0.2)], duration_s=0.5)
+    with pytest.raises(ValueError, match="scale must be one of"):
+        compute_spectrogram_tile(
+            wav,
+            start_s=0.0,
+            end_s=0.2,
+            scale=cast(SpectrogramScale, "bogus"),
+        )
+
+    # _freq_resample_matrix boundary interpolation: fc <= stft[0], fc > stft[-1], and zero span.
+    stft_freqs = np.asarray([100.0, 100.0, 200.0, 300.0], dtype=np.float64)
+    target_freqs = np.asarray([50.0, 100.0, 150.0, 400.0], dtype=np.float64)
+    weights = _freq_resample_matrix(stft_freqs, target_freqs, 10.0, 500.0)
+    assert weights.shape == (4, 4)
+    np.testing.assert_allclose(weights.sum(axis=1), np.ones(4), atol=1e-9)
+
+    # Duplicate stft bin narrow-bin path (span <= 0.0) and right <= 0 / right >= n_stft.
+    stft_dup = np.asarray([100.0, 100.0, 500.0], dtype=np.float64)
+    w_dup = _freq_resample_matrix(
+        stft_dup,
+        np.asarray([50.0, 100.0, 600.0], dtype=np.float64),
+        40.0,
+        610.0,
+    )
+    assert w_dup[0, 0] == 1.0
+    assert w_dup[2, 2] == 1.0
+
+    # Force narrow-bin hit on duplicate stft frequency where left=0, right=1 and span==0.
+    stft_same = np.asarray([100.0, 100.0], dtype=np.float64)
+    w_zero_span = _freq_resample_matrix(
+        stft_same,
+        np.asarray([90.0, 100.0001, 110.0], dtype=np.float64),
+        89.0,
+        111.0,
+    )
+    assert w_zero_span.shape == (3, 2)
+
+    # Exact duplicate span==0 branch: stft = [100.0, 200.0, 200.0], target bin [150..180] empty, fc=200.0?
+    # Better: stft = [100.0, 100.0, 300.0], target = [100.0] with edges [100.5, 100.6] -> no mask, searchsorted=2.
+    # For left=0, right=1 with span==0: searchsorted(stft, fc, side='left') == 1 requires stft[0] < fc <= stft[1]
+    # which is impossible if stft[0] == stft[1], UNLESS stft is [100.0, 90.0] (non-monotonic defensive guard).
+    w_defensive = _freq_resample_matrix(
+        np.asarray([100.0, 90.0], dtype=np.float64),
+        np.asarray([95.0, 96.0], dtype=np.float64),
+        94.0,
+        97.0,
+    )
+    assert w_defensive.shape == (2, 2)
+
+    # _resample_time_axis: exact width match, single frame repeat, upsampling (n_frames < width_cols).
+    grid_eq = np.ones((4, 8), dtype=np.float64)
+    assert _resample_time_axis(grid_eq, 8) is grid_eq
+    grid_one = np.full((4, 1), 2.5, dtype=np.float64)
+    rep = _resample_time_axis(grid_one, 6)
+    assert rep.shape == (4, 6) and np.all(rep == 2.5)
+    grid_small = np.linspace(0.0, 1.0, 12, dtype=np.float64).reshape((3, 4))
+    up = _resample_time_axis(grid_small, 16)
+    assert up.shape == (3, 16)
+
+    # _compute_stft_db_grid: empty mono input and long input where n_samples > n_fft * width_cols.
+    db_empty = _compute_stft_db_grid(
+        np.empty(0, dtype=np.float32),
+        48000,
+        width_cols=8,
+        n_bins=4,
+        n_fft=64,
+        scale="linear",
+        f_min_hz=0.0,
+        f_max_hz=24000.0,
+    )
+    assert db_empty.shape == (4, 8)
+    assert np.all(np.isfinite(db_empty))
+
+    db_long = _compute_stft_db_grid(
+        np.zeros(4096, dtype=np.float32),
+        48000,
+        width_cols=4,
+        n_bins=4,
+        n_fft=64,
+        scale="linear",
+        f_min_hz=0.0,
+        f_max_hz=24000.0,
+    )
+    assert db_long.shape == (4, 4)
