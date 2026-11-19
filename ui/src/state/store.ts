@@ -665,6 +665,7 @@ export const useStore = create<AppState>((set) => ({
       activeTakeId: null,
       unitOverrides: {},
       overrideUndo: createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }),
+      lastUndoDomain: null,
       spectralSelection: null,
       error: null,
       errorLabel: null,

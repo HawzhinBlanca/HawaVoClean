@@ -44,7 +44,7 @@ function formatDb(db: number): string {
 export function LiveMeter({ playing, readLevels, onResetPeak }: LiveMeterProps) {
   const reducedMotion = useReducedMotion();
   const [levels, setLevels] = useState<LiveMeterLevels>(IDLE_LEVELS);
-  const rafRef = useRef<number>(0);
+  const rafRef = useRef<number | null>(null);
   const lastUpdateRef = useRef<number>(0);
 
   const sampleNow = useCallback((): LiveMeterLevels => {
@@ -53,9 +53,9 @@ export function LiveMeter({ playing, readLevels, onResetPeak }: LiveMeterProps) 
 
   useEffect(() => {
     if (!playing) {
-      if (rafRef.current) {
+      if (rafRef.current !== null) {
         window.cancelAnimationFrame(rafRef.current);
-        rafRef.current = 0;
+        rafRef.current = null;
       }
       // Drop live momentary bar to floor on stop while preserving latched peak hold.
       setLevels((prev) => ({
@@ -67,22 +67,28 @@ export function LiveMeter({ playing, readLevels, onResetPeak }: LiveMeterProps) 
       return;
     }
 
+    let cancelled = false;
     const intervalMs = reducedMotion ? REDUCED_MOTION_INTERVAL_MS : NORMAL_INTERVAL_MS;
     lastUpdateRef.current = 0;
 
     const tick = (ts: number): void => {
+      rafRef.current = null;
+      if (cancelled) return;
       if (lastUpdateRef.current === 0 || ts - lastUpdateRef.current >= intervalMs) {
         lastUpdateRef.current = ts;
         setLevels(sampleNow());
       }
-      rafRef.current = window.requestAnimationFrame(tick);
+      if (!cancelled) {
+        rafRef.current = window.requestAnimationFrame(tick);
+      }
     };
 
     rafRef.current = window.requestAnimationFrame(tick);
     return () => {
-      if (rafRef.current) {
+      cancelled = true;
+      if (rafRef.current !== null) {
         window.cancelAnimationFrame(rafRef.current);
-        rafRef.current = 0;
+        rafRef.current = null;
       }
     };
   }, [playing, reducedMotion, sampleNow]);

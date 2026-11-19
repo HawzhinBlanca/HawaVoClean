@@ -80,6 +80,7 @@ export interface SpectrogramDisplayProps {
 }
 
 interface DragRect {
+  pointerId: number;
   x0: number;
   y0: number;
   x1: number;
@@ -89,7 +90,8 @@ interface DragRect {
 }
 
 function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return v >= 1 ? 1 : v;
 }
 
 function formatTimecodeShort(seconds: number): string {
@@ -121,6 +123,14 @@ export function SpectrogramDisplay({
   const lastFetchKeyRef = useRef('');
   const tileCacheRef = useRef<Map<string, StftTile>>(new Map());
   const lastRenderKey = useRef('');
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const abMode = useStore((s) => s.abMode);
   const original = useStore((s) => s.original);
@@ -199,12 +209,21 @@ export function SpectrogramDisplay({
   // Fetch real 2D STFT / Delta tiles from POST /api/v1/spectrogram when visible & ready
   // (debounced + abortable + cached), seamlessly falling back to client STFT/analysis.
   useEffect(() => {
-    if (fetchTimerRef.current !== null) {
-      window.clearTimeout(fetchTimerRef.current);
-      fetchTimerRef.current = null;
-    }
-    fetchAbortRef.current?.abort();
-    fetchAbortRef.current = null;
+    const abortPendingFetch = (): void => {
+      if (fetchTimerRef.current !== null) {
+        window.clearTimeout(fetchTimerRef.current);
+        fetchTimerRef.current = null;
+      }
+      if (fetchAbortRef.current) {
+        fetchAbortRef.current.abort();
+        fetchAbortRef.current = null;
+        if (lastFetchKeyRef.current && !tileCacheRef.current.has(lastFetchKeyRef.current)) {
+          lastFetchKeyRef.current = '';
+        }
+      }
+    };
+
+    abortPendingFetch();
 
     if (!visible || engineStatus !== 'ready' || !client || typeof client.fetchSpectrogramTile !== 'function') {
       return;
@@ -234,12 +253,13 @@ export function SpectrogramDisplay({
 
     fetchTimerRef.current = window.setTimeout(() => {
       fetchTimerRef.current = null;
+      if (!mountedRef.current) return;
       const ac = new AbortController();
       fetchAbortRef.current = ac;
       lastFetchKeyRef.current = reqKey;
 
       const stageW = stageRef.current?.clientWidth ?? 400;
-      const widthCols = Math.max(128, Math.min(512, Math.round(stageW)));
+      const widthCols = Math.max(128, Math.min(512, Math.round(stageW > 0 ? stageW : 400)));
       const nBins = 128;
 
       void client
@@ -258,7 +278,8 @@ export function SpectrogramDisplay({
           ac.signal,
         )
         .then((res) => {
-          if (ac.signal.aborted) return;
+          if (ac.signal.aborted || !mountedRef.current) return;
+          if (fetchAbortRef.current === ac) fetchAbortRef.current = null;
           const bytes = decodeBase64ToUint8Array(res.data_b64);
           if (!bytes || res.n_bins < 1 || res.width_cols < 1) return;
           if (bytes.length < res.n_bins * res.width_cols) return;
@@ -282,20 +303,14 @@ export function SpectrogramDisplay({
         })
         .catch(() => {
           // Soft fallback: client STFT / analysis tile stays rendered cleanly.
+          if (fetchAbortRef.current === ac) fetchAbortRef.current = null;
           if (!ac.signal.aborted && lastFetchKeyRef.current === reqKey) {
             lastFetchKeyRef.current = '';
           }
         });
     }, SERVER_FETCH_DEBOUNCE_MS);
 
-    return () => {
-      if (fetchTimerRef.current !== null) {
-        window.clearTimeout(fetchTimerRef.current);
-        fetchTimerRef.current = null;
-      }
-      fetchAbortRef.current?.abort();
-      fetchAbortRef.current = null;
-    };
+    return abortPendingFetch;
   }, [
     visible,
     engineStatus,
@@ -420,9 +435,12 @@ export function SpectrogramDisplay({
       return;
     }
 
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = canvas.clientWidth || 400;
-    const cssH = canvas.clientHeight || SPEC_HEIGHT;
+    const dpr =
+      Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0
+        ? window.devicePixelRatio
+        : 1;
+    const cssW = canvas.clientWidth > 0 ? canvas.clientWidth : 400;
+    const cssH = canvas.clientHeight > 0 ? canvas.clientHeight : SPEC_HEIGHT;
     const w = Math.max(1, Math.round(cssW * dpr));
     const h = Math.max(1, Math.round(cssH * dpr));
     if (canvas.width !== w) canvas.width = w;
@@ -442,6 +460,7 @@ export function SpectrogramDisplay({
     if (redrawTimer.current !== null) window.clearTimeout(redrawTimer.current);
     redrawTimer.current = window.setTimeout(() => {
       redrawTimer.current = null;
+      if (!mountedRef.current) return;
       redrawRef.current();
     }, REDRAW_DEBOUNCE_MS);
   }, []);
@@ -453,6 +472,7 @@ export function SpectrogramDisplay({
   // so tile arrivals and scale/mode changes never tear down the WebGL2 context.
   useEffect(() => {
     if (!visible) {
+      setDragRect(null);
       rendererRef.current?.dispose();
       rendererRef.current = null;
       lastRenderKey.current = '';
@@ -465,12 +485,28 @@ export function SpectrogramDisplay({
     lastRenderKey.current = '';
 
     const unsub = waveView.subscribe(() => {
+      if (!mountedRef.current) return;
       setViewTick((n) => n + 1);
       scheduleRedrawRef.current();
     });
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && stageRef.current) {
+      ro = new ResizeObserver((entries) => {
+        const entry = entries[entries.length - 1];
+        if (!entry) return;
+        const rect = entry.contentRect;
+        if (!(rect.width > 0) || !(rect.height > 0)) return;
+        lastRenderKey.current = '';
+        scheduleRedrawRef.current();
+      });
+      ro.observe(stageRef.current);
+    }
+
     redrawRef.current();
 
     return () => {
+      ro?.disconnect();
       unsub();
       if (redrawTimer.current !== null) {
         window.clearTimeout(redrawTimer.current);
@@ -505,9 +541,20 @@ export function SpectrogramDisplay({
     };
   };
 
+  const releaseCaptureSafe = (el: HTMLDivElement, pointerId: number): void => {
+    if (typeof el.releasePointerCapture === 'function') {
+      try {
+        el.releasePointerCapture(pointerId);
+      } catch {
+        // Ignore if pointer capture was never held or already released.
+      }
+    }
+  };
+
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
     if (e.button !== 0) return;
     const box = getStageBox();
+    if (!(box.width > 0) || !(box.height > 0)) return;
     const x = clamp01((e.clientX - box.left) / box.width);
     const y = clamp01((e.clientY - box.top) / box.height);
     if (typeof e.currentTarget.setPointerCapture === 'function') {
@@ -518,6 +565,7 @@ export function SpectrogramDisplay({
       }
     }
     setDragRect({
+      pointerId: e.pointerId,
       x0: x,
       y0: y,
       x1: x,
@@ -528,16 +576,27 @@ export function SpectrogramDisplay({
   };
 
   const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
-    if (!dragRect) return;
+    if (!dragRect || dragRect.pointerId !== e.pointerId) return;
     const box = getStageBox();
+    if (!(box.width > 0) || !(box.height > 0)) return;
     const x = clamp01((e.clientX - box.left) / box.width);
     const y = clamp01((e.clientY - box.top) / box.height);
-    setDragRect((prev) => (prev ? { ...prev, x1: x, y1: y } : null));
+    setDragRect((prev) => (prev && prev.pointerId === e.pointerId ? { ...prev, x1: x, y1: y } : prev));
+  };
+
+  const handlePointerCancel = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    releaseCaptureSafe(e.currentTarget, e.pointerId);
+    setDragRect((prev) => (prev && prev.pointerId === e.pointerId ? null : prev));
   };
 
   const commitDrag = (e: ReactPointerEvent<HTMLDivElement>): void => {
-    if (!dragRect) return;
+    if (!dragRect || dragRect.pointerId !== e.pointerId) return;
+    releaseCaptureSafe(e.currentTarget, e.pointerId);
     const box = getStageBox();
+    if (!(box.width > 0) || !(box.height > 0)) {
+      setDragRect(null);
+      return;
+    }
     const x1 = clamp01((e.clientX - box.left) / box.width);
     const y1 = clamp01((e.clientY - box.top) / box.height);
     const dxPx = Math.abs(e.clientX - dragRect.startPxX);
@@ -704,7 +763,7 @@ export function SpectrogramDisplay({
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={commitDrag}
-              onPointerCancel={() => setDragRect(null)}
+              onPointerCancel={handlePointerCancel}
               onKeyDown={handleStageKeyDown}
             >
               <canvas
@@ -760,7 +819,9 @@ export function SpectrogramDisplay({
                   onClick={() => {
                     if (!canRepair) return;
                     setRepairing(true);
-                    void applySpectralBoxRepair().finally(() => setRepairing(false));
+                    void applySpectralBoxRepair().finally(() => {
+                      if (mountedRef.current) setRepairing(false);
+                    });
                   }}
                 >
                   {repairing ? 'Repairing…' : 'Attenuate band'}

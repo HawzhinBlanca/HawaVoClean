@@ -1,4 +1,4 @@
-import { useId, useMemo, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import { previewRegion } from '../state/actions';
 import { useStore } from '../state/store';
 import {
@@ -108,6 +108,13 @@ export function StudioRack({
   className,
 }: StudioRackProps) {
   const uid = useId();
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const storeEngineReady = useStore((s) => s.engineStatus === 'ready');
   const storeHasSource = useStore((s) => Boolean(s.source && s.original));
   const effectiveCanPreview =
@@ -140,7 +147,8 @@ export function StudioRack({
     [allPresets, activePresetId],
   );
 
-  const strengthPct = Math.round(Math.min(1, Math.max(0.1, settings.strength)) * 100);
+  const safeStrength = Number.isFinite(settings.strength) ? settings.strength : 0.75;
+  const strengthPct = Math.round(Math.min(1, Math.max(0.1, safeStrength)) * 100);
   const hpfActive = settings.hpfEnabled !== false;
   const effectiveNamingTemplate =
     controlledNamingTemplate ?? settings.namingTemplate ?? DEFAULT_NAMING_TEMPLATE;
@@ -196,16 +204,28 @@ export function StudioRack({
       return;
     }
     try {
+      let persisted = true;
       if (onSavePreset) {
         onSavePreset(trimmed, settings);
       } else {
         const saved = saveUserPreset({ name: trimmed, settings });
-        setInternalUserPresets(loadUserPresets());
+        const reloaded = loadUserPresets();
+        persisted = reloaded.some((p) => p.id === saved.id);
+        setInternalUserPresets(
+          persisted
+            ? reloaded
+            : [...internalUserPresets.filter((p) => p.id !== saved.id), saved],
+        );
         setInternalActiveId(saved.id);
       }
       setSaveName('');
       setPanelMode('none');
-      setFeedback({ kind: 'status', text: `Saved preset "${trimmed}".` });
+      setFeedback({
+        kind: 'status',
+        text: persisted
+          ? `Saved preset "${trimmed}".`
+          : `Saved preset "${trimmed}" for this session (storage full or unavailable).`,
+      });
     } catch (err) {
       setFeedback({
         kind: 'error',
@@ -216,14 +236,26 @@ export function StudioRack({
 
   const handleDeleteSelected = (): void => {
     if (disabled || !selectedPreset || selectedPreset.builtin) return;
-    if (onDeletePreset) {
-      onDeletePreset(selectedPreset.id);
-    } else {
-      deleteUserPreset(selectedPreset.id);
-      setInternalUserPresets(loadUserPresets());
-      setInternalActiveId('');
+    try {
+      if (onDeletePreset) {
+        onDeletePreset(selectedPreset.id);
+      } else {
+        deleteUserPreset(selectedPreset.id);
+        const reloaded = loadUserPresets();
+        setInternalUserPresets(
+          reloaded.length > 0
+            ? reloaded
+            : internalUserPresets.filter((p) => p.id !== selectedPreset.id),
+        );
+        setInternalActiveId('');
+      }
+      setFeedback({ kind: 'status', text: `Deleted preset "${selectedPreset.name}".` });
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Unable to delete preset.',
+      });
     }
-    setFeedback({ kind: 'status', text: `Deleted preset "${selectedPreset.name}".` });
   };
 
   const handleExportClick = (): void => {
@@ -259,21 +291,40 @@ export function StudioRack({
       setFeedback({ kind: 'error', text: res.error });
       return;
     }
-    if (onImportPreset) {
-      onImportPreset(res.preset);
-    } else {
-      const saved = saveUserPreset({
-        name: res.preset.name,
-        ...(res.preset.description !== undefined ? { description: res.preset.description } : {}),
-        settings: res.preset.settings,
+    try {
+      let persisted = true;
+      if (onImportPreset) {
+        onImportPreset(res.preset);
+      } else {
+        const saved = saveUserPreset({
+          name: res.preset.name,
+          ...(res.preset.description !== undefined ? { description: res.preset.description } : {}),
+          settings: res.preset.settings,
+        });
+        const reloaded = loadUserPresets();
+        persisted = reloaded.some((p) => p.id === saved.id);
+        setInternalUserPresets(
+          persisted
+            ? reloaded
+            : [...internalUserPresets.filter((p) => p.id !== saved.id), saved],
+        );
+        setInternalActiveId(saved.id);
+      }
+      onChange({ ...res.preset.settings });
+      setImportText('');
+      setPanelMode('none');
+      setFeedback({
+        kind: 'status',
+        text: persisted
+          ? `Imported preset "${res.preset.name}".`
+          : `Imported preset "${res.preset.name}" for this session (storage full or unavailable).`,
       });
-      setInternalUserPresets(loadUserPresets());
-      setInternalActiveId(saved.id);
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        text: err instanceof Error ? err.message : 'Unable to import preset.',
+      });
     }
-    onChange({ ...res.preset.settings });
-    setImportText('');
-    setPanelMode('none');
-    setFeedback({ kind: 'status', text: `Imported preset "${res.preset.name}".` });
   };
 
   const handleNamingChange = (e: ChangeEvent<HTMLInputElement>): void => {
@@ -289,7 +340,9 @@ export function StudioRack({
     if (disabled || !effectiveCanPreview || previewing) return;
     setPreviewing(true);
     const run = onPreviewRegion ? onPreviewRegion() : previewRegion();
-    void Promise.resolve(run).finally(() => setPreviewing(false));
+    void Promise.resolve(run).finally(() => {
+      if (mountedRef.current) setPreviewing(false);
+    });
   };
 
   return (

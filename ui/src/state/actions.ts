@@ -850,6 +850,7 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   }
   stopFollow?.();
   stopFollow = null;
+  stopSelectionPlay();
   analyzeAbort?.abort();
   const player = getPlayer();
   player.pause();
@@ -861,12 +862,15 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   // `player.time` reads it ungated, so the old clip's timecode would survive
   // the deck that produced it.
   player.seek(0);
+  if (typeof player.setLoopRange === 'function') player.setLoopRange(null);
+  if (typeof player.setLoopEnabled === 'function') player.setLoopEnabled(false);
   player.claimOnly('original', null);
   player.load('cleaned', null);
   unitOverrideEpoch += 1;
   previewEpoch += 1;
   spectralRepairEpoch += 1;
   extractTrackEpoch += 1;
+  takeAnalysisCache.clear();
   st.resetForNewSource();
   // A refusal is answered by the load that follows it. The multi-file note is
   // not a refusal — it explains *this* load ("3 files were dropped, the first
@@ -1728,10 +1732,16 @@ export async function startJob(strategyOverride?: ProcessingStrategyV1): Promise
     // dead socket, a path the engine will not take — destroyed a finished run
     // to start one that never began.
     reconcileTries.delete(jobItem.jobId);
+    unitOverrideEpoch += 1;
+    previewEpoch += 1;
+    spectralRepairEpoch += 1;
+    extractTrackEpoch += 1;
     const cur = useStore.getState();
     cur.setError(null);
     cur.setCleaned(null, null);
     cur.setReport(null);
+    cur.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+    if (cur.lastUndoDomain === 'override') cur.setLastUndoDomain(null);
     cur.setCurrentRun(null);
     cur.setDeckFault(null);
     cur.setArtifacts(null);
@@ -2042,6 +2052,16 @@ export async function inspectBatchItem(item: BatchItem): Promise<void> {
   const client = requireClient();
   const player = getPlayer();
 
+  unitOverrideEpoch += 1;
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
+  extractTrackEpoch += 1;
+  st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+  if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+  st.setSpectralSelection(null);
+  if (typeof player.setLoopRange === 'function') player.setLoopRange(null);
+  if (typeof player.setLoopEnabled === 'function') player.setLoopEnabled(false);
+
   st.setSource({ path: item.input_path, name: baseName(item.input_path), origin: 'file' });
 
   const originalUrl = client.fileUrl(item.input_path);
@@ -2154,6 +2174,7 @@ export async function selectRun(jobId: string): Promise<void> {
   }
   stopFollow?.();
   stopFollow = null;
+  stopSelectionPlay();
   // An analysis in flight belongs to the clip the user was *leaving*. Without
   // this it keeps running, and when it lands it writes that clip's peaks,
   // spectrum, duration and loudness over the run just restored — clip B's
@@ -2163,10 +2184,19 @@ export async function selectRun(jobId: string): Promise<void> {
   analyzeAbort?.abort();
   analyzeAbort = null;
   st.setAnalyzing(false);
+  unitOverrideEpoch += 1;
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
+  extractTrackEpoch += 1;
   const player = getPlayer();
   player.pause();
+  if (typeof player.setLoopRange === 'function') player.setLoopRange(null);
+  if (typeof player.setLoopEnabled === 'function') player.setLoopEnabled(false);
   st.setError(null);
   st.setRejection(null);
+  st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+  if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+  st.setSpectralSelection(null);
   st.setSource({ path: entry.inputPath, name: entry.inputName, origin: 'file' });
   st.setJob({
     id: entry.jobId,
@@ -2825,20 +2855,29 @@ export function clearSelectionRange(): void {
   getState().setSelectionRange(null);
 }
 
+let selectionPlayRaf = 0;
+
+function stopSelectionPlay(): void {
+  if (selectionPlayRaf) {
+    cancelAnimationFrame(selectionPlayRaf);
+    selectionPlayRaf = 0;
+  }
+}
+
 /** D2 · Plays only the current selection range. Auto-pauses at the end. */
 export function playSelection(loop = false): void {
   const sel = getState().selectionRange;
   if (!sel || sel.end <= sel.start) return;
 
+  stopSelectionPlay();
   const player = getPlayer();
   player.seek(sel.start);
   void player.play();
 
   // Poll transport time and stop/loop when we pass the end
-  let handle = 0;
   const check = (): void => {
+    selectionPlayRaf = 0;
     if (!getState().playing) {
-      cancelAnimationFrame(handle);
       return;
     }
     if (player.time >= sel.end) {
@@ -2846,13 +2885,12 @@ export function playSelection(loop = false): void {
         player.seek(sel.start);
       } else {
         player.pause();
-        cancelAnimationFrame(handle);
         return;
       }
     }
-    handle = requestAnimationFrame(check);
+    selectionPlayRaf = requestAnimationFrame(check);
   };
-  handle = requestAnimationFrame(check);
+  selectionPlayRaf = requestAnimationFrame(check);
 }
 
 // ---------------------------------------------------------------------------
@@ -3096,12 +3134,32 @@ function applyLocalUnitDecision(
   };
 }
 
+function isActiveJobRunning(st: ReturnType<typeof getState>): boolean {
+  if (creatingJob) return true;
+  if (!st.job) return false;
+  if (!st.job.status) return st.report === null;
+  return jobInFlight(st.job);
+}
+
 async function syncOverrideMapDiff(prev: UnitOverrideMap, next: UnitOverrideMap): Promise<void> {
+  const start = getState();
+  const expectedSourcePath = start.source?.path ?? start.original?.path ?? null;
+  const expectedJobId = start.job?.id ?? start.report?.job_id ?? null;
   const keys = new Set<number>([
     ...Object.keys(prev).map(Number),
     ...Object.keys(next).map(Number),
   ]);
   for (const unitId of keys) {
+    const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      isActiveJobRunning(cur) ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return;
+    }
     const before = prev[unitId] ?? 'auto';
     const after = next[unitId] ?? 'auto';
     if (before !== after) {
@@ -3210,6 +3268,8 @@ async function applyUnitOverrideInternal(
       const sep = baseUrl.includes('?') ? '&' : '?';
       const versionTag = res.masterSha256 || String(Date.now());
       const bustedUrl = `${baseUrl}${sep}v=${encodeURIComponent(versionTag)}`;
+      previewEpoch += 1;
+      cur.setPreviewActive(false);
       player.load(
         'cleaned',
         bustedUrl,
@@ -3268,12 +3328,18 @@ export async function applyUnitOverride(
 /** Undo the most recent unit override or StudioRack parameter change. */
 export function undoAction(): void {
   const st = getState();
+  if (isActiveJobRunning(st)) return;
   const preferOverride =
     st.lastUndoDomain === 'override'
       ? st.overrideUndo.canUndo
       : !st.rackUndo.canUndo && st.overrideUndo.canUndo;
 
   if (preferOverride) {
+    if (!st.report && !st.job) {
+      st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+      if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+      return;
+    }
     const prevMap = st.overrideUndo.present;
     const nextStack = st.overrideUndo.undo();
     st.setUnitOverrides(nextStack.present, nextStack);
@@ -3296,12 +3362,18 @@ export function undoAction(): void {
 /** Redo the most recently undone unit override or StudioRack parameter change. */
 export function redoAction(): void {
   const st = getState();
+  if (isActiveJobRunning(st)) return;
   const preferOverride =
     st.lastUndoDomain === 'override'
       ? st.overrideUndo.canRedo
       : !st.rackUndo.canRedo && st.overrideUndo.canRedo;
 
   if (preferOverride) {
+    if (!st.report && !st.job) {
+      st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+      if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+      return;
+    }
     const prevMap = st.overrideUndo.present;
     const nextStack = st.overrideUndo.redo();
     st.setUnitOverrides(nextStack.present, nextStack);
@@ -3352,6 +3424,8 @@ export function selectTake(takeId: string): void {
   const take = st.takes.find((t) => t.id === takeId);
   if (!take) return;
 
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
   const historyMatch = st.history.find((h) => h.jobId === take.id);
   const cachedAnalysis = takeAnalysisCache.get(take.id) ?? historyMatch?.cleaned ?? null;
   st.setActiveTakeId(take.id);
@@ -3667,8 +3741,11 @@ export async function applySpectralBoxRepair(
     cur.setDeckFault(null);
     if (res.outputPath) {
       cur.setCleaned(cur.cleaned, res.outputPath);
+    } else if (audioUrl) {
+      cur.setPreviewActive(false);
     }
     if (audioUrl) {
+      previewEpoch += 1;
       const player = getPlayer();
       const wasPlaying = player.playing;
       const atTime = player.time;

@@ -64,10 +64,12 @@ export const PRESET_SCHEMA_ID = 'hawavoclean.preset.v1';
 export const PRESET_SCHEMA_VERSION = 1;
 export const DEFAULT_NAMING_TEMPLATE = '{name}_{profile}_{preset}';
 export const MAX_PRESET_JSON_BYTES = 32_768;
+export const MAX_PRESET_STORAGE_BYTES = 512 * 1024;
 export const MAX_PRESET_NAME_LENGTH = 80;
 export const MAX_PRESET_DESCRIPTION_LENGTH = 240;
 export const MAX_NAMING_TEMPLATE_LENGTH = 120;
 export const MAX_USER_PRESETS = 100;
+const MAX_STORAGE_SCAN_ITEMS = MAX_USER_PRESETS * 4;
 
 export const STRENGTH_MIN = 0.1;
 export const STRENGTH_MAX = 1.0;
@@ -270,7 +272,7 @@ function hasForbiddenKeysDeep(value: unknown, depth = 0): boolean {
     return value.some((item) => hasForbiddenKeysDeep(item, depth + 1));
   }
   if (typeof value === 'object' && value !== null) {
-    for (const key of Object.keys(value)) {
+    for (const key of Object.getOwnPropertyNames(value)) {
       if (FORBIDDEN_KEYS.has(key)) return true;
       const child = (value as Record<string, unknown>)[key];
       if (hasForbiddenKeysDeep(child, depth + 1)) return true;
@@ -548,7 +550,8 @@ export function loadUserPresets(storage?: Storage | null): UserPreset[] {
   } catch {
     return [];
   }
-  if (!rawText) return [];
+  if (!rawText || rawText.length > MAX_PRESET_STORAGE_BYTES) return [];
+  if (/"(?:__proto__|constructor|prototype)"\s*:/.test(rawText)) return [];
 
   let parsed: unknown;
   try {
@@ -556,14 +559,17 @@ export function loadUserPresets(storage?: Storage | null): UserPreset[] {
   } catch {
     return [];
   }
-  if (!Array.isArray(parsed) || hasForbiddenKeysDeep(parsed)) {
+  if (!Array.isArray(parsed)) {
     return [];
   }
 
   const valid: UserPreset[] = [];
   const seenIds = new Set<string>();
-  for (const item of parsed) {
+  const scanLimit = Math.min(parsed.length, MAX_STORAGE_SCAN_ITEMS);
+  for (let i = 0; i < scanLimit; i++) {
     if (valid.length >= MAX_USER_PRESETS) break;
+    const item = parsed[i];
+    if (hasForbiddenKeysDeep(item)) continue;
     const res = validateUserPresetObject(item, { requireId: true, forceUserId: true });
     if (res.ok && !seenIds.has(res.preset.id)) {
       seenIds.add(res.preset.id);

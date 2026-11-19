@@ -189,6 +189,8 @@ export class DualPlayer {
   private faultListeners = new Set<FaultListener>();
   private raf = 0;
   private wantPlaying = false;
+  private playToken = 0;
+  private disposed = false;
   private loudnessMatchEnabled = true;
   private lufsIn: number | null = null;
   private lufsOut: number | null = null;
@@ -255,8 +257,16 @@ export class DualPlayer {
         // leaving the transport in a half-playing state.
         if (this.wantPlaying && deck === this.active && !el.ended && this.state[deck] === 'ready') {
           window.setTimeout(() => {
-            if (this.wantPlaying && this.active === deck && el.paused && !el.ended) {
+            if (
+              !this.disposed &&
+              this.wantPlaying &&
+              this.active === deck &&
+              el.paused &&
+              !el.ended &&
+              this.state[deck] === 'ready'
+            ) {
               void el.play().catch(() => {
+                if (this.disposed) return;
                 this.wantPlaying = false;
                 this.pauseAll();
                 this.emit();
@@ -310,17 +320,42 @@ export class DualPlayer {
    * Element-level mute is the pre-graph A/B mechanism and still works; a
    * webview without WebAudio should lose the fade, not the sound.
    */
+  private teardownGraph(closeContext = false): void {
+    try {
+      this.gains?.original.disconnect();
+      this.gains?.cleaned.disconnect();
+      this.deltaInverter?.disconnect();
+      this.deltaGain?.disconnect();
+      this.analyser?.disconnect();
+    } catch {
+      // Ignore disconnect errors on torn-down or closed contexts.
+    }
+    const ctx = this.ctx;
+    this.ctx = null;
+    this.gains = null;
+    this.deltaInverter = null;
+    this.deltaGain = null;
+    this.analyser = null;
+    if (closeContext && ctx && ctx.state !== 'closed') {
+      try {
+        void ctx.close().catch(() => undefined);
+      } catch {
+        // Ignore synchronous close errors.
+      }
+    }
+  }
+
   private ensureGraph(): void {
-    if (this.ctx) return;
+    if (this.disposed) return;
+    if (this.ctx && this.ctx.state !== 'closed') return;
+    if (this.ctx && this.ctx.state === 'closed') {
+      this.teardownGraph(false);
+    }
     try {
       this.buildGraph();
     } catch {
       // Left null on purpose: `applyMuteFallback()` owns A/B from here.
-      this.ctx = null;
-      this.gains = null;
-      this.deltaInverter = null;
-      this.deltaGain = null;
-      this.analyser = null;
+      this.teardownGraph(false);
       this.applyMuteFallback();
     }
   }
@@ -435,18 +470,25 @@ export class DualPlayer {
 
   private applyTargetGain(immediate = false): void {
     const branch = this.computeBranchGains();
-    if (this.gains && this.ctx) {
-      const now = this.ctx.currentTime;
-      this.rampParam(this.gains.original.gain, branch.original, now, immediate);
-      this.rampParam(this.gains.cleaned.gain, branch.cleaned, now, immediate);
-      if (this.deltaGain) {
-        this.rampParam(this.deltaGain.gain, branch.delta, now, immediate);
+    if (this.gains && this.ctx && this.ctx.state !== 'closed') {
+      try {
+        const now = this.ctx.currentTime;
+        this.rampParam(this.gains.original.gain, branch.original, now, immediate);
+        this.rampParam(this.gains.cleaned.gain, branch.cleaned, now, immediate);
+        if (this.deltaGain) {
+          this.rampParam(this.deltaGain.gain, branch.delta, now, immediate);
+        }
+        return;
+      } catch {
+        // Fall through to mute fallback if context closed mid-ramp.
       }
-    } else {
-      const targetCleaned = this.getTargetGain('cleaned');
-      this.els.cleaned.volume = Math.min(1, Math.max(0, targetCleaned));
-      this.applyMuteFallback();
     }
+    if (this.ctx && this.ctx.state === 'closed') {
+      this.teardownGraph(false);
+    }
+    const targetCleaned = this.getTargetGain('cleaned');
+    this.els.cleaned.volume = Math.min(1, Math.max(0, targetCleaned));
+    this.applyMuteFallback();
   }
 
   /**
@@ -591,7 +633,7 @@ export class DualPlayer {
    */
   getLiveMeterLevels(): LiveMeterLevels {
     const analyser = this.analyser;
-    if (!analyser) {
+    if (!analyser || (this.ctx && this.ctx.state === 'closed')) {
       return {
         momentaryLufs: METER_FLOOR_DB,
         shortTermLufs: METER_FLOOR_DB,
@@ -604,13 +646,23 @@ export class DualPlayer {
     if (!this.meterBuf || this.meterBuf.length !== size) {
       this.meterBuf = new Float32Array(size);
     }
-    analyser.getFloatTimeDomainData(this.meterBuf);
+    try {
+      analyser.getFloatTimeDomainData(this.meterBuf);
+    } catch {
+      return {
+        momentaryLufs: METER_FLOOR_DB,
+        shortTermLufs: METER_FLOOR_DB,
+        peakDbfs: METER_FLOOR_DB,
+        truePeakHoldDbfs: this.peakHoldDbfs,
+      };
+    }
 
     const buf = this.meterBuf;
     let sumSq = 0;
     let samplePeak = 0;
     for (let i = 0; i < buf.length; i++) {
-      const s = buf[i] ?? 0;
+      const raw = buf[i] ?? 0;
+      const s = Number.isFinite(raw) ? raw : 0;
       sumSq += s * s;
       const a = Math.abs(s);
       if (a > samplePeak) samplePeak = a;
@@ -798,6 +850,7 @@ export class DualPlayer {
     expectedDuration: number | null = null,
     regionOffsetS?: number,
   ): void {
+    if (this.disposed) return;
     if (url === null) {
       this.retire(deck);
       return;
@@ -817,10 +870,20 @@ export class DualPlayer {
     ) {
       return;
     }
-    // Preserve timeline position when reloading the currently active deck
-    // (e.g. live unit re-stitch or spectral box repair while playing/scrubbed).
+    const isNewOriginalSource =
+      deck === 'original' && this.attached.original !== url && this.wanted.original !== url;
+    if (isNewOriginalSource) {
+      this.deltaModeEnabled = false;
+      this.loopRangeValue = null;
+      this.loopEnabledFlag = false;
+    }
+    // Preserve timeline position when reloading the currently active cleaned deck
+    // (e.g. live unit re-stitch or spectral box repair while playing/scrubbed),
+    // never when switching `original` to a brand-new source.
     const prevActiveTime =
-      deck === this.active && this.state[deck] === 'ready' ? this.time : null;
+      !isNewOriginalSource && deck === this.active && this.state[deck] === 'ready'
+        ? this.time
+        : null;
     this.wanted[deck] = url;
     this.offset[deck] = safeOffset;
     this.isPreviewDeck[deck] = isPreview;
@@ -1017,15 +1080,34 @@ export class DualPlayer {
     this.emit();
   }
 
+  private revokeBlob(deck: Deck): void {
+    const blob = this.objectUrl[deck];
+    if (blob) {
+      URL.revokeObjectURL(blob);
+      this.objectUrl[deck] = null;
+      // A revoked blob URL cannot be revived on the element without a fresh fetch.
+      this.attached[deck] = null;
+    }
+  }
+
   /**
    * Take a deck out of service without touching its `src`. Removing the
    * attribute (or calling `load()` on an empty element) is what used to abort
    * the deck's open range request; the element keeps the source it has, stays
    * silent, and reports itself unavailable until something is loaded onto it.
+   * Any `blob:` handle owned by this deck is revoked immediately to prevent
+   * retaining large in-memory audio buffers across source switches.
    */
   private retire(deck: Deck): void {
     this.faults[deck] = null;
-    if (this.state[deck] === 'empty' && this.wanted[deck] === null) return;
+    if (this.state[deck] === 'empty' && this.wanted[deck] === null) {
+      this.revokeBlob(deck);
+      if (deck === 'original') {
+        this.loopRangeValue = null;
+        this.loopEnabledFlag = false;
+      }
+      return;
+    }
     this.takeOutOfService(deck, false);
     this.emit();
   }
@@ -1048,21 +1130,31 @@ export class DualPlayer {
     this.seekOnMeta[deck] = null;
     this.state[deck] = 'empty';
     this.deltaModeEnabled = false;
+    if (deck === 'original') {
+      this.loopRangeValue = null;
+      this.loopEnabledFlag = false;
+    }
     if (this.pendingActive === deck) this.pendingActive = null;
     const el = this.els[deck];
     el.pause();
+    this.revokeBlob(deck);
     if (deck === this.active && this.wantPlaying && !keepPlaying) {
       this.wantPlaying = false;
+      this.playToken += 1;
       this.pauseAll();
     }
-    if (this.gains && this.ctx) {
-      const g = this.gains[deck].gain;
-      g.cancelScheduledValues(this.ctx.currentTime);
-      g.setValueAtTime(0, this.ctx.currentTime);
-      if (this.deltaGain) {
-        const dg = this.deltaGain.gain;
-        dg.cancelScheduledValues(this.ctx.currentTime);
-        dg.setValueAtTime(0, this.ctx.currentTime);
+    if (this.gains && this.ctx && this.ctx.state !== 'closed') {
+      try {
+        const g = this.gains[deck].gain;
+        g.cancelScheduledValues(this.ctx.currentTime);
+        g.setValueAtTime(0, this.ctx.currentTime);
+        if (this.deltaGain) {
+          const dg = this.deltaGain.gain;
+          dg.cancelScheduledValues(this.ctx.currentTime);
+          dg.setValueAtTime(0, this.ctx.currentTime);
+        }
+      } catch {
+        el.muted = true;
       }
     } else {
       el.muted = true;
@@ -1132,15 +1224,26 @@ export class DualPlayer {
   }
 
   setActive(deck: Deck): void {
-    if (deck === this.active && !this.deltaModeEnabled) return;
+    if (this.disposed) return;
+    if (deck === this.active && !this.deltaModeEnabled) {
+      if (this.pendingActive !== null) {
+        this.pendingActive = null;
+        this.emit();
+      }
+      return;
+    }
     if (this.state[deck] === 'empty') return;
     if (this.state[deck] === 'loading') {
       // Arrive at the deck as soon as it has a source.
-      this.pendingActive = deck;
+      if (this.pendingActive !== deck) {
+        this.pendingActive = deck;
+        this.emit();
+      }
       return;
     }
     const prev = this.active;
     this.active = deck;
+    this.pendingActive = null;
     this.deltaModeEnabled = false;
     const from = this.els[prev];
     const to = this.els[deck];
@@ -1169,12 +1272,22 @@ export class DualPlayer {
   }
 
   async play(): Promise<void> {
-    if (this.state[this.active] === 'empty') return;
+    if (this.disposed || this.state[this.active] === 'empty') return;
+    this.wantPlaying = true;
+    const token = ++this.playToken;
     this.ensureGraph();
     if (this.ctx && this.ctx.state === 'suspended') {
-      await this.ctx.resume();
+      try {
+        await this.ctx.resume();
+      } catch {
+        // Autoplay or closed-context resume rejections fail soft cleanly.
+      }
     }
-    this.wantPlaying = true;
+    if (this.disposed || !this.wantPlaying || this.playToken !== token) return;
+    if (this.state[this.active] === 'empty') {
+      this.wantPlaying = false;
+      return;
+    }
     // Active deck is reloading (e.g. live unit re-stitch or spectral repair):
     // retain wantPlaying so `afterAttach` resumes playback seamlessly.
     if (this.state[this.active] !== 'ready') {
@@ -1205,12 +1318,14 @@ export class DualPlayer {
       plays.push(el.play().catch(() => undefined));
     }
     await Promise.all(plays);
+    if (this.disposed || !this.wantPlaying || this.playToken !== token) return;
     this.startTicker();
     this.emit();
   }
 
   pause(): void {
     this.wantPlaying = false;
+    this.playToken += 1;
     this.pauseAll();
     this.emit();
   }
@@ -1221,6 +1336,7 @@ export class DualPlayer {
   }
 
   seek(time: number): void {
+    if (this.disposed || !Number.isFinite(time)) return;
     const d = this.duration;
     const t = Math.max(0, Math.min(d > 0 ? d : time, time));
     for (const deck of ['original', 'cleaned'] as const) {
@@ -1362,11 +1478,21 @@ export class DualPlayer {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.wantPlaying = false;
+    this.playToken += 1;
     this.stopTicker();
     this.listeners.clear();
     this.faultListeners.clear();
     this.faults = { original: null, cleaned: null };
+    this.pendingActive = null;
     this.deltaModeEnabled = false;
+    this.loopEnabledFlag = false;
+    this.loopRangeValue = null;
+    this.offset = { original: 0, cleaned: 0 };
+    this.isPreviewDeck = { original: false, cleaned: false };
+    this.pendingSeekTime = { original: null, cleaned: null };
+    this.seekOnMeta = { original: null, cleaned: null };
     this.lufsHistory = [];
     this.meterBuf = null;
     this.peakHoldDbfs = METER_FLOOR_DB;
@@ -1377,17 +1503,12 @@ export class DualPlayer {
       el.removeAttribute('src');
       el.load();
       el.remove();
-      const blob = this.objectUrl[deck];
-      if (blob) URL.revokeObjectURL(blob);
-      this.objectUrl[deck] = null;
+      this.revokeBlob(deck);
+      this.wanted[deck] = null;
       this.attached[deck] = null;
       this.state[deck] = 'empty';
     }
-    this.deltaInverter?.disconnect();
-    this.deltaGain?.disconnect();
-    this.deltaInverter = null;
-    this.deltaGain = null;
-    void this.ctx?.close();
+    this.teardownGraph(true);
   }
 }
 

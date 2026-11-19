@@ -77,7 +77,8 @@ export function VideoPreview({
     video.muted = true;
     const targetTime =
       effectiveDuration > 0 ? Math.min(safeTime, effectiveDuration) : safeTime;
-    const drift = Math.abs(video.currentTime - targetTime);
+    const mediaTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+    const drift = Math.abs(mediaTime - targetTime);
 
     if (drift > VIDEO_SYNC_DRIFT_THRESHOLD_S) {
       lastProgrammaticTargetRef.current = targetTime;
@@ -95,19 +96,50 @@ export function VideoPreview({
     const video = videoRef.current;
     if (!video || collapsed || !normalizedUrl || hasError) return;
 
+    let cancelled = false;
     video.muted = true;
     if (playing) {
       if (video.paused) {
-        const playResult = video.play();
-        if (playResult && typeof playResult.catch === 'function') {
-          playResult.catch(() => {
-            // Autoplay or abort rejections in headless/background tabs are non-fatal.
-          });
+        try {
+          const playResult = video.play();
+          if (playResult && typeof playResult.then === 'function') {
+            playResult.then(
+              () => {
+                if (cancelled) {
+                  try {
+                    video.pause();
+                  } catch {
+                    // Ignore pause failures on detached or errored media elements.
+                  }
+                }
+              },
+              () => {
+                // Autoplay or abort rejections in headless/background tabs are non-fatal.
+              },
+            );
+          }
+        } catch {
+          // Synchronous play() throws in restricted webviews are non-fatal.
         }
       }
     } else if (!video.paused) {
-      video.pause();
+      try {
+        video.pause();
+      } catch {
+        // Ignore pause errors on detached elements.
+      }
     }
+
+    return () => {
+      cancelled = true;
+      if (playing) {
+        try {
+          if (!video.paused) video.pause();
+        } catch {
+          // Ignore pause errors during teardown.
+        }
+      }
+    };
   }, [playing, collapsed, normalizedUrl, hasError]);
 
   // Degrade cleanly to nothing for audio-only sources.
@@ -178,7 +210,8 @@ export function VideoPreview({
                 Number.isFinite(el.duration) && el.duration > 0
                   ? Math.min(safeTime, el.duration)
                   : safeTime;
-              if (Math.abs(el.currentTime - targetTime) > VIDEO_SYNC_DRIFT_THRESHOLD_S) {
+              const mediaTime = Number.isFinite(el.currentTime) ? el.currentTime : 0;
+              if (Math.abs(mediaTime - targetTime) > VIDEO_SYNC_DRIFT_THRESHOLD_S) {
                 lastProgrammaticTargetRef.current = targetTime;
                 try {
                   el.currentTime = targetTime;

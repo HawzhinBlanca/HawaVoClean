@@ -16,19 +16,30 @@ function compileShader(gl: WebGL2RenderingContext, type: number, src: string): W
 function createProgram(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram {
   const prog = gl.createProgram();
   if (!prog) throw new Error('createProgram failed');
-  const v = compileShader(gl, gl.VERTEX_SHADER, vs);
-  const f = compileShader(gl, gl.FRAGMENT_SHADER, fs);
-  gl.attachShader(prog, v);
-  gl.attachShader(prog, f);
-  gl.linkProgram(prog);
-  gl.deleteShader(v);
-  gl.deleteShader(f);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    const log = gl.getProgramInfoLog(prog) ?? '';
+  let v: WebGLShader | null = null;
+  let f: WebGLShader | null = null;
+  try {
+    v = compileShader(gl, gl.VERTEX_SHADER, vs);
+    f = compileShader(gl, gl.FRAGMENT_SHADER, fs);
+    gl.attachShader(prog, v);
+    gl.attachShader(prog, f);
+    gl.linkProgram(prog);
+    gl.deleteShader(v);
+    v = null;
+    gl.deleteShader(f);
+    f = null;
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(prog) ?? '';
+      gl.deleteProgram(prog);
+      throw new Error(`program link failed: ${log}`);
+    }
+    return prog;
+  } catch (err) {
+    if (v) gl.deleteShader(v);
+    if (f) gl.deleteShader(f);
     gl.deleteProgram(prog);
-    throw new Error(`program link failed: ${log}`);
+    throw err;
   }
-  return prog;
 }
 
 /**
@@ -63,7 +74,11 @@ export interface Fbo {
 export function createFbo(gl: WebGL2RenderingContext, width: number, height: number): Fbo {
   const tex = gl.createTexture();
   const fb = gl.createFramebuffer();
-  if (!tex || !fb) throw new Error('fbo alloc failed');
+  if (!tex || !fb) {
+    if (tex) gl.deleteTexture(tex);
+    if (fb) gl.deleteFramebuffer(fb);
+    throw new Error('fbo alloc failed');
+  }
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);

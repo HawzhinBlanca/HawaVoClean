@@ -736,11 +736,31 @@ export class StftCanvasRenderer {
     return tex;
   }
 
-  private cleanupGl(gl: WebGL2RenderingContext): void {
-    if (this.stftTex) gl.deleteTexture(this.stftTex);
-    if (this.lutTex) gl.deleteTexture(this.lutTex);
-    if (this.vao) gl.deleteVertexArray(this.vao);
-    if (this.prog) gl.deleteProgram(this.prog.p);
+  private cleanupGl(gl: WebGL2RenderingContext, releaseContext = false): void {
+    const lost = typeof gl.isContextLost === 'function' && gl.isContextLost();
+    if (!lost) {
+      try {
+        gl.activeTexture?.(gl.TEXTURE1);
+        gl.bindTexture?.(gl.TEXTURE_2D, null);
+        gl.activeTexture?.(gl.TEXTURE0);
+        gl.bindTexture?.(gl.TEXTURE_2D, null);
+        gl.bindVertexArray?.(null);
+        gl.useProgram?.(null);
+        if (this.stftTex) gl.deleteTexture(this.stftTex);
+        if (this.lutTex) gl.deleteTexture(this.lutTex);
+        if (this.vao) gl.deleteVertexArray(this.vao);
+        if (this.prog) gl.deleteProgram(this.prog.p);
+        if (releaseContext) {
+          const ext = gl.getExtension?.('WEBGL_lose_context') as
+            | { loseContext?: () => void }
+            | null
+            | undefined;
+          ext?.loseContext?.();
+        }
+      } catch {
+        // Ignore teardown errors if the GPU context was lost mid-cleanup.
+      }
+    }
     this.stftTex = null;
     this.lutTex = null;
     this.vao = null;
@@ -749,6 +769,7 @@ export class StftCanvasRenderer {
 
   clear(): void {
     if (this.gl) {
+      if (typeof this.gl.isContextLost === 'function' && this.gl.isContextLost()) return;
       this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       this.gl.clearColor(7 / 255, 8 / 255, 10 / 255, 1);
       this.gl.clear(this.gl.COLOR_BUFFER_BIT);
@@ -767,9 +788,14 @@ export class StftCanvasRenderer {
     const w = this.canvas.width;
     const h = this.canvas.height;
     if (w < 1 || h < 1) return;
+    if (!Number.isFinite(viewStart) || !Number.isFinite(viewEnd) || !(viewEnd > viewStart)) {
+      this.clear();
+      return;
+    }
 
     if (this.gl && this.prog && this.stftTex && this.lutTex) {
       const gl = this.gl;
+      if (typeof gl.isContextLost === 'function' && gl.isContextLost()) return;
       if (this.lastTile !== tile) {
         gl.bindTexture(gl.TEXTURE_2D, this.stftTex);
         gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -834,7 +860,7 @@ export class StftCanvasRenderer {
 
   dispose(): void {
     if (this.gl) {
-      this.cleanupGl(this.gl);
+      this.cleanupGl(this.gl, true);
       this.gl = null;
     }
     this.ctx2d = null;
