@@ -93,16 +93,14 @@ cargo build --release
 cargo build --release --features onnx
 ```
 
-Package into standard macOS plugin bundles:
+Package into signed macOS CFBundles (`Info.plist`, `PkgInfo`, rewritten `@loader_path` install name, and ad-hoc `codesign --force --sign -`):
 
 ```bash
-# VST3 bundle
-mkdir -p target/bundled/HawaVoClean.vst3/Contents/MacOS
-cp target/release/libhawavoclean_daw.dylib target/bundled/HawaVoClean.vst3/Contents/MacOS/HawaVoClean
+# Builds release dylib and writes HawaVoClean.clap + HawaVoClean.vst3 into target/bundled/
+./bundle-macos.sh
 
-# CLAP bundle
-mkdir -p target/bundled/HawaVoClean.clap/Contents/MacOS
-cp target/release/libhawavoclean_daw.dylib target/bundled/HawaVoClean.clap/Contents/MacOS/HawaVoClean
+# Or target a custom output directory:
+./bundle-macos.sh /tmp/hawa-daw-bundles
 ```
 
 Install for local DAW testing (Logic Pro via AU wrapper, DaVinci Fairlight, Reaper, Ableton Live, Bitwig):
