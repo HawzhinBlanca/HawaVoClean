@@ -695,3 +695,149 @@ def test_pipeline_default_bit_identity_and_opt_in_pro_chain(
     out_meta = done["report"]["output"]
     assert out_meta["integrated_lufs"] == pytest.approx(-23.0, abs=2.0)
     assert out_meta["true_peak_dbtp"] <= -0.95
+
+
+# ---------------------------------------------------------------------------
+# 7. POST /api/v1/spectral-repair & managed spectral_*.wav /api/audio access
+# ---------------------------------------------------------------------------
+
+
+def test_v1_spectral_repair_endpoint_audio_access_and_policy(
+    real_client: TestClient, work: Path
+) -> None:
+    sr = 48000
+    n = int(1.5 * sr)
+    t = np.arange(n, dtype=np.float64) / float(sr)
+    speech_300 = 0.25 * np.sin(2.0 * np.pi * 300.0 * t)
+    chime_1000 = np.zeros(n, dtype=np.float64)
+    s0, s1 = int(0.5 * sr), int(1.0 * sr)
+    chime_1000[s0:s1] = 0.30 * np.sin(2.0 * np.pi * 1000.0 * t[s0:s1])
+    sig = (speech_300 + chime_1000).astype(np.float32)
+
+    src = work / "spectral_src.wav"
+    sf.write(str(src), sig, sr, format="WAV", subtype="PCM_24")
+
+    resp = real_client.post(
+        "/api/v1/spectral-repair",
+        headers=H,
+        json={
+            "path": str(src),
+            "startS": 0.5,
+            "endS": 1.0,
+            "fLowHz": 850.0,
+            "fHighHz": 1150.0,
+            "attenuationDb": 24.0,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    out_path = Path(body["outputPath"])
+    assert out_path.is_file()
+    assert out_path.parent.resolve() == (work / "previews").resolve()
+    assert out_path.name.startswith("spectral_") and out_path.suffix == ".wav"
+    assert body["audioUrl"].startswith("/api/audio?path=")
+    assert body["startS"] == pytest.approx(0.5)
+    assert body["endS"] == pytest.approx(1.0)
+    assert body["fLowHz"] == pytest.approx(850.0)
+    assert body["fHighHz"] == pytest.approx(1150.0)
+    assert body["attenuationDb"] == pytest.approx(24.0)
+    assert body["renderMs"] > 0.0
+
+    # Session client can stream managed spectral_*.wav via /api/audio (200 & 206).
+    sess_h = _session_headers(real_client)
+    audio_resp = real_client.get(body["audioUrl"], headers=sess_h)
+    assert audio_resp.status_code == 200
+    assert audio_resp.content[:4] == b"RIFF"
+
+    ranged = real_client.get(body["audioUrl"], headers={**sess_h, "Range": "bytes=0-15"})
+    assert ranged.status_code == 206
+    assert len(ranged.content) == 16
+
+    # Symlink spoofing spectral_*.wav inside previews/ must be rejected with 403.
+    sym = (work / "previews" / "spectral_symlink.wav").resolve()
+    sym.symlink_to(src)
+    denied_sym = real_client.get("/api/audio", params={"path": str(sym)}, headers=sess_h)
+    assert denied_sym.status_code == 403
+
+    # Verify acoustic attenuation on the written WAV file.
+    import scipy.signal
+
+    repaired_audio, rep_sr = sf.read(str(out_path), dtype="float32")
+    assert rep_sr == sr
+    sos_chime = scipy.signal.butter(4, [900.0, 1100.0], btype="bandpass", fs=sr, output="sos")
+    sos_speech = scipy.signal.butter(4, [220.0, 380.0], btype="bandpass", fs=sr, output="sos")
+    c_before = float(np.sqrt(np.mean(scipy.signal.sosfiltfilt(sos_chime, sig[s0:s1]) ** 2)))
+    c_after = float(
+        np.sqrt(np.mean(scipy.signal.sosfiltfilt(sos_chime, repaired_audio[s0:s1]) ** 2))
+    )
+    assert 20.0 * np.log10(c_before / max(c_after, 1e-9)) > 15.0
+
+    v_before = float(np.sqrt(np.mean(scipy.signal.sosfiltfilt(sos_speech, sig[s0:s1]) ** 2)))
+    v_after = float(
+        np.sqrt(np.mean(scipy.signal.sosfiltfilt(sos_speech, repaired_audio[s0:s1]) ** 2))
+    )
+    assert abs(20.0 * np.log10(v_after / max(v_before, 1e-9))) < 0.5
+
+    # Unauthorized path rejected with 403 (both root outside allowlist and session without cap).
+    r_forbidden = real_client.post(
+        "/api/v1/spectral-repair",
+        headers=H,
+        json={
+            "path": "/etc/hosts",
+            "startS": 0.0,
+            "endS": 0.5,
+            "fLowHz": 500.0,
+            "fHighHz": 1500.0,
+        },
+    )
+    assert r_forbidden.status_code == 403
+    assert r_forbidden.json()["error"] == "forbidden"
+
+    r_sess_denied = real_client.post(
+        "/api/v1/spectral-repair",
+        headers=sess_h,
+        json={
+            "path": str(src),
+            "startS": 0.0,
+            "endS": 0.5,
+            "fLowHz": 500.0,
+            "fHighHz": 1500.0,
+        },
+    )
+    assert r_sess_denied.status_code == 403
+
+    # Validation errors -> 400.
+    r_bad_time = real_client.post(
+        "/api/v1/spectral-repair",
+        headers=H,
+        json={"path": str(src), "startS": 0.8, "endS": 0.4, "fLowHz": 500.0, "fHighHz": 1500.0},
+    )
+    assert r_bad_time.status_code == 400
+
+    r_bad_freq = real_client.post(
+        "/api/v1/spectral-repair",
+        headers=H,
+        json={"path": str(src), "startS": 0.1, "endS": 0.5, "fLowHz": 1500.0, "fHighHz": 500.0},
+    )
+    assert r_bad_freq.status_code == 400
+
+    r_over_nyq = real_client.post(
+        "/api/v1/spectral-repair",
+        headers=H,
+        json={"path": str(src), "startS": 0.1, "endS": 0.5, "fLowHz": 500.0, "fHighHz": 30000.0},
+    )
+    assert r_over_nyq.status_code == 400
+
+    r_bad_att = real_client.post(
+        "/api/v1/spectral-repair",
+        headers=H,
+        json={
+            "path": str(src),
+            "startS": 0.1,
+            "endS": 0.5,
+            "fLowHz": 500.0,
+            "fHighHz": 1500.0,
+            "attenuationDb": 90.0,
+        },
+    )
+    assert r_bad_att.status_code == 400

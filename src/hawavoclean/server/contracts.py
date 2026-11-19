@@ -445,6 +445,37 @@ class SpectrogramRequestV1(ContractModel):
         return self
 
 
+class SpectralRepairRequestV1(ContractModel):
+    """Request for 2D time×frequency surgical spectral box attenuation."""
+
+    path: str = Field(min_length=1, max_length=32_768)
+    start_s: float = Field(ge=0.0, allow_inf_nan=False)
+    end_s: float = Field(gt=0.0, allow_inf_nan=False)
+    f_low_hz: float = Field(ge=0.0, allow_inf_nan=False)
+    f_high_hz: float = Field(gt=0.0, allow_inf_nan=False)
+    attenuation_db: float = Field(default=24.0, ge=3.0, le=60.0, allow_inf_nan=False)
+
+    @field_validator(
+        "start_s",
+        "end_s",
+        "f_low_hz",
+        "f_high_hz",
+        "attenuation_db",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_fields(cls, value: Any) -> Any:
+        return _reject_bool_number(value)
+
+    @model_validator(mode="after")
+    def validate_box(self) -> SpectralRepairRequestV1:
+        if self.end_s <= self.start_s:
+            raise ValueError("endS must be greater than startS")
+        if self.f_high_hz <= self.f_low_hz:
+            raise ValueError("fHighHz must be greater than fLowHz")
+        return self
+
+
 class DeliveryExportRequestV1(ContractModel):
     """Request to export a master WAV with optional broadcast loudness and metadata preservation."""
 
@@ -497,6 +528,7 @@ __all__ = [
     "SmartAnalysisRequestV1",
     "SmartAnalysisResponseV1",
     "SmartSafeStrategyV1",
+    "SpectralRepairRequestV1",
     "SpectrogramModeV1",
     "SpectrogramRequestV1",
     "SpectrogramScaleV1",

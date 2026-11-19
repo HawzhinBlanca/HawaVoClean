@@ -207,7 +207,11 @@ def _hermite_fill_span(
     m1 = float(x[end + 1] - x[end]) if end + 1 < n else 0.0
     spline = scipy.interpolate.CubicHermiteSpline([start - 1, end], [y0, y1], [m0, m1])
     idx = np.arange(start, end, dtype=np.float64)
-    return np.asarray(spline(idx), dtype=np.float64)
+    filled = np.asarray(spline(idx), dtype=np.float64)
+    bound = max(abs(y0), abs(y1)) * 1.15 + 1e-4
+    if not np.all(np.isfinite(filled)) or float(np.max(np.abs(filled))) > bound:
+        return np.linspace(y0, y1, (end - start) + 2, dtype=np.float64)[1:-1]
+    return filled
 
 
 def _reconstruct_click_span(
@@ -259,7 +263,7 @@ def _reconstruct_click_span(
         float(np.max(np.abs(right_ctx))),
         1e-4,
     )
-    if not np.all(np.isfinite(ar_interp)) or float(np.max(np.abs(ar_interp))) > 2.5 * ctx_peak:
+    if not np.all(np.isfinite(ar_interp)) or float(np.max(np.abs(ar_interp))) > 1.25 * ctx_peak:
         return hermite
     return np.asarray(ar_interp, dtype=np.float64)
 
@@ -700,3 +704,225 @@ def apply_pro_repair_chain(
                 actions.append(f"room_tone_floor(target_db={opts.room_tone_target_floor_db:.1f})")
 
     return np.ascontiguousarray(current, dtype=np.float32), actions
+
+
+def _raised_cosine_box_1d(
+    coords: np.ndarray[Any, np.dtype[np.float64]],
+    lo: float,
+    hi: float,
+    feather: float,
+    *,
+    taper_lo: bool = True,
+    taper_hi: bool = True,
+) -> np.ndarray[Any, np.dtype[np.float64]]:
+    """Smooth raised-cosine mask in [0, 1] supported on [lo, hi]."""
+    mask = np.zeros(coords.shape, dtype=np.float64)
+    inside = (coords >= lo) & (coords <= hi)
+    if not bool(np.any(inside)):
+        return mask
+
+    mask[inside] = 1.0
+    width = hi - lo
+    eff_feather = min(max(0.0, feather), 0.25 * width)
+    if eff_feather <= 0.0:
+        return mask
+
+    if taper_lo:
+        lo_zone = inside & (coords < lo + eff_feather)
+        if bool(np.any(lo_zone)):
+            phase = (coords[lo_zone] - lo) / eff_feather
+            mask[lo_zone] *= 0.5 * (1.0 - np.cos(math.pi * phase))
+
+    if taper_hi:
+        hi_zone = inside & (coords > hi - eff_feather)
+        if bool(np.any(hi_zone)):
+            phase = (hi - coords[hi_zone]) / eff_feather
+            mask[hi_zone] *= 0.5 * (1.0 - np.cos(math.pi * phase))
+
+    return mask
+
+
+def _spectral_box_repair_channel(
+    channel: Float32Array,
+    sample_rate: int,
+    *,
+    start_s: float,
+    end_s: float,
+    f_low_hz: float,
+    f_high_hz: float,
+    attenuation_db: float,
+    n_fft: int,
+) -> Float32Array:
+    """Apply a smooth 2D STFT attenuation box on one channel with bit-identical exterior."""
+    n = int(channel.shape[0])
+    start_idx = max(0, int(round(start_s * sample_rate)))
+    end_idx = min(n, int(round(end_s * sample_rate)))
+    if end_idx <= start_idx:
+        return channel.copy()
+
+    if n_fft % 8 == 0:
+        hop = n_fft // 8
+    elif n_fft % 4 == 0:
+        hop = n_fft // 4
+    else:
+        hop = max(1, n_fft // 2)
+    noverlap = n_fft - hop
+
+    taper_s = 0.015
+    fade_samples = int(round(taper_s * sample_rate))
+    splice_start = max(0, start_idx - fade_samples) if start_idx > 0 else 0
+    splice_end = min(n, end_idx + fade_samples) if end_idx < n else n
+
+    pad = max(n_fft, fade_samples + hop)
+    ctx_start = max(0, splice_start - pad)
+    ctx_end = min(n, splice_end + pad)
+
+    slice_x = channel[ctx_start:ctx_end].astype(np.float64, copy=False)
+    orig_slice_len = int(slice_x.shape[0])
+    if orig_slice_len < n_fft:
+        work_x = np.pad(slice_x, (0, n_fft - orig_slice_len), mode="constant")
+    else:
+        work_x = slice_x
+
+    freqs, times, zxx = scipy.signal.stft(
+        work_x,
+        fs=float(sample_rate),
+        window="hann",
+        nperseg=n_fft,
+        noverlap=noverlap,
+        boundary="zeros",
+        padded=True,
+    )
+    freqs_arr = np.asarray(freqs, dtype=np.float64)
+    times_arr = np.asarray(times, dtype=np.float64)
+    zxx_arr = np.asarray(zxx, dtype=np.complex128)
+
+    df = float(sample_rate) / float(n_fft)
+    nyquist = 0.5 * float(sample_rate)
+    f_mask = _raised_cosine_box_1d(
+        freqs_arr,
+        f_low_hz,
+        f_high_hz,
+        2.0 * df,
+        taper_lo=f_low_hz > 0.0,
+        taper_hi=f_high_hz < nyquist,
+    )
+    if not bool(np.any(f_mask > 0.0)) and freqs_arr.size > 0:
+        nearest_bin = int(np.argmin(np.abs(freqs_arr - 0.5 * (f_low_hz + f_high_hz))))
+        f_mask[nearest_bin] = 1.0
+
+    t_abs = (ctx_start / float(sample_rate)) + times_arr
+    stft_lo = max(0.0, start_s - taper_s) if start_idx > 0 else start_s
+    stft_hi = min(n / float(sample_rate), end_s + taper_s) if end_idx < n else end_s
+    t_mask = _raised_cosine_box_1d(
+        t_abs,
+        stft_lo,
+        stft_hi,
+        taper_s,
+        taper_lo=start_idx > 0,
+        taper_hi=end_idx < n,
+    )
+    if not bool(np.any(t_mask > 0.0)) and times_arr.size > 0:
+        nearest_frame = int(np.argmin(np.abs(t_abs - 0.5 * (start_s + end_s))))
+        t_mask[nearest_frame] = 1.0
+
+    mask_2d = f_mask[:, np.newaxis] * t_mask[np.newaxis, :]
+    target_gain = 10.0 ** (-attenuation_db / 20.0)
+    gain_2d = 1.0 - mask_2d * (1.0 - target_gain)
+
+    _, reconstructed = scipy.signal.istft(
+        zxx_arr * gain_2d,
+        fs=float(sample_rate),
+        window="hann",
+        nperseg=n_fft,
+        noverlap=noverlap,
+        input_onesided=True,
+        boundary=True,
+    )
+    repaired_slice = np.asarray(reconstructed[:orig_slice_len], dtype=np.float64)
+
+    out = channel.copy()
+    splice_len = splice_end - splice_start
+    local_start = splice_start - ctx_start
+    local_end = splice_end - ctx_start
+    fade_in_len = start_idx - splice_start
+    fade_out_len = splice_end - end_idx
+
+    blend = np.ones(splice_len, dtype=np.float64)
+    if fade_in_len > 0:
+        k_in = np.arange(fade_in_len, dtype=np.float64)
+        blend[:fade_in_len] = 0.5 * (1.0 - np.cos(math.pi * (k_in + 0.5) / float(fade_in_len)))
+    if fade_out_len > 0:
+        k_out = np.arange(fade_out_len, dtype=np.float64)
+        blend[splice_len - fade_out_len :] = 0.5 * (
+            1.0 + np.cos(math.pi * (k_out + 0.5) / float(fade_out_len))
+        )
+
+    orig_seg = channel[splice_start:splice_end].astype(np.float64, copy=False)
+    rep_seg = repaired_slice[local_start:local_end]
+    blended = orig_seg * (1.0 - blend) + rep_seg * blend
+    out[splice_start:splice_end] = blended.astype(np.float32)
+    return out
+
+
+def apply_spectral_box_repair(
+    waveform: np.ndarray[Any, Any],
+    sample_rate: int,
+    *,
+    start_s: float,
+    end_s: float,
+    f_low_hz: float,
+    f_high_hz: float,
+    attenuation_db: float = 24.0,
+    n_fft: int = 2048,
+) -> Float32Array:
+    """Surgically attenuate a 2D time×frequency box via a smooth raised-cosine STFT mask.
+
+    Applies a soft 15 ms raised-cosine time taper and 2-bin frequency feathering
+    to prevent ringing/pre-echo while keeping audio outside the crossfaded time
+    window bit-identical and audio outside ``[f_low_hz, f_high_hz]`` untouched.
+    """
+    wave_2d, was_1d = _validate_waveform(waveform, sample_rate)
+
+    for label, val in (
+        ("start_s", start_s),
+        ("end_s", end_s),
+        ("f_low_hz", f_low_hz),
+        ("f_high_hz", f_high_hz),
+        ("attenuation_db", attenuation_db),
+    ):
+        if isinstance(val, bool) or not np.isfinite(val):
+            raise ValueError(f"{label} must be a finite number, got {val!r}")
+
+    if isinstance(n_fft, bool) or not isinstance(n_fft, int) or n_fft < 64 or n_fft % 2 != 0:
+        raise ValueError(f"n_fft must be an even integer >= 64, got {n_fft!r}")
+
+    nyquist = 0.5 * float(sample_rate)
+    if start_s < 0.0 or end_s <= start_s:
+        raise ValueError(f"time window must satisfy 0 <= start_s < end_s, got ({start_s}, {end_s})")
+    if f_low_hz < 0.0 or f_high_hz <= f_low_hz or f_high_hz > nyquist:
+        raise ValueError(
+            f"frequency band must satisfy 0 <= f_low_hz < f_high_hz <= {nyquist:g}, "
+            f"got ({f_low_hz}, {f_high_hz})"
+        )
+    if not (3.0 <= attenuation_db <= 60.0):
+        raise ValueError(f"attenuation_db must be within [3.0, 60.0], got {attenuation_db}")
+
+    channels, samples = wave_2d.shape
+    if channels == 0 or samples == 0:
+        return _restore_shape(wave_2d.copy(), was_1d)
+
+    out = np.empty_like(wave_2d)
+    for ch in range(channels):
+        out[ch] = _spectral_box_repair_channel(
+            wave_2d[ch],
+            sample_rate,
+            start_s=float(start_s),
+            end_s=float(end_s),
+            f_low_hz=float(f_low_hz),
+            f_high_hz=float(f_high_hz),
+            attenuation_db=float(attenuation_db),
+            n_fft=n_fft,
+        )
+
+    return _restore_shape(out, was_1d)

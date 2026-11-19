@@ -41,7 +41,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from hawavoclean import __version__
-from hawavoclean.audio.decode import iter_decode_audio
+from hawavoclean.audio.decode import decode_audio, iter_decode_audio
 from hawavoclean.audio.delivery import (
     DeliveryPreset,
     ExportFormat,
@@ -64,6 +64,7 @@ from hawavoclean.errors import (
     PreflightError,
 )
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks
+from hawavoclean.finishing.pro_repair import apply_spectral_box_repair
 from hawavoclean.hashing import hash_file
 from hawavoclean.logging import get_logger
 from hawavoclean.natural_contract import load_natural_route_contract
@@ -99,6 +100,7 @@ from hawavoclean.server.contracts import (
     SmartAnalysisRequestV1,
     SmartAnalysisResponseV1,
     SmartSafeStrategyV1,
+    SpectralRepairRequestV1,
     SpectrogramRequestV1,
     TrackExtractRequestV1,
     TrackInspectRequestV1,
@@ -1405,16 +1407,84 @@ def _session_output_path(input_path: Path, profile: str, raw_output: str) -> Pat
 
 
 def _is_managed_preview_file(raw: str, resolved: Path) -> bool:
-    """Return True iff ``resolved`` is a regular managed preview WAV inside ``work_root/previews``."""
+    """Return True iff ``resolved`` is a regular managed preview/spectral WAV in ``work_root/previews``."""
     preview_dir = (work_root() / "previews").resolve()
     return (
         resolved.parent == preview_dir
         and resolved.is_file()
         and not is_reparse_or_symlink(Path(raw))
         and not is_reparse_or_symlink(resolved)
-        and resolved.name.startswith("preview_")
+        and resolved.name.startswith(("preview_", "spectral_"))
         and resolved.suffix == ".wav"
     )
+
+
+def _run_spectral_box_repair(
+    source_path: Path,
+    req: SpectralRepairRequestV1,
+) -> dict[str, Any]:
+    """Decode source, apply 2D spectral box attenuation, and write atomic ``spectral_<id>.wav``."""
+    t0 = time.perf_counter()
+    probe = probe_audio(source_path)
+    file_duration_s = probe.samples / float(probe.sample_rate)
+    if req.start_s >= file_duration_s:
+        raise ValueError(
+            f"start_s {req.start_s:.3f}s is at or past file end ({file_duration_s:.3f}s)"
+        )
+    effective_end_s = min(req.end_s, file_duration_s)
+    if effective_end_s <= req.start_s:
+        raise ValueError("Clamped spectral repair time window is empty")
+
+    nyquist = 0.5 * float(probe.sample_rate)
+    if req.f_high_hz > nyquist:
+        raise ValueError(f"fHighHz ({req.f_high_hz:g} Hz) exceeds Nyquist ({nyquist:g} Hz)")
+
+    decoded = decode_audio(probe)
+    repaired = apply_spectral_box_repair(
+        decoded.data,
+        decoded.sample_rate,
+        start_s=req.start_s,
+        end_s=effective_end_s,
+        f_low_hz=req.f_low_hz,
+        f_high_hz=req.f_high_hz,
+        attenuation_db=req.attenuation_db,
+    )
+
+    preview_dir = (work_root() / "previews").resolve()
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    key_material = (
+        f"{source_path}:{req.start_s:.6f}:{effective_end_s:.6f}:"
+        f"{req.f_low_hz:.2f}:{req.f_high_hz:.2f}:{req.attenuation_db:.2f}:"
+        f"{time.time_ns()}:{os.getpid()}:{threading.get_ident()}"
+    )
+    digest = hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:16]
+    final_path = preview_dir / f"spectral_{digest}.wav"
+    tmp_path = preview_dir / f".spectral_{digest}_{os.getpid()}_{threading.get_ident()}.tmp.wav"
+    try:
+        encode_audio(
+            AudioBuffer(data=repaired, sample_rate=decoded.sample_rate),
+            tmp_path,
+            output_bit_depth="pcm24",
+            dither=False,
+            seed_context=f"spectral:{digest}",
+        )
+        os.replace(tmp_path, final_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    output_path_str = str(final_path)
+    render_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+    return {
+        "outputPath": output_path_str,
+        "audioUrl": f"/api/audio?{urlencode({'path': output_path_str})}",
+        "startS": req.start_s,
+        "endS": effective_end_s,
+        "fLowHz": req.f_low_hz,
+        "fHighHz": req.f_high_hz,
+        "attenuationDb": req.attenuation_db,
+        "renderMs": render_ms,
+    }
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
@@ -2316,6 +2386,20 @@ def create_app(
         except FileNotFoundError as exc:
             raise ApiError(404, "not_found", str(exc)) from exc
         return tile.to_dict()
+
+    @app.post("/api/v1/spectral-repair")
+    async def spectral_repair_v1(request: Request, req: SpectralRepairRequestV1) -> dict[str, Any]:
+        """Apply 2D time×frequency surgical STFT attenuation and serve via managed ``/api/audio``."""
+        source_path = _resolve_read_path(request, req.path)
+        try:
+            async with app.state.preview_slots:
+                return await asyncio.to_thread(_run_spectral_box_repair, source_path, req)
+        except ValueError as exc:
+            raise ApiError(400, "bad_request", str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+        except MediaPreflightError as exc:
+            raise ApiError(400, exc.reason.value, str(exc)) from exc
 
     @app.post("/api/v1/export")
     async def export_delivery_v1(request: Request, req: DeliveryExportRequestV1) -> dict[str, Any]:

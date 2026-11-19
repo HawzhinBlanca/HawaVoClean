@@ -15,6 +15,7 @@ from hawavoclean.finishing.pro_repair import (
     apply_mouth_declick,
     apply_pro_repair_chain,
     apply_room_tone_floor,
+    apply_spectral_box_repair,
 )
 
 SR = 48000
@@ -265,3 +266,127 @@ def test_pro_repair_edge_cases_and_fail_closed() -> None:
         apply_room_tone_floor(short, short, SR, blend_ratio=0.75)
     with pytest.raises(ValueError, match="does not match"):
         apply_room_tone_floor(short, np.zeros(32, dtype=np.float32), SR)
+
+
+@pytest.mark.unit
+def test_spectral_box_repair_attenuates_target_preserves_speech_and_exterior() -> None:
+    n = int(1.5 * SR)
+    t = np.arange(n, dtype=np.float64) / SR
+    speech_300 = 0.25 * np.sin(2.0 * np.pi * 300.0 * t)
+    chime_1000 = np.zeros(n, dtype=np.float64)
+    s0, s1 = int(0.5 * SR), int(1.0 * SR)
+    chime_1000[s0:s1] = 0.30 * np.sin(2.0 * np.pi * 1000.0 * t[s0:s1])
+    damaged = (speech_300 + chime_1000).astype(np.float32)
+
+    repaired = apply_spectral_box_repair(
+        damaged,
+        SR,
+        start_s=0.5,
+        end_s=1.0,
+        f_low_hz=850.0,
+        f_high_hz=1150.0,
+        attenuation_db=24.0,
+    )
+
+    assert repaired.shape == damaged.shape
+    assert repaired.dtype == np.float32
+    assert np.all(np.isfinite(repaired))
+
+    # Targeted 1000 Hz chime inside [0.5s, 1.0s] knocked down by > 15 dB.
+    chime_before = _band_rms(damaged[s0:s1], 900.0, 1100.0)
+    chime_after = _band_rms(repaired[s0:s1], 900.0, 1100.0)
+    chime_reduction_db = 20.0 * np.log10(chime_before / max(chime_after, 1e-9))
+    assert chime_reduction_db > 15.0
+
+    # Simultaneous 300 Hz speech fundamental preserved (< 0.5 dB change).
+    speech_before = _band_rms(damaged[s0:s1], 220.0, 380.0)
+    speech_after = _band_rms(repaired[s0:s1], 220.0, 380.0)
+    speech_delta_db = abs(20.0 * np.log10(speech_after / max(speech_before, 1e-9)))
+    assert speech_delta_db < 0.5
+
+    # Audio outside [0.5s, 1.0s] (past the 15 ms crossfade edges) is bit-identical.
+    margin = int(0.020 * SR)
+    assert np.array_equal(repaired[: s0 - margin], damaged[: s0 - margin])
+    assert np.array_equal(repaired[s1 + margin :], damaged[s1 + margin :])
+
+    # 2D stereo array support (dual-mono stays bit-identical across L/R).
+    stereo = np.stack([damaged, damaged], axis=0)
+    repaired_stereo = apply_spectral_box_repair(
+        stereo,
+        SR,
+        start_s=0.5,
+        end_s=1.0,
+        f_low_hz=850.0,
+        f_high_hz=1150.0,
+        attenuation_db=24.0,
+    )
+    assert repaired_stereo.shape == stereo.shape
+    assert repaired_stereo.dtype == np.float32
+    assert np.array_equal(repaired_stereo[0], repaired_stereo[1])
+    assert np.array_equal(repaired_stereo[0], repaired)
+
+
+@pytest.mark.unit
+def test_spectral_box_repair_edge_cases_and_fail_closed() -> None:
+    empty = np.empty(0, dtype=np.float32)
+    out_empty = apply_spectral_box_repair(
+        empty, SR, start_s=0.0, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0
+    )
+    assert out_empty.size == 0
+
+    short = np.zeros(64, dtype=np.float32)
+    out_short = apply_spectral_box_repair(
+        short, SR, start_s=0.0, end_s=0.001, f_low_hz=500.0, f_high_hz=2000.0
+    )
+    assert out_short.shape == short.shape
+    assert np.all(np.isfinite(out_short))
+
+    # Window past end of audio leaves signal untouched.
+    out_past = apply_spectral_box_repair(
+        short, SR, start_s=1.0, end_s=2.0, f_low_hz=500.0, f_high_hz=2000.0
+    )
+    assert np.array_equal(out_past, short)
+
+    for bad in (
+        np.array([0.0, np.nan, 0.1], dtype=np.float32),
+        np.array([0.0, np.inf, 0.1], dtype=np.float32),
+    ):
+        with pytest.raises(ValueError, match="NaN or Inf"):
+            apply_spectral_box_repair(
+                bad, SR, start_s=0.0, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0
+            )
+
+    with pytest.raises(ValueError, match="sample_rate"):
+        apply_spectral_box_repair(short, 0, start_s=0.0, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0)
+    with pytest.raises(ValueError, match="time window"):
+        apply_spectral_box_repair(
+            short, SR, start_s=-0.1, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0
+        )
+    with pytest.raises(ValueError, match="time window"):
+        apply_spectral_box_repair(
+            short, SR, start_s=0.5, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0
+        )
+    with pytest.raises(ValueError, match="frequency band"):
+        apply_spectral_box_repair(
+            short, SR, start_s=0.0, end_s=0.5, f_low_hz=800.0, f_high_hz=800.0
+        )
+    with pytest.raises(ValueError, match="frequency band"):
+        apply_spectral_box_repair(
+            short, SR, start_s=0.0, end_s=0.5, f_low_hz=200.0, f_high_hz=25000.0
+        )
+    with pytest.raises(ValueError, match="attenuation_db"):
+        apply_spectral_box_repair(
+            short, SR, start_s=0.0, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0, attenuation_db=2.0
+        )
+    with pytest.raises(ValueError, match="attenuation_db"):
+        apply_spectral_box_repair(
+            short, SR, start_s=0.0, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0, attenuation_db=65.0
+        )
+    with pytest.raises(ValueError, match="finite"):
+        apply_spectral_box_repair(
+            short, SR, start_s=float("nan"), end_s=0.5, f_low_hz=200.0, f_high_hz=800.0
+        )
+    with pytest.raises(ValueError, match="n_fft"):
+        apply_spectral_box_repair(
+            short, SR, start_s=0.0, end_s=0.5, f_low_hz=200.0, f_high_hz=800.0, n_fft=32
+        )
