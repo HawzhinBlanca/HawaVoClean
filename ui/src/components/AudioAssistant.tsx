@@ -11,6 +11,7 @@ import type {
   HawaVoCleanReport,
   ProcessingStrategyV1,
 } from '../api/types';
+import { SPECTRAL_SELECTION_EVENT } from '../render/stftSpectrogram';
 import { startJob } from '../state/actions';
 import { useI18n } from '../state/i18n';
 import {
@@ -34,6 +35,19 @@ function formatClock(seconds: number): string {
   const frac = Math.round((secs - whole) * 10);
   const secStr = `${String(whole).padStart(2, '0')}${frac > 0 ? `.${frac}` : ''}`;
   return `${mins}:${secStr}`;
+}
+
+function formatBandRange(fLowHz: number, fHighHz: number): string {
+  const lo = Math.max(0, Math.min(fLowHz, fHighHz));
+  const hi = Math.max(fLowHz, fHighHz);
+  if (hi < 1000) {
+    return `${Math.round(lo)}–${Math.round(hi)} Hz`;
+  }
+  const fmtK = (hz: number): string => (hz % 1000 === 0 ? `${hz / 1000}` : (hz / 1000).toFixed(1));
+  if (lo >= 1000) {
+    return `${fmtK(lo)}–${fmtK(hi)} kHz`;
+  }
+  return `${Math.round(lo)} Hz–${fmtK(hi)} kHz`;
 }
 
 /** Compact bounded numeric/enum telemetry only — never paths, filenames, or audio bytes. */
@@ -108,6 +122,8 @@ export function AudioAssistant() {
   const capabilities = useStore((s) => s.capabilities);
   const selectionRange = useStore((s) => s.selectionRange);
   const setSelectionRange = useStore((s) => s.setSelectionRange);
+  const spectralSelection = useStore((s) => s.spectralSelection);
+  const setSpectralSelection = useStore((s) => s.setSpectralSelection);
   const sourceKey = source?.sourceId || source?.path || '';
   const currentSource = useRef(sourceKey);
   currentSource.current = sourceKey;
@@ -186,7 +202,31 @@ export function AudioAssistant() {
     const end_s = maxDur !== null ? Math.min(maxDur, rawEnd) : rawEnd;
     return end_s > start_s ? { start_s, end_s } : null;
   })();
-  const effectiveRange = plan?.time_range ?? activeRegion;
+  const activeSpectralBand = (() => {
+    if (
+      !spectralSelection ||
+      !Number.isFinite(spectralSelection.startS) ||
+      !Number.isFinite(spectralSelection.endS) ||
+      !Number.isFinite(spectralSelection.fLowHz) ||
+      !Number.isFinite(spectralSelection.fHighHz)
+    ) {
+      return null;
+    }
+    const maxDur =
+      original && Number.isFinite(original.duration_s) && original.duration_s > 0
+        ? original.duration_s
+        : null;
+    const startS = Math.max(0, Math.round(spectralSelection.startS * 1000) / 1000);
+    const rawEnd = Math.round(spectralSelection.endS * 1000) / 1000;
+    const endS = maxDur !== null ? Math.min(maxDur, rawEnd) : rawEnd;
+    const fLowHz = Math.max(0, Math.min(spectralSelection.fLowHz, spectralSelection.fHighHz));
+    const fHighHz = Math.max(spectralSelection.fLowHz, spectralSelection.fHighHz);
+    return endS > startS && fHighHz > fLowHz ? { startS, endS, fLowHz, fHighHz } : null;
+  })();
+  const effectiveRange =
+    plan?.time_range ??
+    activeRegion ??
+    (activeSpectralBand ? { start_s: activeSpectralBand.startS, end_s: activeSpectralBand.endS } : null);
   const blockReason = !source || !original
     ? 'Load a recording before applying an edit.'
     : !engineReady ? 'The audio engine is offline.'
@@ -221,6 +261,10 @@ export function AudioAssistant() {
     request.current = ac;
     const history = messages.slice(-12);
     const acousticContext = buildAcousticContext(original, report, capabilities);
+    const bandContext = activeSpectralBand
+      ? ` [Band: ${formatBandRange(activeSpectralBand.fLowHz, activeSpectralBand.fHighHz)} · ${formatClock(activeSpectralBand.startS)}–${formatClock(activeSpectralBand.endS)}]`
+      : '';
+    const plannedMessage = bandContext ? `${message}${bandContext}`.slice(0, 2000) : message;
     setMessages([...history, { role: 'user', content: message }]);
     setDraft('');
     dispatch({ type: 'START_PLAN' });
@@ -229,7 +273,7 @@ export function AudioAssistant() {
     try {
       const next = await client.planAudio(
         {
-          message,
+          message: plannedMessage,
           history,
           allow_cloud_text: false,
           ...(acousticContext ? { acoustic_context: acousticContext } : {}),
@@ -352,6 +396,38 @@ export function AudioAssistant() {
             title="Clear selected region"
             disabled={running || submitting}
             onClick={() => setSelectionRange(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
+      {activeSpectralBand && (
+        <div
+          className="aa-region-pill aa-band-pill"
+          role="group"
+          aria-label="Selected spectrogram frequency band"
+        >
+          <span className="aa-region-label">
+            Band:{' '}
+            <span className="mono">
+              {formatBandRange(activeSpectralBand.fLowHz, activeSpectralBand.fHighHz)} ·{' '}
+              {formatClock(activeSpectralBand.startS)}–{formatClock(activeSpectralBand.endS)}
+            </span>
+          </span>
+          <button
+            type="button"
+            className="aa-region-clear aa-band-clear"
+            aria-label={`Clear spectral band ${formatBandRange(activeSpectralBand.fLowHz, activeSpectralBand.fHighHz)} ${formatClock(activeSpectralBand.startS)} to ${formatClock(activeSpectralBand.endS)}`}
+            title="Clear selected frequency band"
+            disabled={running || submitting}
+            onClick={() => {
+              setSpectralSelection(null);
+              if (typeof window !== 'undefined') {
+                window.dispatchEvent(
+                  new CustomEvent(SPECTRAL_SELECTION_EVENT, { detail: null, bubbles: true }),
+                );
+              }
+            }}
           >
             ×
           </button>

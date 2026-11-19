@@ -1,4 +1,6 @@
 import { useId, useMemo, useState, type ChangeEvent, type FormEvent } from 'react';
+import { previewRegion } from '../state/actions';
+import { useStore } from '../state/store';
 import {
   AMBIENCE_FLOOR_OPTIONS,
   BUILTIN_PRESETS,
@@ -36,6 +38,8 @@ export interface StudioRackProps {
   onNamingTemplateChange?: ((template: string) => void) | undefined;
   sampleFileName?: string | undefined;
   activeProfile?: string | undefined;
+  canPreview?: boolean | undefined;
+  onPreviewRegion?: (() => void | Promise<unknown>) | undefined;
   className?: string | undefined;
 }
 
@@ -99,9 +103,18 @@ export function StudioRack({
   onNamingTemplateChange,
   sampleFileName = 'interview',
   activeProfile = 'studio_pro',
+  canPreview: controlledCanPreview,
+  onPreviewRegion,
   className,
 }: StudioRackProps) {
   const uid = useId();
+  const storeEngineReady = useStore((s) => s.engineStatus === 'ready');
+  const storeHasSource = useStore((s) => Boolean(s.source && s.original));
+  const effectiveCanPreview =
+    controlledCanPreview !== undefined
+      ? controlledCanPreview
+      : storeEngineReady && storeHasSource;
+  const [previewing, setPreviewing] = useState(false);
   const [internalUserPresets, setInternalUserPresets] = useState<UserPreset[]>(() =>
     controlledPresets ? [] : loadUserPresets(),
   );
@@ -272,6 +285,13 @@ export function StudioRack({
     }
   };
 
+  const handlePreviewClick = (): void => {
+    if (disabled || !effectiveCanPreview || previewing) return;
+    setPreviewing(true);
+    const run = onPreviewRegion ? onPreviewRegion() : previewRegion();
+    void Promise.resolve(run).finally(() => setPreviewing(false));
+  };
+
   return (
     <section
       className={`studio-rack${className ? ` ${className}` : ''}`}
@@ -321,6 +341,20 @@ export function StudioRack({
           </div>
 
           <div className="sr-preset-actions">
+            <button
+              type="button"
+              className="sr-btn sr-btn-preview"
+              disabled={disabled || !effectiveCanPreview || previewing}
+              aria-label="Preview selected region (hotkey P)"
+              title={
+                effectiveCanPreview
+                  ? 'Instant warm region preview on Cleaned deck (P)'
+                  : 'Load a clip while the engine is ready to preview'
+              }
+              onClick={handlePreviewClick}
+            >
+              {previewing ? 'Previewing…' : 'Preview (P)'}
+            </button>
             <button
               type="button"
               className="sr-btn"

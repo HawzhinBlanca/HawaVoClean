@@ -301,4 +301,92 @@ describe('SpectrogramDisplay component', () => {
       vi.useRealTimers();
     }
   });
+
+  it('renders Attenuate band button next to 2D selection chip, disables when offline/busy, calls repairSpectralBox, and passes axe-core', async () => {
+    const repairSpectralBox = vi.fn(async () => ({
+      outputPath: '/work/repaired.wav',
+      audioUrl: '/api/audio?path=%2Fwork%2Frepaired.wav',
+      startS: 2.5,
+      endS: 7.5,
+      fLowHz: 140,
+      fHighHz: 220,
+      attenuationDb: 24,
+      renderMs: 44,
+    }));
+
+    act(() => {
+      useStore.setState({
+        engineStatus: 'offline',
+        client: {
+          baseUrl: '',
+          repairSpectralBox,
+          fileUrl: (p: string) => `/api/audio?path=${encodeURIComponent(p)}`,
+        } as unknown as NonNullable<ReturnType<typeof useStore.getState>['client']>,
+      });
+      useStore.getState().setSource({ path: '/test.wav', name: 'test.wav', origin: 'file' });
+      useStore.getState().setOriginal(mockAnalysis({ duration_s: 10.0, sample_rate: 48000 }));
+      root.render(createElement(SpectrogramDisplay));
+    });
+
+    act(() => host.querySelector<HTMLButtonElement>('button.wave-fit')?.click());
+
+    const stage = host.querySelector<HTMLDivElement>('.spectrogram-stage')!;
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 160,
+      right: 400,
+      bottom: 160,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 100, clientY: 32, pointerId: 1 }),
+      );
+    });
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointermove', { bubbles: true, button: 0, clientX: 300, clientY: 128, pointerId: 1 }),
+      );
+    });
+    act(() => {
+      stage.dispatchEvent(
+        new PointerEvent('pointerup', { bubbles: true, button: 0, clientX: 300, clientY: 128, pointerId: 1 }),
+      );
+    });
+
+    const repairBtn = host.querySelector<HTMLButtonElement>('button.spectrogram-repair-btn');
+    expect(repairBtn).not.toBeNull();
+    expect(repairBtn?.textContent).toBe('Attenuate band');
+    expect(repairBtn?.disabled).toBe(true); // offline
+
+    // Switch engine to ready -> enabled
+    act(() => {
+      useStore.setState({ engineStatus: 'ready' });
+    });
+    expect(repairBtn?.disabled).toBe(false);
+
+    await act(async () => {
+      repairBtn?.click();
+    });
+    expect(repairSpectralBox).toHaveBeenCalledTimes(1);
+    expect(repairSpectralBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/test.wav',
+        attenuationDb: 24,
+      }),
+    );
+
+    const results = await axe.run(host, {
+      rules: {
+        'color-contrast': { enabled: false },
+        region: { enabled: false },
+      },
+    });
+    expect(results.violations).toEqual([]);
+  });
 });

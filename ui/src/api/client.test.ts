@@ -879,5 +879,67 @@ describe('v1 capabilities and jobs (True-10 D4.11)', () => {
     );
     expect(tracks.trackCount).toBe(2);
     expect(tracks.tracks[0]?.name).toBe('Boom');
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          path: '/field/poly.wav',
+          outDir: '/work/extracted_tracks/poly_abc',
+          extractedPaths: ['/work/extracted_tracks/poly_abc/ch01_Boom.wav'],
+        }),
+      ),
+    );
+    const extracted = await client().extractTracks('/field/poly.wav', [0]);
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/tracks/extract',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ path: '/field/poly.wav', trackIndices: [0] }),
+      }),
+    );
+    expect(extracted.extractedPaths).toEqual(['/work/extracted_tracks/poly_abc/ch01_Boom.wav']);
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          outputPath: '/work/repaired_box.wav',
+          audioUrl: '/api/audio?path=%2Fwork%2Frepaired_box.wav',
+          startS: 4.2,
+          endS: 6.1,
+          fLowHz: 140,
+          fHighHz: 220,
+          attenuationDb: 24,
+          renderMs: 62.4,
+        }),
+      ),
+    );
+    const repair = await client().repairSpectralBox({
+      path: '/a.wav',
+      startS: 4.2,
+      endS: 6.1,
+      fLowHz: 140,
+      fHighHz: 220,
+      attenuationDb: 24,
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/spectral-repair',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          path: '/a.wav',
+          startS: 4.2,
+          endS: 6.1,
+          fLowHz: 140,
+          fHighHz: 220,
+          attenuationDb: 24,
+        }),
+      }),
+    );
+    expect(repair.outputPath).toBe('/work/repaired_box.wav');
+    expect(repair.audioUrl).toBe('/api/audio?path=%2Fwork%2Frepaired_box.wav');
+    expect(repair.attenuationDb).toBe(24);
+    expect(repair.renderMs).toBeCloseTo(62.4);
   });
 });

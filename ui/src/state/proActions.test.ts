@@ -6,8 +6,12 @@ import type { AudioAnalysis, HawaVoCleanReport } from '../api/types';
 import { DEFAULT_STUDIO_RACK_SETTINGS } from './presets';
 import { getState, useStore } from './store';
 import {
+  applySpectralBoxRepair,
+  cleanTrackWithMarkersInResolve,
   exportWithDelivery,
+  extractAndLoadTrack,
   pinTake,
+  previewRegion,
   redoAction,
   removeTake,
   selectTake,
@@ -21,18 +25,33 @@ const mockPlayer = vi.hoisted(() => ({
   playing: false,
   duration: 12,
   load: vi.fn(),
+  claimOnly: vi.fn(),
   seek: vi.fn(),
   play: vi.fn(async () => undefined),
   pause: vi.fn(),
   setActive: vi.fn(),
   setLoudnessMatch: vi.fn(),
+  setLoopRange: vi.fn(),
+  setLoopEnabled: vi.fn(),
   hasDeck: vi.fn(() => true),
   gainOffsetDb: 0,
 }));
 
+const mockBridge = vi.hoisted(() => ({
+  current: {
+    host: 'web' as 'web' | 'resolve' | 'electron',
+    engine: { getEndpoint: async () => ({ baseUrl: '' }) },
+    resolve: undefined as
+      | {
+          batchCleanTrack?: ReturnType<typeof vi.fn>;
+        }
+      | undefined,
+  },
+}));
+
 vi.mock('../audio/player', () => ({ getPlayer: () => mockPlayer }));
 vi.mock('../bridge', () => ({
-  getBridge: () => ({ host: 'web', engine: { getEndpoint: async () => ({ baseUrl: '' }) } }),
+  getBridge: () => mockBridge.current,
 }));
 vi.mock('../api/sse', () => ({
   followJob: vi.fn(() => () => undefined),
@@ -71,6 +90,13 @@ function makeReport(jobId: string): HawaVoCleanReport {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockPlayer.time = 0;
+  mockPlayer.playing = false;
+  mockBridge.current = {
+    host: 'web',
+    engine: { getEndpoint: async () => ({ baseUrl: '' }) },
+    resolve: undefined,
+  };
   useStore.setState(pristine, true);
 });
 
@@ -233,5 +259,220 @@ describe('Wave 2 exportWithDelivery action', () => {
     );
     expect(res?.outputPath).toBe('/out/clip_mux.mp4');
     expect(getState().statusLine).toContain('clip_mux.mp4');
+  });
+});
+
+describe('Last-Mile Pro Bridges actions', () => {
+  it('previewRegion uses selectionRange (clamped to <=15s), loops cleaned deck, and reports warmHit + renderMs', async () => {
+    const renderRegionPreview = vi.fn(async () => ({
+      previewPath: '/tmp/prev_1.wav',
+      audioUrl: '/api/audio?path=%2Ftmp%2Fprev_1.wav',
+      renderMs: 42.6,
+      warmHit: true,
+      metricsBefore: { lufs: -22, noiseFloorDb: -40 },
+      metricsAfter: { lufs: -22, noiseFloorDb: -58 },
+      durationS: 15,
+    }));
+    const client = {
+      baseUrl: 'http://127.0.0.1:8765',
+      renderRegionPreview,
+      fileUrl: (p: string) => `http://127.0.0.1:8765/api/audio?path=${encodeURIComponent(p)}`,
+    } as unknown as EngineClient;
+
+    useStore.setState({
+      engineStatus: 'ready',
+      client,
+      source: { path: '/in/clip.wav', name: 'clip.wav', origin: 'file' },
+      original: makeAnalysis('/in/clip.wav'),
+      profile: 'studio_pro',
+      selectionRange: { start: 2, end: 25 }, // 23s > 15s cap, and clipped to duration 12s
+      rackSettings: {
+        ...DEFAULT_STUDIO_RACK_SETTINGS,
+        strength: 0.85,
+        ambienceFloorDb: -45,
+      },
+    });
+    // Increase clip duration to 40s to test the 15s clamp
+    useStore.setState({ original: { ...makeAnalysis('/in/clip.wav'), duration_s: 40 } });
+
+    const res = await previewRegion();
+    expect(renderRegionPreview).toHaveBeenCalledWith({
+      path: '/in/clip.wav',
+      startS: 2,
+      endS: 17,
+      profile: 'studio_pro',
+      strength: 0.85,
+      ambienceFloorDb: -45,
+    });
+    expect(mockPlayer.load).toHaveBeenCalledWith(
+      'cleaned',
+      'http://127.0.0.1:8765/api/audio?path=%2Ftmp%2Fprev_1.wav',
+      15,
+    );
+    expect(mockPlayer.setLoopRange).toHaveBeenCalledWith([2, 17]);
+    expect(mockPlayer.setLoopEnabled).toHaveBeenCalledWith(true);
+    expect(mockPlayer.setActive).toHaveBeenCalledWith('cleaned');
+    expect(getState().abMode).toBe('cleaned');
+    expect(getState().statusLine).toContain('43 ms');
+    expect(getState().statusLine).toContain('warm hit');
+    expect(res?.warmHit).toBe(true);
+  });
+
+  it('previewRegion falls back to [player.time, min(duration, player.time + 6)] when no selectionRange is set and fails soft when offline', async () => {
+    const renderRegionPreview = vi.fn(async () => ({
+      previewPath: '/tmp/prev_2.wav',
+      audioUrl: '/api/audio?path=%2Ftmp%2Fprev_2.wav',
+      renderMs: 118,
+      warmHit: false,
+      metricsBefore: { lufs: -22, noiseFloorDb: -40 },
+      metricsAfter: { lufs: -22, noiseFloorDb: -56 },
+      durationS: 3,
+    }));
+    const client = {
+      baseUrl: '',
+      renderRegionPreview,
+      fileUrl: (p: string) => `/api/audio?path=${encodeURIComponent(p)}`,
+    } as unknown as EngineClient;
+
+    mockPlayer.time = 9;
+    useStore.setState({
+      engineStatus: 'ready',
+      client,
+      source: { path: '/in/clip.wav', name: 'clip.wav', origin: 'file' },
+      original: makeAnalysis('/in/clip.wav'), // duration_s = 12
+      selectionRange: null,
+    });
+
+    await previewRegion();
+    expect(renderRegionPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ path: '/in/clip.wav', startS: 9, endS: 12 }),
+    );
+    expect(mockPlayer.setLoopRange).toHaveBeenCalledWith([9, 12]);
+    expect(getState().statusLine).toContain('cold render');
+
+    // Offline soft handling
+    useStore.setState({ engineStatus: 'offline' });
+    const offlineRes = await previewRegion();
+    expect(offlineRes).toBeNull();
+    expect(getState().statusLine.toLowerCase()).toContain('offline');
+  });
+
+  it('applySpectralBoxRepair repairs the active audio path and loads repaired audio onto cleaned deck', async () => {
+    const repairSpectralBox = vi.fn(async () => ({
+      outputPath: '/work/repaired.wav',
+      audioUrl: '/api/audio?path=%2Fwork%2Frepaired.wav',
+      startS: 4.2,
+      endS: 6.1,
+      fLowHz: 140,
+      fHighHz: 220,
+      attenuationDb: 24,
+      renderMs: 55.2,
+    }));
+    const client = {
+      baseUrl: 'http://127.0.0.1:8765',
+      repairSpectralBox,
+      fileUrl: (p: string) => `http://127.0.0.1:8765/api/audio?path=${encodeURIComponent(p)}`,
+    } as unknown as EngineClient;
+
+    useStore.setState({
+      engineStatus: 'ready',
+      client,
+      source: { path: '/in/clip.wav', name: 'clip.wav', origin: 'file' },
+      original: makeAnalysis('/in/clip.wav'),
+      abMode: 'original',
+      spectralSelection: { startS: 4.2, endS: 6.1, fLowHz: 140, fHighHz: 220 },
+    });
+
+    const res = await applySpectralBoxRepair();
+    expect(repairSpectralBox).toHaveBeenCalledWith({
+      path: '/in/clip.wav',
+      startS: 4.2,
+      endS: 6.1,
+      fLowHz: 140,
+      fHighHz: 220,
+      attenuationDb: 24,
+    });
+    expect(mockPlayer.load).toHaveBeenCalledWith(
+      'cleaned',
+      'http://127.0.0.1:8765/api/audio?path=%2Fwork%2Frepaired.wav',
+      12,
+    );
+    expect(mockPlayer.setActive).toHaveBeenCalledWith('cleaned');
+    expect(getState().abMode).toBe('cleaned');
+    expect(getState().cleanedPath).toBe('/work/repaired.wav');
+    expect(getState().statusLine).toContain('140–220 Hz');
+    expect(res?.outputPath).toBe('/work/repaired.wav');
+  });
+
+  it('extractAndLoadTrack calls extractTracks and loads the extracted mono WAV onto the deck', async () => {
+    const extractTracks = vi.fn(async () => ({
+      extractedPaths: ['/work/extracted_tracks/poly/ch02_Lav.wav'],
+    }));
+    const analyze = vi.fn(async () => makeAnalysis('/work/extracted_tracks/poly/ch02_Lav.wav'));
+    const client = {
+      baseUrl: '',
+      extractTracks,
+      analyze,
+      fileUrl: (p: string) => `/api/audio?path=${encodeURIComponent(p)}`,
+    } as unknown as EngineClient;
+
+    useStore.setState({
+      engineStatus: 'ready',
+      client,
+      source: { path: '/field/poly.wav', name: 'poly.wav', origin: 'file' },
+      original: { ...makeAnalysis('/field/poly.wav'), channels: 6 },
+    });
+
+    const out = await extractAndLoadTrack('/field/poly.wav', 1, 'Lav');
+    expect(extractTracks).toHaveBeenCalledWith('/field/poly.wav', [1]);
+    expect(out).toBe('/work/extracted_tracks/poly/ch02_Lav.wav');
+    expect(getState().source?.path).toBe('/work/extracted_tracks/poly/ch02_Lav.wav');
+    expect(getState().source?.name).toBe('ch02_Lav.wav');
+  });
+
+  it('cleanTrackWithMarkersInResolve forwards cleaned path and report to bridge.resolve.batchCleanTrack', async () => {
+    const batchCleanTrack = vi.fn(async () => ({
+      success: true,
+      trackIndex: 3,
+      trackName: 'HawaVoClean',
+      clipsPlaced: 1,
+      markersAdded: 4,
+    }));
+    mockBridge.current = {
+      host: 'resolve',
+      engine: { getEndpoint: async () => ({ baseUrl: '' }) },
+      resolve: { batchCleanTrack },
+    };
+
+    const report = makeReport('j9');
+    useStore.setState({
+      source: { path: '/in/clip.wav', name: 'clip.wav', origin: 'resolve', mediaId: 'm-123' },
+      cleanedPath: '/out/clip_clean.wav',
+      report,
+      job: {
+        id: 'j9',
+        outputPath: '/out/clip_clean.wav',
+        reportPath: '/out/clip_clean.hawavoclean.json',
+        status: null,
+        streamConnected: false,
+      },
+    });
+
+    const res = await cleanTrackWithMarkersInResolve();
+    expect(batchCleanTrack).toHaveBeenCalledWith({
+      clips: [{ clipId: 'm-123', mediaId: 'm-123', startFrame: 0 }],
+      cleanedByClipId: {
+        'm-123': {
+          filePath: '/out/clip_clean.wav',
+          report,
+          reportPath: '/out/clip_clean.hawavoclean.json',
+        },
+      },
+      targetTrackName: 'HawaVoClean',
+      addGuardMarkers: true,
+    });
+    expect(res?.markersAdded).toBe(4);
+    expect(getState().statusLine).toContain('HawaVoClean');
+    expect(getState().statusLine).toContain('4 guard markers');
   });
 });

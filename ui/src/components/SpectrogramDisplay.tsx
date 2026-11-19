@@ -43,7 +43,8 @@ import {
 import { formatTime } from '../render/ticks';
 import { waveView } from '../render/viewWindow';
 import '../render/spectrogram.css';
-import { useStore } from '../state/store';
+import { applySpectralBoxRepair } from '../state/actions';
+import { jobInFlight, useStore } from '../state/store';
 
 const SPEC_HEIGHT = 160;
 const REDRAW_DEBOUNCE_MS = 40;
@@ -127,6 +128,9 @@ export function SpectrogramDisplay({
   const cleanedPath = useStore((s) => s.cleanedPath);
   const engineStatus = useStore((s) => s.engineStatus);
   const client = useStore((s) => s.client);
+  const running = useStore((s) => jobInFlight(s.job));
+  const analyzing = useStore((s) => s.analyzing);
+  const storeSpectralSelection = useStore((s) => s.spectralSelection);
   const setSpectralSelection = useStore((s) => s.setSpectralSelection);
 
   const [visible, setVisible] = useState(false);
@@ -134,11 +138,14 @@ export function SpectrogramDisplay({
   const [scale, setScale] = useState<FrequencyScale>('log');
   const [selection, setSelection] = useState<SpectralSelection | null>(null);
   const [dragRect, setDragRect] = useState<DragRect | null>(null);
+  const [repairing, setRepairing] = useState(false);
   const [serverTile, setServerTile] = useState<{ key: string; tile: StftTile } | null>(null);
   const [viewTick, setViewTick] = useState(0);
 
   const hasData = original !== null;
   const hasCleaned = cleaned !== null || cleanedTile !== null || cleanedPcm !== null;
+  const canRepair =
+    engineStatus === 'ready' && Boolean(client) && !running && !analyzing && !repairing;
 
   // Sync spectrogram view mode with global A/B deck changes.
   useEffect(() => {
@@ -173,10 +180,18 @@ export function SpectrogramDisplay({
     const onSpectralEvent = (e: Event): void => {
       const detail = (e as CustomEvent<SpectralSelection | null>).detail ?? null;
       setSpectralSelection(detail);
+      setSelection(detail);
     };
     window.addEventListener(SPECTRAL_SELECTION_EVENT, onSpectralEvent);
     return () => window.removeEventListener(SPECTRAL_SELECTION_EVENT, onSpectralEvent);
   }, [setSpectralSelection]);
+
+  // Sync local selection if cleared from store (e.g. AudioAssistant chip dismiss).
+  useEffect(() => {
+    if (storeSpectralSelection === null && selection !== null) {
+      setSelection(null);
+    }
+  }, [storeSpectralSelection, selection]);
 
   const effectiveMode: SpectrogramViewMode =
     viewMode === 'original' || !hasCleaned ? 'original' : viewMode;
@@ -719,6 +734,26 @@ export function SpectrogramDisplay({
                   {formatTimecodeShort(selection.startS)} – {formatTimecodeShort(selection.endS)} ·{' '}
                   {formatFreqHz(selection.fLowHz)} – {formatFreqHz(selection.fHighHz)}
                 </span>
+                <button
+                  type="button"
+                  className="spectrogram-repair-btn"
+                  disabled={!canRepair}
+                  aria-label={`Attenuate band ${formatFreqHz(selection.fLowHz)} to ${formatFreqHz(selection.fHighHz)}`}
+                  title={
+                    canRepair
+                      ? 'Surgically attenuate this time-frequency region on the Cleaned deck'
+                      : engineStatus !== 'ready'
+                        ? 'Engine offline — reconnect to apply spectral repair'
+                        : 'Wait for active processing to finish'
+                  }
+                  onClick={() => {
+                    if (!canRepair) return;
+                    setRepairing(true);
+                    void applySpectralBoxRepair().finally(() => setRepairing(false));
+                  }}
+                >
+                  {repairing ? 'Repairing…' : 'Attenuate band'}
+                </button>
                 <button
                   type="button"
                   className="spectrogram-clear-btn"

@@ -22,6 +22,7 @@ const actions = vi.hoisted(() => ({
   cancelJob: vi.fn(),
   cancelUpload: vi.fn(),
   isAnalyzing: vi.fn(() => false),
+  previewRegion: vi.fn(),
   redoAction: vi.fn(),
   seekTo: vi.fn(),
   setAb: vi.fn(),
@@ -161,6 +162,7 @@ describe('the ? overlay owns the keyboard while it is up', () => {
     press('a');
     expect(actions.togglePlay).not.toHaveBeenCalled();
     expect(actions.seekTo).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
     expect(actions.setAb).not.toHaveBeenCalled();
   });
@@ -179,6 +181,7 @@ describe('inertness', () => {
     expect(actions.togglePlay).not.toHaveBeenCalled();
     expect(actions.seekTo).not.toHaveBeenCalled();
     expect(actions.setAb).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
     expect(getState().shortcutsOpen).toBe(false);
   });
@@ -196,6 +199,7 @@ describe('inertness', () => {
     press(' ', { code: 'Space', target: ce });
     expect(actions.togglePlay).not.toHaveBeenCalled();
     expect(actions.seekTo).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
   });
 
@@ -332,17 +336,28 @@ describe('A / B — deck switching', () => {
   });
 });
 
-describe('P — process', () => {
-  it('starts a run only when every precondition is met', () => {
+describe('P — instant warm region preview & Shift+P — process', () => {
+  it('triggers previewRegion on P when every precondition is met', () => {
     armed();
-    press('p');
+    const ev = press('p');
+    expect(ev.defaultPrevented).toBe(true);
+    expect(actions.previewRegion).toHaveBeenCalledTimes(1);
+    expect(actions.startJob).not.toHaveBeenCalled();
+  });
+
+  it('triggers startJob on Shift+P when idle', () => {
+    armed();
+    const ev = press('P', { shiftKey: true });
+    expect(ev.defaultPrevented).toBe(true);
     expect(actions.startJob).toHaveBeenCalledTimes(1);
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 
   it('is silent while the engine is offline', () => {
     armed();
     getState().setEngine('offline', null, '3.2.0');
     press('p');
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
   });
 
@@ -350,27 +365,27 @@ describe('P — process', () => {
     armed();
     getState().setAnalyzing(true);
     press('p');
-    expect(actions.startJob).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 
   it('is silent while a run is already going', () => {
     armed();
     runningJob();
     press('p');
-    expect(actions.startJob).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 
   it('arms again once the run has reached a terminal state', () => {
     armed();
     runningJob('done');
     press('p');
-    expect(actions.startJob).toHaveBeenCalledTimes(1);
+    expect(actions.previewRegion).toHaveBeenCalledTimes(1);
   });
 
   it('is silent with no clip at all', () => {
     getState().setEngine('ready', null, '3.2.0');
     press('p');
-    expect(actions.startJob).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 });
 

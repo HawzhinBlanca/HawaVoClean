@@ -1,6 +1,6 @@
 import type { Profile } from '../api/types';
 import { jobInFlight, useStore } from '../state/store';
-import { toggleAdvancedOpen, updateRackSettings } from '../state/actions';
+import { previewRegion, toggleAdvancedOpen, updateRackSettings } from '../state/actions';
 import { ProfileControl } from './ProfileControl';
 import { RestoreControl } from './RestoreControl';
 import { StudioRack } from './StudioRack';
@@ -20,6 +20,8 @@ export function AdvancedControls() {
   const mode = useStore((s) => s.mode);
   const speakerId = useStore((s) => s.speakerId);
   const source = useStore((s) => s.source);
+  const original = useStore((s) => s.original);
+  const engineReady = useStore((s) => s.engineStatus === 'ready');
   const job = useStore((s) => s.job);
   const rackSettings = useStore((s) => s.rackSettings);
   const batchNamingTemplate = useStore((s) => s.batchNamingTemplate);
@@ -29,6 +31,7 @@ export function AdvancedControls() {
   const modeLabel = mode === 'restore' ? `Restore${speakerId ? ` (${speakerId})` : ''}` : 'Natural';
   const summary = `${profileLabel} · ${modeLabel}`;
   const running = jobInFlight(job);
+  const canPreview = engineReady && Boolean(source && original) && !running;
   const sampleFileName = source?.name ? source.name.replace(/\.[^.]+$/, '') : 'interview';
 
   return (
@@ -58,6 +61,8 @@ export function AdvancedControls() {
             onChange={updateRackSettings}
             isVideoSource={isVideoFilePath(source?.path)}
             disabled={running}
+            canPreview={canPreview}
+            onPreviewRegion={previewRegion}
             namingTemplate={batchNamingTemplate}
             onNamingTemplateChange={setBatchNamingTemplate}
             sampleFileName={sampleFileName}

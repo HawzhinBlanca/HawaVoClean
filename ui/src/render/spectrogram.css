@@ -243,3 +243,36 @@
   outline: 2px solid var(--cyan, #39d0ff);
   outline-offset: 1px;
 }
+
+.spectrogram-repair-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: var(--r-xs, 3px);
+  border: 1px solid rgba(57, 208, 255, 0.65);
+  background: rgba(57, 208, 255, 0.22);
+  color: var(--fg, #e6e9ee);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.spectrogram-repair-btn:hover:not(:disabled) {
+  background: rgba(57, 208, 255, 0.34);
+  border-color: var(--cyan, #39d0ff);
+}
+
+.spectrogram-repair-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.spectrogram-repair-btn:focus-visible {
+  outline: 2px solid var(--cyan, #39d0ff);
+  outline-offset: 1px;
+}

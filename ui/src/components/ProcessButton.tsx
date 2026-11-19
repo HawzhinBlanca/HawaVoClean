@@ -361,7 +361,7 @@ export function ProcessButton() {
     : running
       ? 'Cancel this run (Esc)'
       : canStart
-        ? 'Process this clip (P)'
+        ? 'Process this clip (Shift+P)'
         : !source
           ? 'Load a clip first — drop one on the strip above or press Open file'
           : analyzing

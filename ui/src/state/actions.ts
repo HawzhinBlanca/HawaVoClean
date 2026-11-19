@@ -15,11 +15,13 @@ import type {
   ProcessingRequestV1,
   ProcessingStrategyV1,
   Profile,
+  RegionPreviewResponse,
+  SpectralRepairResponse,
   UnitDecisionRecord,
 } from '../api/types';
 import { reportTxtPath } from '../api/types';
 import { getPlayer, type DeckFault } from '../audio/player';
-import { getBridge } from '../bridge';
+import { getBridge, type ResolveBatchCleanTrackResult } from '../bridge';
 import { addTakeSnapshot, type TakeSnapshot } from '../components/TakeSwitcher';
 import { waveView } from '../render/viewWindow';
 import { unitsEnhanced } from './plural';
@@ -2701,6 +2703,52 @@ export async function replaceInResolve(): Promise<void> {
   }
 }
 
+/**
+ * Place cleaned clip(s) onto a dedicated non-destructive Resolve audio track
+ * and apply Guard review markers transactionally.
+ */
+export async function cleanTrackWithMarkersInResolve(): Promise<ResolveBatchCleanTrackResult | null> {
+  const bridge = getBridge();
+  const st = getState();
+  if (!bridge.resolve?.batchCleanTrack || !st.cleanedPath) return null;
+  const clipId = st.source?.mediaId || st.source?.sourceId || st.job?.id || 'clip-1';
+  try {
+    st.setStatus('Placing cleaned track and Guard markers in Resolve…');
+    const res = await bridge.resolve.batchCleanTrack({
+      clips: [
+        {
+          clipId,
+          mediaId: st.source?.mediaId ?? clipId,
+          startFrame: 0,
+        },
+      ],
+      cleanedByClipId: {
+        [clipId]: {
+          filePath: st.cleanedPath,
+          ...(st.report ? { report: st.report } : {}),
+          ...(st.job?.reportPath ? { reportPath: st.job.reportPath } : {}),
+        },
+      },
+      targetTrackName: 'HawaVoClean',
+      addGuardMarkers: true,
+    });
+    if (res.success) {
+      const clipsPlaced = res.clipsPlaced ?? 1;
+      const markersAdded = res.markersAdded ?? 0;
+      const trackName = res.trackName || 'HawaVoClean';
+      st.setStatus(
+        `Placed ${clipsPlaced} clip${clipsPlaced === 1 ? '' : 's'} on ${trackName} · ${markersAdded} guard marker${markersAdded === 1 ? '' : 's'}`,
+      );
+    } else {
+      st.setStatus('Resolve did not commit the cleaned track');
+    }
+    return res;
+  } catch (e) {
+    reportFailure(classifyFailure(e, st.source?.name), 'Resolve track clean failed');
+    return null;
+  }
+}
+
 export async function revealOutput(): Promise<void> {
   const bridge = getBridge();
   const st = getState();
@@ -3386,6 +3434,246 @@ export async function exportWithDelivery(
     const msg = describeError(e);
     st.setError(msg, 'Export error');
     st.setStatus(`Export failed · ${msg}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Last-Mile Pro Bridges: Instant Warm Region Preview, 2D Spectral Box Repair,
+// Poly-WAV Single-Track Extraction
+
+const MAX_PREVIEW_WINDOW_S = 15.0;
+const DEFAULT_PREVIEW_WINDOW_S = 6.0;
+
+function resolveClientAudioUrl(
+  client: EngineClient,
+  audioUrl: string | null | undefined,
+  fallbackPath?: string | null,
+): string {
+  const raw = (audioUrl ?? '').trim();
+  if (raw) {
+    if (/^https?:\/\//i.test(raw) || raw.startsWith('blob:')) return raw;
+    if (raw.startsWith('/') && client.baseUrl) return `${client.baseUrl}${raw}`;
+    return raw;
+  }
+  if (fallbackPath) return client.fileUrl(fallbackPath);
+  return '';
+}
+
+/**
+ * Render an instant warm region preview (`POST /api/v1/preview`), load it onto
+ * the cleaned deck, enable looping over [startS, endS], switch to the cleaned
+ * deck, and report render latency + warm-cache status.
+ */
+export async function previewRegion(): Promise<RegionPreviewResponse | null> {
+  const st = getState();
+  if (!st.source || !st.original) return null;
+
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.renderRegionPreview !== 'function') {
+    st.setStatus('Preview unavailable — engine is offline');
+    return null;
+  }
+
+  const player = getPlayer();
+  const duration =
+    Number.isFinite(st.original.duration_s) && st.original.duration_s > 0
+      ? st.original.duration_s
+      : st.duration;
+
+  let startS: number;
+  let endS: number;
+  if (
+    st.selectionRange &&
+    Number.isFinite(st.selectionRange.start) &&
+    Number.isFinite(st.selectionRange.end) &&
+    st.selectionRange.end > st.selectionRange.start
+  ) {
+    startS = Math.max(0, st.selectionRange.start);
+    const boundedEnd =
+      duration > 0 ? Math.min(duration, st.selectionRange.end) : st.selectionRange.end;
+    endS = Math.min(boundedEnd, startS + MAX_PREVIEW_WINDOW_S);
+  } else {
+    const curTime = Number.isFinite(player.time) && player.time >= 0 ? player.time : 0;
+    if (duration > 0 && curTime >= duration) {
+      startS = Math.max(0, duration - DEFAULT_PREVIEW_WINDOW_S);
+      endS = duration;
+    } else {
+      startS = curTime;
+      const targetEnd = startS + DEFAULT_PREVIEW_WINDOW_S;
+      endS = duration > 0 ? Math.min(duration, targetEnd) : targetEnd;
+    }
+    if (endS - startS > MAX_PREVIEW_WINDOW_S) {
+      endS = startS + MAX_PREVIEW_WINDOW_S;
+    }
+  }
+
+  if (!(endS > startS)) return null;
+
+  st.setStatus(`Rendering warm preview (${startS.toFixed(1)}s–${endS.toFixed(1)}s)…`);
+  try {
+    const res = await client.renderRegionPreview({
+      path: st.source.path,
+      startS,
+      endS,
+      profile: st.profile,
+      strength: st.rackSettings.strength,
+      ambienceFloorDb: st.rackSettings.ambienceFloorDb,
+    });
+    const cur = getState();
+    const audioUrl = resolveClientAudioUrl(client, res.audioUrl, res.previewPath);
+    if (!audioUrl) {
+      cur.setStatus('Preview finished with no playable audio URL');
+      return res;
+    }
+    cur.setDeckFault(null);
+    if (res.previewPath) {
+      cur.setCleaned(cur.cleaned, res.previewPath);
+    }
+    player.load('cleaned', audioUrl, res.durationS > 0 ? res.durationS : endS - startS);
+    if (typeof player.setLoopRange === 'function') {
+      player.setLoopRange([startS, endS]);
+    }
+    if (typeof player.setLoopEnabled === 'function') {
+      player.setLoopEnabled(true);
+    }
+    player.setActive('cleaned');
+    cur.setAbMode('cleaned');
+    const ms = Math.round(res.renderMs);
+    const cacheTag = res.warmHit ? 'warm hit' : 'cold render';
+    cur.setStatus(
+      `Preview ready · ${ms} ms (${cacheTag}) · loop ${startS.toFixed(1)}s–${endS.toFixed(1)}s`,
+    );
+    return res;
+  } catch (e) {
+    const msg = describeError(e);
+    const cur = getState();
+    cur.setError(msg, 'Preview error');
+    cur.setStatus(`Preview failed · ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Surgically attenuate the active 2D spectrogram box selection via
+ * `POST /api/v1/spectral-repair` and load the repaired audio onto the cleaned deck.
+ */
+export async function applySpectralBoxRepair(
+  attenuationDb = 24,
+): Promise<SpectralRepairResponse | null> {
+  const st = getState();
+  const box = st.spectralSelection;
+  if (!box) return null;
+
+  const activePath =
+    st.abMode === 'cleaned' && st.cleanedPath
+      ? st.cleanedPath
+      : (st.source?.path ?? st.original?.path ?? st.cleanedPath);
+  if (!activePath) return null;
+
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.repairSpectralBox !== 'function') {
+    st.setStatus('Spectral repair unavailable — engine is offline');
+    return null;
+  }
+
+  st.setStatus(
+    `Attenuating ${Math.round(box.fLowHz)}–${Math.round(box.fHighHz)} Hz (${box.startS.toFixed(1)}s–${box.endS.toFixed(1)}s)…`,
+  );
+  try {
+    const res = await client.repairSpectralBox({
+      path: activePath,
+      startS: box.startS,
+      endS: box.endS,
+      fLowHz: box.fLowHz,
+      fHighHz: box.fHighHz,
+      attenuationDb,
+    });
+    const cur = getState();
+    const audioUrl = resolveClientAudioUrl(client, res.audioUrl, res.outputPath);
+    cur.setDeckFault(null);
+    if (res.outputPath) {
+      cur.setCleaned(cur.cleaned, res.outputPath);
+    }
+    if (audioUrl) {
+      const player = getPlayer();
+      const wasPlaying = player.playing;
+      const atTime = player.time;
+      player.load(
+        'cleaned',
+        audioUrl,
+        cur.cleaned?.duration_s ?? cur.original?.duration_s ?? null,
+      );
+      if (Number.isFinite(atTime) && atTime > 0) {
+        player.seek(atTime);
+      }
+      player.setActive('cleaned');
+      cur.setAbMode('cleaned');
+      if (wasPlaying) {
+        void player.play();
+      }
+    }
+    const ms = Math.round(res.renderMs);
+    cur.setStatus(
+      `Attenuated ${Math.round(res.fLowHz)}–${Math.round(res.fHighHz)} Hz by ${Math.round(res.attenuationDb)} dB · ${ms} ms`,
+    );
+    if (res.outputPath && typeof client.analyze === 'function') {
+      void analyzeCleaned(res.outputPath)
+        .then((analysis) => {
+          const latest = getState();
+          if (latest.cleanedPath === res.outputPath && analysis) {
+            latest.setCleaned(analysis, res.outputPath);
+            syncPlayerLoudnessMatch();
+          }
+        })
+        .catch(() => undefined);
+    }
+    return res;
+  } catch (e) {
+    const msg = describeError(e);
+    const cur = getState();
+    cur.setError(msg, 'Spectral repair error');
+    cur.setStatus(`Spectral repair failed · ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Extract a single 0-based track from a Poly-WAV file via `POST /api/v1/tracks/extract`
+ * and load the resulting mono WAV onto the main deck.
+ */
+export async function extractAndLoadTrack(
+  path: string,
+  trackIndex: number,
+  trackName?: string,
+): Promise<string | null> {
+  const st = getState();
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.extractTracks !== 'function') {
+    st.setStatus('Track extraction unavailable — engine is offline');
+    return null;
+  }
+  const label = trackName ? `${trackName} (ch ${trackIndex + 1})` : `track ${trackIndex + 1}`;
+  st.setStatus(`Extracting ${label}…`);
+  try {
+    const res = await client.extractTracks(path, [trackIndex]);
+    const extractedPath = res.extractedPaths[0];
+    if (!extractedPath) {
+      st.setError('No audio file was produced for the selected track.', 'Track extract failed');
+      st.setStatus('Track extraction produced no output');
+      return null;
+    }
+    await loadSource({
+      path: extractedPath,
+      name: baseName(extractedPath),
+      origin: 'file',
+    });
+    return extractedPath;
+  } catch (e) {
+    const msg = describeError(e);
+    const cur = getState();
+    cur.setError(msg, 'Track extract failed');
+    cur.setStatus(`Track extraction failed · ${msg}`);
     return null;
   }
 }

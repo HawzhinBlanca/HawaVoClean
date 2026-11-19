@@ -1,6 +1,7 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import axe from 'axe-core';
 import type { AudioAnalysis, AudioPlan } from '../api/types';
 import type { EngineClient } from '../api/client';
 import { startJob } from '../state/actions';
@@ -507,5 +508,39 @@ describe('AudioAssistant', () => {
     expect(host.textContent).toContain('Dereverb is unavailable on this machine.');
     await act(async () => host.querySelector<HTMLButtonElement>('.aa-apply')?.click());
     expect(startJob).not.toHaveBeenCalled();
+  });
+
+  it('shows a dismissible spectrogram band chip, attaches band context to planAudio without breaking acoustic_context, and passes axe-core', async () => {
+    armed(60);
+    useStore.setState({
+      spectralSelection: { startS: 4.2, endS: 6.1, fLowHz: 140, fHighHz: 220 },
+    });
+    await render();
+
+    const bandChip = host.querySelector('.aa-band-pill');
+    expect(bandChip).not.toBeNull();
+    expect(bandChip?.textContent).toContain('Band:');
+    expect(bandChip?.textContent).toContain('140–220 Hz');
+    expect(bandChip?.textContent).toContain('0:04.2–0:06.1');
+
+    await type('Attenuate this hum');
+    await send();
+
+    const sentPayload = planAudio.mock.calls[0]?.[0];
+    expect(sentPayload.message).toContain('Attenuate this hum');
+    expect(sentPayload.message).toContain('140–220 Hz');
+    expect(sentPayload.message).toContain('0:04.2–0:06.1');
+    // AcousticContext strictly forbids unknown keys
+    expect('spectralSelection' in (sentPayload.acoustic_context ?? {})).toBe(false);
+
+    const axeResults = await axe.run(host, {
+      rules: { 'color-contrast': { enabled: false }, region: { enabled: false } },
+    });
+    expect(axeResults.violations).toEqual([]);
+
+    // Dismissing the chip clears spectralSelection
+    await act(async () => host.querySelector<HTMLButtonElement>('.aa-band-clear')?.click());
+    expect(getState().spectralSelection).toBeNull();
+    expect(host.querySelector('.aa-band-pill')).toBeNull();
   });
 });

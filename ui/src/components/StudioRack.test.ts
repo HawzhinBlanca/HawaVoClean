@@ -336,4 +336,24 @@ describe('StudioRack', () => {
     });
     expect(await runAxe(host)).toEqual([]);
   });
+
+  it('renders compact Preview (P) button enabled when engine ready + source loaded and invokes onPreviewRegion', async () => {
+    const onPreviewRegion = vi.fn(async () => undefined);
+    await renderRack({ canPreview: false, onPreviewRegion });
+
+    const disabledBtn = host.querySelector<HTMLButtonElement>('button.sr-btn-preview');
+    expect(disabledBtn).not.toBeNull();
+    expect(disabledBtn?.textContent?.trim()).toBe('Preview (P)');
+    expect(disabledBtn?.disabled).toBe(true);
+
+    await renderRack({ canPreview: true, onPreviewRegion });
+    const enabledBtn = host.querySelector<HTMLButtonElement>('button.sr-btn-preview');
+    expect(enabledBtn?.disabled).toBe(false);
+
+    await act(async () => {
+      enabledBtn!.click();
+    });
+    expect(onPreviewRegion).toHaveBeenCalledTimes(1);
+    expect(await runAxe(host)).toEqual([]);
+  });
 });

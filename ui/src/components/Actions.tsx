@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getBridge } from '../bridge';
 import {
   artifactsFor,
+  cleanTrackWithMarkersInResolve,
   copyReportSummary,
   exportWithDelivery,
   importToResolve,
@@ -252,6 +253,19 @@ export function Actions() {
             <IconReplace size={14} />
             <span>Replace clip</span>
           </button>
+          {bridge.resolve?.batchCleanTrack && masterServed ? (
+            <button
+              className="btn small resolve-batch-btn"
+              type="button"
+              onClick={() => {
+                void cleanTrackWithMarkersInResolve();
+              }}
+              title="Place cleaned clip(s) on a dedicated Resolve track and add Guard review markers"
+            >
+              <IconReplace size={14} />
+              <span>Clean Track + Markers</span>
+            </button>
+          ) : null}
         </>
       ) : null}
       <button

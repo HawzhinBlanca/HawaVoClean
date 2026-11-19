@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import type { TrackInfo } from '../api/types';
 import { getBridge } from '../bridge';
 import {
   ACCEPTED_EXTENSIONS,
@@ -6,6 +7,7 @@ import {
   cancelAnalysis,
   channelWarning,
   cancelUpload,
+  extractAndLoadTrack,
   ingestDataTransfer,
   ingestFile,
   openFileDialog,
@@ -189,14 +191,69 @@ export function SourceStrip() {
   // run.
   const running = useStore((s) => jobInFlight(s.job));
   const engineOffline = useStore((s) => s.engineStatus === 'offline');
+  const client = useStore((s) => s.client);
   // C5 · subscribing to `error` is what makes the clip-row failure chip
   // reactive: the classification behind `sourceFailureLabel()` is set on the
   // same beat as this string, so a change here is a change there.
   const error = useStore((s) => s.error);
   const [over, setOver] = useState(false);
+  const [tracksOpen, setTracksOpen] = useState(false);
+  const [tracksLoading, setTracksLoading] = useState(false);
+  const [tracksError, setTracksError] = useState<string | null>(null);
+  const [tracks, setTracks] = useState<TrackInfo[] | null>(null);
+  const [extractingTrack, setExtractingTrack] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const uploading = Boolean(upload);
   const disabled = !engineReady || running || uploading;
+  const sourcePath = source?.path ?? null;
+
+  useEffect(() => {
+    setTracksOpen(false);
+    setTracksLoading(false);
+    setTracksError(null);
+    setTracks(null);
+    setExtractingTrack(null);
+  }, [sourcePath]);
+
+  const handleToggleTracks = useCallback(async () => {
+    if (!source || !original || original.channels <= 2) return;
+    if (tracksOpen) {
+      setTracksOpen(false);
+      return;
+    }
+    setTracksOpen(true);
+    if (tracks !== null && !tracksError) return;
+    if (!client || !engineReady || typeof client.inspectTracks !== 'function') {
+      setTracksError('Engine is offline — reconnect to inspect Poly-WAV tracks.');
+      return;
+    }
+    setTracksLoading(true);
+    setTracksError(null);
+    try {
+      const res = await client.inspectTracks(source.path);
+      setTracks(res.tracks);
+    } catch (e) {
+      setTracksError(e instanceof Error ? e.message : 'Unable to inspect Poly-WAV tracks.');
+    } finally {
+      setTracksLoading(false);
+    }
+  }, [source, original, tracksOpen, tracks, tracksError, client, engineReady]);
+
+  const handleExtractTrack = useCallback(
+    async (track: TrackInfo) => {
+      if (!source || disabled || extractingTrack !== null) return;
+      setExtractingTrack(track.index);
+      try {
+        const extracted = await extractAndLoadTrack(source.path, track.index, track.name);
+        if (extracted) {
+          setTracksOpen(false);
+        }
+      } finally {
+        setExtractingTrack(null);
+      }
+    },
+    [source, disabled, extractingTrack],
+  );
   // B6 · every refusal in this strip names its own reason. `aria-disabled`
   // rather than `disabled` on the buttons, because a disabled control takes no
   // pointer events and would swallow the tooltip that carries the reason.
@@ -374,6 +431,19 @@ export function SourceStrip() {
                     {chanNote ? <IconWarn size={10} /> : null}
                   </span>
                 </span>
+                {original.channels > 2 ? (
+                  <button
+                    type="button"
+                    className="btn small poly-tracks-btn"
+                    aria-expanded={tracksOpen}
+                    aria-controls="poly-track-picker"
+                    disabled={disabled || tracksLoading || extractingTrack !== null}
+                    title="Inspect and extract an individual channel from this multi-track poly-WAV"
+                    onClick={() => void handleToggleTracks()}
+                  >
+                    {tracksLoading ? 'Inspecting…' : `Tracks (${original.channels}ch)`}
+                  </button>
+                ) : null}
                 {source.name.toLowerCase().endsWith('.mp4') ? (
                   <span
                     className="kv mp4-tag"
@@ -413,6 +483,73 @@ export function SourceStrip() {
           <span className="empty">No clip loaded</span>
         )}
       </div>
+      {tracksOpen && source && original && original.channels > 2 ? (
+        <div
+          id="poly-track-picker"
+          className="poly-track-picker"
+          role="region"
+          aria-label="Poly-WAV track selector"
+        >
+          <div className="ptp-head">
+            <span className="ptp-title">
+              Poly-WAV Tracks · <span className="mono">{original.channels}ch</span>
+            </span>
+            <button
+              type="button"
+              className="ptp-close"
+              aria-label="Close track selector"
+              onClick={() => setTracksOpen(false)}
+            >
+              <IconCancel size={11} />
+            </button>
+          </div>
+          {tracksLoading ? (
+            <p className="ptp-hint" role="status">
+              Inspecting tracks…
+            </p>
+          ) : tracksError ? (
+            <p className="ptp-error" role="alert">
+              {tracksError}
+            </p>
+          ) : tracks && tracks.length > 0 ? (
+            <ul className="ptp-list">
+              {tracks.map((track) => {
+                const rmsText = Number.isFinite(track.rms_dbfs)
+                  ? `${track.rms_dbfs.toFixed(1)} dB`
+                  : '—';
+                const speechPct = Math.round(
+                  Math.max(0, Math.min(1, track.speech_activity_ratio)) * 100,
+                );
+                const busyThis = extractingTrack === track.index;
+                return (
+                  <li className="ptp-row" key={track.index}>
+                    <span className="ptp-idx mono">#{track.index + 1}</span>
+                    <span className="ptp-name" title={track.name}>
+                      {track.name}
+                      {track.likely_dialogue ? (
+                        <span className="ptp-badge">Dialogue</span>
+                      ) : null}
+                    </span>
+                    <span className="ptp-meta mono">{rmsText} RMS</span>
+                    <span className="ptp-meta mono">{speechPct}% speech</span>
+                    <button
+                      type="button"
+                      className="btn small ptp-load-btn"
+                      disabled={disabled || extractingTrack !== null}
+                      aria-label={`Extract and load track ${track.index + 1}: ${track.name}`}
+                      onClick={() => void handleExtractTrack(track)}
+                    >
+                      {busyThis ? 'Loading…' : 'Load track'}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="ptp-hint">No individual tracks reported for this file.</p>
+          )}
+        </div>
+      ) : null}
       <DropRejectionNote />
     </section>
   );

@@ -744,3 +744,35 @@ export interface TrackInspectResponse {
   tracks: TrackInfo[];
 }
 
+export interface TrackExtractRequest {
+  path: string;
+  trackIndices: number[];
+  outDir?: string | undefined;
+}
+
+export interface TrackExtractResponse {
+  path?: string | undefined;
+  outDir?: string | undefined;
+  extractedPaths: string[];
+}
+
+export interface SpectralRepairRequest {
+  path: string;
+  startS: number;
+  endS: number;
+  fLowHz: number;
+  fHighHz: number;
+  attenuationDb?: number | undefined;
+}
+
+export interface SpectralRepairResponse {
+  outputPath: string;
+  audioUrl: string;
+  startS: number;
+  endS: number;
+  fLowHz: number;
+  fHighHz: number;
+  attenuationDb: number;
+  renderMs: number;
+}
+

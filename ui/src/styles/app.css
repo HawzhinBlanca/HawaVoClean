@@ -638,6 +638,135 @@ kbd {
   padding: 1px 5px;
 }
 
+.poly-tracks-btn {
+  min-height: 24px;
+  border: 1px solid rgba(57, 208, 255, 0.45);
+  color: var(--cyan-2);
+}
+
+.poly-track-picker {
+  position: absolute;
+  z-index: 7;
+  right: var(--pad-5);
+  top: calc(100% + 6px);
+  width: min(560px, calc(100% - 24px));
+  padding: var(--pad-3) var(--pad-4);
+  border-radius: var(--r);
+  border: 1px solid var(--hair-strong);
+  background: var(--panel);
+  box-shadow: var(--elev-3);
+  color: var(--fg);
+}
+
+.ptp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--pad-2);
+  margin-bottom: var(--pad-2);
+  padding-bottom: var(--pad-2);
+  border-bottom: 1px solid var(--hair);
+}
+
+.ptp-title {
+  font-size: var(--fs-label);
+  font-weight: var(--fw-medium);
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.ptp-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: var(--r-xs);
+  border: 1px solid var(--hair-strong);
+  background: var(--panel-2);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+
+.ptp-close:hover {
+  color: var(--fg);
+  border-color: var(--cyan-dim);
+}
+
+.ptp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--pad-1);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.ptp-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--pad-3);
+  padding: var(--pad-1) var(--pad-2);
+  border-radius: var(--r-sm);
+  background: var(--display-2);
+  border: 1px solid var(--hair);
+  font-size: var(--fs-sm);
+}
+
+.ptp-idx {
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.ptp-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--pad-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-weight: var(--fw-medium);
+}
+
+.ptp-badge {
+  font-size: var(--fs-label);
+  padding: 1px 5px;
+  border-radius: var(--r-xs);
+  border: 1px solid rgba(57, 208, 255, 0.4);
+  background: rgba(57, 208, 255, 0.12);
+  color: var(--cyan-2);
+}
+
+.ptp-meta {
+  color: var(--fg-3);
+  font-size: var(--fs-label);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ptp-load-btn {
+  min-height: 24px;
+  min-width: 24px;
+}
+
+.ptp-hint {
+  margin: var(--pad-1) 0;
+  font-size: var(--fs-sm);
+  color: var(--fg-3);
+}
+
+.ptp-error {
+  margin: var(--pad-1) 0;
+  font-size: var(--fs-sm);
+  color: var(--err);
+}
+
 /* ---------------------------------------------------------------- waveform panel */
 .wavepanel {
   display: grid;

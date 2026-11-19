@@ -10,6 +10,7 @@ import {
   cancelJob,
   cancelUpload,
   isAnalyzing,
+  previewRegion,
   redoAction,
   seekTo,
   setAb,
@@ -147,9 +148,13 @@ export function handleKeyDown(e: KeyboardEvent): void {
       break;
     }
     case 'p': {
-      const canStart =
+      const canAct =
         st.engineStatus === 'ready' && !!st.source && !!st.original && !st.analyzing && !running;
-      if (canStart) void startJob();
+      if (canAct) {
+        e.preventDefault();
+        if (e.shiftKey) void startJob();
+        else void previewRegion();
+      }
       break;
     }
     case 'l':

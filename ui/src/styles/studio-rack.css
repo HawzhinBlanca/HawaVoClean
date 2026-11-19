@@ -135,6 +135,18 @@
   border-color: var(--cyan-2);
 }
 
+.sr-btn-preview {
+  color: var(--cyan-2);
+  border-color: var(--cyan-dim);
+  background: rgba(57, 208, 255, 0.1);
+}
+
+.sr-btn-preview:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--cyan);
+  background: rgba(57, 208, 255, 0.2);
+}
+
 .sr-btn-danger:hover:not(:disabled) {
   color: var(--err);
   border-color: var(--err);

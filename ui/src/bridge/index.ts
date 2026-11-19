@@ -1,6 +1,18 @@
-import type { HawaBridge } from './types';
+import type { HawaBridge, ResolveBridge } from './types';
 
-export type { HawaBridge, HawaHost, ResolveClip } from './types';
+export type {
+  HawaBridge,
+  HawaHost,
+  ResolveApplyGuardMarkersPayload,
+  ResolveApplyGuardMarkersResult,
+  ResolveBatchCleanEntry,
+  ResolveBatchCleanTrackPayload,
+  ResolveBatchCleanTrackResult,
+  ResolveBatchTrackClip,
+  ResolveBridge,
+  ResolveClip,
+  ResolveGuardMarker,
+} from './types';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost']);
 const UNSUPPORTED_PREVIEW_PORTS = new Set(['3000', '4173', '5173', '8080']);
@@ -58,10 +70,46 @@ function buildWebBridge(): HawaBridge {
   };
 }
 
+function wrapResolveBridge(raw: ResolveBridge): ResolveBridge {
+  const wrapped: ResolveBridge = {
+    getSelectedClip: () => raw.getSelectedClip(),
+    importMedia: (path) => raw.importMedia(path),
+    replaceClip: (mediaId, path) => raw.replaceClip(mediaId, path),
+    appendToTimeline: (mediaId) => raw.appendToTimeline(mediaId),
+    getContext: () => raw.getContext(),
+  };
+  if (typeof raw.newTrack === 'function') {
+    const fn = raw.newTrack;
+    wrapped.newTrack = (mediaId, path, options) => fn.call(raw, mediaId, path, options);
+  }
+  if (typeof raw.batchCleanTrack === 'function') {
+    const fn = raw.batchCleanTrack;
+    wrapped.batchCleanTrack = (payload) => fn.call(raw, payload);
+  }
+  if (typeof raw.applyGuardMarkers === 'function') {
+    const fn = raw.applyGuardMarkers;
+    wrapped.applyGuardMarkers = (payload) => fn.call(raw, payload);
+  }
+  return wrapped;
+}
+
+function wrapHostBridge(raw: HawaBridge): HawaBridge {
+  if (!raw.resolve) return raw;
+  return {
+    ...raw,
+    resolve: wrapResolveBridge(raw.resolve),
+  };
+}
+
 let cached: HawaBridge | null = null;
 
 export function getBridge(): HawaBridge {
   if (cached) return cached;
-  cached = window.hawa ?? buildWebBridge();
+  cached = window.hawa ? wrapHostBridge(window.hawa) : buildWebBridge();
   return cached;
+}
+
+/** Test helper to clear the cached host bridge singleton. */
+export function resetBridgeCache(): void {
+  cached = null;
 }

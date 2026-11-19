@@ -23,9 +23,12 @@ import type {
   RegionPreviewMetrics,
   RegionPreviewRequest,
   RegionPreviewResponse,
+  SpectralRepairRequest,
+  SpectralRepairResponse,
   SpectrogramScale,
   SpectrogramTileRequest,
   SpectrogramTileResponse,
+  TrackExtractResponse,
   TrackInfo,
   TrackInspectResponse,
   UnitDecisionRecord,
@@ -774,12 +777,87 @@ export class EngineClient {
       { method: 'POST', body: JSON.stringify({ path }) },
       signal,
     );
-    const tracks = Array.isArray(raw.tracks) ? (raw.tracks as TrackInfo[]) : [];
+    const tracks = Array.isArray(raw.tracks)
+      ? raw.tracks.map((item): TrackInfo => {
+          const t = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+          const idx = Number(t.index ?? 0);
+          return {
+            index: idx,
+            name: String(t.name ?? `Track ${idx + 1}`),
+            sample_rate: Number(t.sample_rate ?? t.sampleRate ?? 48000),
+            samples: Number(t.samples ?? 0),
+            duration_s: Number(t.duration_s ?? t.durationS ?? 0),
+            rms_dbfs: Number(t.rms_dbfs ?? t.rmsDb ?? t.rms_db ?? -Infinity),
+            peak_dbfs: Number(t.peak_dbfs ?? t.peakDbfs ?? t.peak_db ?? -Infinity),
+            speech_activity_ratio: Number(
+              t.speech_activity_ratio ?? t.speechActivity ?? t.speech_activity ?? 0,
+            ),
+            likely_dialogue: Boolean(t.likely_dialogue ?? t.likelyDialogue ?? false),
+          };
+        })
+      : [];
     const trackCount = Number(raw.trackCount ?? raw.track_count ?? tracks.length);
     return {
       path: String(raw.path ?? path),
       trackCount,
       tracks,
+    };
+  }
+
+  async extractTracks(
+    path: string,
+    trackIndices: number[],
+    outDir?: string,
+    signal?: AbortSignal,
+  ): Promise<TrackExtractResponse> {
+    const body: Record<string, unknown> = {
+      path,
+      trackIndices,
+    };
+    if (outDir !== undefined) body.outDir = outDir;
+
+    const raw = await this.json<Record<string, unknown>>(
+      '/api/v1/tracks/extract',
+      { method: 'POST', body: JSON.stringify(body) },
+      signal,
+    );
+    const extractedRaw = raw.extractedPaths ?? raw.extracted_paths;
+    const extractedPaths = Array.isArray(extractedRaw) ? extractedRaw.map((p) => String(p)) : [];
+    const outDirRaw = raw.outDir ?? raw.out_dir;
+    return {
+      ...(typeof raw.path === 'string' ? { path: raw.path } : {}),
+      ...(typeof outDirRaw === 'string' ? { outDir: outDirRaw } : {}),
+      extractedPaths,
+    };
+  }
+
+  async repairSpectralBox(
+    req: SpectralRepairRequest,
+    signal?: AbortSignal,
+  ): Promise<SpectralRepairResponse> {
+    const body: Record<string, unknown> = {
+      path: req.path,
+      startS: req.startS,
+      endS: req.endS,
+      fLowHz: req.fLowHz,
+      fHighHz: req.fHighHz,
+    };
+    if (req.attenuationDb !== undefined) body.attenuationDb = req.attenuationDb;
+
+    const raw = await this.json<Record<string, unknown>>(
+      '/api/v1/spectral-repair',
+      { method: 'POST', body: JSON.stringify(body) },
+      signal,
+    );
+    return {
+      outputPath: String(raw.outputPath ?? raw.output_path ?? ''),
+      audioUrl: String(raw.audioUrl ?? raw.audio_url ?? ''),
+      startS: Number(raw.startS ?? raw.start_s ?? req.startS),
+      endS: Number(raw.endS ?? raw.end_s ?? req.endS),
+      fLowHz: Number(raw.fLowHz ?? raw.f_low_hz ?? req.fLowHz),
+      fHighHz: Number(raw.fHighHz ?? raw.f_high_hz ?? req.fHighHz),
+      attenuationDb: Number(raw.attenuationDb ?? raw.attenuation_db ?? req.attenuationDb ?? 24),
+      renderMs: Number(raw.renderMs ?? raw.render_ms ?? 0),
     };
   }
 }
