@@ -118,6 +118,15 @@ function validateAudioFormat(filePath) {
   }
 }
 
+/** Explicit legal stage transitions for Resolve timeline transactions. */
+const ALLOWED_TRANSACTION_TRANSITIONS = Object.freeze({
+  INIT: Object.freeze(['STAGED', 'COMMITTED', 'ROLLING_BACK']),
+  STAGED: Object.freeze(['COMMITTED', 'ROLLING_BACK']),
+  COMMITTED: Object.freeze([]),
+  ROLLING_BACK: Object.freeze(['ROLLED_BACK']),
+  ROLLED_BACK: Object.freeze([]),
+});
+
 class TransactionJournal {
   /**
    * @param {string} [txDir]
@@ -161,8 +170,17 @@ class TransactionJournal {
   update(txId, stage, compensations) {
     const logPath = path.join(this.txDir, `${txId}.json`);
     if (!fs.existsSync(logPath)) return;
+    let record;
     try {
-      const record = JSON.parse(fs.readFileSync(logPath, 'utf8'));
+      record = JSON.parse(fs.readFileSync(logPath, 'utf8'));
+    } catch (_) {
+      return;
+    }
+    const allowed = ALLOWED_TRANSACTION_TRANSITIONS[record.stage] || [];
+    if (!allowed.includes(stage)) {
+      throw new Error(`Illegal timeline transaction transition: ${record.stage} -> ${stage}`);
+    }
+    try {
       record.stage = stage;
       record.updatedAt = new Date().toISOString();
       if (compensations) record.compensations = compensations;
@@ -522,6 +540,7 @@ class TimelineTransactionManager {
 }
 
 module.exports = {
+  ALLOWED_TRANSACTION_TRANSITIONS,
   validateAudioFormat,
   TransactionJournal,
   TimelineTransactionManager,

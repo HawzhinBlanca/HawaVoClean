@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useReducer, useRef, useState, type FormEvent } from 'react';
 import type {
   AcousticContext,
   AudioAnalysis,
@@ -13,7 +13,12 @@ import type {
 } from '../api/types';
 import { startJob } from '../state/actions';
 import { useI18n } from '../state/i18n';
-import { getState, isProfileUnavailable, jobInFlight, useStore } from '../state/store';
+import {
+  assistantReducer,
+  deriveWorkspacePhase,
+  INITIAL_ASSISTANT_STATE,
+} from '../state/machines';
+import { getState, isProfileUnavailable, useStore } from '../state/store';
 import '../styles/assistant.css';
 
 const EXAMPLES = ['Clean the voice and reduce room noise', 'Keep the speech, remove the music', 'Remove the dog barking'];
@@ -97,8 +102,9 @@ export function AudioAssistant() {
   const report = useStore((s) => s.report);
   const client = useStore((s) => s.client);
   const engineReady = useStore((s) => s.engineStatus === 'ready');
-  const analyzing = useStore((s) => s.analyzing || !!s.upload);
-  const running = useStore((s) => jobInFlight(s.job));
+  const workspacePhase = useStore(deriveWorkspacePhase);
+  const analyzing = workspacePhase === 'uploading' || workspacePhase === 'analyzing';
+  const running = workspacePhase === 'processing';
   const capabilities = useStore((s) => s.capabilities);
   const selectionRange = useStore((s) => s.selectionRange);
   const setSelectionRange = useStore((s) => s.setSelectionRange);
@@ -111,24 +117,30 @@ export function AudioAssistant() {
   const planningRequest = useRef(false);
   const [messages, setMessages] = useState<AudioChatMessage[]>([]);
   const [draft, setDraft] = useState('');
-  const [plan, setPlan] = useState<AudioPlan | null>(null);
-  const [planning, setPlanning] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [machine, dispatch] = useReducer(assistantReducer, INITIAL_ASSISTANT_STATE);
   const [status, setStatus] = useState<AudioAssistantStatus | null>(null);
   const [lastProvider, setLastProvider] = useState<AudioPlan['provider'] | null>(null);
   const [modelSize, setModelSize] = useState<'small' | 'base' | 'large'>('large');
   const transcript = useRef<HTMLDivElement | null>(null);
 
+  const plan = machine.phase === 'planned' || machine.phase === 'applying' ? machine.plan : null;
+  const planning = machine.phase === 'planning';
+  const submitting = machine.phase === 'applying';
+  const error =
+    machine.phase === 'error'
+      ? machine.message
+      : machine.phase === 'planned'
+        ? machine.applyError
+        : null;
+
   useEffect(() => {
     sequence.current += 1;
     request.current?.abort();
     setMessages([]);
-    setPlan(null);
     setDraft('');
-    setError(null);
-    setPlanning(false);
+    dispatch({ type: 'RESET' });
     planningRequest.current = false;
+    applying.current = false;
     setLastProvider(null);
     return () => {
       sequence.current += 1;
@@ -211,10 +223,9 @@ export function AudioAssistant() {
     const acousticContext = buildAcousticContext(original, report, capabilities);
     setMessages([...history, { role: 'user', content: message }]);
     setDraft('');
-    setPlan(null);
-    setError(null);
-    setPlanning(true);
+    dispatch({ type: 'START_PLAN' });
     const timeout = window.setTimeout(() => ac.abort(new DOMException('The assistant took too long to answer.', 'TimeoutError')), 120000);
+    let settled = false;
     try {
       const next = await client.planAudio(
         {
@@ -226,18 +237,26 @@ export function AudioAssistant() {
         ac.signal,
       );
       if (ac.signal.aborted || sequence.current !== id || currentSource.current !== sourceAtSend) return;
+      settled = true;
       setMessages([...history, { role: 'user', content: message }, { role: 'assistant', content: next.explanation }]);
-      setPlan(next.needs_clarification ? null : next);
+      dispatch(next.needs_clarification ? { type: 'PLAN_CLARIFIED' } : { type: 'PLAN_READY', plan: next });
       setModelSize(next.model_size);
       setLastProvider(next.provider);
     } catch (e) {
       if (sequence.current !== id || currentSource.current !== sourceAtSend) return;
       if (!ac.signal.aborted || ac.signal.reason?.name === 'TimeoutError') {
-        setError(e instanceof Error ? e.message : 'The assistant could not answer. Please try again.');
+        settled = true;
+        dispatch({
+          type: 'PLAN_FAILED',
+          message: e instanceof Error ? e.message : 'The assistant could not answer. Please try again.',
+        });
       }
     } finally {
       window.clearTimeout(timeout);
-      if (sequence.current === id) { setPlanning(false); planningRequest.current = false; }
+      if (sequence.current === id) {
+        if (!settled) dispatch({ type: 'PLAN_CANCELLED' });
+        planningRequest.current = false;
+      }
     }
   };
 
@@ -279,16 +298,19 @@ export function AudioAssistant() {
       };
     } else return;
     applying.current = true;
-    setSubmitting(true);
+    dispatch({ type: 'START_APPLY' });
     const priorJob = getState().job?.id;
+    let applyFailed: string | null = null;
     try {
       await startJob(strategy);
       if (getState().job?.id === priorJob && currentSource.current === sourceKey) {
-        setError(getState().error || 'The edit did not start. Check the processing message below.');
+        applyFailed = getState().error || 'The edit did not start. Check the processing message below.';
       }
     } finally {
       applying.current = false;
-      setSubmitting(false);
+      if (currentSource.current === sourceKey) {
+        dispatch(applyFailed ? { type: 'APPLY_FAILED', message: applyFailed } : { type: 'APPLY_STARTED' });
+      }
     }
   };
 
@@ -313,7 +335,7 @@ export function AudioAssistant() {
         </div>
       )}
       {!messages.length && <div className="aa-examples" aria-label="Example audio requests">
-        {EXAMPLES.map((example) => <button type="button" key={example} disabled={planning || running} onClick={() => { setDraft(example); setPlan(null); }}>{example}</button>)}
+        {EXAMPLES.map((example) => <button type="button" key={example} disabled={planning || running} onClick={() => { setDraft(example); dispatch({ type: 'DRAFT_CHANGED' }); }}>{example}</button>)}
       </div>}
       {activeRegion && (
         <div className="aa-region-pill" role="group" aria-label="Selected waveform region">
@@ -341,7 +363,7 @@ export function AudioAssistant() {
           id="audio-assistant-message" rows={2} maxLength={2000} value={draft}
           placeholder="Keep the speech and remove background music…"
           disabled={planning || running || submitting}
-          onChange={(event) => { setDraft(event.target.value); setPlan(null); setError(null); }}
+          onChange={(event) => { setDraft(event.target.value); dispatch({ type: 'DRAFT_CHANGED' }); }}
           onKeyDown={(event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }}
         />
         <div className="aa-compose-actions">

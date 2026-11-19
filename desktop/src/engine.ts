@@ -403,10 +403,24 @@ function forceKillWindowsTree(child: ChildProcess): Promise<void> {
   });
 }
 
+export type EngineBrokerPhase = 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
+
+export const ALLOWED_ENGINE_BROKER_TRANSITIONS: Readonly<
+  Record<EngineBrokerPhase, readonly EngineBrokerPhase[]>
+> = Object.freeze({
+  idle: Object.freeze(['starting', 'stopping', 'stopped'] as const),
+  starting: Object.freeze(['ready', 'failed', 'stopping', 'stopped'] as const),
+  ready: Object.freeze(['stopping', 'stopped', 'failed'] as const),
+  stopping: Object.freeze(['stopped'] as const),
+  stopped: Object.freeze([] as const),
+  failed: Object.freeze(['stopping', 'stopped'] as const),
+});
+
 export class EngineBroker {
   readonly #paths: EnginePaths;
   readonly #token = crypto.randomBytes(32).toString('hex');
   readonly #stderrTail: string[] = [];
+  #phase: EngineBrokerPhase = 'idle';
   #child: ChildProcess | null = null;
   #endpoint: EngineEndpoint | null = null;
   #session: EngineSessionCapability | null = null;
@@ -420,8 +434,12 @@ export class EngineBroker {
     this.#paths = paths;
   }
 
+  get phase(): EngineBrokerPhase {
+    return this.#phase;
+  }
+
   get origin(): string | null {
-    return this.#endpoint?.baseUrl ?? null;
+    return this.#phase === 'ready' ? (this.#endpoint?.baseUrl ?? null) : null;
   }
 
   get stderrTail(): readonly string[] {
@@ -433,7 +451,8 @@ export class EngineBroker {
   }
 
   start(): void {
-    if (this.#readyPromise !== null) return;
+    if (this.#phase !== 'idle') return;
+    this.#transition('starting');
     this.#readyPromise = new Promise<EngineEndpoint>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
@@ -530,13 +549,17 @@ export class EngineBroker {
     child.once('error', (error) => this.#fail(new Error(`Engine process error: ${error.message}`)));
     child.once('exit', (code, signal) => {
       this.invalidateSession();
-      if (this.#endpoint === null && this.#failure === null) {
+      if (this.#phase === 'starting') {
         this.#fail(new Error(`Engine exited before ready (${signal ?? `code ${String(code)}`}).`));
+      } else if (this.#phase === 'ready') {
+        this.#endpoint = null;
+        this.#cleanupRendezvous();
+        this.#transition('stopped');
       }
     });
 
     const timer = setTimeout(() => {
-      if (this.#endpoint === null && this.#failure === null) {
+      if (this.#phase === 'starting') {
         this.#fail(new Error('Engine did not report ready within 60 seconds.'));
         signalProcessTree(child, 'SIGTERM');
       }
@@ -584,31 +607,49 @@ export class EngineBroker {
   }
 
   async #waitForEndpoint(): Promise<EngineEndpoint> {
-    this.start();
+    if (this.#phase === 'idle') this.start();
+    if (this.#phase === 'stopping' || this.#phase === 'stopped') {
+      throw new Error('Engine broker has been stopped.');
+    }
     if (this.#failure) throw this.#failure;
     if (!this.#readyPromise) throw new Error('Engine startup did not initialize.');
     return this.#readyPromise;
   }
 
   async stop(): Promise<void> {
+    if (this.#phase === 'stopped') return;
+    if (this.#phase !== 'stopping') this.#transition('stopping');
     this.#cleanupRendezvous();
-    const child = this.#child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    if (this.#endpoint) {
-      await postShutdown(this.#endpoint, this.#token);
-      if (await waitForExit(child, 1_000)) return;
-    }
-    signalProcessTree(child, 'SIGTERM');
-    if (await waitForExit(child, SHUTDOWN_GRACE_MS)) return;
-    if (this.#paths.platform === 'win32') await forceKillWindowsTree(child);
-    else signalProcessTree(child, 'SIGKILL');
-    await waitForExit(child, 1_000);
+    const endpoint = this.#endpoint;
+    this.#endpoint = null;
     this.invalidateSession();
+    const child = this.#child;
+    if (child && child.exitCode === null && child.signalCode === null) {
+      if (endpoint) {
+        await postShutdown(endpoint, this.#token);
+        if (!(await waitForExit(child, 1_000))) {
+          signalProcessTree(child, 'SIGTERM');
+          if (!(await waitForExit(child, SHUTDOWN_GRACE_MS))) {
+            if (this.#paths.platform === 'win32') await forceKillWindowsTree(child);
+            else signalProcessTree(child, 'SIGKILL');
+            await waitForExit(child, 1_000);
+          }
+        }
+      } else {
+        signalProcessTree(child, 'SIGTERM');
+        if (!(await waitForExit(child, SHUTDOWN_GRACE_MS))) {
+          if (this.#paths.platform === 'win32') await forceKillWindowsTree(child);
+          else signalProcessTree(child, 'SIGKILL');
+          await waitForExit(child, 1_000);
+        }
+      }
+    }
+    if (this.#phase === 'stopping') this.#transition('stopped');
   }
 
   #handleStdoutLine(line: string): void {
     if (!line.trim()) return;
-    if (this.#endpoint !== null || this.#failure !== null) {
+    if (this.#phase !== 'starting') {
       this.#pushStderr(`[stdout] ${line}`);
       return;
     }
@@ -620,6 +661,7 @@ export class EngineBroker {
         return;
       }
       this.#endpoint = rendererEngineEndpoint(port);
+      this.#transition('ready');
       this.#writeRendezvous(port);
       this.#resolveReady?.(this.#endpoint);
     } catch {
@@ -670,9 +712,18 @@ export class EngineBroker {
     }
   }
 
+  #transition(next: EngineBrokerPhase): void {
+    const allowed = ALLOWED_ENGINE_BROKER_TRANSITIONS[this.#phase];
+    if (!allowed.includes(next)) {
+      throw new Error(`Illegal engine broker transition: ${this.#phase} -> ${next}`);
+    }
+    this.#phase = next;
+  }
+
   #fail(error: Error): void {
-    if (this.#failure !== null || this.#endpoint !== null) return;
+    if (this.#phase !== 'starting') return;
     this.#failure = error;
+    this.#transition('failed');
     this.#rejectReady?.(error);
   }
 }

@@ -30,7 +30,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from hawavoclean.errors import ExitCode, MediaPreflightError, MediaPreflightReason
 from hawavoclean.hashing import hash_file
@@ -67,7 +67,61 @@ MAX_INPUT_FILE_BYTES = 8 * 1024**3
 logger = get_logger("server.jobs")
 
 JobState = Literal["queued", "running", "done", "failed", "cancelled", "interrupted"]
+BatchState = Literal["queued", "running", "paused", "done", "failed", "cancelled"]
 TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled", "interrupted"})
+ALLOWED_JOB_TRANSITIONS: Final[dict[JobState, frozenset[JobState]]] = {
+    "queued": frozenset({"running", "cancelled", "failed", "interrupted"}),
+    "running": frozenset({"done", "failed", "cancelled", "interrupted"}),
+    # Completed jobs may only transition to ``failed`` if durability or startup
+    # artifact verification fails, or back to ``queued`` on explicit retry.
+    "done": frozenset({"failed", "queued"}),
+    "failed": frozenset({"queued"}),
+    "cancelled": frozenset({"queued"}),
+    "interrupted": frozenset({"queued"}),
+}
+_VALID_BATCH_STATES: Final[frozenset[str]] = frozenset(
+    {"queued", "running", "paused", "done", "failed", "cancelled"}
+)
+
+
+def transition_job_state(record: JobRecord, target: JobState) -> JobState:
+    """Enforce the explicit job finite-state transition table."""
+    allowed = ALLOWED_JOB_TRANSITIONS[record.state]
+    if target not in allowed:
+        raise ValueError(f"Illegal job state transition: {record.state!r} -> {target!r}")
+    record.state = target
+    return target
+
+
+def derive_batch_state(
+    *,
+    total: int,
+    completed: int,
+    failed: int,
+    cancelled: int,
+    running: int,
+    queued: int,
+    is_paused: bool,
+    stored_state: str | None = None,
+) -> BatchState:
+    """Pure finite-state derivation for an aggregate batch summary."""
+    if is_paused:
+        return "paused"
+    if running > 0:
+        return "running"
+    if queued > 0:
+        return "queued"
+    if completed + failed + cancelled >= total and total > 0:
+        if cancelled == total:
+            return "cancelled"
+        if failed > 0 and completed == 0:
+            return "failed"
+        return "done"
+    if stored_state in _VALID_BATCH_STATES:
+        return cast(BatchState, stored_state)
+    return "queued"
+
+
 STDERR_TAIL_LINES = 50
 DEFAULT_KILL_GRACE_S = 3.0
 DEFAULT_MAX_ACTIVE_JOBS = 128
@@ -816,7 +870,7 @@ class JobManager:
     def _mark_artifact_invalid(record: JobRecord, exc: Exception) -> None:
         record.bundle = None
         record.artifact_evidence = None
-        record.state = "failed"
+        transition_job_state(record, "failed")
         record.stage = "error"
         record.message = "Completed artifacts failed startup validation"
         record.error = {"code": "ARTIFACT_INVALID", "message": str(exc)}
@@ -1110,7 +1164,7 @@ class JobManager:
                     # an accepted row whose deletion did not commit.
                     for job_id in prepared:
                         record = self._jobs[job_id]
-                        record.state = "cancelled"
+                        transition_job_state(record, "cancelled")
                         record.stage = "cancelled"
                         record.finished_at = _now_iso()
                         record.terminal_at = self._clock()
@@ -1490,7 +1544,7 @@ class JobManager:
             record.source_sha256 = pinned.sha256
             record.source_size_bytes = pinned.size_bytes
 
-            record.state = "queued"
+            transition_job_state(record, "queued")
             record.stage = "preflight"
             record.progress = 0.0
             record.message = "Queued (retry)"
@@ -1552,21 +1606,16 @@ class JobManager:
             db_batch is not None and db_batch.get("state") == "paused"
         )
 
-        if is_paused:
-            batch_state = "paused"
-        elif running > 0:
-            batch_state = "running"
-        elif queued > 0:
-            batch_state = "queued"
-        elif completed + failed + cancelled >= total and total > 0:
-            if cancelled == total:
-                batch_state = "cancelled"
-            elif failed > 0 and completed == 0:
-                batch_state = "failed"
-            else:
-                batch_state = "done"
-        else:
-            batch_state = db_batch.get("state", "queued") if db_batch else "queued"
+        batch_state = derive_batch_state(
+            total=total,
+            completed=completed,
+            failed=failed,
+            cancelled=cancelled,
+            running=running,
+            queued=queued,
+            is_paused=is_paused,
+            stored_state=str(db_batch.get("state")) if db_batch and db_batch.get("state") else None,
+        )
 
         created_at = (
             db_batch["created_at"]
@@ -1687,7 +1736,7 @@ class JobManager:
         return True
 
     def _finish_locked(self, record: JobRecord, state: JobState, message: str) -> None:
-        record.state = state
+        transition_job_state(record, state)
         record.finished_at = _now_iso()
         record.terminal_at = self._clock()
         record.message = message
@@ -1701,7 +1750,7 @@ class JobManager:
             # A verified export that cannot make its terminal transition
             # durable must never be reported as completed. The files remain
             # recoverable, but this job verdict is explicitly failed.
-            record.state = "failed"
+            transition_job_state(record, "failed")
             record.stage = "error"
             record.message = "Verified artifacts were not recorded durably"
             record.error = {
@@ -1776,7 +1825,7 @@ class JobManager:
                 if self._closed or next_job_id is None:
                     return
                 record = self._jobs[next_job_id]
-                record.state = "running"
+                transition_job_state(record, "running")
                 record.started_at = _now_iso()
                 record.last_progress_at = self._clock()
                 record.message = "Starting"

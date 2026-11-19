@@ -280,3 +280,21 @@ test('transactionalNewTrack creates dedicated track, aligns timecode, and execut
   assert.equal(deletedTracks.length, 1); // track deleted
   assert.equal(deletedClips.length, 1); // media pool item purged
 });
+
+test('TransactionJournal enforces explicit stage transition table', () => {
+  const { ALLOWED_TRANSACTION_TRANSITIONS, TransactionJournal } = require('../com.hawavoclean.resolve/timeline-transactions.js');
+  assert.deepEqual([...ALLOWED_TRANSACTION_TRANSITIONS.COMMITTED], []);
+  assert.deepEqual([...ALLOWED_TRANSACTION_TRANSITIONS.ROLLED_BACK], []);
+
+  const txDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hawa-tx-fsm-'));
+  try {
+    const journal = new TransactionJournal(txDir);
+    const txId = journal.begin('replace', { mediaId: 'm1' });
+    assert.throws(() => journal.update(txId, 'ROLLED_BACK'), /Illegal timeline transaction transition: INIT -> ROLLED_BACK/);
+    journal.update(txId, 'ROLLING_BACK');
+    journal.update(txId, 'ROLLED_BACK');
+    assert.throws(() => journal.update(txId, 'COMMITTED'), /Illegal timeline transaction transition: ROLLED_BACK -> COMMITTED/);
+  } finally {
+    fs.rmSync(txDir, { recursive: true, force: true });
+  }
+});

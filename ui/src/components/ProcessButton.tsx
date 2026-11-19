@@ -2,13 +2,9 @@
 import { useEffect, useRef } from 'react';
 import type { JobStage, JobStatus } from '../api/types';
 import { cancelJob, startJob } from '../state/actions';
+import { deriveProcessingReadiness } from '../state/machines';
 import { useReducedMotion } from '../state/reducedMotion';
-import {
-  getRouteBlockedReason,
-  isProfileUnavailable,
-  isRouteBlocked,
-  useStore,
-} from '../state/store';
+import { useStore } from '../state/store';
 import { IconBolt, IconCheck, IconWarn } from './Icons';
 import '../styles/process.css';
 
@@ -202,8 +198,12 @@ function stageIndex(status: JobStatus | null): number {
 
 export function ProcessButton() {
   const source = useStore((s) => s.source);
+  const upload = useStore((s) => s.upload);
   const original = useStore((s) => s.original);
-  const engineReady = useStore((s) => s.engineStatus === 'ready');
+  const cleanedPath = useStore((s) => s.cleanedPath);
+  const report = useStore((s) => s.report);
+  const engineStatus = useStore((s) => s.engineStatus);
+  const engineReady = engineStatus === 'ready';
   const job = useStore((s) => s.job);
   const analyzing = useStore((s) => s.analyzing);
   const mode = useStore((s) => s.mode);
@@ -215,39 +215,29 @@ export function ProcessButton() {
 
   const status = job?.status ?? null;
   const state = status?.state ?? (job ? 'queued' : null);
-  const running = state === 'running' || state === 'queued';
+  const {
+    phase: workspacePhase,
+    running,
+    routeBlocked,
+    blockedReason,
+    restoreMissingConsent,
+    canStart,
+  } = deriveProcessingReadiness({
+    engineStatus,
+    source,
+    upload,
+    analyzing,
+    original,
+    job,
+    cleanedPath,
+    report,
+    mode,
+    profile,
+    speakerId,
+    capabilities,
+    reconstructionConsent,
+  });
   const progress = running || state === 'done' ? Math.max(0, Math.min(1, status?.progress ?? 0)) : 0;
-
-  const restoreCapId = speakerId ? 'restore_enrolled' : 'restore_source';
-  const isRestore = mode === 'restore';
-  const restoreBlocked = isRestore && isRouteBlocked(capabilities, restoreCapId);
-  const restoreBlockedReason = restoreBlocked ? getRouteBlockedReason(capabilities, restoreCapId) : null;
-  const restoreMissingConsent = isRestore && !reconstructionConsent;
-
-  const naturalBlocked = mode === 'natural' && isProfileUnavailable(capabilities, profile);
-  const naturalBlockedReason = naturalBlocked
-    ? (getRouteBlockedReason(capabilities, profile) ??
-      (profile === 'studio_pro'
-        ? 'Studio Pro is unavailable on this machine.'
-        : profile === 'dereverb'
-          ? 'Dereverb is unavailable on this machine.'
-          : null))
-    : null;
-
-  const smartSafeBlocked = mode === 'smart_safe' && isRouteBlocked(capabilities, 'smart_safe');
-  const smartSafeBlockedReason = smartSafeBlocked ? getRouteBlockedReason(capabilities, 'smart_safe') : null;
-
-  const routeBlocked = restoreBlocked || naturalBlocked || smartSafeBlocked;
-  const blockedReason = restoreBlockedReason || naturalBlockedReason || smartSafeBlockedReason;
-
-  const canStart =
-    engineReady &&
-    !!source &&
-    !!original &&
-    !analyzing &&
-    !running &&
-    !routeBlocked &&
-    !restoreMissingConsent;
 
   // Elapsed time. The engine's own timestamps win when they parse — they are
   // the job's real wall clock, and they survive a page reload mid-run — with a
@@ -339,16 +329,18 @@ export function ProcessButton() {
         k: 'Ready',
         v: !engineReady
           ? 'Offline'
-          : !source
-            ? 'No clip'
-            : analyzing
-              ? 'Analyzing'
-              : // a clip that failed to analyse leaves `source` set and
-                // `original` null; the plate must not read "Armed" while it
-                // is disabled with nothing to process
-                !original
-                ? 'No data'
-                : 'Armed',
+          : workspacePhase === 'uploading'
+            ? 'Uploading'
+            : !source
+              ? 'No clip'
+              : analyzing
+                ? 'Analyzing'
+                : // a clip that failed to analyse leaves `source` set and
+                  // `original` null; the plate must not read "Armed" while it
+                  // is disabled with nothing to process
+                  !original
+                  ? 'No data'
+                  : 'Armed',
       },
       { k: 'Length', v: original ? fmtElapsed(original.duration_s) : '—', num: true },
       { k: 'Format', v: original ? `${khz}\u00b7${original.channels}ch` : '—', num: true },

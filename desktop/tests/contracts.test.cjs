@@ -18,6 +18,8 @@ const {
   SESSION_PARTITION,
 } = require('../dist/contracts.js');
 const {
+  ALLOWED_ENGINE_BROKER_TRANSITIONS,
+  EngineBroker,
   engineSessionNeedsRenewal,
   parseDevelopmentCommand,
   rendererEngineEndpoint,
@@ -667,6 +669,31 @@ test('installed engine execution preserves post-install hash invariance with zer
     assert.deepEqual(files.sort(), ['ENGINE-SHA256SUMS', 'test_worker.py']);
     const postHash = crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex');
     assert.equal(postHash, initialHash, 'script hash must remain identical');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('EngineBroker enforces explicit lifecycle phases and clears origin after stop', async () => {
+  assert.deepEqual([...ALLOWED_ENGINE_BROKER_TRANSITIONS.stopped], []);
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'hawavoclean-broker-phase-'));
+  try {
+    const broker = new EngineBroker({
+      packaged: false,
+      platform: process.platform,
+      resourcesPath: temp,
+      repositoryRoot: temp,
+      userData: temp,
+      temp,
+    });
+    assert.equal(broker.phase, 'idle');
+    assert.equal(broker.origin, null);
+    await broker.stop();
+    assert.equal(broker.phase, 'stopped');
+    assert.equal(broker.origin, null);
+    await broker.stop();
+    assert.equal(broker.phase, 'stopped');
+    await assert.rejects(() => broker.endpoint(), /stopped/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
