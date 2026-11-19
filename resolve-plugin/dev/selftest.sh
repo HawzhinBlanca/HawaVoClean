@@ -36,6 +36,7 @@ ENGINE_JSON="$PLUGIN_DIR/engine.json"
 INDEX_HTML="$PLUGIN_DIR/index.html"
 SECURITY_JS="$PLUGIN_DIR/selftest-security.js"
 BACKUP_DIR="$(mktemp -d)"
+ISOLATED_RENDEZVOUS_DIR="$(mktemp -d)"
 [ -f "$ENGINE_JSON" ] && cp "$ENGINE_JSON" "$BACKUP_DIR/engine.json"
 [ -f "$INDEX_HTML" ] && cp "$INDEX_HTML" "$BACKUP_DIR/index.html"
 [ -f "$SECURITY_JS" ] && cp "$SECURITY_JS" "$BACKUP_DIR/selftest-security.js"
@@ -46,6 +47,7 @@ cleanup() {
   [ -f "$BACKUP_DIR/index.html" ] && cp "$BACKUP_DIR/index.html" "$INDEX_HTML"
   [ -f "$BACKUP_DIR/selftest-security.js" ] && cp "$BACKUP_DIR/selftest-security.js" "$SECURITY_JS"
   [ ! -d "$BACKUP_DIR" ] || find "$BACKUP_DIR" -depth -delete
+  [ ! -d "$ISOLATED_RENDEZVOUS_DIR" ] || find "$ISOLATED_RENDEZVOUS_DIR" -depth -delete
 }
 trap cleanup EXIT
 
@@ -94,7 +96,7 @@ EOF
 # run_electron <timeout_s> <logfile> [ENV=VAL ...]
 run_electron() {
   local timeout_s="$1" logfile="$2"; shift 2
-  ( cd "$PLUGIN_DIR" && exec env "$@" HAWA_SELFTEST=1 ELECTRON_ENABLE_LOGGING=0 "$ELECTRON_BIN" . >"$logfile" 2>&1 ) &
+  ( cd "$PLUGIN_DIR" && exec env -u ELECTRON_RUN_AS_NODE HAWAVOCLEAN_RENDEZVOUS_DIR="$ISOLATED_RENDEZVOUS_DIR" "$@" HAWA_SELFTEST=1 ELECTRON_ENABLE_LOGGING=0 "$ELECTRON_BIN" . >"$logfile" 2>&1 ) &
   local pid=$! waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$timeout_s" ]; then
@@ -111,7 +113,7 @@ run_electron() {
 # run_hard_crash <logfile>
 run_hard_crash() {
   local logfile="$1" pid waited=0 line epid
-  ( cd "$PLUGIN_DIR" && exec env FAKE_ENGINE_MODE=ok HAWA_SELFTEST=1 HAWA_SELFTEST_HARD_CRASH=1 ELECTRON_ENABLE_LOGGING=0 "$ELECTRON_APP_BIN" . >"$logfile" 2>&1 ) &
+  ( cd "$PLUGIN_DIR" && exec env -u ELECTRON_RUN_AS_NODE HAWAVOCLEAN_RENDEZVOUS_DIR="$ISOLATED_RENDEZVOUS_DIR" FAKE_ENGINE_MODE=ok HAWA_SELFTEST=1 HAWA_SELFTEST_HARD_CRASH=1 ELECTRON_ENABLE_LOGGING=0 "$ELECTRON_APP_BIN" . >"$logfile" 2>&1 ) &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     line="$(grep '^HAWA_SELFTEST_RESULT ' "$logfile" | head -1 | sed 's/^HAWA_SELFTEST_RESULT //' || true)"

@@ -41,7 +41,11 @@ const {
   withoutRendererCredentials,
 } = require('./session-auth.js');
 const { discoverDesktopEngine } = require('./engine-discovery.js');
-const { TimelineTransactionManager } = require('./timeline-transactions.js');
+const {
+  TimelineTransactionManager,
+  validateBatchCleanTrackPayload,
+  validateApplyGuardMarkersPayload,
+} = require('./timeline-transactions.js');
 
 const PLUGIN_ID = 'com.hawavoclean.resolve';
 const APP_TITLE = 'HawaVoClean';
@@ -974,32 +978,15 @@ async function resolveNewTrack(mediaId, filePath, options) {
 }
 
 async function resolveBatchCleanTrack(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('batchCleanTrack: payload must be an object.');
-  }
+  const validated = validateBatchCleanTrackPayload(payload);
   const mgr = getTimelineTxManager();
-  return mgr.transactionalBatchTrackClean({
-    clips: payload.clips,
-    cleanedByClipId: payload.cleanedByClipId,
-    targetTrackName: payload.targetTrackName,
-    fps: payload.fps,
-    addGuardMarkers: payload.addGuardMarkers,
-  });
+  return mgr.transactionalBatchTrackClean(validated);
 }
 
 async function resolveApplyGuardMarkers(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('applyGuardMarkers: payload must be an object.');
-  }
+  const validated = validateApplyGuardMarkersPayload(payload);
   const mgr = getTimelineTxManager();
-  return mgr.applyGuardMarkers({
-    report: payload.report,
-    reportPath: payload.reportPath,
-    clipStartFrame: payload.clipStartFrame,
-    fps: payload.fps,
-    sourceOffsetS: payload.sourceOffsetS,
-    markers: payload.markers,
-  });
+  return mgr.applyGuardMarkers(validated);
 }
 
 async function resolveGetContext() {

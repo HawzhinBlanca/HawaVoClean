@@ -10,7 +10,15 @@ const os = require('node:os');
 const {
   validateAudioFormat,
   extractGuardMarkersFromReport,
+  validateBatchCleanTrackPayload,
+  validateApplyGuardMarkersPayload,
   GUARD_MARKER_COLORS,
+  MAX_MARKER_NAME_LEN,
+  MAX_MARKER_NOTE_LEN,
+  MAX_IPC_MARKER_NOTE_LEN,
+  MAX_BATCH_CLIPS,
+  MAX_GUARD_MARKERS,
+  MAX_GUARD_REPORT_UNITS,
   TransactionJournal,
   TimelineTransactionManager,
 } = require('../com.hawavoclean.resolve/timeline-transactions.js');
@@ -836,6 +844,400 @@ test('main.js and preload.js wire resolve:batch-clean-track and resolve:apply-gu
     !mainSource.includes('failPoint: payload'),
     'main.js IPC bridge must never forward untrusted test failPoint from renderer payload'
   );
+  assert.match(
+    mainSource,
+    /async function resolveBatchCleanTrack\(payload\)\s*\{\s*const validated = validateBatchCleanTrackPayload\(payload\);\s*const mgr = getTimelineTxManager\(\);/
+  );
+  assert.match(
+    mainSource,
+    /async function resolveApplyGuardMarkers\(payload\)\s*\{\s*const validated = validateApplyGuardMarkersPayload\(payload\);\s*const mgr = getTimelineTxManager\(\);/
+  );
   assert.match(preloadSource, /batchCleanTrack:\s*\(payload\)\s*=>\s*invoke\('hawa:resolve:batch-clean-track',\s*payload\)/);
   assert.match(preloadSource, /applyGuardMarkers:\s*\(payload\)\s*=>\s*invoke\('hawa:resolve:apply-guard-markers',\s*payload\)/);
+});
+
+test('extractGuardMarkersFromReport survives corrupt reports, invalid fps, negative frames, inverted times, and >10KB notes', () => {
+  // Corrupt / non-object reports and non-array units
+  for (const badReport of [null, undefined, 42, 'corrupt', true, [], { units: null }, { units: 'bad' }, { units: {} }]) {
+    assert.deepEqual(extractGuardMarkersFromReport(badReport, 100, 24), []);
+  }
+
+  // Invalid fps values (NaN, Infinity, -Infinity, 0, negative, booleans, empty string)
+  const minimalReport = { units: [{ unit_id: 1, start_time_s: 1, end_time_s: 2, final_decision: 'REVERTED' }] };
+  for (const badFps of [NaN, Infinity, -Infinity, 0, -24, true, false, '', null, undefined, 'abc']) {
+    assert.deepEqual(extractGuardMarkersFromReport(minimalReport, 100, badFps), []);
+  }
+
+  // Null options must not crash destructuring
+  assert.equal(extractGuardMarkersFromReport(minimalReport, 100, 24, null).length, 1);
+
+  // Negative clipStartFrame, inverted start_time_s > end_time_s, huge >10KB note & score flood, NUL bytes
+  const hugeReason = 'A'.repeat(16_384) + '\0tail';
+  const hugeScores = {};
+  for (let i = 0; i < 500; i += 1) {
+    hugeScores[`metric_${String(i).padStart(4, '0')}`] = 'X'.repeat(200);
+  }
+  const adversarialReport = {
+    units: [
+      null,
+      'string-unit',
+      [],
+      { final_decision: 'REVERTED', start_time_s: null, end_time_s: 2 }, // null start_time_s must be skipped
+      { final_decision: 'REVERTED', start_time_s: NaN, end_time_s: 2 },
+      {
+        unit_id: 7,
+        start_time_s: 5.0,
+        end_time_s: 2.0, // inverted start > end
+        final_decision: 'REVERTED',
+        decision_reason: hugeReason,
+        guard_a_scores: hugeScores,
+      },
+      {
+        unit_id: 8,
+        start_time_s: -10.0,
+        end_time_s: -5.0,
+        final_decision: 'ERROR_PASSTHROUGH',
+        decision_reason: 'Negative range\0sanitized',
+      },
+    ],
+  };
+
+  const markers = extractGuardMarkersFromReport(adversarialReport, -500, 24);
+  assert.equal(markers.length, 2);
+
+  for (const m of markers) {
+    assert.ok(Number.isSafeInteger(m.frameOffset) && m.frameOffset >= 0, `frameOffset must be non-negative safe int, got ${m.frameOffset}`);
+    assert.ok(Number.isSafeInteger(m.durationFrames) && m.durationFrames >= 1, `durationFrames must be >= 1, got ${m.durationFrames}`);
+    assert.ok(m.note.length <= MAX_MARKER_NOTE_LEN, `marker note exceeded cap: ${m.note.length}`);
+    assert.ok(m.name.length <= MAX_MARKER_NAME_LEN, `marker name exceeded cap: ${m.name.length}`);
+    assert.ok(!m.note.includes('\0'), 'marker note must not contain NUL');
+    assert.ok(!m.name.includes('\0'), 'marker name must not contain NUL');
+  }
+  // Inverted start_time_s > end_time_s clamps cleanly to 1-frame marker
+  const inverted = markers.find((m) => m.unitId === 7);
+  assert.ok(inverted);
+  assert.equal(inverted.frameOffset, 120);
+  assert.equal(inverted.durationFrames, 1);
+});
+
+test('transactionalBatchTrackClean rejects duplicate clip IDs, missing WAV paths, and prototype keys before touching Resolve', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tx-batch-adv-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const wav1 = path.join(tmpDir, 'c1.wav');
+  createSyntheticWav(wav1, { sampleRate: 48000, channels: 1 });
+
+  let resolveTouched = false;
+  const manager = new TimelineTransactionManager({
+    getProject: async () => {
+      resolveTouched = true;
+      return { GetCurrentTimeline: async () => ({}) };
+    },
+    getMediaPool: async () => {
+      resolveTouched = true;
+      return {};
+    },
+    findItemByMediaId: async () => null,
+    log: () => {},
+    journal: new TransactionJournal(path.join(tmpDir, 'journal')),
+  });
+
+  // Duplicate clipId
+  await assert.rejects(
+    manager.transactionalBatchTrackClean({
+      clips: [
+        { clipId: 'dup-1', startFrame: 0 },
+        { clipId: 'dup-1', startFrame: 240 },
+      ],
+      cleanedByClipId: { 'dup-1': wav1 },
+    }),
+    /duplicate clipId 'dup-1'/
+  );
+  assert.equal(resolveTouched, false, 'duplicate clipId must fail before touching Resolve API');
+
+  // Missing WAV file on disk
+  await assert.rejects(
+    manager.transactionalBatchTrackClean({
+      clips: [{ clipId: 'c1', startFrame: 0 }],
+      cleanedByClipId: { c1: path.join(tmpDir, 'missing.wav') },
+    }),
+    /batchTrackClean rejected clip 'c1'/
+  );
+  assert.equal(resolveTouched, false, 'missing WAV must fail before touching Resolve API');
+
+  // Missing cleaned entry via prototype key ('toString')
+  await assert.rejects(
+    manager.transactionalBatchTrackClean({
+      clips: [{ clipId: 'toString', startFrame: 0 }],
+      cleanedByClipId: { c1: wav1 },
+    }),
+    /missing cleaned audio entry for clip 'toString'/
+  );
+  assert.equal(resolveTouched, false, 'prototype key must not satisfy cleanedByClipId lookup');
+
+  // Invalid fps (NaN / Infinity / <=0)
+  for (const badFps of [NaN, Infinity, 0, -24, true]) {
+    await assert.rejects(
+      manager.transactionalBatchTrackClean({
+        clips: [{ clipId: 'c1', startFrame: 0 }],
+        cleanedByClipId: { c1: wav1 },
+        fps: badFps,
+      }),
+      /invalid fps/
+    );
+  }
+  assert.equal(resolveTouched, false);
+});
+
+test('partial rollback continues cleaning up remaining resources when DeleteMarkersByColor, DeleteClips, and DeleteTrack throw', async (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tx-batch-partial-rb-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  const journalDir = path.join(tmpDir, 'journal');
+  const journal = new TransactionJournal(journalDir);
+  const wav1 = path.join(tmpDir, 'c1.wav');
+  const wav2 = path.join(tmpDir, 'c2.wav');
+  createSyntheticWav(wav1, { sampleRate: 48000, channels: 1 });
+  createSyntheticWav(wav2, { sampleRate: 48000, channels: 1 });
+
+  const tracks = [{ name: 'Dialogue 1', subtype: 'mono' }];
+  const colorDeletesAttempted = [];
+  const itemDeletesAttempted = [];
+  const trackDeletesAttempted = [];
+  const poolDeletesAttempted = [];
+
+  // Timeline implements DeleteMarkersByColor (not DeleteMarkerAtFrame) and throws during rollback!
+  const mockTimeline = {
+    GetTrackCount: async () => tracks.length,
+    GetTrackName: async (_type, idx) => tracks[idx - 1]?.name || '',
+    AddTrack: async (_type, subtype) => {
+      tracks.push({ name: `Audio ${tracks.length + 1}`, subtype });
+      return true;
+    },
+    SetTrackName: async (_type, idx, name) => {
+      tracks[idx - 1].name = name;
+      return true;
+    },
+    AddMarker: async () => true,
+    DeleteMarkersByColor: async (color) => {
+      colorDeletesAttempted.push(color);
+      if (color === 'Red') throw null; // non-Error throw must NOT abort rollback!
+      throw new Error(`DeleteMarkersByColor(${color}) IPC failure`);
+    },
+    DeleteClips: async () => {
+      throw new Error('Timeline DeleteClips failed');
+    },
+    DeleteItem: async (item) => {
+      itemDeletesAttempted.push(item.id);
+      return true;
+    },
+    DeleteTrack: async (_type, idx) => {
+      trackDeletesAttempted.push(idx);
+      throw new Error(`DeleteTrack(${idx}) locked`);
+    },
+  };
+
+  let mpCounter = 0;
+  const mockMediaPool = {
+    ImportMedia: async (paths) => [{ id: `mp-${++mpCounter}`, path: paths[0] }],
+    AppendToTimeline: async (specs) => [{ id: `tl-${specs[0].recordFrame}` }],
+    DeleteClips: async (clips) => {
+      poolDeletesAttempted.push(...clips.map((c) => c.id));
+      return true;
+    },
+  };
+
+  const manager = new TimelineTransactionManager({
+    getProject: async () => ({ GetCurrentTimeline: async () => mockTimeline }),
+    getMediaPool: async () => mockMediaPool,
+    findItemByMediaId: async () => null,
+    log: () => {},
+    journal,
+  });
+
+  await assert.rejects(
+    manager.transactionalBatchTrackClean({
+      timeline: mockTimeline,
+      clips: [
+        { clipId: 'c1', startFrame: 100 },
+        { clipId: 'c2', startFrame: 300 },
+      ],
+      cleanedByClipId: {
+        c1: {
+          filePath: wav1,
+          report: { units: [{ unit_id: 1, start_time_s: 1, end_time_s: 2, final_decision: 'REVERTED' }] },
+        },
+        c2: {
+          filePath: wav2,
+          report: { units: [{ unit_id: 2, start_time_s: 1, end_time_s: 2, final_decision: 'LOW_STRENGTH', chosen_strength: 0.25 }] },
+        },
+      },
+      fps: 24,
+      failPoint: 'after_markers',
+    }),
+    /Injected failure after guard marker placement/
+  );
+
+  // Every rollback stage must have run despite throws in DeleteMarkersByColor, DeleteClips, and DeleteTrack!
+  assert.deepEqual(colorDeletesAttempted.sort(), ['Red', 'Yellow']);
+  assert.deepEqual(itemDeletesAttempted, ['tl-300', 'tl-100'], 'DeleteItem fallback must clean up timeline items when DeleteClips throws');
+  assert.deepEqual(trackDeletesAttempted, [2]);
+  assert.deepEqual(poolDeletesAttempted, ['mp-1', 'mp-2'], 'mediaPool.DeleteClips must STILL run after DeleteTrack throws');
+
+  const journalFiles = fs.readdirSync(journalDir).filter((f) => f.endsWith('.json'));
+  assert.equal(journalFiles.length, 1);
+  const rec = JSON.parse(fs.readFileSync(path.join(journalDir, journalFiles[0]), 'utf8'));
+  assert.equal(rec.stage, 'ROLLED_BACK');
+  assert.ok(rec.compensations.some((c) => c.action === 'delete_markers_by_color' && c.status === 'error'));
+  assert.ok(rec.compensations.some((c) => c.action === 'delete_track' && c.status === 'error'));
+  assert.ok(rec.compensations.some((c) => c.action === 'delete_media_pool_clips' && c.status === 'ok'));
+});
+
+test('applyGuardMarkers continues rollback when DeleteMarkersByColor throws and truncates oversized notes', async () => {
+  const placed = [];
+  const colorDeletes = [];
+  let failOnThird = false;
+
+  const mockTimeline = {
+    AddMarker: async (frameId, color, name, note, duration) => {
+      if (failOnThird && placed.length === 2) {
+        throw new Error('Marker 3 IPC crash');
+      }
+      placed.push({ frameId, color, name, note, duration });
+      return true;
+    },
+    DeleteMarkersByColor: async (color) => {
+      colorDeletes.push(color);
+      throw new Error(`DeleteMarkersByColor(${color}) threw`);
+    },
+  };
+
+  const manager = new TimelineTransactionManager({
+    getProject: async () => ({ GetCurrentTimeline: async () => mockTimeline }),
+    getMediaPool: async () => ({}),
+    findItemByMediaId: async () => null,
+    log: () => {},
+  });
+
+  // Huge >10KB note is truncated safely when applied directly
+  const ok = await manager.applyGuardMarkers({
+    timeline: mockTimeline,
+    markers: [{ frameOffset: 50, color: 'Red', name: 'N'.repeat(1000), note: 'Z'.repeat(20_000), durationFrames: 12 }],
+  });
+  assert.equal(ok.markersAdded, 1);
+  assert.ok(placed[0].note.length <= MAX_MARKER_NOTE_LEN);
+  assert.ok(placed[0].name.length <= MAX_MARKER_NAME_LEN);
+
+  // Partial rollback with throwing DeleteMarkersByColor attempts every color and rethrows original error
+  placed.length = 0;
+  failOnThird = true;
+  await assert.rejects(
+    manager.applyGuardMarkers({
+      timeline: mockTimeline,
+      markers: [
+        { frameOffset: 10, color: 'Red', name: 'M1', note: 'n1', durationFrames: 1 },
+        { frameOffset: 20, color: 'Yellow', name: 'M2', note: 'n2', durationFrames: 1 },
+        { frameOffset: 30, color: 'Red', name: 'M3', note: 'n3', durationFrames: 1 },
+      ],
+    }),
+    /Marker 3 IPC crash/
+  );
+  assert.deepEqual(colorDeletes.sort(), ['Red', 'Yellow']);
+});
+
+test('IPC validators reject malformed, non-array, duplicate, and oversized payloads before Resolve API', () => {
+  // validateBatchCleanTrackPayload
+  for (const bad of [null, undefined, [], 'str', 123]) {
+    assert.throws(() => validateBatchCleanTrackPayload(bad), /payload must be a plain object/);
+  }
+  assert.throws(() => validateBatchCleanTrackPayload({ clips: 'not-array', cleanedByClipId: {} }), /clips must be a non-empty array/);
+  assert.throws(() => validateBatchCleanTrackPayload({ clips: [], cleanedByClipId: {} }), /clips must be a non-empty array/);
+  assert.throws(
+    () => validateBatchCleanTrackPayload({
+      clips: Array.from({ length: MAX_BATCH_CLIPS + 1 }, (_, i) => ({ clipId: `c${i}`, startFrame: i })),
+      cleanedByClipId: { c0: '/tmp/a.wav' },
+    }),
+    /exceeds maximum batch size/
+  );
+  assert.throws(
+    () => validateBatchCleanTrackPayload({
+      clips: [{ clipId: 'c1', startFrame: 0 }, { clipId: 'c1', startFrame: 10 }],
+      cleanedByClipId: { c1: '/tmp/a.wav' },
+    }),
+    /duplicate clipId/
+  );
+  assert.throws(
+    () => validateBatchCleanTrackPayload({
+      clips: [{ clipId: 'c1', startFrame: -5 }],
+      cleanedByClipId: { c1: '/tmp/a.wav' },
+    }),
+    /invalid startFrame/
+  );
+  assert.throws(
+    () => validateBatchCleanTrackPayload({
+      clips: [{ clipId: 'c1', startFrame: 0 }],
+      cleanedByClipId: { c1: 'relative/path.wav' },
+    }),
+    /bounded absolute path/
+  );
+  assert.throws(
+    () => validateBatchCleanTrackPayload({
+      clips: [{ clipId: 'c1', startFrame: 0 }],
+      cleanedByClipId: { c1: '/tmp/a.wav' },
+      fps: NaN,
+    }),
+    /fps must be a finite number/
+  );
+  assert.throws(
+    () => validateBatchCleanTrackPayload({
+      clips: [{ clipId: 'c1', startFrame: 0 }],
+      cleanedByClipId: { c1: '/tmp/a.wav' },
+      addGuardMarkers: 'yes',
+    }),
+    /addGuardMarkers must be a boolean/
+  );
+
+  // Strips untrusted failPoint / timeline from valid DTO
+  const cleanBatch = validateBatchCleanTrackPayload({
+    clips: [{ clipId: 'c1', startFrame: 10 }],
+    cleanedByClipId: { c1: '/tmp/a.wav' },
+    fps: 24,
+    failPoint: 'mid_batch',
+    timeline: {},
+  });
+  assert.equal('failPoint' in cleanBatch, false);
+  assert.equal('timeline' in cleanBatch, false);
+
+  // validateApplyGuardMarkersPayload
+  for (const bad of [null, undefined, [], 'str', 99]) {
+    assert.throws(() => validateApplyGuardMarkersPayload(bad), /payload must be a plain object/);
+  }
+  assert.throws(() => validateApplyGuardMarkersPayload({ markers: 'not-array' }), /markers must be an array/);
+  assert.throws(
+    () => validateApplyGuardMarkersPayload({
+      markers: Array.from({ length: MAX_GUARD_MARKERS + 1 }, (_, i) => ({ frameOffset: i })),
+    }),
+    /exceeds maximum count/
+  );
+  assert.throws(
+    () => validateApplyGuardMarkersPayload({
+      markers: [{ frameOffset: 10, note: 'X'.repeat(MAX_IPC_MARKER_NOTE_LEN + 1) }],
+    }),
+    /oversized note/
+  );
+  assert.throws(
+    () => validateApplyGuardMarkersPayload({
+      markers: [{ frameOffset: -1 }],
+    }),
+    /invalid frameOffset/
+  );
+  assert.throws(
+    () => validateApplyGuardMarkersPayload({
+      report: { units: Array.from({ length: MAX_GUARD_REPORT_UNITS + 1 }, () => ({})) },
+    }),
+    /at most/
+  );
+  assert.throws(() => validateApplyGuardMarkersPayload({ reportPath: 'relative.json' }), /bounded absolute path/);
+  assert.throws(() => validateApplyGuardMarkersPayload({ fps: Infinity }), /fps must be a finite number/);
+  assert.throws(() => validateApplyGuardMarkersPayload({ clipStartFrame: -10 }), /clipStartFrame must be a finite non-negative/);
 });

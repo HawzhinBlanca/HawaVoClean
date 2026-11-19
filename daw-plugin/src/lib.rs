@@ -32,11 +32,40 @@ pub const NUM_BINS: usize = FRAME_SIZE / 2 + 1;
 pub const RING_CAPACITY: usize = 2048;
 
 const MIN_GAIN_EPS: f32 = 1e-6;
+/// Subnormal (denormal) flush threshold: safely above `f32::MIN_POSITIVE` (~1.18e-38)
+/// while far below any audible signal (-600 dBFS), preventing denormal CPU stalls.
+const DENORMAL_FLUSH: f32 = 1e-30;
+/// Upper finite sample clamp (+120 dBFS) guaranteeing `(FRAME_SIZE * x)^2` never overflows `f32::MAX`.
+const MAX_SAFE_SAMPLE: f32 = 1e6;
 
-/// Convert decibels to linear amplitude gain.
+/// Flush non-finite (NaN / Inf) and subnormal (denormal) scalar values to `0.0`.
+#[inline]
+fn flush_denormal(x: f32) -> f32 {
+    if !x.is_finite() || x.abs() < DENORMAL_FLUSH {
+        0.0
+    } else {
+        x
+    }
+}
+
+/// Sanitize an audio-thread sample: flush NaN/Inf/subnormal values to `0.0` and
+/// clamp extreme finite spikes so downstream FFT PSD math cannot overflow.
+#[inline]
+pub fn sanitize_sample(x: f32) -> f32 {
+    if !x.is_finite() || x.abs() < DENORMAL_FLUSH {
+        0.0
+    } else {
+        x.clamp(-MAX_SAFE_SAMPLE, MAX_SAFE_SAMPLE)
+    }
+}
+
+/// Convert decibels to linear amplitude gain, safely returning `0.0` for non-finite inputs.
 #[inline]
 pub fn db_to_gain(db: f32) -> f32 {
-    10.0_f32.powf(db * 0.05)
+    if !db.is_finite() {
+        return 0.0;
+    }
+    flush_denormal(10.0_f32.powf(db.clamp(-200.0, 120.0) * 0.05))
 }
 
 /// Phase-inverted Delta audition / delay-aligned wet-dry mix + output trim.
@@ -51,18 +80,24 @@ pub fn apply_output_mix(
     delta_listen: bool,
     output_gain: f32,
 ) -> f32 {
-    let mix = wet_dry.clamp(0.0, 1.0);
-    let signal = if delta_listen {
-        dry_aligned - wet
+    let dry = sanitize_sample(dry_aligned);
+    let wet_clean = sanitize_sample(wet);
+    let mix = if wet_dry.is_finite() {
+        wet_dry.clamp(0.0, 1.0)
     } else {
-        (1.0 - mix) * dry_aligned + mix * wet
+        1.0
     };
-    let out = signal * output_gain;
-    if out.is_finite() {
-        out
+    let gain = if output_gain.is_finite() {
+        output_gain.clamp(0.0, MAX_SAFE_SAMPLE)
     } else {
         0.0
-    }
+    };
+    let signal = if delta_listen {
+        dry - wet_clean
+    } else {
+        (1.0 - mix) * dry + mix * wet_clean
+    };
+    flush_denormal(signal * gain)
 }
 
 // ---------------------------------------------------------------------------
@@ -299,37 +334,62 @@ impl FrameProcessor for WienerFallbackProcessor {
         strength: f32,
         ambience_floor_gain: f32,
     ) {
-        let s = strength.clamp(0.0, 1.0);
+        let s = if strength.is_finite() {
+            strength.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         if s <= MIN_GAIN_EPS {
-            output.copy_from_slice(input);
+            for (dst, &src) in output.iter_mut().zip(input.iter()) {
+                *dst = sanitize_sample(src);
+            }
             return;
         }
 
         for (slot, &x) in self.fft_buf.iter_mut().zip(input.iter()) {
-            *slot = Complex32::new(x, 0.0);
+            *slot = Complex32::new(sanitize_sample(x), 0.0);
         }
         self.fft_in_place(false);
 
-        let floor_gain = ambience_floor_gain.clamp(MIN_GAIN_EPS, 1.0);
+        let floor_gain = if ambience_floor_gain.is_finite() {
+            ambience_floor_gain.clamp(MIN_GAIN_EPS, 1.0)
+        } else {
+            MIN_GAIN_EPS
+        };
         let over_sub = 1.0 + 1.5 * s;
 
         for bin in 0..NUM_BINS {
-            let psd = self.fft_buf[bin].norm_sq();
-            if !self.initialized_noise {
+            let raw_psd = self.fft_buf[bin].norm_sq();
+            let psd = if raw_psd.is_finite() && raw_psd >= 0.0 {
+                raw_psd
+            } else {
+                0.0
+            };
+            if !self.initialized_noise || !self.noise_psd[bin].is_finite() {
                 self.noise_psd[bin] = psd.max(1e-8);
             } else {
                 // Asymmetric minimum-tracking noise estimator: drops quickly on quiet frames,
                 // rises slowly during sustained stationary noise while protecting speech peaks.
                 let alpha = if psd < self.noise_psd[bin] { 0.80 } else { 0.992 };
-                self.noise_psd[bin] = (alpha * self.noise_psd[bin] + (1.0 - alpha) * psd).max(1e-9);
+                let updated = alpha * self.noise_psd[bin] + (1.0 - alpha) * psd;
+                self.noise_psd[bin] = if updated.is_finite() {
+                    updated.max(1e-9)
+                } else {
+                    1e-8
+                };
             }
 
-            let noise = self.noise_psd[bin];
-            let post_snr = (psd / noise).max(1.0);
+            let noise = self.noise_psd[bin].max(1e-9);
+            let post_snr = (psd / noise).clamp(1.0, 1e12);
             let wiener = ((post_snr - over_sub).max(0.0) / post_snr).sqrt();
-            let target_gain = (1.0 - s) + s * wiener.max(floor_gain);
+            let target_gain = ((1.0 - s) + s * wiener.max(floor_gain)).clamp(floor_gain, 1.0);
             // Temporal smoothing prevents musical noise artifacts
-            let smooth_gain = (0.65 * self.prev_gain[bin] + 0.35 * target_gain).clamp(floor_gain, 1.0);
+            let prev = if self.prev_gain[bin].is_finite() {
+                self.prev_gain[bin]
+            } else {
+                1.0
+            };
+            let smooth_gain = (0.65 * prev + 0.35 * target_gain).clamp(floor_gain, 1.0);
             self.prev_gain[bin] = smooth_gain;
 
             self.fft_buf[bin].re *= smooth_gain;
@@ -344,7 +404,7 @@ impl FrameProcessor for WienerFallbackProcessor {
 
         self.fft_in_place(true);
         for (dst, src) in output.iter_mut().zip(self.fft_buf.iter()) {
-            *dst = if src.re.is_finite() { src.re } else { 0.0 };
+            *dst = flush_denormal(src.re);
         }
     }
 }
@@ -491,14 +551,16 @@ impl ChannelDspState {
         delta_listen: bool,
         output_gain: f32,
     ) -> f32 {
+        let clean_dry = sanitize_sample(dry_sample);
+
         // 1. Exact delay line matching end-to-end OLA latency (FRAME_SIZE samples:
         //    FRAME_HOP output priming + FRAME_HOP overlap alignment).
         let dry_aligned = self.dry_delay[self.dry_delay_pos];
-        self.dry_delay[self.dry_delay_pos] = dry_sample;
+        self.dry_delay[self.dry_delay_pos] = clean_dry;
         self.dry_delay_pos = (self.dry_delay_pos + 1) % FRAME_SIZE;
 
         // 2. Push into lock-free ring buffer and shift into analysis frame
-        let _ = self.input_ring.push(dry_sample);
+        let _ = self.input_ring.push(clean_dry);
         if let Some(s) = self.input_ring.pop() {
             self.analysis_frame[FRAME_HOP + self.hop_counter] = s;
             self.hop_counter += 1;
@@ -513,12 +575,17 @@ impl ChannelDspState {
 
                 // Overlap-add synthesis with periodic Hann COLA window
                 for i in 0..FRAME_HOP {
-                    let y = self.ola_tail[i] + self.processed_frame[i] * self.hann_window[i];
+                    let y = flush_denormal(
+                        self.ola_tail[i]
+                            + sanitize_sample(self.processed_frame[i]) * self.hann_window[i],
+                    );
                     let _ = self.output_ring.push(y);
                 }
                 for i in 0..FRAME_HOP {
-                    self.ola_tail[i] =
-                        self.processed_frame[FRAME_HOP + i] * self.hann_window[FRAME_HOP + i];
+                    self.ola_tail[i] = flush_denormal(
+                        sanitize_sample(self.processed_frame[FRAME_HOP + i])
+                            * self.hann_window[FRAME_HOP + i],
+                    );
                 }
 
                 // Shift second half of analysis window into first half for 50% overlap
@@ -660,6 +727,9 @@ impl Plugin for HawaVoCleanPlugin {
         buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
+        if !buffer_config.sample_rate.is_finite() || buffer_config.sample_rate <= 0.0 {
+            return false;
+        }
         self.sample_rate = buffer_config.sample_rate;
         let num_channels = audio_io_layout
             .main_output_channels
@@ -849,5 +919,311 @@ mod tests {
             delta_energy > in_energy * 0.1,
             "Expected Delta listen to expose removed noise energy: delta={delta_energy}, in={in_energy}"
         );
+    }
+
+    struct TestInitContext {
+        latency_samples: std::sync::atomic::AtomicU32,
+    }
+
+    impl TestInitContext {
+        fn new() -> Self {
+            Self {
+                latency_samples: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl InitContext<HawaVoCleanPlugin> for TestInitContext {
+        fn plugin_api(&self) -> PluginApi {
+            PluginApi::Clap
+        }
+        fn execute(&self, _task: ()) {}
+        fn set_latency_samples(&self, samples: u32) {
+            self.latency_samples.store(samples, Ordering::Relaxed);
+        }
+        fn set_current_voice_capacity(&self, _capacity: u32) {}
+    }
+
+    struct TestProcessContext;
+
+    impl ProcessContext<HawaVoCleanPlugin> for TestProcessContext {
+        fn plugin_api(&self) -> PluginApi {
+            PluginApi::Clap
+        }
+        fn execute_background(&self, _task: ()) {}
+        fn execute_gui(&self, _task: ()) {}
+        fn transport(&self) -> &Transport {
+            unreachable!("HawaVoCleanPlugin::process does not access transport")
+        }
+        fn next_event(&mut self) -> Option<PluginNoteEvent<HawaVoCleanPlugin>> {
+            None
+        }
+        fn send_event(&mut self, _event: PluginNoteEvent<HawaVoCleanPlugin>) {}
+        fn set_latency_samples(&self, _samples: u32) {}
+        fn set_current_voice_capacity(&self, _capacity: u32) {}
+    }
+
+    fn process_plugin_block(plugin: &mut HawaVoCleanPlugin, channels: &mut [Vec<f32>]) {
+        let num_samples = channels.first().map_or(0, Vec::len);
+        let mut buffer = Buffer::default();
+        // SAFETY: all slices have identical length `num_samples` and live for the duration of `process`.
+        unsafe {
+            buffer.set_slices(num_samples, |output_slices| {
+                output_slices.clear();
+                for ch in channels.iter_mut() {
+                    output_slices.push(ch.as_mut_slice());
+                }
+            });
+        }
+        let mut aux = AuxiliaryBuffers {
+            inputs: &mut [],
+            outputs: &mut [],
+        };
+        let mut ctx = TestProcessContext;
+        let status = plugin.process(&mut buffer, &mut aux, &mut ctx);
+        assert_eq!(status, ProcessStatus::Normal);
+    }
+
+    #[test]
+    fn nan_inf_and_subnormal_inputs_never_poison_wiener_or_ola_state() {
+        let mut wiener = WienerFallbackProcessor::new();
+        let mut poisoned = [0.0f32; FRAME_SIZE];
+        let mut out = [0.0f32; FRAME_SIZE];
+
+        // Fill frame with NaN, +/-Inf, +/-MAX, and positive/negative subnormals
+        for (i, slot) in poisoned.iter_mut().enumerate() {
+            *slot = match i % 8 {
+                0 => f32::NAN,
+                1 => f32::INFINITY,
+                2 => f32::NEG_INFINITY,
+                3 => f32::MIN_POSITIVE * 0.25, // positive subnormal
+                4 => -(f32::MIN_POSITIVE * 0.5), // negative subnormal
+                5 => f32::from_bits(1),         // smallest positive subnormal
+                6 => f32::MAX,
+                _ => f32::MIN,
+            };
+        }
+
+        // 1. Active processing with poisoned input + poisoned parameters
+        wiener.process_frame(&poisoned, &mut out, 1.0, db_to_gain(-24.0));
+        for &y in &out {
+            assert!(y.is_finite() && !y.is_subnormal(), "bad output sample: {y}");
+        }
+        for bin in 0..NUM_BINS {
+            assert!(
+                wiener.noise_psd[bin].is_finite() && wiener.noise_psd[bin] >= 1e-9,
+                "noise_psd[{bin}] poisoned: {}",
+                wiener.noise_psd[bin]
+            );
+            assert!(
+                wiener.prev_gain[bin].is_finite()
+                    && !wiener.prev_gain[bin].is_subnormal()
+                    && (0.0..=1.0).contains(&wiener.prev_gain[bin]),
+                "prev_gain[{bin}] poisoned: {}",
+                wiener.prev_gain[bin]
+            );
+        }
+
+        // 2. Bypass path (strength = 0.0) and NaN parameter paths must still sanitize output
+        wiener.process_frame(&poisoned, &mut out, 0.0, 0.01);
+        for &y in &out {
+            assert!(y.is_finite() && !y.is_subnormal(), "bypass leaked bad sample: {y}");
+        }
+        wiener.process_frame(&poisoned, &mut out, f32::NAN, f32::NAN);
+        for &y in &out {
+            assert!(y.is_finite() && !y.is_subnormal(), "NaN param leaked bad sample: {y}");
+        }
+
+        // 3. Subsequent clean sine frames must recover cleanly through ChannelDspState
+        let mut ch = ChannelDspState::new(Box::new(WienerFallbackProcessor::new()));
+        for &bad in &poisoned {
+            let y = ch.process_sample(bad, 0.9, db_to_gain(-24.0), 1.0, false, 1.0);
+            assert!(y.is_finite() && !y.is_subnormal(), "streaming poisoned output: {y}");
+        }
+
+        let mut clean_energy = 0.0f64;
+        for i in 0..(FRAME_SIZE * 8) {
+            let x = 0.35 * (2.0 * PI * 440.0 * (i as f32) / 48_000.0).sin();
+            let y = ch.process_sample(x, 0.85, db_to_gain(-24.0), 1.0, false, 1.0);
+            assert!(y.is_finite() && !y.is_subnormal(), "post-poison sample {i} invalid: {y}");
+            if i >= FRAME_SIZE * 3 {
+                clean_energy += (y as f64) * (y as f64);
+            }
+        }
+        assert!(
+            clean_energy > 1.0,
+            "processor failed to recover clean signal after NaN/Inf burst: energy={clean_energy}"
+        );
+    }
+
+    #[test]
+    fn zero_length_and_one_sample_buffers_process_safely() {
+        let mut plugin = HawaVoCleanPlugin::default();
+        let mut init_ctx = TestInitContext::new();
+        let layout = HawaVoCleanPlugin::AUDIO_IO_LAYOUTS[0];
+        let cfg = BufferConfig {
+            sample_rate: 48_000.0,
+            min_buffer_size: Some(0),
+            max_buffer_size: 512,
+            process_mode: ProcessMode::Realtime,
+        };
+        assert!(plugin.initialize(&layout, &cfg, &mut init_ctx));
+        assert_eq!(init_ctx.latency_samples.load(Ordering::Relaxed), FRAME_SIZE as u32);
+
+        // 0-length buffer
+        let mut empty = vec![Vec::<f32>::new(), Vec::<f32>::new()];
+        process_plugin_block(&mut plugin, &mut empty);
+
+        // 1-sample buffer streamed across > 2 full STFT frames including NaN/subnormal samples
+        for i in 0..(FRAME_SIZE * 3) {
+            let s = match i {
+                0 => f32::NAN,
+                1 => f32::INFINITY,
+                2 => f32::MIN_POSITIVE * 0.25,
+                _ => 0.25 * (2.0 * PI * 330.0 * (i as f32) / 48_000.0).sin(),
+            };
+            let mut one = vec![vec![s], vec![-s]];
+            process_plugin_block(&mut plugin, &mut one);
+            for ch in &one {
+                let y = ch[0];
+                assert!(y.is_finite() && !y.is_subnormal(), "1-sample block {i} invalid: {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn continuous_100_block_streaming_stability() {
+        let mut plugin = HawaVoCleanPlugin::default();
+        let mut init_ctx = TestInitContext::new();
+        let layout = HawaVoCleanPlugin::AUDIO_IO_LAYOUTS[0];
+        let cfg = BufferConfig {
+            sample_rate: 48_000.0,
+            min_buffer_size: Some(1),
+            max_buffer_size: 512,
+            process_mode: ProcessMode::Realtime,
+        };
+        assert!(plugin.initialize(&layout, &cfg, &mut init_ctx));
+
+        let mut seed: u32 = 0xDEAD_BEEF;
+        let mut max_abs = 0.0f32;
+        for block in 0..100usize {
+            let mut left = vec![0.0f32; 512];
+            let mut right = vec![0.0f32; 512];
+            for i in 0..512 {
+                let n = block * 512 + i;
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let noise = (((seed >> 8) as f32) / ((1u32 << 24) as f32) * 2.0 - 1.0) * 0.05;
+                let voice = 0.3 * (2.0 * PI * 220.0 * (n as f32) / 48_000.0).sin()
+                    + 0.15 * (2.0 * PI * 660.0 * (n as f32) / 48_000.0).sin();
+                left[i] = voice + noise;
+                right[i] = voice * 0.8 - noise;
+            }
+            // Inject occasional adversarial spikes in the middle of streaming
+            if block == 25 {
+                left[17] = f32::NAN;
+                right[99] = f32::NEG_INFINITY;
+            } else if block == 50 {
+                left[0] = f32::MIN_POSITIVE * 0.125;
+                right[511] = -(f32::MIN_POSITIVE * 0.125);
+            }
+
+            let mut stereo = vec![left, right];
+            process_plugin_block(&mut plugin, &mut stereo);
+            for ch in &stereo {
+                for &y in ch {
+                    assert!(
+                        y.is_finite() && !y.is_subnormal(),
+                        "unstable sample in block {block}: {y}"
+                    );
+                    max_abs = max_abs.max(y.abs());
+                }
+            }
+        }
+        assert!(max_abs > 0.05 && max_abs < 5.0, "unexpected streaming peak amplitude: {max_abs}");
+    }
+
+    #[test]
+    fn extreme_sample_rates_initialize_and_process_cleanly() {
+        let layout = HawaVoCleanPlugin::AUDIO_IO_LAYOUTS[1]; // mono
+
+        // Invalid sample rates must be rejected cleanly
+        for bad_sr in [0.0f32, -48_000.0, f32::NAN, f32::INFINITY] {
+            let mut plugin = HawaVoCleanPlugin::default();
+            let mut init_ctx = TestInitContext::new();
+            let cfg = BufferConfig {
+                sample_rate: bad_sr,
+                min_buffer_size: Some(1),
+                max_buffer_size: 512,
+                process_mode: ProcessMode::Realtime,
+            };
+            assert!(
+                !plugin.initialize(&layout, &cfg, &mut init_ctx),
+                "expected invalid sample rate {bad_sr} to be rejected"
+            );
+        }
+
+        // Valid extreme sample rates: 8 kHz through 192 kHz
+        for sr in [8_000.0f32, 44_100.0, 48_000.0, 96_000.0, 192_000.0] {
+            let mut plugin = HawaVoCleanPlugin::default();
+            let mut init_ctx = TestInitContext::new();
+            let cfg = BufferConfig {
+                sample_rate: sr,
+                min_buffer_size: Some(1),
+                max_buffer_size: 512,
+                process_mode: ProcessMode::Realtime,
+            };
+            assert!(plugin.initialize(&layout, &cfg, &mut init_ctx), "failed init at {sr} Hz");
+
+            for block in 0..8usize {
+                let mut mono = vec![(0..256)
+                    .map(|i| {
+                        let n = block * 256 + i;
+                        0.3 * (2.0 * PI * 400.0 * (n as f32) / sr).sin()
+                    })
+                    .collect::<Vec<f32>>()];
+                process_plugin_block(&mut plugin, &mut mono);
+                for &y in &mono[0] {
+                    assert!(y.is_finite() && !y.is_subnormal(), "bad sample at {sr} Hz: {y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sudden_parameter_jumps_mid_frame_stay_finite_and_bounded() {
+        let mut ch = ChannelDspState::new(Box::new(WienerFallbackProcessor::new()));
+        let total = FRAME_SIZE * 12;
+
+        for i in 0..total {
+            let x = 0.4 * (2.0 * PI * 500.0 * (i as f32) / 48_000.0).sin()
+                + 0.08 * (2.0 * PI * 1900.0 * (i as f32) / 48_000.0).cos();
+
+            // Abrupt mid-frame strength 0 -> 1 -> 0 jumps
+            let strength = match (i / 137) % 3 {
+                0 => 0.0,
+                1 => 1.0,
+                _ => 0.5,
+            };
+            // Abrupt mid-frame delta_listen flip
+            let delta_listen = (i % 193) > 73;
+            // Full ambience_floor_db sweep across [-60 dB, 0 dB]
+            let floor_db = -60.0 + 60.0 * ((i % 257) as f32 / 256.0);
+            let floor_gain = db_to_gain(floor_db);
+            // Wet/dry and output gain sweeps
+            let wet_dry = if (i % 101) < 50 { 0.0 } else { 1.0 };
+            let out_gain = db_to_gain(-12.0 + 24.0 * ((i % 89) as f32 / 88.0));
+
+            let y = ch.process_sample(x, strength, floor_gain, wet_dry, delta_listen, out_gain);
+            assert!(
+                y.is_finite() && !y.is_subnormal() && y.abs() < 20.0,
+                "parameter jump produced invalid sample at i={i}: {y}"
+            );
+        }
+
+        // Also validate non-finite scalar parameter handling in db_to_gain & apply_output_mix
+        assert_eq!(db_to_gain(f32::NAN), 0.0);
+        assert_eq!(db_to_gain(f32::INFINITY), 0.0);
+        assert_eq!(apply_output_mix(f32::NAN, 0.5, f32::NAN, false, f32::INFINITY), 0.0);
+        assert_eq!(apply_output_mix(0.5, f32::INFINITY, 0.5, true, 1.0), 0.5);
     }
 }

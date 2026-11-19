@@ -24,6 +24,69 @@ const TRANSACTIONS_DIR = path.join(
   'resolve-transactions'
 );
 
+const MAX_MARKER_NAME_LEN = 256;
+const MAX_MARKER_NOTE_LEN = 2048;
+const MAX_IPC_MARKER_NOTE_LEN = 10_240;
+const MAX_MARKER_COLOR_LEN = 64;
+const MAX_SCORE_VALUE_LEN = 128;
+const MAX_REPORT_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_BATCH_CLIPS = 1000;
+const MAX_GUARD_MARKERS = 5000;
+const MAX_GUARD_REPORT_UNITS = 10_000;
+const MAX_PATH_LEN = 4096;
+const MAX_TRACK_NAME_LEN = 256;
+const MAX_CLIP_ID_LEN = 512;
+const MAX_FPS = 1000;
+
+/**
+ * Safely extracts an error message from any thrown value (including non-Error/null throws).
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function errorMessage(err) {
+  if (err && typeof err === 'object' && 'message' in err) {
+    return String(/** @type {{ message: unknown }} */ (err).message);
+  }
+  return String(err);
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, any>}
+ */
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Parses a finite numeric value while rejecting null, empty strings, and booleans.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function parseFiniteNumber(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean' || typeof value === 'symbol') {
+    return null;
+  }
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Strips NUL bytes and caps string length deterministically so oversized text cannot
+ * wedge DaVinci Resolve's IPC or marker database.
+ *
+ * @param {unknown} value
+ * @param {number} maxLen
+ * @returns {string}
+ */
+function sanitizeBoundedText(value, maxLen) {
+  const cleaned = String(value).replace(/\0/g, '');
+  if (cleaned.length <= maxLen) return cleaned;
+  return `${cleaned.slice(0, Math.max(0, maxLen - 1))}…`;
+}
+
 /**
  * Validates that an audio file is a valid 48 kHz WAV file.
  *
@@ -31,6 +94,9 @@ const TRANSACTIONS_DIR = path.join(
  * @returns {{ valid: boolean, sampleRate: number, channels: number, bitsPerSample: number, format: string, error?: string }}
  */
 function validateAudioFormat(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0 || filePath.includes('\0')) {
+    return { valid: false, sampleRate: 0, channels: 0, bitsPerSample: 0, format: 'unknown', error: 'Invalid audio file path' };
+  }
   let fd;
   try {
     const stat = fs.statSync(filePath);
@@ -62,6 +128,9 @@ function validateAudioFormat(filePath) {
       const chunkSize = header.readUInt32LE(offset + 4);
 
       if (chunkId === 'fmt ') {
+        if (chunkSize < 16 || offset + 24 > bytesRead) {
+          return { valid: false, sampleRate: 0, channels: 0, bitsPerSample: 0, format: 'unknown', error: 'Truncated fmt chunk in WAV' };
+        }
         foundFmt = true;
         audioFormat = header.readUInt16LE(offset + 8);
         numChannels = header.readUInt16LE(offset + 10);
@@ -69,7 +138,7 @@ function validateAudioFormat(filePath) {
         bitsPerSample = header.readUInt16LE(offset + 22);
         break;
       }
-      offset += 8 + chunkSize;
+      offset += 8 + chunkSize + (chunkSize % 2);
     }
 
     if (!foundFmt) {
@@ -108,7 +177,7 @@ function validateAudioFormat(filePath) {
       format: audioFormat === 3 ? 'float' : 'pcm',
     };
   } catch (err) {
-    return { valid: false, sampleRate: 0, channels: 0, bitsPerSample: 0, format: 'unknown', error: err.message };
+    return { valid: false, sampleRate: 0, channels: 0, bitsPerSample: 0, format: 'unknown', error: errorMessage(err) };
   } finally {
     if (fd !== undefined) {
       try {
@@ -136,7 +205,7 @@ function formatGuardScoreValue(value) {
     if (!Number.isFinite(value)) return String(value);
     return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
   }
-  return String(value);
+  return sanitizeBoundedText(value, MAX_SCORE_VALUE_LEN);
 }
 
 /**
@@ -220,34 +289,40 @@ function extractGuardMarkersFromReport(
   report,
   clipStartFrame,
   fps,
-  { sourceOffsetS = 0, lowStrengthThreshold = 0.5 } = {}
+  options = {}
 ) {
-  if (!report || typeof report !== 'object' || !Array.isArray(report.units) || report.units.length === 0) {
+  if (!isPlainObject(report) || !Array.isArray(report.units) || report.units.length === 0) {
     return [];
   }
-  const rate = Number(fps);
-  if (!Number.isFinite(rate) || rate <= 0) {
+  const rate = parseFiniteNumber(fps);
+  if (rate === null || rate <= 0) {
     return [];
   }
 
-  const baseFrame = Number.isFinite(Number(clipStartFrame)) ? Math.round(Number(clipStartFrame)) : 0;
-  const offsetS = Number.isFinite(Number(sourceOffsetS)) && Number(sourceOffsetS) > 0 ? Number(sourceOffsetS) : 0;
-  const threshold = Number.isFinite(Number(lowStrengthThreshold)) ? Number(lowStrengthThreshold) : 0.5;
+  const opts = isPlainObject(options) ? options : {};
+  const parsedClipStart = parseFiniteNumber(clipStartFrame);
+  const baseFrame = parsedClipStart !== null ? Math.max(0, Math.round(parsedClipStart)) : 0;
+  const parsedOffset = parseFiniteNumber(opts.sourceOffsetS);
+  const offsetS = parsedOffset !== null && parsedOffset > 0 ? parsedOffset : 0;
+  const parsedThreshold = parseFiniteNumber(opts.lowStrengthThreshold);
+  const threshold = parsedThreshold !== null ? parsedThreshold : 0.5;
 
   /** @type {Array<{ frameOffset: number, color: 'Red' | 'Yellow', name: string, note: string, durationFrames: number, decision: string, unitId: number | null }>} */
   const markers = [];
+  const unitLimit = Math.min(report.units.length, MAX_GUARD_REPORT_UNITS);
 
-  for (const unit of report.units) {
-    if (!unit || typeof unit !== 'object') continue;
+  for (let i = 0; i < unitLimit; i += 1) {
+    const unit = report.units[i];
+    if (!isPlainObject(unit)) continue;
     const classification = classifyUnitForGuardMarker(unit, threshold);
     if (!classification) continue;
 
     const startRaw = unit.start_time_s ?? unit.startTimeS ?? unit.start_s;
     const endRaw = unit.end_time_s ?? unit.endTimeS ?? unit.end_s;
-    const startS = Number(startRaw);
-    if (!Number.isFinite(startS)) continue;
-    const endParsed = Number(endRaw);
-    const endS = Number.isFinite(endParsed) && endParsed >= startS ? endParsed : startS;
+    const startS = parseFiniteNumber(startRaw);
+    if (startS === null) continue;
+    const endParsed = parseFiniteNumber(endRaw);
+    const endS = endParsed !== null && endParsed >= startS ? endParsed : startS;
 
     // Skip units that ended entirely before the clip's visible in-point handle
     if (offsetS > 0 && endS <= offsetS) continue;
@@ -255,39 +330,49 @@ function extractGuardMarkersFromReport(
     const relStartS = Math.max(0, startS - offsetS);
     const relEndS = Math.max(relStartS, endS - offsetS);
     const frameOffset = baseFrame + Math.round(relStartS * rate);
-    const durationFrames = Math.max(1, Math.round((relEndS - relStartS) * rate));
+    const rawDuration = Math.round((relEndS - relStartS) * rate);
+    if (!Number.isSafeInteger(frameOffset) || frameOffset < 0 || !Number.isSafeInteger(rawDuration)) {
+      continue;
+    }
+    const durationFrames = Math.max(1, rawDuration);
 
     const unitIdRaw = unit.unit_id ?? unit.unitId;
-    const unitId = unitIdRaw !== undefined && unitIdRaw !== null && Number.isFinite(Number(unitIdRaw))
-      ? Number(unitIdRaw)
-      : null;
+    const unitId = parseFiniteNumber(unitIdRaw);
 
-    const name = unitId !== null
+    const rawName = unitId !== null
       ? `HawaVoClean Guard: ${classification.decision} (unit ${unitId})`
       : `HawaVoClean Guard: ${classification.decision}`;
+    const name = sanitizeBoundedText(rawName, MAX_MARKER_NAME_LEN);
 
     const noteParts = [];
     if (typeof unit.decision_reason === 'string' && unit.decision_reason.trim().length > 0) {
-      noteParts.push(unit.decision_reason.trim());
+      noteParts.push(sanitizeBoundedText(unit.decision_reason.trim(), MAX_MARKER_NOTE_LEN));
     }
-    if (classification.decision === 'LOW_STRENGTH' && Number.isFinite(Number(unit.chosen_strength))) {
-      noteParts.push(`chosen_strength=${formatGuardScoreValue(Number(unit.chosen_strength))}`);
+    const chosenStrength = parseFiniteNumber(unit.chosen_strength);
+    if (classification.decision === 'LOW_STRENGTH' && chosenStrength !== null) {
+      noteParts.push(`chosen_strength=${formatGuardScoreValue(chosenStrength)}`);
     }
 
     const scoreEntries = [];
-    if (unit.guard_a_scores && typeof unit.guard_a_scores === 'object' && !Array.isArray(unit.guard_a_scores)) {
+    let scoreChars = 0;
+    const appendScore = (entry) => {
+      if (scoreChars >= MAX_MARKER_NOTE_LEN) return;
+      scoreEntries.push(entry);
+      scoreChars += entry.length + 2;
+    };
+    if (isPlainObject(unit.guard_a_scores)) {
       for (const key of Object.keys(unit.guard_a_scores).sort()) {
         const val = unit.guard_a_scores[key];
         if (val !== undefined && val !== null) {
-          scoreEntries.push(`${key}=${formatGuardScoreValue(val)}`);
+          appendScore(`${sanitizeBoundedText(key, MAX_SCORE_VALUE_LEN)}=${formatGuardScoreValue(val)}`);
         }
       }
     }
-    if (unit.guard_b_scores && typeof unit.guard_b_scores === 'object' && !Array.isArray(unit.guard_b_scores)) {
+    if (isPlainObject(unit.guard_b_scores)) {
       for (const key of Object.keys(unit.guard_b_scores).sort()) {
         const val = unit.guard_b_scores[key];
         if (val !== undefined && val !== null) {
-          scoreEntries.push(`guard_b.${key}=${formatGuardScoreValue(val)}`);
+          appendScore(`guard_b.${sanitizeBoundedText(key, MAX_SCORE_VALUE_LEN)}=${formatGuardScoreValue(val)}`);
         }
       }
     }
@@ -295,7 +380,8 @@ function extractGuardMarkersFromReport(
       noteParts.push(`scores: ${scoreEntries.join(', ')}`);
     }
 
-    const note = noteParts.length > 0 ? noteParts.join(' | ') : `Decision: ${classification.decision}`;
+    const rawNote = noteParts.length > 0 ? noteParts.join(' | ') : `Decision: ${classification.decision}`;
+    const note = sanitizeBoundedText(rawNote, MAX_MARKER_NOTE_LEN);
 
     markers.push({
       frameOffset,
@@ -328,12 +414,12 @@ function extractGuardMarkersFromReport(
  * @returns {object | null}
  */
 function resolveClipReport(entry, cleanedFilePath) {
-  if (entry && typeof entry === 'object' && entry.report && typeof entry.report === 'object') {
+  if (isPlainObject(entry) && isPlainObject(entry.report)) {
     return entry.report;
   }
 
   const candidatePaths = [];
-  if (entry && typeof entry === 'object' && typeof entry.reportPath === 'string' && entry.reportPath.length > 0) {
+  if (isPlainObject(entry) && typeof entry.reportPath === 'string' && entry.reportPath.length > 0) {
     candidatePaths.push(entry.reportPath);
   }
   if (typeof cleanedFilePath === 'string' && cleanedFilePath.length > 0) {
@@ -342,11 +428,14 @@ function resolveClipReport(entry, cleanedFilePath) {
   }
 
   for (const candidate of candidatePaths) {
-    if (!path.isAbsolute(candidate)) continue;
+    if (candidate.includes('\0') || candidate.length > MAX_PATH_LEN || !path.isAbsolute(candidate)) continue;
     try {
-      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-        const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8'));
-        if (parsed && typeof parsed === 'object') return parsed;
+      if (fs.existsSync(candidate)) {
+        const stat = fs.statSync(candidate);
+        if (stat.isFile() && stat.size <= MAX_REPORT_FILE_BYTES) {
+          const parsed = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+          if (isPlainObject(parsed)) return parsed;
+        }
       }
     } catch (_) {
       // Malformed or unreadable sidecar report does not abort audio delivery
@@ -354,6 +443,251 @@ function resolveClipReport(entry, cleanedFilePath) {
   }
 
   return null;
+}
+
+/**
+ * Validates an untrusted IPC payload for `hawa:resolve:batch-clean-track` before touching Resolve API.
+ * Strips unknown fields (such as test-only `failPoint` or `timeline`) and returns a clean DTO.
+ *
+ * @param {unknown} payload
+ * @returns {{ clips: Array<object>, cleanedByClipId: Record<string, any> | Map<string, any>, targetTrackName: string | undefined, fps: number | undefined, addGuardMarkers: boolean | undefined }}
+ */
+function validateBatchCleanTrackPayload(payload) {
+  if (!isPlainObject(payload)) {
+    throw new Error('batchCleanTrack: payload must be a plain object.');
+  }
+  if (!Array.isArray(payload.clips) || payload.clips.length === 0) {
+    throw new Error('batchCleanTrack: clips must be a non-empty array.');
+  }
+  if (payload.clips.length > MAX_BATCH_CLIPS) {
+    throw new Error(`batchCleanTrack: clips exceeds maximum batch size (${MAX_BATCH_CLIPS}).`);
+  }
+  const mapIsMap = payload.cleanedByClipId instanceof Map;
+  if (!mapIsMap && !isPlainObject(payload.cleanedByClipId)) {
+    throw new Error('batchCleanTrack: cleanedByClipId must be an object or Map.');
+  }
+  const mapSize = mapIsMap ? payload.cleanedByClipId.size : Object.keys(payload.cleanedByClipId).length;
+  if (mapSize === 0 || mapSize > MAX_BATCH_CLIPS) {
+    throw new Error(`batchCleanTrack: cleanedByClipId must contain 1..${MAX_BATCH_CLIPS} entries.`);
+  }
+
+  let targetTrackName;
+  if (payload.targetTrackName !== undefined) {
+    if (
+      typeof payload.targetTrackName !== 'string' ||
+      payload.targetTrackName.includes('\0') ||
+      payload.targetTrackName.trim().length === 0 ||
+      payload.targetTrackName.length > MAX_TRACK_NAME_LEN
+    ) {
+      throw new Error(`batchCleanTrack: targetTrackName must be a non-empty string (<= ${MAX_TRACK_NAME_LEN} chars).`);
+    }
+    targetTrackName = payload.targetTrackName;
+  }
+
+  let fps;
+  if (payload.fps !== undefined) {
+    const rate = parseFiniteNumber(payload.fps);
+    if (rate === null || rate <= 0 || rate > MAX_FPS) {
+      throw new Error(`batchCleanTrack: fps must be a finite number in (0, ${MAX_FPS}].`);
+    }
+    fps = rate;
+  }
+
+  let addGuardMarkers;
+  if (payload.addGuardMarkers !== undefined) {
+    if (typeof payload.addGuardMarkers !== 'boolean') {
+      throw new Error('batchCleanTrack: addGuardMarkers must be a boolean.');
+    }
+    addGuardMarkers = payload.addGuardMarkers;
+  }
+
+  const seenClipIds = new Set();
+  for (let i = 0; i < payload.clips.length; i += 1) {
+    const clip = payload.clips[i];
+    if (!isPlainObject(clip)) {
+      throw new Error(`batchCleanTrack: clip at index ${i} must be an object.`);
+    }
+    const rawId = clip.clipId ?? clip.mediaId ?? clip.id;
+    if (typeof rawId !== 'string' || rawId.includes('\0')) {
+      throw new Error(`batchCleanTrack: clip at index ${i} must have a valid string clipId.`);
+    }
+    const clipId = rawId.trim();
+    if (!clipId || clipId.length > MAX_CLIP_ID_LEN) {
+      throw new Error(`batchCleanTrack: clip at index ${i} clipId is empty or too long.`);
+    }
+    if (seenClipIds.has(clipId)) {
+      throw new Error(`batchCleanTrack: duplicate clipId '${clipId}' at index ${i}.`);
+    }
+    seenClipIds.add(clipId);
+
+    const startRaw = clip.startFrame ?? clip.recordFrame;
+    if (startRaw !== undefined) {
+      const parsedStart = parseFiniteNumber(startRaw);
+      if (parsedStart === null || parsedStart < 0) {
+        throw new Error(`batchCleanTrack: invalid startFrame for clip '${clipId}'.`);
+      }
+    }
+
+    const cleanedEntry = mapIsMap
+      ? payload.cleanedByClipId.get(clipId)
+      : (Object.prototype.hasOwnProperty.call(payload.cleanedByClipId, clipId) ? payload.cleanedByClipId[clipId] : undefined);
+    if (!cleanedEntry) {
+      throw new Error(`batchCleanTrack: missing cleaned audio entry for clip '${clipId}'.`);
+    }
+    const filePath = typeof cleanedEntry === 'string'
+      ? cleanedEntry
+      : (isPlainObject(cleanedEntry) ? cleanedEntry.filePath : null);
+    if (
+      typeof filePath !== 'string' ||
+      filePath.length === 0 ||
+      filePath.length > MAX_PATH_LEN ||
+      filePath.includes('\0') ||
+      !path.isAbsolute(filePath)
+    ) {
+      throw new Error(`batchCleanTrack: cleaned audio path for clip '${clipId}' must be a bounded absolute path.`);
+    }
+    if (isPlainObject(cleanedEntry)) {
+      if (cleanedEntry.reportPath !== undefined) {
+        if (
+          typeof cleanedEntry.reportPath !== 'string' ||
+          cleanedEntry.reportPath.length === 0 ||
+          cleanedEntry.reportPath.length > MAX_PATH_LEN ||
+          cleanedEntry.reportPath.includes('\0') ||
+          !path.isAbsolute(cleanedEntry.reportPath)
+        ) {
+          throw new Error(`batchCleanTrack: invalid reportPath for clip '${clipId}'.`);
+        }
+      }
+      if (cleanedEntry.report !== undefined && cleanedEntry.report !== null) {
+        if (!isPlainObject(cleanedEntry.report)) {
+          throw new Error(`batchCleanTrack: report for clip '${clipId}' must be an object.`);
+        }
+        if (cleanedEntry.report.units !== undefined) {
+          if (!Array.isArray(cleanedEntry.report.units) || cleanedEntry.report.units.length > MAX_GUARD_REPORT_UNITS) {
+            throw new Error(`batchCleanTrack: report.units for clip '${clipId}' is invalid or oversized.`);
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    clips: payload.clips,
+    cleanedByClipId: payload.cleanedByClipId,
+    targetTrackName,
+    fps,
+    addGuardMarkers,
+  };
+}
+
+/**
+ * Validates an untrusted IPC payload for `hawa:resolve:apply-guard-markers` before touching Resolve API.
+ *
+ * @param {unknown} payload
+ * @returns {{ report: object | null | undefined, reportPath: string | undefined, clipStartFrame: number | undefined, fps: number | undefined, sourceOffsetS: number | undefined, markers: Array<object> | undefined }}
+ */
+function validateApplyGuardMarkersPayload(payload) {
+  if (!isPlainObject(payload)) {
+    throw new Error('applyGuardMarkers: payload must be a plain object.');
+  }
+
+  let fps;
+  if (payload.fps !== undefined) {
+    const rate = parseFiniteNumber(payload.fps);
+    if (rate === null || rate <= 0 || rate > MAX_FPS) {
+      throw new Error(`applyGuardMarkers: fps must be a finite number in (0, ${MAX_FPS}].`);
+    }
+    fps = rate;
+  }
+
+  let clipStartFrame;
+  if (payload.clipStartFrame !== undefined) {
+    const frame = parseFiniteNumber(payload.clipStartFrame);
+    if (frame === null || frame < 0) {
+      throw new Error('applyGuardMarkers: clipStartFrame must be a finite non-negative number.');
+    }
+    clipStartFrame = frame;
+  }
+
+  let sourceOffsetS;
+  if (payload.sourceOffsetS !== undefined) {
+    const offset = parseFiniteNumber(payload.sourceOffsetS);
+    if (offset === null || offset < 0) {
+      throw new Error('applyGuardMarkers: sourceOffsetS must be a finite non-negative number.');
+    }
+    sourceOffsetS = offset;
+  }
+
+  let reportPath;
+  if (payload.reportPath !== undefined) {
+    if (
+      typeof payload.reportPath !== 'string' ||
+      payload.reportPath.length === 0 ||
+      payload.reportPath.length > MAX_PATH_LEN ||
+      payload.reportPath.includes('\0') ||
+      !path.isAbsolute(payload.reportPath)
+    ) {
+      throw new Error('applyGuardMarkers: reportPath must be a bounded absolute path.');
+    }
+    reportPath = payload.reportPath;
+  }
+
+  let report = payload.report;
+  if (report !== undefined && report !== null) {
+    if (!isPlainObject(report)) {
+      throw new Error('applyGuardMarkers: report must be a plain object.');
+    }
+    if (report.units !== undefined) {
+      if (!Array.isArray(report.units) || report.units.length > MAX_GUARD_REPORT_UNITS) {
+        throw new Error(`applyGuardMarkers: report.units must be an array of at most ${MAX_GUARD_REPORT_UNITS} items.`);
+      }
+    }
+  }
+
+  let markers;
+  if (payload.markers !== undefined) {
+    if (!Array.isArray(payload.markers)) {
+      throw new Error('applyGuardMarkers: markers must be an array.');
+    }
+    if (payload.markers.length > MAX_GUARD_MARKERS) {
+      throw new Error(`applyGuardMarkers: markers exceeds maximum count (${MAX_GUARD_MARKERS}).`);
+    }
+    for (let i = 0; i < payload.markers.length; i += 1) {
+      const m = payload.markers[i];
+      if (!isPlainObject(m)) {
+        throw new Error(`applyGuardMarkers: marker at index ${i} must be an object.`);
+      }
+      const frameOffset = parseFiniteNumber(m.frameOffset);
+      if (frameOffset === null || frameOffset < 0) {
+        throw new Error(`applyGuardMarkers: marker at index ${i} has invalid frameOffset.`);
+      }
+      if (m.color !== undefined && (typeof m.color !== 'string' || m.color.includes('\0') || m.color.length > MAX_MARKER_COLOR_LEN)) {
+        throw new Error(`applyGuardMarkers: marker at index ${i} has invalid color.`);
+      }
+      if (m.name !== undefined && (typeof m.name !== 'string' || m.name.includes('\0') || m.name.length > MAX_MARKER_NAME_LEN * 4)) {
+        throw new Error(`applyGuardMarkers: marker at index ${i} has invalid or oversized name.`);
+      }
+      if (m.note !== undefined && (typeof m.note !== 'string' || m.note.includes('\0') || m.note.length > MAX_IPC_MARKER_NOTE_LEN)) {
+        throw new Error(`applyGuardMarkers: marker at index ${i} has invalid or oversized note (> ${MAX_IPC_MARKER_NOTE_LEN} chars).`);
+      }
+      if (m.durationFrames !== undefined) {
+        const dur = parseFiniteNumber(m.durationFrames);
+        if (dur === null || dur < 1) {
+          throw new Error(`applyGuardMarkers: marker at index ${i} has invalid durationFrames.`);
+        }
+      }
+    }
+    markers = payload.markers;
+  }
+
+  return {
+    report,
+    reportPath,
+    clipStartFrame,
+    fps,
+    sourceOffsetS,
+    markers,
+  };
 }
 
 /** Explicit legal stage transitions for Resolve timeline transactions. */
@@ -806,15 +1140,113 @@ class TimelineTransactionManager {
     if (!Array.isArray(clips) || clips.length === 0) {
       throw new Error('batchTrackClean: clips must be a non-empty array.');
     }
-    if (!cleanedByClipId || typeof cleanedByClipId !== 'object') {
+    if (clips.length > MAX_BATCH_CLIPS) {
+      throw new Error(`batchTrackClean: clips exceeds maximum batch size (${MAX_BATCH_CLIPS}).`);
+    }
+    const mapIsMap = cleanedByClipId instanceof Map;
+    if (!mapIsMap && !isPlainObject(cleanedByClipId)) {
       throw new Error('batchTrackClean: cleanedByClipId map is required.');
     }
-    const rate = Number(fps);
-    if (!Number.isFinite(rate) || rate <= 0) {
+    const rate = parseFiniteNumber(fps);
+    if (rate === null || rate <= 0 || rate > MAX_FPS) {
       throw new Error(`batchTrackClean: invalid fps (${fps}).`);
     }
-    if (typeof targetTrackName !== 'string' || targetTrackName.trim().length === 0) {
+    if (
+      typeof targetTrackName !== 'string' ||
+      targetTrackName.includes('\0') ||
+      targetTrackName.trim().length === 0 ||
+      targetTrackName.length > MAX_TRACK_NAME_LEN
+    ) {
       throw new Error('batchTrackClean: targetTrackName must be a non-empty string.');
+    }
+
+    // 1. Pre-validate every clip, duplicate clipId, and cleaned 48 kHz WAV before touching Resolve API.
+    const prepared = [];
+    const seenClipIds = new Set();
+    let maxChannels = 1;
+
+    for (let i = 0; i < clips.length; i += 1) {
+      const clip = clips[i];
+      if (!isPlainObject(clip)) {
+        throw new Error(`batchTrackClean: clip at index ${i} must be an object.`);
+      }
+      const clipId = String(clip.clipId ?? clip.mediaId ?? clip.id ?? '').trim();
+      if (!clipId || clipId.includes('\0') || clipId.length > MAX_CLIP_ID_LEN) {
+        throw new Error(`batchTrackClean: clip at index ${i} is missing clipId/mediaId/id.`);
+      }
+      if (seenClipIds.has(clipId)) {
+        throw new Error(`batchTrackClean: duplicate clipId '${clipId}' at index ${i}.`);
+      }
+      seenClipIds.add(clipId);
+
+      const cleanedEntry = mapIsMap
+        ? cleanedByClipId.get(clipId)
+        : (Object.prototype.hasOwnProperty.call(cleanedByClipId, clipId) ? cleanedByClipId[clipId] : undefined);
+      if (!cleanedEntry) {
+        throw new Error(`batchTrackClean: missing cleaned audio entry for clip '${clipId}'.`);
+      }
+
+      const filePath = typeof cleanedEntry === 'string'
+        ? cleanedEntry
+        : (isPlainObject(cleanedEntry) ? cleanedEntry.filePath : null);
+      if (typeof filePath !== 'string' || filePath.includes('\0') || filePath.length > MAX_PATH_LEN || !path.isAbsolute(filePath)) {
+        throw new Error(`batchTrackClean: cleaned audio path for clip '${clipId}' must be absolute.`);
+      }
+
+      const audioCheck = validateAudioFormat(filePath);
+      if (!audioCheck.valid) {
+        throw new Error(`batchTrackClean rejected clip '${clipId}': ${audioCheck.error}`);
+      }
+      if (audioCheck.channels > maxChannels) {
+        maxChannels = audioCheck.channels;
+      }
+
+      let startRaw = clip.startFrame ?? clip.recordFrame;
+      if (startRaw === undefined && typeof clip.GetStart === 'function') {
+        startRaw = await clip.GetStart();
+      }
+      const startFrame = parseFiniteNumber(startRaw);
+      if (startFrame === null || startFrame < 0) {
+        throw new Error(`batchTrackClean: invalid startFrame for clip '${clipId}'.`);
+      }
+
+      const handleStartRaw = clip.sourceStartFrame ?? clip.startFrameInSource ?? clip.leftOffset;
+      const handleStartParsed = parseFiniteNumber(handleStartRaw);
+      const handleStartFrame = handleStartParsed !== null
+        ? Math.max(0, Math.round(handleStartParsed))
+        : null;
+
+      let handleEndFrame = null;
+      const handleEndRaw = clip.sourceEndFrame ?? clip.endFrameInSource;
+      const handleEndParsed = parseFiniteNumber(handleEndRaw);
+      const durationParsed = parseFiniteNumber(clip.durationFrames);
+      if (handleEndParsed !== null) {
+        handleEndFrame = Math.max(0, Math.round(handleEndParsed));
+      } else if (handleStartFrame !== null && durationParsed !== null && durationParsed > 0) {
+        handleEndFrame = handleStartFrame + Math.round(durationParsed);
+      }
+      if (handleStartFrame !== null && handleEndFrame !== null && handleEndFrame <= handleStartFrame) {
+        throw new Error(`batchTrackClean: invalid source handle range for clip '${clipId}' (${handleStartFrame}..${handleEndFrame}).`);
+      }
+
+      const offsetParsed = parseFiniteNumber(clip.sourceOffsetS);
+      const sourceOffsetS = offsetParsed !== null && offsetParsed > 0
+        ? offsetParsed
+        : (handleStartFrame !== null ? handleStartFrame / rate : 0);
+
+      const report = addGuardMarkers ? resolveClipReport(cleanedEntry, filePath) : null;
+      const mediaTypeParsed = parseFiniteNumber(clip.mediaType);
+
+      prepared.push({
+        clipId,
+        filePath,
+        startFrame: Math.round(startFrame),
+        handleStartFrame,
+        handleEndFrame,
+        sourceOffsetS,
+        mediaType: mediaTypeParsed !== null ? mediaTypeParsed : undefined,
+        report,
+      });
     }
 
     let activeTimeline = timeline || null;
@@ -830,85 +1262,6 @@ class TimelineTransactionManager {
     const mediaPool = await this.getMediaPool();
     if (!mediaPool) {
       throw new Error('MediaPool unavailable.');
-    }
-
-    // 1. Pre-validate every cleaned WAV and resolve clip alignment before any timeline mutation.
-    const prepared = [];
-    let maxChannels = 1;
-
-    for (let i = 0; i < clips.length; i += 1) {
-      const clip = clips[i];
-      if (!clip || typeof clip !== 'object') {
-        throw new Error(`batchTrackClean: clip at index ${i} must be an object.`);
-      }
-      const clipId = String(clip.clipId ?? clip.mediaId ?? clip.id ?? '').trim();
-      if (!clipId) {
-        throw new Error(`batchTrackClean: clip at index ${i} is missing clipId/mediaId/id.`);
-      }
-
-      const cleanedEntry = cleanedByClipId instanceof Map
-        ? cleanedByClipId.get(clipId)
-        : cleanedByClipId[clipId];
-      if (!cleanedEntry) {
-        throw new Error(`batchTrackClean: missing cleaned audio entry for clip '${clipId}'.`);
-      }
-
-      const filePath = typeof cleanedEntry === 'string' ? cleanedEntry : cleanedEntry.filePath;
-      if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
-        throw new Error(`batchTrackClean: cleaned audio path for clip '${clipId}' must be absolute.`);
-      }
-
-      const audioCheck = validateAudioFormat(filePath);
-      if (!audioCheck.valid) {
-        throw new Error(`batchTrackClean rejected clip '${clipId}': ${audioCheck.error}`);
-      }
-      if (audioCheck.channels > maxChannels) {
-        maxChannels = audioCheck.channels;
-      }
-
-      let startFrame = clip.startFrame ?? clip.recordFrame;
-      if (startFrame === undefined && typeof clip.GetStart === 'function') {
-        startFrame = await clip.GetStart();
-      }
-      startFrame = Number(startFrame);
-      if (!Number.isFinite(startFrame) || startFrame < 0) {
-        throw new Error(`batchTrackClean: invalid startFrame for clip '${clipId}'.`);
-      }
-
-      const handleStartRaw = clip.sourceStartFrame ?? clip.startFrameInSource ?? clip.leftOffset;
-      const handleStartFrame = handleStartRaw !== undefined && handleStartRaw !== null && Number.isFinite(Number(handleStartRaw))
-        ? Math.max(0, Math.round(Number(handleStartRaw)))
-        : null;
-
-      let handleEndFrame = null;
-      const handleEndRaw = clip.sourceEndFrame ?? clip.endFrameInSource;
-      if (handleEndRaw !== undefined && handleEndRaw !== null && Number.isFinite(Number(handleEndRaw))) {
-        handleEndFrame = Math.max(0, Math.round(Number(handleEndRaw)));
-      } else if (
-        handleStartFrame !== null &&
-        clip.durationFrames !== undefined &&
-        Number.isFinite(Number(clip.durationFrames)) &&
-        Number(clip.durationFrames) > 0
-      ) {
-        handleEndFrame = handleStartFrame + Math.round(Number(clip.durationFrames));
-      }
-
-      const sourceOffsetS = Number.isFinite(Number(clip.sourceOffsetS)) && Number(clip.sourceOffsetS) > 0
-        ? Number(clip.sourceOffsetS)
-        : (handleStartFrame !== null ? handleStartFrame / rate : 0);
-
-      const report = addGuardMarkers ? resolveClipReport(cleanedEntry, filePath) : null;
-
-      prepared.push({
-        clipId,
-        filePath,
-        startFrame: Math.round(startFrame),
-        handleStartFrame,
-        handleEndFrame,
-        sourceOffsetS,
-        mediaType: Number.isFinite(Number(clip.mediaType)) ? Number(clip.mediaType) : undefined,
-        report,
-      });
     }
 
     const trackSubtype = maxChannels === 1 ? 'mono' : 'stereo';
@@ -932,6 +1285,8 @@ class TimelineTransactionManager {
     const appendedItems = [];
     /** @type {Array<number>} */
     const addedMarkerFrames = [];
+    /** @type {Set<string>} */
+    const addedMarkerColors = new Set();
     /** @type {Array<object>} */
     const placedMarkers = [];
     const seenMarkerFrames = new Set();
@@ -1057,6 +1412,7 @@ class TimelineTransactionManager {
                 seenMarkerFrames.add(marker.frameOffset);
                 addedMarkerFrames.push(marker.frameOffset);
               }
+              addedMarkerColors.add(marker.color);
               placedMarkers.push(marker);
             }
           }
@@ -1081,41 +1437,64 @@ class TimelineTransactionManager {
         markers: placedMarkers,
       };
     } catch (err) {
-      this.log(`transactionalBatchTrackClean failed: ${err.message}. Initiating compensating rollback...`);
+      this.log(`transactionalBatchTrackClean failed: ${errorMessage(err)}. Initiating compensating rollback...`);
       const compensations = [];
-      this.journal.update(txId, 'ROLLING_BACK', compensations);
+      try {
+        this.journal.update(txId, 'ROLLING_BACK', compensations);
+      } catch (jErr) {
+        this.log(`Rollback journal ROLLING_BACK update failed: ${errorMessage(jErr)}`);
+      }
 
       // Compensating action 1: delete markers added during this transaction
-      if (addedMarkerFrames.length > 0 && typeof activeTimeline.DeleteMarkerAtFrame === 'function') {
-        for (const frameId of [...addedMarkerFrames].reverse()) {
-          try {
-            await activeTimeline.DeleteMarkerAtFrame(frameId);
-            compensations.push({ action: 'delete_marker', frameId, status: 'ok' });
-          } catch (markerErr) {
-            compensations.push({ action: 'delete_marker', frameId, status: 'error', error: markerErr.message });
-            this.log(`Rollback DeleteMarkerAtFrame(${frameId}) failed: ${markerErr.message}`);
+      if (addedMarkerFrames.length > 0) {
+        if (typeof activeTimeline.DeleteMarkerAtFrame === 'function') {
+          for (const frameId of [...addedMarkerFrames].reverse()) {
+            try {
+              await activeTimeline.DeleteMarkerAtFrame(frameId);
+              compensations.push({ action: 'delete_marker', frameId, status: 'ok' });
+            } catch (markerErr) {
+              const msg = errorMessage(markerErr);
+              compensations.push({ action: 'delete_marker', frameId, status: 'error', error: msg });
+              this.log(`Rollback DeleteMarkerAtFrame(${frameId}) failed: ${msg}`);
+            }
+          }
+        } else if (typeof activeTimeline.DeleteMarkersByColor === 'function') {
+          for (const color of addedMarkerColors) {
+            try {
+              await activeTimeline.DeleteMarkersByColor(color);
+              compensations.push({ action: 'delete_markers_by_color', color, status: 'ok' });
+            } catch (markerErr) {
+              const msg = errorMessage(markerErr);
+              compensations.push({ action: 'delete_markers_by_color', color, status: 'error', error: msg });
+              this.log(`Rollback DeleteMarkersByColor(${color}) failed: ${msg}`);
+            }
           }
         }
       }
 
       // Compensating action 2: delete appended timeline items
       if (appendedItems.length > 0) {
+        let deletedViaBatch = false;
         if (typeof activeTimeline.DeleteClips === 'function') {
           try {
             await activeTimeline.DeleteClips(appendedItems, false);
             compensations.push({ action: 'delete_timeline_items', count: appendedItems.length, status: 'ok' });
+            deletedViaBatch = true;
           } catch (itemsErr) {
-            compensations.push({ action: 'delete_timeline_items', count: appendedItems.length, status: 'error', error: itemsErr.message });
-            this.log(`Rollback DeleteClips(timeline) failed: ${itemsErr.message}`);
+            const msg = errorMessage(itemsErr);
+            compensations.push({ action: 'delete_timeline_items', count: appendedItems.length, status: 'error', error: msg });
+            this.log(`Rollback DeleteClips(timeline) failed: ${msg}`);
           }
-        } else if (typeof activeTimeline.DeleteItem === 'function') {
+        }
+        if (!deletedViaBatch && typeof activeTimeline.DeleteItem === 'function') {
           for (const item of [...appendedItems].reverse()) {
             try {
               await activeTimeline.DeleteItem(item);
               compensations.push({ action: 'delete_timeline_item', status: 'ok' });
             } catch (itemErr) {
-              compensations.push({ action: 'delete_timeline_item', status: 'error', error: itemErr.message });
-              this.log(`Rollback DeleteItem failed: ${itemErr.message}`);
+              const msg = errorMessage(itemErr);
+              compensations.push({ action: 'delete_timeline_item', status: 'error', error: msg });
+              this.log(`Rollback DeleteItem failed: ${msg}`);
             }
           }
         }
@@ -1127,8 +1506,9 @@ class TimelineTransactionManager {
           await activeTimeline.DeleteTrack('audio', createdTrackIndex);
           compensations.push({ action: 'delete_track', trackIndex: createdTrackIndex, status: 'ok' });
         } catch (trackErr) {
-          compensations.push({ action: 'delete_track', trackIndex: createdTrackIndex, status: 'error', error: trackErr.message });
-          this.log(`Rollback DeleteTrack(${createdTrackIndex}) failed: ${trackErr.message}`);
+          const msg = errorMessage(trackErr);
+          compensations.push({ action: 'delete_track', trackIndex: createdTrackIndex, status: 'error', error: msg });
+          this.log(`Rollback DeleteTrack(${createdTrackIndex}) failed: ${msg}`);
         }
       }
 
@@ -1138,12 +1518,17 @@ class TimelineTransactionManager {
           await mediaPool.DeleteClips(importedItems);
           compensations.push({ action: 'delete_media_pool_clips', count: importedItems.length, status: 'ok' });
         } catch (poolErr) {
-          compensations.push({ action: 'delete_media_pool_clips', count: importedItems.length, status: 'error', error: poolErr.message });
-          this.log(`Rollback mediaPool.DeleteClips failed: ${poolErr.message}`);
+          const msg = errorMessage(poolErr);
+          compensations.push({ action: 'delete_media_pool_clips', count: importedItems.length, status: 'error', error: msg });
+          this.log(`Rollback mediaPool.DeleteClips failed: ${msg}`);
         }
       }
 
-      this.journal.update(txId, 'ROLLED_BACK', compensations);
+      try {
+        this.journal.update(txId, 'ROLLED_BACK', compensations);
+      } catch (jErr) {
+        this.log(`Rollback journal ROLLED_BACK update failed: ${errorMessage(jErr)}`);
+      }
       throw err;
     }
   }
@@ -1171,6 +1556,45 @@ class TimelineTransactionManager {
     sourceOffsetS = 0,
     markers,
   } = {}) {
+    let resolvedMarkers = [];
+    if (markers !== undefined) {
+      if (!Array.isArray(markers)) {
+        throw new Error('applyGuardMarkers: markers must be an array.');
+      }
+      if (markers.length > MAX_GUARD_MARKERS) {
+        throw new Error(`applyGuardMarkers: markers exceeds maximum count (${MAX_GUARD_MARKERS}).`);
+      }
+      resolvedMarkers = markers.map((m, idx) => {
+        if (!isPlainObject(m)) {
+          throw new Error(`applyGuardMarkers: invalid marker descriptor at index ${idx}.`);
+        }
+        const parsedOffset = parseFiniteNumber(m.frameOffset);
+        if (parsedOffset === null || parsedOffset < 0) {
+          throw new Error(`applyGuardMarkers: invalid marker descriptor at index ${idx}.`);
+        }
+        const parsedDuration = parseFiniteNumber(m.durationFrames);
+        const color = typeof m.color === 'string' && m.color.trim().length > 0
+          ? sanitizeBoundedText(m.color.trim(), MAX_MARKER_COLOR_LEN)
+          : 'Yellow';
+        const name = typeof m.name === 'string' && m.name.trim().length > 0
+          ? sanitizeBoundedText(m.name.trim(), MAX_MARKER_NAME_LEN)
+          : 'HawaVoClean Guard';
+        const note = typeof m.note === 'string'
+          ? sanitizeBoundedText(m.note, MAX_MARKER_NOTE_LEN)
+          : '';
+        return {
+          frameOffset: Math.round(parsedOffset),
+          color,
+          name,
+          note,
+          durationFrames: Math.max(1, parsedDuration !== null ? Math.round(parsedDuration) : 1),
+        };
+      });
+    } else {
+      const parsedReport = resolveClipReport({ report, reportPath }, '');
+      resolvedMarkers = extractGuardMarkersFromReport(parsedReport, clipStartFrame, fps, { sourceOffsetS });
+    }
+
     let activeTimeline = timeline || null;
     if (!activeTimeline) {
       const project = await this.getProject();
@@ -1181,30 +1605,12 @@ class TimelineTransactionManager {
       throw new Error('No active timeline in DaVinci Resolve.');
     }
 
-    let resolvedMarkers = [];
-    if (Array.isArray(markers)) {
-      resolvedMarkers = markers.map((m, idx) => {
-        if (!m || typeof m !== 'object' || !Number.isFinite(Number(m.frameOffset))) {
-          throw new Error(`applyGuardMarkers: invalid marker descriptor at index ${idx}.`);
-        }
-        return {
-          frameOffset: Math.round(Number(m.frameOffset)),
-          color: typeof m.color === 'string' && m.color ? m.color : 'Yellow',
-          name: typeof m.name === 'string' && m.name ? m.name : 'HawaVoClean Guard',
-          note: typeof m.note === 'string' ? m.note : '',
-          durationFrames: Math.max(1, Number.isFinite(Number(m.durationFrames)) ? Math.round(Number(m.durationFrames)) : 1),
-        };
-      });
-    } else {
-      const parsedReport = resolveClipReport({ report, reportPath }, '');
-      resolvedMarkers = extractGuardMarkersFromReport(parsedReport, clipStartFrame, fps, { sourceOffsetS });
-    }
-
     if (resolvedMarkers.length === 0 || typeof activeTimeline.AddMarker !== 'function') {
       return { success: true, markersAdded: 0, markers: [] };
     }
 
     const addedFrames = [];
+    const addedColors = new Set();
     const placed = [];
     const seen = new Set();
 
@@ -1222,16 +1628,25 @@ class TimelineTransactionManager {
             seen.add(marker.frameOffset);
             addedFrames.push(marker.frameOffset);
           }
+          addedColors.add(marker.color);
           placed.push(marker);
         }
       }
       return { success: true, markersAdded: placed.length, markers: placed };
     } catch (err) {
-      if (addedFrames.length > 0 && typeof activeTimeline.DeleteMarkerAtFrame === 'function') {
-        for (const frameId of [...addedFrames].reverse()) {
-          try {
-            await activeTimeline.DeleteMarkerAtFrame(frameId);
-          } catch (_) {}
+      if (addedFrames.length > 0) {
+        if (typeof activeTimeline.DeleteMarkerAtFrame === 'function') {
+          for (const frameId of [...addedFrames].reverse()) {
+            try {
+              await activeTimeline.DeleteMarkerAtFrame(frameId);
+            } catch (_) {}
+          }
+        } else if (typeof activeTimeline.DeleteMarkersByColor === 'function') {
+          for (const color of addedColors) {
+            try {
+              await activeTimeline.DeleteMarkersByColor(color);
+            } catch (_) {}
+          }
         }
       }
       throw err;
@@ -1242,8 +1657,16 @@ class TimelineTransactionManager {
 module.exports = {
   ALLOWED_TRANSACTION_TRANSITIONS,
   GUARD_MARKER_COLORS,
+  MAX_MARKER_NAME_LEN,
+  MAX_MARKER_NOTE_LEN,
+  MAX_IPC_MARKER_NOTE_LEN,
+  MAX_BATCH_CLIPS,
+  MAX_GUARD_MARKERS,
+  MAX_GUARD_REPORT_UNITS,
   validateAudioFormat,
   extractGuardMarkersFromReport,
+  validateBatchCleanTrackPayload,
+  validateApplyGuardMarkersPayload,
   TransactionJournal,
   TimelineTransactionManager,
   TRANSACTIONS_DIR,
