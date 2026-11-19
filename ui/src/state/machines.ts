@@ -283,5 +283,10 @@ export function assistantReducer(state: AssistantState, event: AssistantEvent): 
       return state.phase === 'applying'
         ? { phase: 'planned', plan: state.plan, applyError: event.message }
         : state;
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return state;
+    }
   }
 }

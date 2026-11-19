@@ -694,6 +694,25 @@ test('EngineBroker enforces explicit lifecycle phases and clears origin after st
     await broker.stop();
     assert.equal(broker.phase, 'stopped');
     await assert.rejects(() => broker.endpoint(), /stopped/);
+
+    // Verify starting -> failed -> stopped when the engine executable is missing.
+    const failing = new EngineBroker({
+      packaged: false,
+      platform: process.platform,
+      resourcesPath: temp,
+      repositoryRoot: temp,
+      userData: temp,
+      temp,
+    });
+    assert.equal(failing.phase, 'idle');
+    await assert.rejects(() => failing.endpoint(), /Engine executable is missing/);
+    assert.equal(failing.phase, 'failed');
+    assert.equal(failing.origin, null);
+    // start() after failed must remain a no-op (never resurrect from failed).
+    failing.start();
+    assert.equal(failing.phase, 'failed');
+    await failing.stop();
+    assert.equal(failing.phase, 'stopped');
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
