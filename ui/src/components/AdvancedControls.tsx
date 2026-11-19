@@ -1,8 +1,10 @@
 import type { Profile } from '../api/types';
-import { useStore } from '../state/store';
-import { toggleAdvancedOpen } from '../state/actions';
+import { jobInFlight, useStore } from '../state/store';
+import { toggleAdvancedOpen, updateRackSettings } from '../state/actions';
 import { ProfileControl } from './ProfileControl';
 import { RestoreControl } from './RestoreControl';
+import { StudioRack } from './StudioRack';
+import { isVideoFilePath } from './VideoPreview';
 
 const PROFILE_LABEL: Record<Profile, string> = {
   studio_pro: 'Studio Pro',
@@ -17,10 +19,17 @@ export function AdvancedControls() {
   const profile = useStore((s) => s.profile);
   const mode = useStore((s) => s.mode);
   const speakerId = useStore((s) => s.speakerId);
+  const source = useStore((s) => s.source);
+  const job = useStore((s) => s.job);
+  const rackSettings = useStore((s) => s.rackSettings);
+  const batchNamingTemplate = useStore((s) => s.batchNamingTemplate);
+  const setBatchNamingTemplate = useStore((s) => s.setBatchNamingTemplate);
 
   const profileLabel = PROFILE_LABEL[profile] ?? profile;
   const modeLabel = mode === 'restore' ? `Restore${speakerId ? ` (${speakerId})` : ''}` : 'Natural';
   const summary = `${profileLabel} · ${modeLabel}`;
+  const running = jobInFlight(job);
+  const sampleFileName = source?.name ? source.name.replace(/\.[^.]+$/, '') : 'interview';
 
   return (
     <div className={`advanced-controls${advancedOpen ? ' open' : ''}`}>
@@ -44,6 +53,16 @@ export function AdvancedControls() {
         <div id="advanced-controls-panel" className="advanced-body">
           <ProfileControl />
           <RestoreControl />
+          <StudioRack
+            settings={rackSettings}
+            onChange={updateRackSettings}
+            isVideoSource={isVideoFilePath(source?.path)}
+            disabled={running}
+            namingTemplate={batchNamingTemplate}
+            onNamingTemplateChange={setBatchNamingTemplate}
+            sampleFileName={sampleFileName}
+            activeProfile={profile}
+          />
         </div>
       ) : null}
     </div>

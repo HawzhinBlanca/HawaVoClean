@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { getPlayer } from './audio/player';
 import { Actions } from './components/Actions';
 import { AudioAssistant } from './components/AudioAssistant';
 import { EngineBanner } from './components/EngineBanner';
@@ -13,15 +14,24 @@ import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { SourceStrip } from './components/SourceStrip';
 import { SpectrumDisplay } from './components/SpectrumDisplay';
 import { SpectrogramDisplay } from './components/SpectrogramDisplay';
+import { TakeSwitcher } from './components/TakeSwitcher';
 import { BatchQueue } from './components/BatchQueue';
 import { Transport } from './components/Transport';
 import { UnitInspector } from './components/UnitInspector';
+import { VideoPreview, isVideoFilePath } from './components/VideoPreview';
 import { WaveformDisplay } from './components/WaveformDisplay';
 import {
   installRendererProofResponder,
   RENDERER_PROOF_CONTRACT,
 } from './rendererProof';
-import { connectEngine, ingestDataTransfer } from './state/actions';
+import {
+  connectEngine,
+  ingestDataTransfer,
+  pinTake,
+  removeTake,
+  seekTo,
+  selectTake,
+} from './state/actions';
 import { useJobAnnouncer } from './state/announcer';
 import { useKeyboardMap } from './state/keymap';
 import { getState, jobInFlight, useStore } from './state/store';
@@ -82,6 +92,51 @@ function useDragWatch(): boolean {
   return over;
 }
 
+function SyncedVideoPreview() {
+  const source = useStore((s) => s.source);
+  const client = useStore((s) => s.client);
+  const duration = useStore((s) => s.duration);
+  const collapsed = useStore((s) => s.videoPreviewCollapsed);
+  const setCollapsed = useStore((s) => s.setVideoPreviewCollapsed);
+  const [sync, setSync] = useState(() => {
+    const p = getPlayer();
+    return { time: p.time, playing: p.playing, duration: p.duration };
+  });
+
+  const isVideo = Boolean(source && isVideoFilePath(source.path));
+  const videoUrl = isVideo && source && client ? client.fileUrl(source.path) : null;
+
+  useEffect(() => {
+    if (!videoUrl) return;
+    return getPlayer().subscribe((snap) => {
+      setSync((prev) =>
+        Math.abs(prev.time - snap.time) > 0.02 ||
+        prev.playing !== snap.playing ||
+        prev.duration !== snap.duration
+          ? { time: snap.time, playing: snap.playing, duration: snap.duration }
+          : prev,
+      );
+    });
+  }, [videoUrl]);
+
+  if (!videoUrl || !source) return null;
+
+  return (
+    <div className="app-video-pip">
+      <VideoPreview
+        videoUrl={videoUrl}
+        currentTime={sync.time}
+        playing={sync.playing}
+        duration={sync.duration > 0 ? sync.duration : duration}
+        onSeek={seekTo}
+        collapsed={collapsed}
+        onToggleCollapse={() => setCollapsed(!collapsed)}
+        title={source.name}
+      />
+    </div>
+  );
+}
+
 export default function App() {
   useKeyboardMap();
   const phase = usePhase();
@@ -90,9 +145,13 @@ export default function App() {
   const abMode = useStore((s) => s.abMode);
   const cleanedPath = useStore((s) => s.cleanedPath);
   const batch = useStore((s) => s.batch);
+  const takes = useStore((s) => s.takes);
+  const activeTakeId = useStore((s) => s.activeTakeId);
   const engineStatus = useStore((s) => s.engineStatus);
   const offlineSince = useStore((s) => s.engineOfflineSince);
   const deck = abMode === 'cleaned' && cleanedPath ? 'cleaned' : 'original';
+  const effectiveActiveTake =
+    abMode === 'original' ? 'original' : (activeTakeId ?? takes[takes.length - 1]?.id ?? 'original');
   // The banner is a *row* of the shell grid, never an overlay: a bar that
   // floats over the chassis is a bar that can cover a control, and the one
   // moment the user most needs to reach the controls is the moment something
@@ -162,6 +221,17 @@ export default function App() {
       <main className="main">
         <div className="left">
           <WaveformDisplay />
+          {takes.length >= 2 ? (
+            <div className="app-take-strip">
+              <TakeSwitcher
+                takes={takes}
+                activeId={effectiveActiveTake}
+                onSelect={selectTake}
+                onTogglePin={pinTake}
+                onRemoveTake={removeTake}
+              />
+            </div>
+          ) : null}
           <SpectrogramDisplay />
           {/* The inspector answers "why did this unit go that way"; the run
               list answers "which pass am I looking at". They share the bottom
@@ -173,6 +243,7 @@ export default function App() {
           </div>
         </div>
         <aside className="right" aria-label="Analysis and controls">
+          <SyncedVideoPreview />
           <section className="panel spectrum-panel" aria-label="Spectrum">
             <SpectrumDisplay />
             <MetricsTiles />

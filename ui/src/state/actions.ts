@@ -7,18 +7,27 @@ import type {
   AudioAnalysis,
   BatchItem,
   BatchSummary,
+  DeliveryExportResponse,
+  ExportFormatId,
   HawaVoCleanReport,
   JobStatus,
   ManualRoute,
   ProcessingRequestV1,
   ProcessingStrategyV1,
   Profile,
+  UnitDecisionRecord,
 } from '../api/types';
 import { reportTxtPath } from '../api/types';
 import { getPlayer, type DeckFault } from '../audio/player';
 import { getBridge } from '../bridge';
+import { addTakeSnapshot, type TakeSnapshot } from '../components/TakeSwitcher';
 import { waveView } from '../render/viewWindow';
 import { unitsEnhanced } from './plural';
+import {
+  DEFAULT_STUDIO_RACK_SETTINGS,
+  type StudioRackSettings,
+} from './presets';
+import { createUndoStack, shallowRecordEqual } from './undoStack';
 import {
   classifyFailure,
   failureSource,
@@ -38,6 +47,8 @@ import {
   type HistoryEntry,
   type JobInfo,
   type SourceInfo,
+  type UnitOverrideMap,
+  type UnitOverrideMapValue,
 } from './store';
 
 /**
@@ -1297,6 +1308,7 @@ function onJobStatus(status: JobStatus): void {
     const out = status.output_path || st.job.outputPath;
     st.setStatus(`Done · ${baseName(out)}`);
     recordRun(status, 'done');
+    recordCompletedTake(status, out, report, null);
     void (async () => {
       try {
         const client = requireClient();
@@ -1326,6 +1338,10 @@ function onJobStatus(status: JobStatus): void {
           lufsOut: analysis?.loudness.integrated_lufs ?? null,
           noiseOut: analysis?.noise_floor_db ?? null,
         });
+        if (analysis) {
+          takeAnalysisCache.set(status.job_id, analysis);
+          updateTakeLufs(status.job_id, analysis.loudness.integrated_lufs ?? null);
+        }
         if (!cur.job || cur.job.id !== status.job_id) return;
         cur.setCleaned(analysis, out);
         syncPlayerLoudnessMatch();
@@ -1624,10 +1640,28 @@ export async function startJob(strategyOverride?: ProcessingStrategyV1): Promise
         st.setError(reason || unavailableProfileMessage(profile), 'Capability blocked');
         return;
       }
+      const rs = st.rackSettings;
+      const rackModified =
+        st.rackDirty || !shallowRecordEqual(rs, DEFAULT_STUDIO_RACK_SETTINGS);
       strategy = {
         kind: 'manual',
         route: profile as ManualRoute,
         allow_generative_reconstruction: false,
+        ...(rackModified
+          ? {
+              strength: rs.strength,
+              ambienceFloorDb: rs.ambienceFloorDb,
+              deliveryPreset: rs.deliveryPreset,
+              proRepair: {
+                deplosive: rs.deplosive,
+                mouth_declick: rs.mouthDeclick,
+                declip: rs.declip,
+                deess: rs.deess,
+                tonal_restoration: rs.tonalRestoration,
+                level_rider: rs.levelRider,
+              },
+            }
+          : {}),
       };
     }
 
@@ -2886,6 +2920,474 @@ export async function saveProcessingRecord(): Promise<void> {
     return;
   }
   await revealOutput();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2 Pro Studio Actions: Rack Undo/Redo, Unit Overrides, Multi-Take, Delivery Export
+
+const takeAnalysisCache = new Map<string, AudioAnalysis>();
+
+function extractTakeMosDelta(report: HawaVoCleanReport | null): number | null {
+  const candidates = report?.restoration?.candidates;
+  if (!candidates || candidates.length === 0) return null;
+  const selected = candidates.find((c) => c.selected);
+  const preserve = candidates.find((c) => c.route === 'preserve');
+  if (
+    selected &&
+    preserve &&
+    Number.isFinite(selected.score) &&
+    Number.isFinite(preserve.score)
+  ) {
+    return selected.score - preserve.score;
+  }
+  return null;
+}
+
+function recordCompletedTake(
+  status: JobStatus,
+  outputPath: string,
+  report: HawaVoCleanReport | null,
+  analysis: AudioAnalysis | null,
+): void {
+  const st = getState();
+  if (!outputPath) return;
+  if (st.source && status.input_path && status.input_path !== st.source.path) return;
+  const profile = status.profile ?? st.profile;
+  const lufsOut =
+    analysis?.loudness.integrated_lufs ?? report?.output.integrated_lufs ?? null;
+  const snapshot: TakeSnapshot = {
+    id: status.job_id,
+    label: baseName(outputPath).replace(/\.[^.]+$/, ''),
+    profile,
+    cleanedPath: outputPath,
+    report,
+    mosDelta: extractTakeMosDelta(report),
+    lufsOut,
+    createdAt: status.finished_at ?? new Date().toISOString(),
+  };
+  if (analysis) {
+    takeAnalysisCache.set(snapshot.id, analysis);
+  }
+  const nextTakes = addTakeSnapshot(st.takes, snapshot);
+  st.setTakes(nextTakes, snapshot.id);
+  st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+}
+
+function updateTakeLufs(takeId: string, lufsOut: number | null): void {
+  if (lufsOut === null || !Number.isFinite(lufsOut)) return;
+  const st = getState();
+  if (!st.takes.some((t) => t.id === takeId)) return;
+  const updated = st.takes.map((t) => (t.id === takeId ? { ...t, lufsOut } : t));
+  st.setTakes(updated);
+}
+
+/** Update StudioRack settings and push a snapshot onto the undo stack. */
+export function updateRackSettings(next: StudioRackSettings): void {
+  const st = getState();
+  const nextUndo = st.rackUndo.push(next);
+  st.setRackSettings(next, nextUndo, true);
+  st.setLastUndoDomain('rack');
+}
+
+function applyLocalUnitDecision(
+  report: HawaVoCleanReport,
+  unitId: number,
+  decision: UnitOverrideMapValue,
+  overrideNewDecision?: string,
+): { report: HawaVoCleanReport; updatedUnit: UnitDecisionRecord | null } {
+  const units = report.units ?? [];
+  let updatedUnit: UnitDecisionRecord | null = null;
+  const nextUnits = units.map((u) => {
+    if (u.unit_id !== unitId) return u;
+    let finalDecision = overrideNewDecision ?? u.final_decision;
+    let manualOverride: string | null = decision === 'auto' ? null : decision;
+    let reason = u.decision_reason ?? '';
+    if (!overrideNewDecision) {
+      if (decision === 'force_original') {
+        finalDecision = 'original_reverted';
+        reason = `manual override: force_original (was ${u.final_decision})`;
+      } else if (decision === 'force_enhanced') {
+        finalDecision = 'enhanced';
+        reason = `manual override: force_enhanced (was ${u.final_decision})`;
+      } else {
+        const verdict = (u.guard_a_verdict ?? '').toUpperCase();
+        finalDecision = verdict.includes('PASS') ? 'enhanced' : 'original_reverted';
+        manualOverride = null;
+        reason = `guard ${u.guard_a_verdict} (auto restored)`;
+      }
+    }
+    updatedUnit = {
+      ...u,
+      final_decision: finalDecision,
+      manual_override: manualOverride,
+      decision_reason: reason,
+    };
+    return updatedUnit;
+  });
+
+  const enhancedCount = nextUnits.filter((u) => u.final_decision === 'enhanced').length;
+  const revertedCount = nextUnits.filter(
+    (u) => u.final_decision === 'reverted' || u.final_decision === 'original_reverted',
+  ).length;
+
+  return {
+    report: {
+      ...report,
+      units: nextUnits,
+      summary: {
+        ...report.summary,
+        enhanced: enhancedCount,
+        reverted: revertedCount,
+      },
+    },
+    updatedUnit,
+  };
+}
+
+async function syncOverrideMapDiff(prev: UnitOverrideMap, next: UnitOverrideMap): Promise<void> {
+  const keys = new Set<number>([
+    ...Object.keys(prev).map(Number),
+    ...Object.keys(next).map(Number),
+  ]);
+  for (const unitId of keys) {
+    const before = prev[unitId] ?? 'auto';
+    const after = next[unitId] ?? 'auto';
+    if (before !== after) {
+      await applyUnitOverrideInternal(unitId, after, false);
+    }
+  }
+}
+
+async function applyUnitOverrideInternal(
+  unitId: number,
+  decision: UnitOverrideMapValue,
+  recordUndo: boolean,
+): Promise<void> {
+  const st = getState();
+  const nextOverrides: UnitOverrideMap = { ...st.unitOverrides };
+  if (decision === 'auto') {
+    delete nextOverrides[unitId];
+  } else {
+    nextOverrides[unitId] = decision;
+  }
+
+  if (recordUndo) {
+    const nextUndo = st.overrideUndo.push(nextOverrides);
+    st.setUnitOverrides(nextOverrides, nextUndo);
+    st.setLastUndoDomain('override');
+  } else {
+    st.setUnitOverrides(nextOverrides);
+  }
+
+  // Apply optimistically to the on-screen report while preserving selectedUnit.
+  if (st.report) {
+    const local = applyLocalUnitDecision(st.report, unitId, decision);
+    useStore.setState((cur) => ({
+      report: local.report,
+      selectedUnit:
+        cur.selectedUnit && cur.selectedUnit.unit_id === unitId && local.updatedUnit
+          ? local.updatedUnit
+          : cur.selectedUnit,
+    }));
+  }
+
+  const jobId = st.job?.id ?? st.report?.job_id ?? null;
+  const client = st.client;
+  if (
+    !jobId ||
+    !client ||
+    st.engineStatus !== 'ready' ||
+    typeof client.overrideUnit !== 'function'
+  ) {
+    st.setStatus(`Unit ${unitId} marked ${decision.replace(/_/g, ' ')} (offline preview)`);
+    return;
+  }
+
+  try {
+    const res = await client.overrideUnit(jobId, { unitId, decision });
+    const cur = getState();
+    if (cur.report) {
+      let nextReport = cur.report;
+      let nextSelected = cur.selectedUnit;
+      if (Array.isArray(res.units) && res.units.length > 0) {
+        nextReport = {
+          ...cur.report,
+          units: res.units,
+          ...(res.summary ? { summary: { ...cur.report.summary, ...res.summary } } : {}),
+        };
+        if (nextSelected) {
+          nextSelected =
+            res.units.find((u) => u.unit_id === nextSelected?.unit_id) ?? nextSelected;
+        }
+      } else {
+        const merged = applyLocalUnitDecision(
+          cur.report,
+          unitId,
+          decision,
+          res.newDecision || undefined,
+        );
+        nextReport = res.summary
+          ? { ...merged.report, summary: { ...merged.report.summary, ...res.summary } }
+          : merged.report;
+        if (nextSelected && nextSelected.unit_id === unitId && merged.updatedUnit) {
+          nextSelected = merged.updatedUnit;
+        }
+      }
+      useStore.setState({ report: nextReport, selectedUnit: nextSelected });
+    }
+
+    if (res.restitched && cur.cleanedPath) {
+      const player = getPlayer();
+      const wasPlaying = player.playing;
+      const atTime = player.time;
+      const baseUrl = client.fileUrl(cur.cleanedPath);
+      const sep = baseUrl.includes('?') ? '&' : '?';
+      const versionTag = res.masterSha256 || String(Date.now());
+      const bustedUrl = `${baseUrl}${sep}v=${encodeURIComponent(versionTag)}`;
+      player.load(
+        'cleaned',
+        bustedUrl,
+        cur.cleaned?.duration_s ?? cur.original?.duration_s ?? null,
+      );
+      if (Number.isFinite(atTime) && atTime > 0) {
+        player.seek(atTime);
+      }
+      if (wasPlaying) {
+        void player.play();
+      }
+      const ms = typeof res.restitchMs === 'number' ? ` in ${Math.round(res.restitchMs)} ms` : '';
+      cur.setStatus(`Unit ${unitId} updated · master re-stitched${ms}`);
+      // Best-effort refresh of cleaned audio metrics in background.
+      void analyzeCleaned(cur.cleanedPath)
+        .then((analysis) => {
+          const latest = getState();
+          if (latest.cleanedPath === cur.cleanedPath && analysis) {
+            latest.setCleaned(analysis, cur.cleanedPath);
+            syncPlayerLoudnessMatch();
+          }
+        })
+        .catch(() => undefined);
+    } else {
+      cur.setStatus(`Unit ${unitId} updated (${decision.replace(/_/g, ' ')})`);
+    }
+  } catch (e) {
+    getState().setStatus(`Override recorded locally · ${describeError(e)}`);
+  }
+}
+
+/** Override a single speech unit decision, re-stitching the master when supported. */
+export async function applyUnitOverride(
+  unitId: number,
+  decision: UnitOverrideMapValue,
+): Promise<void> {
+  await applyUnitOverrideInternal(unitId, decision, true);
+}
+
+/** Undo the most recent unit override or StudioRack parameter change. */
+export function undoAction(): void {
+  const st = getState();
+  const preferOverride =
+    st.lastUndoDomain === 'override'
+      ? st.overrideUndo.canUndo
+      : !st.rackUndo.canUndo && st.overrideUndo.canUndo;
+
+  if (preferOverride) {
+    const prevMap = st.overrideUndo.present;
+    const nextStack = st.overrideUndo.undo();
+    st.setUnitOverrides(nextStack.present, nextStack);
+    st.setStatus('Undid unit override');
+    void syncOverrideMapDiff(prevMap, nextStack.present);
+    return;
+  }
+
+  if (st.rackUndo.canUndo) {
+    const nextStack = st.rackUndo.undo();
+    st.setRackSettings(
+      nextStack.present,
+      nextStack,
+      !shallowRecordEqual(nextStack.present, DEFAULT_STUDIO_RACK_SETTINGS),
+    );
+    st.setStatus('Undid Studio Rack change');
+  }
+}
+
+/** Redo the most recently undone unit override or StudioRack parameter change. */
+export function redoAction(): void {
+  const st = getState();
+  const preferOverride =
+    st.lastUndoDomain === 'override'
+      ? st.overrideUndo.canRedo
+      : !st.rackUndo.canRedo && st.overrideUndo.canRedo;
+
+  if (preferOverride) {
+    const prevMap = st.overrideUndo.present;
+    const nextStack = st.overrideUndo.redo();
+    st.setUnitOverrides(nextStack.present, nextStack);
+    st.setStatus('Redid unit override');
+    void syncOverrideMapDiff(prevMap, nextStack.present);
+    return;
+  }
+
+  if (st.rackUndo.canRedo) {
+    const nextStack = st.rackUndo.redo();
+    st.setRackSettings(
+      nextStack.present,
+      nextStack,
+      !shallowRecordEqual(nextStack.present, DEFAULT_STUDIO_RACK_SETTINGS),
+    );
+    st.setStatus('Redid Studio Rack change');
+  }
+}
+
+/** Loop playback over a selected unit's time range immediately. */
+export function loopSelectedUnit(unit: UnitDecisionRecord): void {
+  if (!Number.isFinite(unit.start_time_s) || !Number.isFinite(unit.end_time_s)) return;
+  if (unit.end_time_s <= unit.start_time_s) return;
+
+  const st = getState();
+  st.setSelectionRange({ start: unit.start_time_s, end: unit.end_time_s });
+
+  const player = getPlayer();
+  if (typeof player.setLoopRange === 'function') {
+    player.setLoopRange([unit.start_time_s, unit.end_time_s]);
+  }
+  if (typeof player.setLoopEnabled === 'function') {
+    player.setLoopEnabled(true);
+  }
+  player.seek(unit.start_time_s);
+  void player.play();
+}
+
+/** Switch the active comparison take, loading its cleaned deck and report immediately. */
+export function selectTake(takeId: string): void {
+  const st = getState();
+  if (takeId === 'original') {
+    st.setActiveTakeId('original');
+    setAb('original');
+    return;
+  }
+
+  const take = st.takes.find((t) => t.id === takeId);
+  if (!take) return;
+
+  const historyMatch = st.history.find((h) => h.jobId === take.id);
+  const cachedAnalysis = takeAnalysisCache.get(take.id) ?? historyMatch?.cleaned ?? null;
+  st.setActiveTakeId(take.id);
+  st.setCleaned(cachedAnalysis, take.cleanedPath);
+  if (take.report) {
+    st.setReport(take.report);
+  }
+  st.setDeckFault(null);
+  syncPlayerLoudnessMatch();
+
+  const player = getPlayer();
+  if (st.client && take.cleanedPath) {
+    player.load(
+      'cleaned',
+      st.client.fileUrl(take.cleanedPath),
+      cachedAnalysis?.duration_s ?? st.original?.duration_s ?? null,
+    );
+    player.setActive('cleaned');
+    st.setAbMode('cleaned');
+  }
+  st.setStatus(`Comparing ${take.label} (${take.profile})`);
+
+  if (!cachedAnalysis && st.client && st.engineStatus === 'ready' && take.cleanedPath) {
+    void analyzeCleaned(take.cleanedPath)
+      .then((analysis) => {
+        if (!analysis) return;
+        takeAnalysisCache.set(take.id, analysis);
+        updateTakeLufs(take.id, analysis.loudness.integrated_lufs ?? null);
+        const cur = getState();
+        if (cur.activeTakeId === take.id) {
+          cur.setCleaned(analysis, take.cleanedPath);
+          syncPlayerLoudnessMatch();
+        }
+      })
+      .catch(() => undefined);
+  }
+}
+
+/** Pin or unpin a take in the multi-take switcher so it is protected from eviction. */
+export function pinTake(takeId: string): void {
+  const st = getState();
+  const next = st.takes.map((t) => (t.id === takeId ? { ...t, pinned: !t.pinned } : t));
+  st.setTakes(next);
+}
+
+/** Remove an unpinned take from the multi-take switcher. */
+export function removeTake(takeId: string): void {
+  const st = getState();
+  const target = st.takes.find((t) => t.id === takeId);
+  if (!target || target.pinned) return;
+  const next = st.takes.filter((t) => t.id !== takeId);
+  takeAnalysisCache.delete(takeId);
+  const nextActive =
+    st.activeTakeId === takeId ? (next[next.length - 1]?.id ?? 'original') : st.activeTakeId;
+  st.setTakes(next, nextActive);
+  if (st.activeTakeId === takeId && nextActive) {
+    selectTake(nextActive);
+  }
+}
+
+/**
+ * Export the cleaned master with delivery loudness calibration and/or target
+ * container format (WAV 24/32f, FLAC, AAC, or lossless video mux-back).
+ */
+export async function exportWithDelivery(
+  format?: ExportFormatId,
+): Promise<DeliveryExportResponse | null> {
+  const st = getState();
+  if (!st.cleanedPath) return null;
+  const targetFormat: ExportFormatId = format ?? st.rackSettings.exportFormat;
+  const deliveryPreset = st.rackSettings.deliveryPreset;
+
+  if (targetFormat === 'wav24' && deliveryPreset === 'match_input') {
+    await saveCleanedMaster();
+    return null;
+  }
+
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.exportDelivery !== 'function') {
+    st.setStatus('Cannot export delivery format while the engine is offline');
+    return null;
+  }
+
+  st.setStatus(`Exporting ${targetFormat.toUpperCase()} (${deliveryPreset})…`);
+  try {
+    const res = await client.exportDelivery({
+      masterPath: st.cleanedPath,
+      format: targetFormat,
+      deliveryPreset,
+      ...(targetFormat === 'video_mux' && st.source?.path
+        ? { sourceMediaPath: st.source.path }
+        : {}),
+      preserveMetadata: true,
+    });
+    const lufsNote =
+      typeof res.integratedLufs === 'number' && Number.isFinite(res.integratedLufs)
+        ? ` · ${res.integratedLufs.toFixed(1)} LUFS`
+        : '';
+    st.setStatus(`Exported ${baseName(res.outputPath)} (${res.format.toUpperCase()}${lufsNote})`);
+
+    const bridge = getBridge();
+    if (bridge.host === 'web' && res.outputPath) {
+      const url = client.fileUrl(res.outputPath);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = baseName(res.outputPath);
+      a.target = '_blank';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    return res;
+  } catch (e) {
+    const msg = describeError(e);
+    st.setError(msg, 'Export error');
+    st.setStatus(`Export failed · ${msg}`);
+    return null;
+  }
 }
 
 

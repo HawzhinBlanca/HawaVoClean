@@ -25,8 +25,20 @@ const GROUPS: Group[] = [
       { keys: [['Space']], what: 'Play / pause' },
       { keys: [['A']], what: 'Listen to the ORIGINAL deck' },
       { keys: [['B']], what: 'Listen to the CLEANED deck', when: 'after a run' },
+      { keys: [['D']], what: 'Toggle Removed (Δ) audition', when: 'after a run' },
+      { keys: [['L']], what: 'Toggle region / clip loop' },
       { keys: [['←'], ['→']], what: 'Seek ∓ 5 seconds' },
       { keys: [['Shift', '←'], ['Shift', '→']], what: 'Seek ∓ 1 second' },
+    ],
+  },
+  {
+    title: 'Editing',
+    rows: [
+      { keys: [['⌘', 'Z'], ['Ctrl', 'Z']], what: 'Undo unit override or rack change' },
+      {
+        keys: [['⌘', 'Shift', 'Z'], ['Ctrl', 'Shift', 'Z']],
+        what: 'Redo unit override or rack change',
+      },
     ],
   },
   {
@@ -86,7 +98,7 @@ const GROUPS: Group[] = [
     rows: [
       { keys: [['I']], what: 'Set selection in-point', when: 'display focused' },
       { keys: [['O']], what: 'Set selection out-point', when: 'display focused' },
-      { keys: [['L']], what: 'Loop-play the selection' },
+      { keys: [['L']], what: 'Toggle region / clip loop' },
       { keys: [['Esc']], what: 'Clear the selection', when: 'display focused' },
     ],
   },
@@ -214,8 +226,8 @@ export function ShortcutOverlay() {
         </div>
         <div className="sc-foot">
           <span>
-            Modifier combinations (<kbd>⌘</kbd>/<kbd>Ctrl</kbd>/<kbd>Alt</kbd>) are left to the
-            browser — nothing here hijacks them.
+            Other modifier combinations (<kbd>⌘</kbd>/<kbd>Ctrl</kbd>/<kbd>Alt</kbd>) are left to
+            the browser — nothing here hijacks them.
           </span>
         </div>
       </div>

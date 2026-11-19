@@ -6,14 +6,25 @@ import { getBridge } from '../bridge';
 import {
   artifactsFor,
   copyReportSummary,
+  exportWithDelivery,
   importToResolve,
   replaceInResolve,
   revealOutput,
   saveCleanedMaster,
   saveProcessingRecord,
 } from '../state/actions';
+import type { ExportFormatId } from '../state/presets';
 import { useStore } from '../state/store';
 import { IconCheck, IconImport, IconReplace, IconReveal } from './Icons';
+import { isVideoFilePath } from './VideoPreview';
+
+const EXPORT_FORMAT_LABEL: Record<ExportFormatId, string> = {
+  wav24: 'WAV 24-bit',
+  wav32f: 'WAV 32f',
+  flac: 'FLAC',
+  aac: 'AAC',
+  video_mux: 'Mux Video',
+};
 
 /**
  * `download` is ignored across origins, so the anchors also carry
@@ -96,6 +107,54 @@ function CopySummary() {
   );
 }
 
+/** Compact Delivery / Format Export button (Mux Video for video sources, or target format/preset). */
+function ExportDeliveryButton({
+  masterServed,
+  engineReady,
+}: {
+  masterServed: boolean;
+  engineReady: boolean;
+}) {
+  const source = useStore((s) => s.source);
+  const rackSettings = useStore((s) => s.rackSettings);
+  const [exporting, setExporting] = useState(false);
+
+  const isVideo = isVideoFilePath(source?.path);
+  const targetFormat: ExportFormatId = isVideo
+    ? rackSettings.exportFormat === 'wav24'
+      ? 'video_mux'
+      : rackSettings.exportFormat
+    : rackSettings.exportFormat;
+  const label =
+    targetFormat === 'video_mux'
+      ? 'Mux Video'
+      : `Export ${EXPORT_FORMAT_LABEL[targetFormat] ?? targetFormat}`;
+  const enabled = masterServed && engineReady && !exporting;
+
+  const onExport = useCallback(() => {
+    if (!enabled) return;
+    setExporting(true);
+    void exportWithDelivery(targetFormat).finally(() => setExporting(false));
+  }, [enabled, targetFormat]);
+
+  return (
+    <button
+      className="btn small export-delivery-btn"
+      type="button"
+      disabled={!enabled}
+      onClick={onExport}
+      title={
+        enabled
+          ? `${label} with ${rackSettings.deliveryPreset} loudness target`
+          : 'Available once a run has finished and the engine is ready'
+      }
+    >
+      <IconImport size={14} />
+      <span>{exporting ? 'Exporting…' : label}</span>
+    </button>
+  );
+}
+
 export function Actions() {
   const bridge = getBridge();
   const hasResolve = Boolean(bridge.resolve);
@@ -147,6 +206,7 @@ export function Actions() {
           label="Summary .txt"
           title={artifacts ? (artifacts.txt.note ?? `Download ${artifacts.txt.name}`) : note}
         />
+        <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
         <CopySummary />
       </div>
     );
@@ -233,6 +293,7 @@ export function Actions() {
         <IconReveal size={14} />
         <span>Reveal in Finder</span>
       </button>
+      <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
       <CopySummary />
     </div>
   );

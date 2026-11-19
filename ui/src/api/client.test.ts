@@ -733,4 +733,151 @@ describe('v1 capabilities and jobs (True-10 D4.11)', () => {
     expect(interrupted.state).toBe('interrupted');
     expect(interrupted.output_path).toBe('/out/m.wav');
   });
+
+  it('calls Pro Studio v1 endpoints (spectrogram, preview, override, export, tracks/inspect)', async () => {
+    const fetchFn = mockFetch(
+      res(
+        200,
+        JSON.stringify({
+          start_s: 0,
+          end_s: 2,
+          sample_rate: 48000,
+          f_min_hz: 20,
+          f_max_hz: 24000,
+          n_bins: 2,
+          width_cols: 2,
+          scale: 'linear',
+          db_floor: -60,
+          db_ceil: 0,
+          data_b64: 'AQIDBA==',
+        }),
+      ),
+    );
+    const tile = await client().fetchSpectrogramTile({
+      path: '/a.wav',
+      cleanedPath: '/out/a.wav',
+      mode: 'delta',
+      startS: 0,
+      endS: 2,
+      widthCols: 2,
+      nBins: 2,
+      scale: 'linear',
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/spectrogram',
+      expect.objectContaining({ method: 'POST', credentials: 'same-origin' }),
+    );
+    expect(tile.n_bins).toBe(2);
+    expect(tile.data_b64).toBe('AQIDBA==');
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          previewPath: '/tmp/preview_1.wav',
+          audioUrl: '/api/audio?path=%2Ftmp%2Fpreview_1.wav',
+          renderMs: 142.5,
+          warmHit: true,
+          metricsBefore: { lufs: -22.0, noiseFloorDb: -40.0 },
+          metricsAfter: { lufs: -21.8, noiseFloorDb: -56.0 },
+          durationS: 3.0,
+        }),
+      ),
+    );
+    const preview = await client().renderRegionPreview({
+      path: '/a.wav',
+      startS: 1,
+      endS: 4,
+      profile: 'studio_pro',
+      strength: 0.8,
+      ambienceFloorDb: -45,
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/preview',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(preview.warmHit).toBe(true);
+    expect(preview.metricsAfter.noiseFloorDb).toBe(-56.0);
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          job_id: 'j1',
+          unit_index: 2,
+          unit_id: 2,
+          old_decision: 'enhanced',
+          new_decision: 'original_reverted',
+          override: 'force_original',
+          restitched: true,
+          restitchMs: 38.2,
+          masterSha256: 'abc123',
+        }),
+      ),
+    );
+    const ov = await client().overrideUnit('j1', { unitId: 2, decision: 'force_original' });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/jobs/j1/override',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(ov.restitched).toBe(true);
+    expect(ov.restitchMs).toBeCloseTo(38.2);
+    expect(ov.masterSha256).toBe('abc123');
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          outputPath: '/out/a_ebu.flac',
+          format: 'flac',
+          deliveryPreset: 'ebu_r128',
+          lraLu: 5.4,
+          integratedLufs: -23.0,
+          truePeakDbtp: -1.1,
+        }),
+      ),
+    );
+    const exp = await client().exportDelivery({
+      masterPath: '/out/a.wav',
+      format: 'flac',
+      deliveryPreset: 'ebu_r128',
+      preserveMetadata: true,
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/export',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(exp.outputPath).toBe('/out/a_ebu.flac');
+    expect(exp.integratedLufs).toBe(-23.0);
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          path: '/field/poly.wav',
+          trackCount: 2,
+          tracks: [
+            {
+              index: 0,
+              name: 'Boom',
+              sample_rate: 48000,
+              samples: 48000,
+              duration_s: 1.0,
+              rms_dbfs: -24.0,
+              peak_dbfs: -6.0,
+              speech_activity_ratio: 0.72,
+              likely_dialogue: true,
+            },
+          ],
+        }),
+      ),
+    );
+    const tracks = await client().inspectTracks('/field/poly.wav');
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/tracks/inspect',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(tracks.trackCount).toBe(2);
+    expect(tracks.tracks[0]?.name).toBe('Boom');
+  });
 });

@@ -10,11 +10,12 @@ import {
   cancelJob,
   cancelUpload,
   isAnalyzing,
-  playSelection,
+  redoAction,
   seekTo,
   setAb,
   startJob,
   togglePlay,
+  undoAction,
 } from './actions';
 import { clearSelection, stepUnit } from './selection';
 import { getState } from './store';
@@ -46,9 +47,19 @@ export function isActivatable(target: EventTarget | null): boolean {
  */
 export function handleKeyDown(e: KeyboardEvent): void {
   if (e.defaultPrevented) return;
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (isEditable(e.target)) return;
   const st = getState();
+
+  // Cmd/Ctrl+Z (Undo) and Cmd/Ctrl+Shift+Z (Redo) when not typing in an input.
+  if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+    if (!st.shortcutsOpen && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redoAction();
+      else undoAction();
+    }
+    return;
+  }
+  if (e.altKey) return;
 
   if (e.key === '?') {
     e.preventDefault();
@@ -119,15 +130,42 @@ export function handleKeyDown(e: KeyboardEvent): void {
         setAb('cleaned');
       }
       break;
+    case 'd': {
+      // Toggle Delta ("Listen to Removed") audition when cleaned deck is ready.
+      const cleanedReady =
+        hasAudio &&
+        Boolean(st.cleanedPath) &&
+        st.artifacts?.master !== false &&
+        st.deckFault?.deck !== 'cleaned';
+      if (cleanedReady) {
+        e.preventDefault();
+        const player = getPlayer();
+        if (typeof player.toggleDeltaMode === 'function') {
+          player.toggleDeltaMode();
+        }
+      }
+      break;
+    }
     case 'p': {
       const canStart =
         st.engineStatus === 'ready' && !!st.source && !!st.original && !st.analyzing && !running;
       if (canStart) void startJob();
       break;
     }
-    // D2: play selection range, looping
     case 'l':
-      if (hasAudio && st.selectionRange) playSelection(true);
+      // Toggle Region / Clip Loop on DualPlayer.
+      if (hasAudio) {
+        e.preventDefault();
+        const player = getPlayer();
+        if (st.selectionRange && st.selectionRange.end > st.selectionRange.start) {
+          if (typeof player.setLoopRange === 'function') {
+            player.setLoopRange([st.selectionRange.start, st.selectionRange.end]);
+          }
+        }
+        if (typeof player.toggleLoop === 'function') {
+          player.toggleLoop();
+        }
+      }
       break;
     default:
       break;

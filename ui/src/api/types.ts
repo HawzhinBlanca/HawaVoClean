@@ -2,6 +2,15 @@
 // (docs/schemas/report.schema.json). Only the fields the UI reads are typed
 // strictly; everything else is carried through as `unknown`.
 
+export type DeliveryPresetId =
+  | 'match_input'
+  | 'ebu_r128'
+  | 'atsc_a85'
+  | 'podcast'
+  | 'streaming';
+
+export type ExportFormatId = 'wav24' | 'wav32f' | 'flac' | 'aac' | 'video_mux';
+
 export interface HealthResponse {
   ok: boolean;
   version: string;
@@ -112,6 +121,12 @@ export interface ManualStrategyV1 {
   strength?: number | undefined;
   time_range?: [number, number] | null | undefined;
   timeRange?: [number, number] | null | undefined;
+  ambience_floor_db?: number | null | undefined;
+  ambienceFloorDb?: number | null | undefined;
+  delivery_preset?: DeliveryPresetId | null | undefined;
+  deliveryPreset?: DeliveryPresetId | null | undefined;
+  pro_repair?: Record<string, boolean> | null | undefined;
+  proRepair?: Record<string, boolean> | null | undefined;
 }
 
 export interface SeparateStrategyV1 {
@@ -346,6 +361,7 @@ export interface UnitDecisionRecord {
   finish_preset_applied?: string;
   finish_actions?: string[];
   final_decision: string;
+  manual_override?: string | null | undefined;
   decision_reason?: string;
   runtime_ms?: number;
 }
@@ -610,5 +626,121 @@ export interface BatchSummary {
   created_at: string;
   updated_at: string;
   jobs: BatchItem[];
+}
+
+// ---- Pro Studio API Types (Wave 2) -----------------------------------------
+
+export type SpectrogramMode = 'original' | 'cleaned' | 'delta';
+export type SpectrogramScale = 'log' | 'mel' | 'linear';
+
+export interface SpectrogramTileRequest {
+  path: string;
+  cleanedPath?: string | null | undefined;
+  mode: SpectrogramMode;
+  startS: number;
+  endS: number;
+  widthCols?: number | undefined;
+  nBins?: number | undefined;
+  nFft?: number | undefined;
+  scale?: SpectrogramScale | undefined;
+  dbFloor?: number | undefined;
+  dbCeil?: number | undefined;
+}
+
+export interface SpectrogramTileResponse {
+  start_s: number;
+  end_s: number;
+  sample_rate: number;
+  f_min_hz: number;
+  f_max_hz: number;
+  n_bins: number;
+  width_cols: number;
+  scale: SpectrogramScale;
+  db_floor: number;
+  db_ceil: number;
+  data_b64: string;
+}
+
+export interface RegionPreviewRequest {
+  path: string;
+  startS: number;
+  endS: number;
+  profile?: Profile | string | undefined;
+  strength?: number | undefined;
+  ambienceFloorDb?: number | null | undefined;
+}
+
+export interface RegionPreviewMetrics {
+  lufs: number | null;
+  noiseFloorDb: number | null;
+  mos?: number | null | undefined;
+}
+
+export interface RegionPreviewResponse {
+  previewPath: string;
+  audioUrl: string;
+  renderMs: number;
+  warmHit: boolean;
+  metricsBefore: RegionPreviewMetrics;
+  metricsAfter: RegionPreviewMetrics;
+  durationS: number;
+}
+
+export type UnitOverrideDecision = 'auto' | 'force_original' | 'force_enhanced' | 'custom_strength';
+
+export interface UnitOverrideRequest {
+  unitId: number;
+  decision: UnitOverrideDecision;
+  strength?: number | undefined;
+}
+
+export interface UnitOverrideResponse {
+  jobId: string;
+  unitIndex: number;
+  unitId: number;
+  oldDecision: string;
+  newDecision: string;
+  override: UnitOverrideDecision;
+  restitched: boolean;
+  restitchMs?: number | null | undefined;
+  masterSha256?: string | null | undefined;
+  summary?: UnitSummary | null | undefined;
+  units?: UnitDecisionRecord[] | null | undefined;
+}
+
+export interface DeliveryExportRequest {
+  masterPath: string;
+  destPath?: string | null | undefined;
+  format: ExportFormatId;
+  deliveryPreset?: DeliveryPresetId | undefined;
+  sourceMediaPath?: string | null | undefined;
+  preserveMetadata?: boolean | undefined;
+}
+
+export interface DeliveryExportResponse {
+  outputPath: string;
+  format: ExportFormatId;
+  deliveryPreset: DeliveryPresetId;
+  lraLu: number | null;
+  integratedLufs: number | null;
+  truePeakDbtp: number | null;
+}
+
+export interface TrackInfo {
+  index: number;
+  name: string;
+  sample_rate: number;
+  samples: number;
+  duration_s: number;
+  rms_dbfs: number;
+  peak_dbfs: number;
+  speech_activity_ratio: number;
+  likely_dialogue: boolean;
+}
+
+export interface TrackInspectResponse {
+  path: string;
+  trackCount: number;
+  tracks: TrackInfo[];
 }
 

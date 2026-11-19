@@ -9,6 +9,10 @@ import type {
   CreateJobRequest,
   CreateJobResponse,
   CreateV1JobResponse,
+  DeliveryExportRequest,
+  DeliveryExportResponse,
+  DeliveryPresetId,
+  ExportFormatId,
   HealthResponse,
   JobStage,
   JobState,
@@ -16,6 +20,19 @@ import type {
   PeaksWindow,
   ProcessingRequestV1,
   Profile,
+  RegionPreviewMetrics,
+  RegionPreviewRequest,
+  RegionPreviewResponse,
+  SpectrogramScale,
+  SpectrogramTileRequest,
+  SpectrogramTileResponse,
+  TrackInfo,
+  TrackInspectResponse,
+  UnitDecisionRecord,
+  UnitOverrideDecision,
+  UnitOverrideRequest,
+  UnitOverrideResponse,
+  UnitSummary,
   UploadResponse,
 } from './types';
 
@@ -588,5 +605,181 @@ export class EngineClient {
 
   v1BatchEventsUrl(batchId: string): string {
     return `${this.baseUrl}/api/v1/batches/${encodeURIComponent(batchId)}/events`;
+  }
+
+  // ---- Pro Studio API methods (Wave 2) --------------------------------------
+
+  async fetchSpectrogramTile(
+    req: SpectrogramTileRequest,
+    signal?: AbortSignal,
+  ): Promise<SpectrogramTileResponse> {
+    const body: Record<string, unknown> = {
+      path: req.path,
+      mode: req.mode,
+      startS: req.startS,
+      endS: req.endS,
+    };
+    if (req.cleanedPath) body.cleanedPath = req.cleanedPath;
+    if (req.widthCols !== undefined) body.widthCols = req.widthCols;
+    if (req.nBins !== undefined) body.nBins = req.nBins;
+    if (req.nFft !== undefined) body.nFft = req.nFft;
+    if (req.scale !== undefined) body.scale = req.scale;
+    if (req.dbFloor !== undefined) body.dbFloor = req.dbFloor;
+    if (req.dbCeil !== undefined) body.dbCeil = req.dbCeil;
+
+    const raw = await this.json<Record<string, unknown>>(
+      '/api/v1/spectrogram',
+      { method: 'POST', body: JSON.stringify(body) },
+      signal,
+    );
+    const num = (a: unknown, b: unknown, fallback = 0): number => {
+      const v = a !== undefined ? a : b;
+      return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+    };
+    const scaleRaw = raw.scale;
+    const scale: SpectrogramScale =
+      scaleRaw === 'mel' || scaleRaw === 'linear' || scaleRaw === 'log'
+        ? scaleRaw
+        : (req.scale ?? 'log');
+    return {
+      start_s: num(raw.start_s, raw.startS, req.startS),
+      end_s: num(raw.end_s, raw.endS, req.endS),
+      sample_rate: num(raw.sample_rate, raw.sampleRate, 48000),
+      f_min_hz: num(raw.f_min_hz, raw.fMinHz, 20),
+      f_max_hz: num(raw.f_max_hz, raw.fMaxHz, 24000),
+      n_bins: num(raw.n_bins, raw.nBins, 0),
+      width_cols: num(raw.width_cols, raw.widthCols, 0),
+      scale,
+      db_floor: num(raw.db_floor, raw.dbFloor, -60),
+      db_ceil: num(raw.db_ceil, raw.dbCeil, 0),
+      data_b64: String(raw.data_b64 ?? raw.dataB64 ?? ''),
+    };
+  }
+
+  async renderRegionPreview(
+    req: RegionPreviewRequest,
+    signal?: AbortSignal,
+  ): Promise<RegionPreviewResponse> {
+    const body: Record<string, unknown> = {
+      path: req.path,
+      startS: req.startS,
+      endS: req.endS,
+    };
+    if (req.profile !== undefined) body.profile = req.profile;
+    if (req.strength !== undefined) body.strength = req.strength;
+    if (req.ambienceFloorDb !== undefined) body.ambienceFloorDb = req.ambienceFloorDb;
+
+    const raw = await this.json<Record<string, unknown>>(
+      '/api/v1/preview',
+      { method: 'POST', body: JSON.stringify(body) },
+      signal,
+    );
+    const normMetrics = (m: unknown): RegionPreviewMetrics => {
+      const rec = (m && typeof m === 'object' ? m : {}) as Record<string, unknown>;
+      const lufsVal = rec.lufs ?? rec.integrated_lufs;
+      const noiseVal = rec.noiseFloorDb ?? rec.noise_floor_db;
+      const mosVal = rec.mos;
+      return {
+        lufs: typeof lufsVal === 'number' && Number.isFinite(lufsVal) ? lufsVal : null,
+        noiseFloorDb: typeof noiseVal === 'number' && Number.isFinite(noiseVal) ? noiseVal : null,
+        ...(typeof mosVal === 'number' && Number.isFinite(mosVal) ? { mos: mosVal } : {}),
+      };
+    };
+    return {
+      previewPath: String(raw.previewPath ?? raw.preview_path ?? ''),
+      audioUrl: String(raw.audioUrl ?? raw.audio_url ?? ''),
+      renderMs: Number(raw.renderMs ?? raw.render_ms ?? 0),
+      warmHit: Boolean(raw.warmHit ?? raw.warm_hit ?? false),
+      metricsBefore: normMetrics(raw.metricsBefore ?? raw.metrics_before),
+      metricsAfter: normMetrics(raw.metricsAfter ?? raw.metrics_after),
+      durationS: Number(raw.durationS ?? raw.duration_s ?? Math.max(0, req.endS - req.startS)),
+    };
+  }
+
+  async overrideUnit(
+    jobId: string,
+    req: UnitOverrideRequest,
+    signal?: AbortSignal,
+  ): Promise<UnitOverrideResponse> {
+    const body: Record<string, unknown> = {
+      unitId: req.unitId,
+      decision: req.decision,
+    };
+    if (req.strength !== undefined) body.strength = req.strength;
+
+    const raw = await this.json<Record<string, unknown>>(
+      `/api/v1/jobs/${encodeURIComponent(jobId)}/override`,
+      { method: 'POST', body: JSON.stringify(body) },
+      signal,
+    );
+    const restitchMsRaw = raw.restitchMs ?? raw.restitch_ms;
+    const masterShaRaw = raw.masterSha256 ?? raw.master_sha256;
+    return {
+      jobId: String(raw.jobId ?? raw.job_id ?? jobId),
+      unitIndex: Number(raw.unitIndex ?? raw.unit_index ?? req.unitId),
+      unitId: Number(raw.unitId ?? raw.unit_id ?? req.unitId),
+      oldDecision: String(raw.oldDecision ?? raw.old_decision ?? ''),
+      newDecision: String(raw.newDecision ?? raw.new_decision ?? ''),
+      override: (raw.override ?? req.decision) as UnitOverrideDecision,
+      restitched: Boolean(raw.restitched),
+      ...(typeof restitchMsRaw === 'number' && Number.isFinite(restitchMsRaw)
+        ? { restitchMs: restitchMsRaw }
+        : {}),
+      ...(typeof masterShaRaw === 'string' && masterShaRaw ? { masterSha256: masterShaRaw } : {}),
+      ...(raw.summary && typeof raw.summary === 'object'
+        ? { summary: raw.summary as UnitSummary }
+        : {}),
+      ...(Array.isArray(raw.units) ? { units: raw.units as UnitDecisionRecord[] } : {}),
+    };
+  }
+
+  async exportDelivery(
+    req: DeliveryExportRequest,
+    signal?: AbortSignal,
+  ): Promise<DeliveryExportResponse> {
+    const body: Record<string, unknown> = {
+      masterPath: req.masterPath,
+      format: req.format,
+    };
+    if (req.destPath) body.destPath = req.destPath;
+    if (req.deliveryPreset !== undefined) body.deliveryPreset = req.deliveryPreset;
+    if (req.sourceMediaPath) body.sourceMediaPath = req.sourceMediaPath;
+    if (req.preserveMetadata !== undefined) body.preserveMetadata = req.preserveMetadata;
+
+    const raw = await this.json<Record<string, unknown>>(
+      '/api/v1/export',
+      { method: 'POST', body: JSON.stringify(body) },
+      signal,
+    );
+    const optNum = (a: unknown, b: unknown): number | null => {
+      const v = a !== undefined ? a : b;
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    };
+    return {
+      outputPath: String(raw.outputPath ?? raw.output_path ?? ''),
+      format: (raw.format ?? req.format) as ExportFormatId,
+      deliveryPreset: (raw.deliveryPreset ??
+        raw.delivery_preset ??
+        req.deliveryPreset ??
+        'match_input') as DeliveryPresetId,
+      lraLu: optNum(raw.lraLu, raw.lra_lu),
+      integratedLufs: optNum(raw.integratedLufs, raw.integrated_lufs),
+      truePeakDbtp: optNum(raw.truePeakDbtp, raw.true_peak_dbtp),
+    };
+  }
+
+  async inspectTracks(path: string, signal?: AbortSignal): Promise<TrackInspectResponse> {
+    const raw = await this.json<Record<string, unknown>>(
+      '/api/v1/tracks/inspect',
+      { method: 'POST', body: JSON.stringify({ path }) },
+      signal,
+    );
+    const tracks = Array.isArray(raw.tracks) ? (raw.tracks as TrackInfo[]) : [];
+    const trackCount = Number(raw.trackCount ?? raw.track_count ?? tracks.length);
+    return {
+      path: String(raw.path ?? path),
+      trackCount,
+      tracks,
+    };
   }
 }

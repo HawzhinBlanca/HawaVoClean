@@ -210,6 +210,7 @@ describe('SpectrogramDisplay component', () => {
       expect(sel.fHighHz).toBeGreaterThan(sel.fLowHz);
       expect(sel.fHighHz).toBeLessThanOrEqual(24000);
       expect(onProp).toHaveBeenLastCalledWith(sel);
+      expect(useStore.getState().spectralSelection).toEqual(sel);
 
       // Selection box + Hz/timecode chip + Clear button rendered
       expect(host.querySelector('.spectrogram-selection-box')).not.toBeNull();
@@ -248,5 +249,56 @@ describe('SpectrogramDisplay component', () => {
       },
     });
     expect(results.violations).toEqual([]);
+  });
+
+  it('fetches live 2D STFT tiles from POST /api/v1/spectrogram when ready and caches by key', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchSpectrogramTile = vi.fn(async () => ({
+        start_s: 0,
+        end_s: 2,
+        sample_rate: 48000,
+        f_min_hz: 20,
+        f_max_hz: 24000,
+        n_bins: 2,
+        width_cols: 2,
+        scale: 'linear' as const,
+        db_floor: -72,
+        db_ceil: -2,
+        data_b64: 'AQIDBA==',
+      }));
+      act(() => {
+        useStore.setState({
+          engineStatus: 'ready',
+          client: { fetchSpectrogramTile } as unknown as NonNullable<
+            ReturnType<typeof useStore.getState>['client']
+          >,
+        });
+        useStore.getState().setSource({ path: '/path/to/test.wav', name: 'test.wav', origin: 'file' });
+        useStore.getState().setOriginal(mockAnalysis({ duration_s: 2.0 }));
+        root.render(createElement(SpectrogramDisplay));
+      });
+
+      act(() => host.querySelector<HTMLButtonElement>('button.wave-fit')?.click());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(160);
+      });
+
+      expect(fetchSpectrogramTile).toHaveBeenCalledTimes(1);
+      expect(fetchSpectrogramTile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: '/path/to/test.wav',
+          mode: 'original',
+          startS: 0,
+          endS: 2,
+          scale: 'linear',
+        }),
+        expect.any(AbortSignal),
+      );
+      expect(host.textContent).toContain('-72 dB');
+      expect(host.textContent).toContain('-2 dB');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

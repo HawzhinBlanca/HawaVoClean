@@ -95,6 +95,9 @@ describe('AdvancedControls', () => {
     expect(rootEl).not.toBeNull();
     const panel = host.querySelector('#advanced-controls-panel');
     expect(panel).not.toBeNull();
+    // StudioRack is wired inside the expanded AdvancedControls panel
+    const rack = host.querySelector('section.studio-rack');
+    expect(rack).not.toBeNull();
   });
 
   it('formats Studio Pro and Low-band labels cleanly in the collapsed summary', async () => {

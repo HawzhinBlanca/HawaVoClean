@@ -27,6 +27,7 @@ vi.mock('../bridge', () => ({
 // side-effecting Resolve/Finder calls are replaced.
 vi.mock('../state/actions', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../state/actions')>()),
+  exportWithDelivery: vi.fn(async () => null),
   importToResolve: vi.fn(),
   replaceInResolve: vi.fn(),
   revealOutput: vi.fn(),
@@ -169,5 +170,46 @@ describe('a run whose master the engine can no longer serve', () => {
     const gone = dead();
     expect(gone).toHaveLength(1);
     expect(gone[0]?.getAttribute('title')).toContain('no longer on disk');
+  });
+});
+
+describe('delivery & video mux export button', () => {
+  it('shows Mux Video when source is a video container and calls exportWithDelivery', async () => {
+    const actionsMod = await import('../state/actions');
+    await finishedRun();
+    await act(async () => {
+      getState().setSource({ path: '/clips/interview.mp4', name: 'interview.mp4', origin: 'file' });
+    });
+    await render();
+
+    const exportBtn = host.querySelector<HTMLButtonElement>('button.export-delivery-btn');
+    expect(exportBtn).not.toBeNull();
+    expect(exportBtn?.textContent).toContain('Mux Video');
+    expect(exportBtn?.disabled).toBe(false);
+
+    await act(async () => {
+      exportBtn?.click();
+    });
+    expect(actionsMod.exportWithDelivery).toHaveBeenCalledWith('video_mux');
+  });
+
+  it('reflects StudioRack exportFormat for audio sources', async () => {
+    const actionsMod = await import('../state/actions');
+    await finishedRun();
+    await act(async () => {
+      getState().setRackSettings({
+        ...getState().rackSettings,
+        exportFormat: 'flac',
+      });
+    });
+    await render();
+
+    const exportBtn = host.querySelector<HTMLButtonElement>('button.export-delivery-btn');
+    expect(exportBtn?.textContent).toContain('Export FLAC');
+
+    await act(async () => {
+      exportBtn?.click();
+    });
+    expect(actionsMod.exportWithDelivery).toHaveBeenCalledWith('flac');
   });
 });

@@ -2,7 +2,7 @@
 // Displays aggregate progress, per-item status, individual item controls,
 // deck inspection without stopping queue, and batch pause/resume/cancel.
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   baseName,
   cancelBatchItem,
@@ -12,6 +12,7 @@ import {
   resumeCurrentBatch,
   retryBatchItem,
 } from '../state/actions';
+import type { DeliveryPresetId } from '../state/presets';
 import { useStore } from '../state/store';
 import type { BatchItem } from '../api/types';
 import {
@@ -23,6 +24,27 @@ import {
   IconWarn,
 } from './Icons';
 import { JobHistory } from './JobHistory';
+
+const DELIVERY_BADGE_LABEL: Record<DeliveryPresetId, string> = {
+  match_input: 'Match Input',
+  ebu_r128: 'EBU R128 (-23 LUFS)',
+  atsc_a85: 'ATSC A/85 (-24 LUFS)',
+  podcast: 'Podcast (-16 LUFS)',
+  streaming: 'Streaming (-14 LUFS)',
+};
+
+/** Returns true when a batch item has failed, errored, or has reverted/flagged units. */
+export function isBatchItemFlagged(item: BatchItem): boolean {
+  if (item.state === 'failed' || Boolean(item.error)) return true;
+  const s = item.report?.summary;
+  if (!s) return false;
+  return (
+    (s.reverted ?? 0) > 0 ||
+    (s.continuity_reverted ?? 0) > 0 ||
+    (s.error_passthrough ?? 0) > 0 ||
+    (s.unverified ?? 0) > 0
+  );
+}
 
 function ItemMark({ state }: { state: BatchItem['state'] }) {
   if (state === 'done') return <IconCheck size={12} />;
@@ -126,8 +148,16 @@ export function BatchQueue() {
   const batch = useStore((s) => s.batch);
   const activeInspectJobId = useStore((s) => s.activeInspectJobId);
   const setBatch = useStore((s) => s.setBatch);
+  const batchNamingTemplate = useStore((s) => s.batchNamingTemplate);
+  const deliveryPreset = useStore((s) => s.rackSettings.deliveryPreset);
 
   const [showHistory, setShowHistory] = useState(false);
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
+
+  const flaggedJobs = useMemo(
+    () => (batch ? batch.jobs.filter(isBatchItemFlagged) : []),
+    [batch],
+  );
 
   if (!batch) return null;
 
@@ -154,6 +184,8 @@ export function BatchQueue() {
     batch.state === 'done' || batch.state === 'failed' || batch.state === 'cancelled';
   const isRunning = batch.state === 'running' || batch.state === 'queued';
   const isPaused = batch.state === 'paused';
+  const visibleJobs = flaggedOnly ? flaggedJobs : batch.jobs;
+  const deliveryLabel = DELIVERY_BADGE_LABEL[deliveryPreset] ?? deliveryPreset;
 
   return (
     <section className="panel batch-queue" aria-label="Batch Queue">
@@ -172,8 +204,35 @@ export function BatchQueue() {
               <span className="batch-cancelled-count"> · {batch.cancelled_items} cancelled</span>
             )}
           </span>
+          <div className="batch-meta-bar">
+            <span
+              className="batch-delivery-badge"
+              title={`Active delivery target: ${deliveryLabel}`}
+            >
+              {deliveryLabel}
+            </span>
+            <code
+              className="batch-naming-badge"
+              title={`Batch output naming template: ${batchNamingTemplate}`}
+            >
+              {batchNamingTemplate}
+            </code>
+          </div>
         </div>
         <div className="batch-controls">
+          <button
+            type="button"
+            className={`batch-btn subtle batch-flag-toggle${flaggedOnly ? ' on' : ''}`}
+            aria-pressed={flaggedOnly}
+            aria-label="Filter flagged items only"
+            title="Show only items with errors or reverted speech units"
+            onClick={() => setFlaggedOnly((v) => !v)}
+          >
+            <span>Flagged only</span>
+            {flaggedJobs.length > 0 ? (
+              <span className="batch-flag-count mono">{flaggedJobs.length}</span>
+            ) : null}
+          </button>
           <button
             type="button"
             className="batch-btn subtle"
@@ -245,16 +304,22 @@ export function BatchQueue() {
       </div>
 
       <div className="batch-body">
-        <ul className="batch-list" aria-label={`Batch items (${batch.jobs.length})`}>
-          {batch.jobs.map((item) => (
-            <li key={item.job_id}>
-              <BatchItemRow
-                item={item}
-                isInspecting={item.job_id === activeInspectJobId}
-              />
-            </li>
-          ))}
-        </ul>
+        {flaggedOnly && visibleJobs.length === 0 ? (
+          <p className="batch-empty-flagged" role="status">
+            No flagged items — all runs are clean so far.
+          </p>
+        ) : (
+          <ul className="batch-list" aria-label={`Batch items (${visibleJobs.length})`}>
+            {visibleJobs.map((item) => (
+              <li key={item.job_id}>
+                <BatchItemRow
+                  item={item}
+                  isInspecting={item.job_id === activeInspectJobId}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </section>
   );

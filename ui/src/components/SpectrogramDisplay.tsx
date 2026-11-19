@@ -47,7 +47,23 @@ import { useStore } from '../state/store';
 
 const SPEC_HEIGHT = 160;
 const REDRAW_DEBOUNCE_MS = 40;
+const SERVER_FETCH_DEBOUNCE_MS = 120;
+const SERVER_TILE_CACHE_MAX = 16;
 const MIN_DRAG_PX = 4;
+
+function decodeBase64ToUint8Array(b64: string): Uint8Array | null {
+  if (!b64) return null;
+  try {
+    const binary = atob(b64);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      out[i] = binary.charCodeAt(i);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
 
 export interface SpectrogramDisplayProps {
   /** Optional server-computed 2D STFT tile for Original (`uint8 [nBins x widthCols]`). */
@@ -99,18 +115,27 @@ export function SpectrogramDisplay({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<StftCanvasRenderer | null>(null);
   const redrawTimer = useRef<number | null>(null);
+  const fetchTimerRef = useRef<number | null>(null);
+  const fetchAbortRef = useRef<AbortController | null>(null);
+  const lastFetchKeyRef = useRef('');
+  const tileCacheRef = useRef<Map<string, StftTile>>(new Map());
   const lastRenderKey = useRef('');
 
   const abMode = useStore((s) => s.abMode);
   const original = useStore((s) => s.original);
   const cleaned = useStore((s) => s.cleaned);
+  const cleanedPath = useStore((s) => s.cleanedPath);
+  const engineStatus = useStore((s) => s.engineStatus);
+  const client = useStore((s) => s.client);
+  const setSpectralSelection = useStore((s) => s.setSpectralSelection);
 
   const [visible, setVisible] = useState(false);
   const [viewMode, setViewMode] = useState<SpectrogramViewMode>(abMode);
   const [scale, setScale] = useState<FrequencyScale>('log');
   const [selection, setSelection] = useState<SpectralSelection | null>(null);
   const [dragRect, setDragRect] = useState<DragRect | null>(null);
-  const [, setViewTick] = useState(0);
+  const [serverTile, setServerTile] = useState<{ key: string; tile: StftTile } | null>(null);
+  const [viewTick, setViewTick] = useState(0);
 
   const hasData = original !== null;
   const hasCleaned = cleaned !== null || cleanedTile !== null || cleanedPcm !== null;
@@ -131,15 +156,143 @@ export function SpectrogramDisplay({
     }
   }, [hasCleaned, viewMode]);
 
-  // Clear stale 2D selection when a new source clip is loaded.
+  // Clear stale 2D selection and server tile cache when a new source clip is loaded.
   const sourcePath = original?.path ?? null;
   useEffect(() => {
     setSelection(null);
     setDragRect(null);
-  }, [sourcePath]);
+    setSpectralSelection(null);
+    setServerTile(null);
+    lastFetchKeyRef.current = '';
+    tileCacheRef.current.clear();
+  }, [sourcePath, setSpectralSelection]);
+
+  // Keep store spectralSelection synced if an external listener dispatches hawa:spectral-selection.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onSpectralEvent = (e: Event): void => {
+      const detail = (e as CustomEvent<SpectralSelection | null>).detail ?? null;
+      setSpectralSelection(detail);
+    };
+    window.addEventListener(SPECTRAL_SELECTION_EVENT, onSpectralEvent);
+    return () => window.removeEventListener(SPECTRAL_SELECTION_EVENT, onSpectralEvent);
+  }, [setSpectralSelection]);
 
   const effectiveMode: SpectrogramViewMode =
     viewMode === 'original' || !hasCleaned ? 'original' : viewMode;
+
+  // Fetch real 2D STFT / Delta tiles from POST /api/v1/spectrogram when visible & ready
+  // (debounced + abortable + cached), seamlessly falling back to client STFT/analysis.
+  useEffect(() => {
+    if (fetchTimerRef.current !== null) {
+      window.clearTimeout(fetchTimerRef.current);
+      fetchTimerRef.current = null;
+    }
+    fetchAbortRef.current?.abort();
+    fetchAbortRef.current = null;
+
+    if (!visible || engineStatus !== 'ready' || !client || typeof client.fetchSpectrogramTile !== 'function') {
+      return;
+    }
+    if (!original?.path) return;
+    // Explicit prop tiles override server fetching.
+    if (effectiveMode === 'original' && originalTile) return;
+    if (effectiveMode === 'cleaned' && cleanedTile) return;
+    if (effectiveMode === 'delta' && originalTile && cleanedTile) return;
+
+    const cleanFile = cleaned?.path ?? cleanedPath ?? null;
+    if ((effectiveMode === 'cleaned' || effectiveMode === 'delta') && !cleanFile) return;
+
+    const v = waveView.view;
+    const startS = v.end > v.start ? v.start : 0;
+    const endS = v.end > v.start ? v.end : (original.duration_s ?? 0);
+    if (!(endS > startS)) return;
+
+    const reqKey = `${original.path}|${effectiveMode === 'original' ? '' : (cleanFile ?? '')}|${effectiveMode}|${startS.toFixed(2)}|${endS.toFixed(2)}`;
+    const cached = tileCacheRef.current.get(reqKey);
+    if (cached) {
+      lastFetchKeyRef.current = reqKey;
+      setServerTile({ key: reqKey, tile: cached });
+      return;
+    }
+    if (lastFetchKeyRef.current === reqKey) return;
+
+    fetchTimerRef.current = window.setTimeout(() => {
+      fetchTimerRef.current = null;
+      const ac = new AbortController();
+      fetchAbortRef.current = ac;
+      lastFetchKeyRef.current = reqKey;
+
+      const stageW = stageRef.current?.clientWidth ?? 400;
+      const widthCols = Math.max(128, Math.min(512, Math.round(stageW)));
+      const nBins = 128;
+
+      void client
+        .fetchSpectrogramTile(
+          {
+            path: original.path,
+            ...(effectiveMode !== 'original' && cleanFile ? { cleanedPath: cleanFile } : {}),
+            mode: effectiveMode,
+            startS,
+            endS,
+            widthCols,
+            nBins,
+            // Request linear FFT bins so StftCanvasRenderer can switch Log/Mel/Linear client-side without double-warping.
+            scale: 'linear',
+          },
+          ac.signal,
+        )
+        .then((res) => {
+          if (ac.signal.aborted) return;
+          const bytes = decodeBase64ToUint8Array(res.data_b64);
+          if (!bytes || res.n_bins < 1 || res.width_cols < 1) return;
+          if (bytes.length < res.n_bins * res.width_cols) return;
+          const tile: StftTile = {
+            data: bytes,
+            nBins: res.n_bins,
+            widthCols: res.width_cols,
+            sampleRate: res.sample_rate || original.sample_rate || 48000,
+            startS: res.start_s,
+            endS: res.end_s,
+            dbFloor: res.db_floor,
+            dbCeil: res.db_ceil,
+          };
+          const cache = tileCacheRef.current;
+          if (cache.size >= SERVER_TILE_CACHE_MAX) {
+            const oldest = cache.keys().next().value;
+            if (oldest !== undefined) cache.delete(oldest);
+          }
+          cache.set(reqKey, tile);
+          setServerTile({ key: reqKey, tile });
+        })
+        .catch(() => {
+          // Soft fallback: client STFT / analysis tile stays rendered cleanly.
+          if (!ac.signal.aborted && lastFetchKeyRef.current === reqKey) {
+            lastFetchKeyRef.current = '';
+          }
+        });
+    }, SERVER_FETCH_DEBOUNCE_MS);
+
+    return () => {
+      if (fetchTimerRef.current !== null) {
+        window.clearTimeout(fetchTimerRef.current);
+        fetchTimerRef.current = null;
+      }
+      fetchAbortRef.current?.abort();
+      fetchAbortRef.current = null;
+    };
+  }, [
+    visible,
+    engineStatus,
+    client,
+    original,
+    cleaned,
+    cleanedPath,
+    effectiveMode,
+    originalTile,
+    cleanedTile,
+    viewTick,
+  ]);
 
   const sampleRate = original?.sample_rate ?? cleaned?.sample_rate ?? 48000;
   const maxFreqHz = Math.min(MAX_FREQ_HZ, Math.max(MIN_FREQ_HZ + 1, sampleRate / 2));
@@ -180,6 +333,17 @@ export function SpectrogramDisplay({
   }, [cleanedTile, cleanedPcm, cleaned, sampleRate]);
 
   const activeTile = useMemo<StftTile | null>(() => {
+    const cleanFile = cleaned?.path ?? cleanedPath ?? '';
+    const modePrefix = `${original?.path ?? ''}|${effectiveMode === 'original' ? '' : cleanFile}|${effectiveMode}|`;
+    if (
+      serverTile &&
+      serverTile.key.startsWith(modePrefix) &&
+      !(effectiveMode === 'original' && originalTile) &&
+      !(effectiveMode === 'cleaned' && cleanedTile) &&
+      !(effectiveMode === 'delta' && originalTile && cleanedTile)
+    ) {
+      return serverTile.tile;
+    }
     if (effectiveMode === 'delta' && resolvedOrigTile && resolvedCleanTile) {
       return computeDeltaTile(resolvedOrigTile, resolvedCleanTile);
     }
@@ -187,7 +351,17 @@ export function SpectrogramDisplay({
       return resolvedCleanTile;
     }
     return resolvedOrigTile;
-  }, [effectiveMode, resolvedOrigTile, resolvedCleanTile]);
+  }, [
+    serverTile,
+    original,
+    cleaned,
+    cleanedPath,
+    originalTile,
+    cleanedTile,
+    effectiveMode,
+    resolvedOrigTile,
+    resolvedCleanTile,
+  ]);
 
   const ticks = useMemo(
     () => getFrequencyTicks(scale, MIN_FREQ_HZ, maxFreqHz),
@@ -205,6 +379,7 @@ export function SpectrogramDisplay({
   const emitSelection = useCallback(
     (next: SpectralSelection | null) => {
       setSelection(next);
+      setSpectralSelection(next);
       onSpectralSelectionChange?.(next);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(
@@ -215,7 +390,7 @@ export function SpectrogramDisplay({
         );
       }
     },
-    [onSpectralSelectionChange],
+    [onSpectralSelectionChange, setSpectralSelection],
   );
 
   const redraw = useCallback(() => {

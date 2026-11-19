@@ -270,4 +270,62 @@ describe('BatchQueue component', () => {
     expect(host.querySelector('.batch-history-wrapper')).toBeNull();
     expect(host.querySelector('.batch-queue')).not.toBeNull();
   });
+
+  it('filters flagged items (failed or reverted units) and displays naming template + delivery preset badge', async () => {
+    const batchWithFlagged = sampleBatch({
+      total_items: 3,
+      completed_items: 2,
+      failed_items: 1,
+      jobs: [
+        ...sampleBatch().jobs,
+        {
+          job_id: 'j3',
+          seq: 3,
+          state: 'done',
+          stage: 'done',
+          progress: 1.0,
+          message: 'Completed with reverts',
+          input_path: '/path/to/reverted.wav',
+          output_path: '/path/to/reverted_studio.wav',
+          report_path: '/path/to/reverted_studio.json',
+          profile: 'studio',
+          mode: 'natural',
+          created_at: '2026-09-05T00:00:00Z',
+          started_at: '2026-09-05T00:00:01Z',
+          finished_at: '2026-09-05T00:00:02Z',
+          report: {
+            job_id: 'j3',
+            config_hash: 'c',
+            input: { path: '/path/to/reverted.wav', sha256: 'x', sample_rate: 48000, channels: 1, samples: 1, duration_s: 2 },
+            output: { path: '/path/to/reverted_studio.wav', sha256: 'y', sample_rate: 48000, channels: 1, samples: 1, duration_s: 2 },
+            core: { id: 'studio', algorithm: 'x', params_hash: 'p' },
+            guard: { id: 'g', probe_hash: 'p', calibration_id: 'c' },
+            environment: {},
+            summary: { units_total: 4, enhanced: 3, reverted: 1 },
+          },
+        },
+      ],
+    });
+    useStore.getState().setBatchNamingTemplate('{name}_{preset}_master');
+    useStore.getState().setBatch(batchWithFlagged);
+    await render();
+
+    expect(host.querySelector('.batch-naming-badge')?.textContent).toBe('{name}_{preset}_master');
+    expect(host.querySelector('.batch-delivery-badge')?.textContent).toContain('EBU R128');
+    expect(host.querySelectorAll('.batch-item-row')).toHaveLength(3);
+
+    const flagBtn = host.querySelector<HTMLButtonElement>('button[aria-label="Filter flagged items only"]');
+    expect(flagBtn).not.toBeNull();
+    expect(flagBtn?.getAttribute('aria-pressed')).toBe('false');
+    expect(flagBtn?.textContent).toContain('1');
+
+    await act(async () => {
+      flagBtn?.click();
+    });
+
+    expect(flagBtn?.getAttribute('aria-pressed')).toBe('true');
+    const filteredRows = host.querySelectorAll('.batch-item-row');
+    expect(filteredRows).toHaveLength(1);
+    expect(filteredRows[0]?.textContent).toContain('reverted.wav');
+  });
 });

@@ -10,8 +10,25 @@ import type {
   Profile,
   UnitDecisionRecord,
 } from '../api/types';
+import type { TakeSnapshot } from '../components/TakeSwitcher';
 import { waveView, type ViewWindow } from '../render/viewWindow';
 import type { HawaHost } from '../bridge/types';
+import {
+  DEFAULT_NAMING_TEMPLATE,
+  DEFAULT_STUDIO_RACK_SETTINGS,
+  type StudioRackSettings,
+} from './presets';
+import { createUndoStack, shallowRecordEqual, type UndoStack } from './undoStack';
+
+export type UnitOverrideMapValue = 'auto' | 'force_original' | 'force_enhanced';
+export type UnitOverrideMap = Record<number, UnitOverrideMapValue>;
+
+export interface SpectralSelectionBox {
+  startS: number;
+  endS: number;
+  fLowHz: number;
+  fHighHz: number;
+}
 
 export type EngineStatus = 'connecting' | 'ready' | 'offline';
 export type SourceOrigin = 'resolve' | 'file' | 'drop' | 'upload';
@@ -310,6 +327,19 @@ export interface AppState {
   batch: BatchSummary | null;
   activeInspectJobId: string | null;
 
+  // Pro Studio state (Wave 2)
+  rackSettings: StudioRackSettings;
+  rackDirty: boolean;
+  rackUndo: UndoStack<StudioRackSettings>;
+  takes: TakeSnapshot[];
+  activeTakeId: string | null;
+  unitOverrides: UnitOverrideMap;
+  overrideUndo: UndoStack<UnitOverrideMap>;
+  lastUndoDomain: 'override' | 'rack' | null;
+  spectralSelection: SpectralSelectionBox | null;
+  videoPreviewCollapsed: boolean;
+  batchNamingTemplate: string;
+
   // actions
   setHost(host: HawaHost): void;
   setEngine(status: EngineStatus, client: EngineClient | null, version: string | null): void;
@@ -355,6 +385,18 @@ export interface AppState {
   setBatch(b: BatchSummary | null): void;
   patchBatch(patch: Partial<BatchSummary>): void;
   setActiveInspectJobId(id: string | null): void;
+  setRackSettings(
+    settings: StudioRackSettings,
+    undo?: UndoStack<StudioRackSettings>,
+    dirty?: boolean,
+  ): void;
+  setTakes(takes: TakeSnapshot[], activeTakeId?: string | null): void;
+  setActiveTakeId(id: string | null): void;
+  setUnitOverrides(overrides: UnitOverrideMap, undo?: UndoStack<UnitOverrideMap>): void;
+  setLastUndoDomain(domain: 'override' | 'rack' | null): void;
+  setSpectralSelection(sel: SpectralSelectionBox | null): void;
+  setVideoPreviewCollapsed(collapsed: boolean): void;
+  setBatchNamingTemplate(template: string): void;
   resetForNewSource(): void;
 }
 
@@ -416,6 +458,21 @@ export const useStore = create<AppState>((set) => ({
   dragOver: false,
   batch: null,
   activeInspectJobId: null,
+
+  rackSettings: { ...DEFAULT_STUDIO_RACK_SETTINGS },
+  rackDirty: false,
+  rackUndo: createUndoStack<StudioRackSettings>(
+    { ...DEFAULT_STUDIO_RACK_SETTINGS },
+    { equals: shallowRecordEqual },
+  ),
+  takes: [],
+  activeTakeId: null,
+  unitOverrides: {},
+  overrideUndo: createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }),
+  lastUndoDomain: null,
+  spectralSelection: null,
+  videoPreviewCollapsed: false,
+  batchNamingTemplate: DEFAULT_NAMING_TEMPLATE,
 
   setHost: (host) => set({ host }),
   // Losing the engine must not lose anything else: the client object is a URL
@@ -549,6 +606,37 @@ export const useStore = create<AppState>((set) => ({
       batch: s.batch ? { ...s.batch, ...patch } : null,
     })),
   setActiveInspectJobId: (activeInspectJobId) => set({ activeInspectJobId }),
+  setRackSettings: (rackSettings, rackUndo, rackDirty) =>
+    set((s) => ({
+      rackSettings,
+      ...(rackUndo !== undefined ? { rackUndo } : {}),
+      ...(rackDirty !== undefined ? { rackDirty } : {}),
+      ...(rackSettings.namingTemplate !== undefined
+        ? { batchNamingTemplate: rackSettings.namingTemplate }
+        : {}),
+      ...(rackUndo === undefined && rackDirty === undefined
+        ? { rackDirty: s.rackDirty || !shallowRecordEqual(rackSettings, DEFAULT_STUDIO_RACK_SETTINGS) }
+        : {}),
+    })),
+  setTakes: (takes, activeTakeId) =>
+    set((s) => ({
+      takes,
+      activeTakeId: activeTakeId !== undefined ? activeTakeId : s.activeTakeId,
+    })),
+  setActiveTakeId: (activeTakeId) => set({ activeTakeId }),
+  setUnitOverrides: (unitOverrides, overrideUndo) =>
+    set(() => ({
+      unitOverrides,
+      ...(overrideUndo !== undefined ? { overrideUndo } : {}),
+    })),
+  setLastUndoDomain: (lastUndoDomain) => set({ lastUndoDomain }),
+  setSpectralSelection: (spectralSelection) => set({ spectralSelection }),
+  setVideoPreviewCollapsed: (videoPreviewCollapsed) => set({ videoPreviewCollapsed }),
+  setBatchNamingTemplate: (batchNamingTemplate) =>
+    set((s) => ({
+      batchNamingTemplate,
+      rackSettings: { ...s.rackSettings, namingTemplate: batchNamingTemplate },
+    })),
   resetForNewSource: () =>
     set({
       original: null,
@@ -567,6 +655,11 @@ export const useStore = create<AppState>((set) => ({
       highlightRange: null,
       selectedUnit: null,
       selectionRange: null,
+      takes: [],
+      activeTakeId: null,
+      unitOverrides: {},
+      overrideUndo: createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }),
+      spectralSelection: null,
       error: null,
       errorLabel: null,
       reconstructionConsent: false,

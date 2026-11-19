@@ -18,6 +18,9 @@ import { BatchQueue } from './components/BatchQueue';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { VerdictStrip } from './components/VerdictStrip';
 import { UnitInspector } from './components/UnitInspector';
+import { TakeSwitcher } from './components/TakeSwitcher';
+import { VideoPreview } from './components/VideoPreview';
+import { createUndoStack, shallowRecordEqual } from './state/undoStack';
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
@@ -479,5 +482,76 @@ describe('Accessibility & Axe-core Audit (D4.5)', () => {
     });
     check = await runAxe(host);
     expect(check.seriousOrCritical).toEqual([]);
+  });
+
+  it('UnitInspector with override actions and Undo/Redo history passes axe-core with zero violations', async () => {
+    const stack = createUndoStack<Record<number, 'auto' | 'force_original' | 'force_enhanced'>>(
+      {},
+      { equals: shallowRecordEqual },
+    ).push({ 1: 'force_original' });
+    useStore.setState({
+      report: fakeReport(),
+      original: fakeAnalysis(),
+      selectedUnit: fakeUnit(1),
+      unitOverrides: { 1: 'force_original' },
+      overrideUndo: stack,
+    });
+    await act(async () => {
+      root.render(createElement(UnitInspector));
+    });
+    const { results, seriousOrCritical } = await runAxe(host);
+    expect(seriousOrCritical).toEqual([]);
+    expect(results.violations).toEqual([]);
+  });
+
+  it('TakeSwitcher and VideoPreview pass axe-core WCAG 2.2 AA with zero violations', async () => {
+    await act(async () => {
+      root.render(
+        createElement(
+          'div',
+          null,
+          createElement(TakeSwitcher, {
+            takes: [
+              {
+                id: 't1',
+                label: 'Take A',
+                profile: 'studio',
+                cleanedPath: '/out/t1.wav',
+                report: fakeReport(),
+                mosDelta: 0.8,
+                lufsOut: -23.0,
+                pinned: true,
+              },
+              {
+                id: 't2',
+                label: 'Take B',
+                profile: 'studio_pro',
+                cleanedPath: '/out/t2.wav',
+                report: fakeReport(),
+                mosDelta: 1.4,
+                lufsOut: -22.8,
+              },
+            ],
+            activeId: 't2',
+            onSelect: () => undefined,
+            onTogglePin: () => undefined,
+            onRemoveTake: () => undefined,
+          }),
+          createElement(VideoPreview, {
+            videoUrl: '/api/audio?path=%2Fclip.mp4',
+            currentTime: 5.2,
+            playing: false,
+            duration: 30,
+            onSeek: () => undefined,
+            collapsed: false,
+            onToggleCollapse: () => undefined,
+            title: 'clip.mp4',
+          }),
+        ),
+      );
+    });
+    const { results, seriousOrCritical } = await runAxe(host);
+    expect(seriousOrCritical).toEqual([]);
+    expect(results.violations).toEqual([]);
   });
 });
