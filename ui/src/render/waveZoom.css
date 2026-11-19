@@ -65,6 +65,11 @@
 }
 
 .wave-fit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
   font-weight: 700;

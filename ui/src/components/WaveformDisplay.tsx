@@ -978,7 +978,7 @@ export function WaveformDisplay() {
               className="wave-fit wave-mark"
               onClick={markSelectionStart}
               disabled={!hasData}
-              aria-label="Mark region start at playhead"
+              aria-label={`${t.markStart} — mark region start at playhead`}
               title="Mark region start (I) · or Shift+drag on waveform"
             >
               {t.markStart}
@@ -988,7 +988,7 @@ export function WaveformDisplay() {
               className="wave-fit wave-mark"
               onClick={markSelectionEnd}
               disabled={!hasData}
-              aria-label="Mark region end at playhead"
+              aria-label={`${t.markEnd} — mark region end at playhead`}
               title="Mark region end (O) · or Shift+drag on waveform"
             >
               {t.markEnd}
@@ -998,7 +998,7 @@ export function WaveformDisplay() {
                 type="button"
                 className="wave-fit wave-mark-clear"
                 onClick={clearSelectionRange}
-                aria-label="Clear selected region"
+                aria-label={`${t.clearRegion} selected region`}
                 title="Clear selected region (Esc)"
               >
                 {t.clearRegion}

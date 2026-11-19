@@ -50,7 +50,7 @@ export interface TranslationCatalog {
 export const CATALOGS: Record<Locale, TranslationCatalog> = {
   en: {
     langToggleLabel: 'کوردی',
-    langToggleAria: 'Switch to Sorani Kurdish',
+    langToggleAria: 'کوردی — Switch to Sorani Kurdish',
     noClip: 'No clip',
     uploading: 'Uploading',
     clip: 'Clip',
@@ -89,7 +89,7 @@ export const CATALOGS: Record<Locale, TranslationCatalog> = {
   },
   ckb: {
     langToggleLabel: 'English',
-    langToggleAria: 'گۆڕین بۆ زمانی ئینگلیزی',
+    langToggleAria: 'English — گۆڕین بۆ زمانی ئینگلیزی',
     noClip: 'هیچ کلیپێک نییە',
     uploading: 'بارکردن...',
     clip: 'کلیپ',

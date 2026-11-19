@@ -137,10 +137,10 @@ describe('WaveformDisplay interactive region picker', () => {
     await render();
 
     const inBtn = host.querySelector<HTMLButtonElement>(
-      'button[aria-label="Mark region start at playhead"]',
+      'button[aria-label="In — mark region start at playhead"]',
     );
     const outBtn = host.querySelector<HTMLButtonElement>(
-      'button[aria-label="Mark region end at playhead"]',
+      'button[aria-label="Out — mark region end at playhead"]',
     );
     expect(inBtn?.disabled).toBe(false);
     expect(outBtn?.disabled).toBe(false);
