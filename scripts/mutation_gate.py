@@ -579,9 +579,11 @@ MUTATIONS: list[Mutation] = [
         "M32",
         "restore child command loses its absolute profiles dir",
         "src/hawavoclean/server/jobs.py",
-        """        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]
-        cmd += ["--profiles-dir", str(profiles_root())]""",
-        """        cmd += ["--mode", "restore", "--speaker-id", str(record.speaker_id)]""",
+        """            # may be launched from anywhere.
+            cmd += ["--speaker-id", str(record.speaker_id)]
+            cmd += ["--profiles-dir", str(profiles_root())]""",
+        """            # may be launched from anywhere.
+            cmd += ["--speaker-id", str(record.speaker_id)]""",
         # Owner: without the explicit absolute dir the child resolves profiles
         # against its own working directory — the CWD trap this repo has
         # already been bitten by twice.

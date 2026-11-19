@@ -850,12 +850,12 @@ def _restore_source_capability() -> CapabilityStatusV1:
     explicit_dir = os.environ.get(LAVASR_MODEL_DIR_ENV)
 
     def _sanitize(text: str) -> str:
-        clean = _redact_capability_detail(text)
+        clean = text
         if explicit_dir:
             clean = clean.replace(explicit_dir, "<lavasr-model-dir>")
             with contextlib.suppress(OSError, ValueError):
                 clean = clean.replace(str(Path(explicit_dir).resolve()), "<lavasr-model-dir>")
-        return clean
+        return _redact_capability_detail(clean)
 
     try:
         ok, reason = probe_neural_bwe_runtime()

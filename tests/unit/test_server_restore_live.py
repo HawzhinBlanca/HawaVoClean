@@ -183,7 +183,26 @@ def test_restore_source_capability_available_and_blocked_paths(
     assert "<lavasr-model-dir>" in cap_blocked.reason
     assert "<home>" in cap_blocked.reason
 
-    # 2b. Missing weights without LAVASR_MODEL_DIR_ENV set (sanitizes <home> cleanly)
+    # 2b. Missing weights when explicit dir is nested under Path.home() (Windows tmp_path layout)
+    home_nested_dir = Path.home() / "AppData" / "Local" / "Temp" / "secret-lavasr-nested"
+    monkeypatch.setenv(LAVASR_MODEL_DIR_ENV, str(home_nested_dir))
+    monkeypatch.setattr(
+        neural_bwe,
+        "probe_neural_bwe_runtime",
+        lambda _model_dir=None: (
+            False,
+            f"missing under {home_nested_dir} and {Path.home()}/priv",
+        ),
+    )
+    cap_nested = _restore_source_capability()
+    assert cap_nested.available is False and cap_nested.maturity == "blocked"
+    assert cap_nested.reason is not None
+    assert "secret-lavasr-nested" not in cap_nested.reason
+    assert str(Path.home()) not in cap_nested.reason
+    assert "<lavasr-model-dir>" in cap_nested.reason
+    assert "<home>" in cap_nested.reason
+
+    # 2c. Missing weights without LAVASR_MODEL_DIR_ENV set (sanitizes <home> cleanly)
     monkeypatch.delenv(LAVASR_MODEL_DIR_ENV, raising=False)
     monkeypatch.setattr(
         neural_bwe,
