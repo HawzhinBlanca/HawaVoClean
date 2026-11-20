@@ -1138,7 +1138,8 @@ def restitch_master_with_overrides(
     if (
         (is_true_stereo_ms or side_timeline_out is not None)
         and side_timeline_out is not None
-        and len(channel_timelines) == 1
+        and len(channel_timelines) >= 1
+        and not by_channel.get(1)
     ):
         from hawavoclean.audio.multitrack import decode_mid_side
 

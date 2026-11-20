@@ -672,9 +672,17 @@ def test_unit_restitch_preserves_true_stereo_ms_finishing_delivery_and_bwf(
     assert res["summary"]["reverted"] == 1
     assert out_wav.is_file()
     out_data, _ = sf.read(str(out_wav), dtype="float32", always_2d=True)
-    # 1) Never collapsed to mono
+    # 1) Never collapsed to mono and Right channel is genuinely reconstructed from Mid/Side (never zeros)
     assert out_data.shape[1] == 2
     assert float(np.max(np.abs(out_data[:, 0] - out_data[:, 1]))) > 1e-3
+    assert float(np.sqrt(np.mean(out_data[:, 1] ** 2))) > 1e-3
+    reconstructed_side = 0.5 * (out_data[:, 0] - out_data[:, 1])
+    side_corr = float(
+        np.corrcoef(reconstructed_side.astype(np.float64), side_orig.astype(np.float64))[0, 1]
+    )
+    assert side_corr > 0.75, (
+        f"expected true_stereo_ms Side reconstruction, got corr={side_corr:.3f}"
+    )
     # 2) BWF/iXML chunks preserved
     extracted = extract_wav_metadata_chunks(out_wav)
     assert extracted.get(b"bext") == b"BEXT_TEST_PAYLOAD_01"

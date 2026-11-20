@@ -1120,12 +1120,14 @@ _TORCH_BACKED: dict[str, str] = {
         """    if (
         (is_true_stereo_ms or side_timeline_out is not None)
         and side_timeline_out is not None
-        and len(channel_timelines) == 1
+        and len(channel_timelines) >= 1
+        and not by_channel.get(1)
     ):""",
         """    if False and (
         (is_true_stereo_ms or side_timeline_out is not None)
         and side_timeline_out is not None
-        and len(channel_timelines) == 1
+        and len(channel_timelines) >= 1
+        and not by_channel.get(1)
     ):""",
         owners=(
             "tests/unit/test_wave_ab_backend.py::test_unit_restitch_preserves_true_stereo_ms_finishing_delivery_and_bwf",
