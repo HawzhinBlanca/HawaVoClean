@@ -386,3 +386,199 @@ def test_cli_serve_passes_web_public_and_cors_origins(monkeypatch: pytest.Monkey
     assert captured["web_public"] is True
     assert captured["cors_origins"] == ("https://studio.example.com", "https://app.example.com")
     assert captured["host"] == "0.0.0.0"
+
+
+# ---------------------------------------------------------------------------
+# Strict Schema Validators, Ollama Transport Bounds & Complete Chat Branches
+# ---------------------------------------------------------------------------
+
+
+def test_assistant_plan_schema_validators_fail_closed() -> None:
+    from pydantic import ValidationError
+
+    from hawavoclean.assistant import (
+        AssistantError,
+        AudioPlan,
+        SpectralRepairPlan,
+        UnitOverridePlan,
+        _provider,
+    )
+
+    with pytest.raises(ValidationError):
+        SpectralRepairPlan(start_s=True, end_s=2.0, f_low_hz=100.0, f_high_hz=200.0)
+    with pytest.raises(ValidationError):
+        SpectralRepairPlan(start_s=5.0, end_s=2.0, f_low_hz=100.0, f_high_hz=200.0)
+    with pytest.raises(ValidationError):
+        SpectralRepairPlan(start_s=1.0, end_s=2.0, f_low_hz=500.0, f_high_hz=200.0)
+    with pytest.raises(ValidationError):
+        UnitOverridePlan(unit_id=1, action="blend", strength=True)
+    with pytest.raises(ValidationError):
+        PlanPayload(operation="undo", explanation="bad\x00ctrl")
+    for op in ("spectral_repair", "playback", "export", "unit_override"):
+        with pytest.raises(ValidationError):
+            PlanPayload(operation=op, explanation="missing required field")
+    with pytest.raises(ValidationError):
+        AudioPlan(
+            operation="undo",
+            explanation="mismatch",
+            provider="rules",
+            needs_clarification=True,
+        )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("HAWAVOCLEAN_CHAT_PROVIDER", "bogus_provider")
+        with pytest.raises(AssistantError):
+            _provider()
+
+
+def test_ollama_discovery_and_post_json_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+    import urllib.request
+
+    from hawavoclean.assistant import (
+        MAX_RESPONSE_BYTES,
+        AssistantError,
+        AssistantUnavailableError,
+        _model_is_installed,
+        _pick_installed_chat_model,
+        _post_json,
+        _probe_ollama_tags,
+        _resolve_chat_model,
+    )
+
+    assert _pick_installed_chat_model(["nomic-embed-text:latest"]) is None
+    assert (
+        _pick_installed_chat_model(["bge-m3:latest", "custom-model:1b", "qwen2.5:7b"])
+        == "qwen2.5:7b"
+    )
+    assert _pick_installed_chat_model(["custom-model:1b"]) == "custom-model:1b"
+    assert _model_is_installed("qwen2.5:7b", ["qwen2.5:7b"]) is True
+    assert _model_is_installed("qwen2.5", ["qwen2.5:latest"]) is True
+    assert _model_is_installed("missing", ["qwen2.5:latest"]) is False
+
+    class _FakeResp:
+        def __init__(self, body: bytes, status: int = 200) -> None:
+            self._body = body
+            self.status = status
+
+        def read(self, n: int = -1) -> bytes:
+            return self._body[:n] if n >= 0 else self._body
+
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *_: Any) -> None:
+            return None
+
+    class _FakeOpener:
+        def __init__(self, outcome: Any) -> None:
+            self._outcome = outcome
+
+        def open(self, *_args: Any, **_kwargs: Any) -> Any:
+            if isinstance(self._outcome, Exception):
+                raise self._outcome
+            return self._outcome
+
+    # _probe_ollama_tags: non-200, oversized, non-dict, non-list models, mixed entries, URLError
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(_FakeResp(b"{}", status=500))
+    )
+    assert _probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_: _FakeOpener(_FakeResp(b"x" * (MAX_RESPONSE_BYTES + 2))),
+    )
+    assert _probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_: _FakeOpener(_FakeResp(b"[]")))
+    assert _probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(_FakeResp(b'{"models": "bad"}'))
+    )
+    assert _probe_ollama_tags("http://127.0.0.1:11434") == (True, [])
+
+    valid_tags = b'{"models": ["skip", {"name": "qwen2.5:7b"}, {"model": "qwen2.5:7b"}, {"name": "default"}]}'
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(_FakeResp(valid_tags))
+    )
+    assert _probe_ollama_tags("http://127.0.0.1:11434") == (True, ["qwen2.5:7b"])
+    assert _resolve_chat_model(None, "http://127.0.0.1:11434") == "qwen2.5:7b"
+    assert _resolve_chat_model("llama3:8b", "http://127.0.0.1:11434") == "llama3:8b"
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(urllib.error.URLError("down"))
+    )
+    assert _probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+    with pytest.raises(AssistantUnavailableError):
+        _resolve_chat_model(None, "http://127.0.0.1:11434")
+
+    # _post_json: valid dict, oversized, non-dict, invalid json, URLError
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(_FakeResp(b'{"ok": true}'))
+    )
+    assert _post_json("http://127.0.0.1:11434/api/chat", {}, {}) == {"ok": True}
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_: _FakeOpener(_FakeResp(b"a" * (MAX_RESPONSE_BYTES + 2))),
+    )
+    with pytest.raises(AssistantError, match="too large"):
+        _post_json("http://127.0.0.1:11434/api/chat", {}, {})
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(_FakeResp(b"[1, 2]"))
+    )
+    with pytest.raises(AssistantError, match="invalid response"):
+        _post_json("http://127.0.0.1:11434/api/chat", {}, {})
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(_FakeResp(b"{not-json"))
+    )
+    with pytest.raises(AssistantError, match="invalid response"):
+        _post_json("http://127.0.0.1:11434/api/chat", {}, {})
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_: _FakeOpener(urllib.error.URLError("offline"))
+    )
+    with pytest.raises(AssistantUnavailableError):
+        _post_json("http://127.0.0.1:11434/api/chat", {}, {})
+
+
+def test_complete_studio_chat_modifiers_exports_previews_and_unit_blend() -> None:
+    # Subtle room tone, ATSC A/85, match input, dual mono
+    p1 = _plan_offline("Clean voice with subtle room tone, ATSC A85 loudness, dual mono")
+    assert p1.ambience_floor_db == pytest.approx(-50.0)
+    assert p1.delivery_preset == "atsc_a85"
+    assert p1.stereo_mode == "dual_mono_same"
+
+    p2 = _plan_offline("Clean voice and match original loudness")
+    assert p2.delivery_preset == "match_input"
+
+    # Unit blend with and without explicit %
+    u1 = _plan_offline("Blend unit 4 at 70%")
+    assert u1.operation == "unit_override"
+    assert u1.unit_override is not None
+    assert u1.unit_override.action == "blend"
+    assert u1.unit_override.strength == pytest.approx(0.7)
+
+    u2 = _plan_offline("Mix unit #2")
+    assert u2.unit_override is not None
+    assert u2.unit_override.strength == pytest.approx(0.5)
+
+    # All direct export formats
+    assert _plan_offline("Export as AAC").export_format == "aac"
+    assert _plan_offline("Save as 32-bit float wav").export_format == "wav32f"
+    assert _plan_offline("Export video mux mp4").export_format == "video_mux"
+
+    # Preview across all cleanup profiles
+    assert _plan_offline("Preview dereverb").cleanup_profile in {"dereverb", "studio"}
+    assert _plan_offline("Preview production").cleanup_profile == "production"
+    assert _plan_offline("Preview lowband").cleanup_profile == "lowband"
+    assert _plan_offline("Audition studio").cleanup_profile == "studio"
+
+    # Diagnosis with minimal empty AcousticContext
+    diag = _plan_offline("Diagnose this audio", AcousticContext())
+    assert "loaded clip" in diag.explanation
