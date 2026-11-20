@@ -14,16 +14,27 @@ from typing import Any, BinaryIO, Literal
 
 import numpy as np
 import pyloudnorm as pyln
+import scipy.ndimage
 import scipy.signal
 import soundfile as sf
 
+from hawavoclean.audio.encode import _finalize_deterministic_wav
 from hawavoclean.errors import OutputValidationError, PreflightError
-from hawavoclean.finishing.limiter import apply_lookahead_limiter
+from hawavoclean.finishing.limiter import (
+    _future_gain_dependency,
+    _release_scalar,
+    _slope_limited_min_envelope,
+    apply_lookahead_limiter,
+)
 from hawavoclean.finishing.loudness import (
     LOUDNESS_ABSOLUTE_GATE_LUFS,
     LOUDNESS_CHANNEL_GAINS,
+    LoudnessMeasurement,
+    StreamingLoudnessMeter,
     measure_loudness_and_peaks,
 )
+from hawavoclean.finishing.truepeak import EDGE as TRUE_PEAK_EDGE
+from hawavoclean.finishing.truepeak import oversampled_peak_envelope_window
 from hawavoclean.paths import ffmpeg_bin_path
 from hawavoclean.platform_fs import is_reparse_or_symlink
 
@@ -325,6 +336,576 @@ def apply_delivery_loudness(
         "ceiling_dbtp": float(ceiling),
     }
     return _restore_shape(processed, was_1d), metrics
+
+
+_STREAM_LIMITER_MAX_STEP = 1 << 17
+_STREAM_TRUE_PEAK_MAX_STEP = 1 << 17
+_DELIVERY_STREAM_SUBTYPES: frozenset[str] = frozenset({"PCM_16", "PCM_24", "PCM_32", "FLOAT"})
+
+
+def _release_smooth_carried(
+    gain: Float32Array,
+    release_coeff: float,
+    current: float,
+) -> float:
+    """Sample-exact carried run-walk release smoother matching limiter._release_smooth."""
+    n = int(gain.shape[0])
+    if n == 0:
+        return current
+    bits = gain.view(np.uint32)
+    changed = bits[1:] != bits[:-1]
+    runs = int(np.count_nonzero(changed)) + 1
+    if runs * 5 > n:
+        return _release_scalar(gain, release_coeff, 0, n, current)
+
+    starts = [0, *(np.flatnonzero(changed) + 1).tolist(), n]
+    targets = gain[np.asarray(starts[:-1], dtype=np.intp)].tolist()
+    for k, target in enumerate(targets):
+        lo = starts[k]
+        hi = starts[k + 1]
+        if target == 0.0 or target != target:
+            current = _release_scalar(gain, release_coeff, lo, hi, current)
+            continue
+        if current == target:
+            continue
+        if target < current:
+            current = target
+            continue
+        ramp: list[float] = []
+        for _ in range(lo, hi):
+            current = target + release_coeff * (current - target)
+            if current == target:
+                break
+            ramp.append(current)
+        if ramp:
+            gain[lo : lo + len(ramp)] = ramp
+    return current
+
+
+class _StreamingLraMeter:
+    """Exact EBU Tech 3342 Loudness Range (LRA) accumulator with bounded memory."""
+
+    def __init__(self, sample_rate: int, channels: int) -> None:
+        self.sample_rate = int(sample_rate)
+        self.channels = int(channels)
+        self._block_len = int(round(_LRA_BLOCK_SIZE_S * self.sample_rate))
+        self._hop_len = max(1, int(round(_LRA_HOP_SIZE_S * self.sample_rate)))
+        self._gains = np.asarray(
+            [
+                LOUDNESS_CHANNEL_GAINS[ch] if ch < len(LOUDNESS_CHANNEL_GAINS) else 1.0
+                for ch in range(self.channels)
+            ],
+            dtype=np.float64,
+        )
+        self._stages: list[
+            tuple[
+                np.ndarray[Any, np.dtype[np.float64]],
+                np.ndarray[Any, np.dtype[np.float64]],
+                float,
+                list[np.ndarray[Any, np.dtype[np.float64]]],
+            ]
+        ] = []
+        if self.channels > 0 and self._block_len > 0:
+            meter = pyln.Meter(self.sample_rate)
+            for stage in meter._filters.values():  # noqa: SLF001 -- matches compute_loudness_range_lu
+                b = np.asarray(stage.b, dtype=np.float64)
+                a = np.asarray(stage.a, dtype=np.float64)
+                order = max(len(a), len(b)) - 1
+                zi = [np.zeros(order, dtype=np.float64) for _ in range(self.channels)]
+                self._stages.append((b, a, float(stage.passband_gain), zi))
+        self._power_tail = np.empty(0, dtype=np.float64)
+        self._tail_offset = 0
+        self._total = 0
+        self._next_start = 0
+        self._block_powers: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+
+    def push(self, data: Float32Array) -> None:
+        if self.channels <= 0 or self._block_len <= 0:
+            return
+        n = int(data.shape[1])
+        if n == 0:
+            return
+        weighted = data.astype(np.float64, copy=True)
+        for b, a, gain, zi in self._stages:
+            for ch in range(self.channels):
+                filtered, zi[ch] = scipy.signal.lfilter(b, a, weighted[ch], zi=zi[ch])
+                weighted[ch] = gain * filtered
+        chunk_power = self._gains @ (weighted * weighted)
+        if self._power_tail.size > 0:
+            buf = np.concatenate((self._power_tail, chunk_power))
+        else:
+            buf = chunk_power
+            self._tail_offset = self._total
+        self._total += n
+
+        available_end = self._tail_offset + int(buf.shape[0])
+        if available_end >= self._next_start + self._block_len:
+            last_start = available_end - self._block_len
+            n_emit = ((last_start - self._next_start) // self._hop_len) + 1
+            global_starts = self._next_start + np.arange(n_emit, dtype=np.intp) * self._hop_len
+            local_starts = global_starts - self._tail_offset
+            local_ends = local_starts + self._block_len
+            cs = np.empty(buf.shape[0] + 1, dtype=np.float64)
+            cs[0] = 0.0
+            np.cumsum(buf, out=cs[1:])
+            mean_power = np.maximum(cs[local_ends] - cs[local_starts], 0.0) / float(self._block_len)
+            self._block_powers.append(mean_power)
+            self._next_start += n_emit * self._hop_len
+            keep_from = min(int(buf.shape[0]), max(0, self._next_start - self._tail_offset))
+            self._power_tail = np.array(buf[keep_from:], dtype=np.float64, copy=True)
+            self._tail_offset += keep_from
+        else:
+            self._power_tail = np.array(buf, dtype=np.float64, copy=True)
+
+    def finish(self) -> float:
+        if not self._block_powers:
+            return 0.0
+        block_power = np.concatenate(self._block_powers)
+        if block_power.size < 2:
+            return 0.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            block_lufs = -0.691 + 10.0 * np.log10(block_power)
+        above_abs = np.isfinite(block_lufs) & (block_lufs >= LOUDNESS_ABSOLUTE_GATE_LUFS)
+        if int(np.count_nonzero(above_abs)) < 2:
+            return 0.0
+        mean_power_abs = float(np.mean(block_power[above_abs]))
+        if mean_power_abs <= 0.0:
+            return 0.0
+        rel_threshold = -0.691 + 10.0 * math.log10(mean_power_abs) + _LRA_RELATIVE_GATE_LU
+        keep = above_abs & (block_lufs >= rel_threshold)
+        if int(np.count_nonzero(keep)) < 2:
+            return 0.0
+        kept = block_lufs[keep]
+        low_p = float(np.percentile(kept, 10.0))
+        high_p = float(np.percentile(kept, 95.0))
+        lra = max(0.0, high_p - low_p)
+        return 0.0 if not math.isfinite(lra) else lra
+
+
+class _StreamingTruePeakMeter:
+    """Bounded-memory exact oversampled true-peak meter with FIR overlap."""
+
+    def __init__(
+        self,
+        channels: int,
+        *,
+        factor: int = 4,
+        max_step: int = _STREAM_TRUE_PEAK_MAX_STEP,
+    ) -> None:
+        self._channels = int(channels)
+        self._factor = int(factor)
+        self._max_step = max(TRUE_PEAK_EDGE + 1, int(max_step))
+        self._tail = np.empty((self._channels, 0), dtype=np.float32)
+        self._pending = 0
+        self._peak = 0.0
+
+    def _push_slice(self, data: Float32Array) -> None:
+        n = int(data.shape[1])
+        if n == 0:
+            return
+        work = np.concatenate((self._tail, data), axis=1) if self._tail.shape[1] > 0 else data
+        total_work = int(work.shape[1])
+        core_start = int(self._tail.shape[1]) - self._pending
+        core_end = total_work - TRUE_PEAK_EDGE
+        if core_end > core_start:
+            env = oversampled_peak_envelope_window(work, self._factor, core_start, core_end)
+            if env.size:
+                self._peak = max(self._peak, float(np.max(env)))
+            keep_from = max(0, core_end - TRUE_PEAK_EDGE)
+            self._tail = np.ascontiguousarray(work[:, keep_from:], dtype=np.float32)
+            self._pending = total_work - core_end
+        else:
+            self._tail = np.ascontiguousarray(work, dtype=np.float32)
+            self._pending += n
+
+    def push(self, data: Float32Array) -> None:
+        n = int(data.shape[1])
+        for offset in range(0, n, self._max_step):
+            self._push_slice(data[:, offset : min(n, offset + self._max_step)])
+
+    def finish(self) -> float:
+        if self._pending > 0 and self._tail.shape[1] > 0:
+            total_tail = int(self._tail.shape[1])
+            core_start = max(0, total_tail - self._pending)
+            env = oversampled_peak_envelope_window(self._tail, self._factor, core_start, total_tail)
+            if env.size:
+                self._peak = max(self._peak, float(np.max(env)))
+            self._pending = 0
+            self._tail = np.empty((self._channels, 0), dtype=np.float32)
+        return self._peak
+
+
+def _wav_container_for_frames(channels: int, frames: int, subtype: str) -> Literal["WAV", "RF64"]:
+    """Select classic RIFF WAV or RF64 based on estimated data size."""
+    bytes_per_sample = 3 if subtype == "PCM_24" else 4
+    estimated = channels * frames * bytes_per_sample + _WAV_HEADER_RESERVE_BYTES
+    return "RF64" if estimated > _WAV_CLASSIC_LIMIT_BYTES else "WAV"
+
+
+def measure_delivery_loudness_streaming(
+    wav_path: Path,
+    *,
+    chunk_samples: int = 1 << 19,
+) -> tuple[LoudnessMeasurement, float]:
+    """Measure integrated LUFS, peaks, and EBU Tech 3342 LRA in one streaming pass."""
+    if isinstance(chunk_samples, bool) or chunk_samples < 1:
+        raise ValueError(f"chunk_samples must be >= 1, got {chunk_samples!r}")
+    resolved = _validate_path_string(wav_path, "wav_path")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Audio file not found: {resolved}")
+
+    with sf.SoundFile(str(resolved), mode="r") as reader:
+        sample_rate = int(reader.samplerate)
+        channels = int(reader.channels)
+        frames = int(reader.frames)
+        if sample_rate <= 0 or channels <= 0 or frames <= 0:
+            raise OutputValidationError(f"Audio file is empty or invalid: {resolved}")
+
+        loudness_meter = StreamingLoudnessMeter(sample_rate, channels)
+        tp_meter = _StreamingTruePeakMeter(channels, factor=4)
+        lra_meter = _StreamingLraMeter(sample_rate, channels)
+        step = min(int(chunk_samples), _STREAM_TRUE_PEAK_MAX_STEP)
+        while True:
+            block = reader.read(frames=step, dtype="float32", always_2d=True)
+            if block.size == 0:
+                break
+            chunk_2d = np.ascontiguousarray(block.T, dtype=np.float32)
+            if not np.all(np.isfinite(chunk_2d)):
+                raise ValueError("waveform contains NaN or Inf values")
+            loudness_meter.push(chunk_2d)
+            tp_meter.push(chunk_2d)
+            lra_meter.push(chunk_2d)
+
+    meas = loudness_meter.finish(tp_meter.finish())
+    lra = lra_meter.finish()
+    return meas, lra
+
+
+def apply_delivery_loudness_streaming(
+    master_wav: Path,
+    out_wav: Path,
+    preset: DeliveryPreset,
+    *,
+    input_lufs: float | None = None,
+    chunk_samples: int = 1 << 19,
+) -> dict[str, float | str]:
+    """Apply preset loudness normalization and lookahead limiting in bounded RAM.
+
+    Pass 1 streams ``master_wav`` through :class:`StreamingLoudnessMeter`,
+    chunked 4x true-peak, and (when bypassing limiting) streaming EBU Tech 3342
+    LRA without holding the full recording in memory. Pass 2 streams static
+    gain and overlap-buffered lookahead limiting (carrying release state and
+    FIR/lookahead context across chunk boundaries) into ``out_wav`` atomically.
+    """
+    if preset not in DELIVERY_PRESETS:
+        raise ValueError(f"Unsupported delivery preset: {preset!r}")
+    if input_lufs is not None and (isinstance(input_lufs, bool) or not math.isfinite(input_lufs)):
+        raise ValueError(f"input_lufs must be finite when provided, got {input_lufs}")
+    if isinstance(chunk_samples, bool) or chunk_samples < 1:
+        raise ValueError(f"chunk_samples must be >= 1, got {chunk_samples!r}")
+
+    master_resolved = _validate_path_string(master_wav, "master_wav")
+    if not master_resolved.is_file():
+        raise FileNotFoundError(f"Master WAV not found: {master_resolved}")
+    out_resolved = _validate_dest_path(out_wav, "wav32f")
+    if out_resolved == master_resolved:
+        raise ValueError("Destination path must not overwrite master_wav in place")
+
+    spec = DELIVERY_PRESETS[preset]
+
+    # Pass 1: streaming loudness + 4x true peak (+ LRA for bypass fast path).
+    with sf.SoundFile(str(master_resolved), mode="r") as reader:
+        sample_rate = int(reader.samplerate)
+        channels = int(reader.channels)
+        total_samples = int(reader.frames)
+        source_subtype = str(reader.subtype)
+        if sample_rate <= 0 or channels <= 0 or total_samples <= 0:
+            raise OutputValidationError(f"Master WAV is empty or invalid: {master_resolved}")
+
+        pre_loudness = StreamingLoudnessMeter(sample_rate, channels)
+        pre_tp4 = _StreamingTruePeakMeter(channels, factor=4)
+        pre_lra_meter = _StreamingLraMeter(sample_rate, channels) if spec.bypass_limiter else None
+        pass1_step = min(int(chunk_samples), _STREAM_TRUE_PEAK_MAX_STEP)
+        while True:
+            block = reader.read(frames=pass1_step, dtype="float32", always_2d=True)
+            if block.size == 0:
+                break
+            chunk_2d = np.ascontiguousarray(block.T, dtype=np.float32)
+            if not np.all(np.isfinite(chunk_2d)):
+                raise ValueError("waveform contains NaN or Inf values")
+            pre_loudness.push(chunk_2d)
+            pre_tp4.push(chunk_2d)
+            if pre_lra_meter is not None:
+                pre_lra_meter.push(chunk_2d)
+
+    pre = pre_loudness.finish(pre_tp4.finish())
+    pre_lra = pre_lra_meter.finish() if pre_lra_meter is not None else 0.0
+
+    out_resolved.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = (
+        out_resolved.parent
+        / f".{out_resolved.stem}.{uuid.uuid4().hex[:8]}.tmp{out_resolved.suffix or '.wav'}"
+    )
+    tmp_trim_path = (
+        out_resolved.parent
+        / f".{out_resolved.stem}.{uuid.uuid4().hex[:8]}.trim.tmp{out_resolved.suffix or '.wav'}"
+    )
+
+    try:
+        if spec.bypass_limiter:
+            target_lufs = (
+                float(input_lufs) if input_lufs is not None else float(pre.integrated_lufs)
+            )
+            if input_lufs is None or pre.integrated_lufs <= -69.0 or input_lufs <= -69.0:
+                gain_db = 0.0
+            else:
+                gain_db = float(
+                    np.clip(
+                        input_lufs - pre.integrated_lufs,
+                        -_MAX_STATIC_GAIN_DB,
+                        _MAX_STATIC_GAIN_DB,
+                    )
+                )
+                if abs(gain_db) < 1e-6:
+                    gain_db = 0.0
+
+            if gain_db == 0.0:
+                copy_subtype = (
+                    source_subtype if source_subtype in _DELIVERY_STREAM_SUBTYPES else "FLOAT"
+                )
+                container = _wav_container_for_frames(channels, total_samples, copy_subtype)
+                with (
+                    sf.SoundFile(str(master_resolved), mode="r") as reader,
+                    sf.SoundFile(
+                        str(tmp_path),
+                        mode="w",
+                        samplerate=sample_rate,
+                        channels=channels,
+                        subtype=copy_subtype,
+                        format=container,
+                    ) as writer,
+                ):
+                    while True:
+                        block = reader.read(frames=pass1_step, dtype="float32", always_2d=True)
+                        if block.size == 0:
+                            break
+                        writer.write(block)
+                post = pre
+                lra = pre_lra
+            else:
+                gain_linear = float(10.0 ** (gain_db / 20.0))
+                container = _wav_container_for_frames(channels, total_samples, "FLOAT")
+                post_loudness = StreamingLoudnessMeter(sample_rate, channels)
+                post_tp4 = _StreamingTruePeakMeter(channels, factor=4)
+                post_lra = _StreamingLraMeter(sample_rate, channels)
+                with (
+                    sf.SoundFile(str(master_resolved), mode="r") as reader,
+                    sf.SoundFile(
+                        str(tmp_path),
+                        mode="w",
+                        samplerate=sample_rate,
+                        channels=channels,
+                        subtype="FLOAT",
+                        format=container,
+                    ) as writer,
+                ):
+                    while True:
+                        block = reader.read(frames=pass1_step, dtype="float32", always_2d=True)
+                        if block.size == 0:
+                            break
+                        chunk_2d = np.ascontiguousarray(block.T, dtype=np.float32)
+                        scaled = _scale_to_finite_float32(chunk_2d, gain_linear)
+                        writer.write(scaled.T)
+                        post_loudness.push(scaled)
+                        post_tp4.push(scaled)
+                        post_lra.push(scaled)
+                post = post_loudness.finish(post_tp4.finish())
+                lra = post_lra.finish()
+
+            _finalize_deterministic_wav(tmp_path)
+            if is_reparse_or_symlink(out_resolved):
+                raise ValueError(
+                    f"Destination path must not be a symlink or reparse point: {out_resolved}"
+                )
+            os.replace(tmp_path, out_resolved)
+            return {
+                "preset": preset,
+                "limiter_mode": "bypass",
+                "input_lufs": float(pre.integrated_lufs),
+                "target_lufs": target_lufs,
+                "applied_gain_db": gain_db,
+                "integrated_lufs": float(post.integrated_lufs),
+                "true_peak_dbtp": float(post.true_peak_dbtp),
+                "sample_peak_dbfs": float(post.sample_peak_dbfs),
+                "loudness_range_lu": float(lra),
+                "limiter_max_gr_db": 0.0,
+                "ceiling_dbtp": "bypass",
+            }
+
+        target = spec.target_lufs_mono if channels == 1 else spec.target_lufs_stereo
+        ceiling = spec.true_peak_ceiling_dbtp
+        assert target is not None and ceiling is not None
+
+        if pre.integrated_lufs <= -69.0:
+            gain_db = 0.0
+            gain_linear = 1.0
+        else:
+            gain_db = float(
+                np.clip(target - pre.integrated_lufs, -_MAX_STATIC_GAIN_DB, _MAX_STATIC_GAIN_DB)
+            )
+            gain_linear = float(10.0 ** (gain_db / 20.0))
+
+        ceiling_linear = float(10.0 ** (ceiling / 20.0))
+        lookahead_samples = int(round(sample_rate * (5.0 / 1000.0)))
+        release_coeff = float(np.exp(-1.0 / (sample_rate * (50.0 / 1000.0))))
+        dependency = _future_gain_dependency(lookahead_samples)
+        limiter_step = min(int(chunk_samples), _STREAM_LIMITER_MAX_STEP)
+        container = _wav_container_for_frames(channels, total_samples, "FLOAT")
+
+        post_loudness = StreamingLoudnessMeter(sample_rate, channels)
+        post_tp4 = _StreamingTruePeakMeter(channels, factor=4)
+        post_tp8 = _StreamingTruePeakMeter(channels, factor=8)
+        post_lra = _StreamingLraMeter(sample_rate, channels)
+        release_state = 1.0
+        min_gain = 1.0
+
+        with (
+            sf.SoundFile(str(master_resolved), mode="r") as reader,
+            sf.SoundFile(
+                str(tmp_path),
+                mode="w",
+                samplerate=sample_rate,
+                channels=channels,
+                subtype="FLOAT",
+                format=container,
+            ) as writer,
+        ):
+            for start in range(0, total_samples, limiter_step):
+                end = min(total_samples, start + limiter_step)
+                needed_end = min(total_samples, end + dependency)
+                source_start = max(0, start - TRUE_PEAK_EDGE)
+                source_end = min(total_samples, needed_end + TRUE_PEAK_EDGE)
+                reader.seek(source_start)
+                raw_block = reader.read(
+                    frames=source_end - source_start, dtype="float32", always_2d=True
+                )
+                if raw_block.shape[0] != source_end - source_start:
+                    raise OutputValidationError(
+                        f"Unexpected EOF while streaming master WAV: {master_resolved}"
+                    )
+                chunk_src = np.ascontiguousarray(raw_block.T, dtype=np.float32)
+                if not np.all(np.isfinite(chunk_src)):
+                    raise ValueError("waveform contains NaN or Inf values")
+
+                gained_slice = (
+                    chunk_src
+                    if gain_linear == 1.0
+                    else _scale_to_finite_float32(chunk_src, gain_linear)
+                )
+                local_start = start - source_start
+                local_end = end - source_start
+                local_needed_end = needed_end - source_start
+
+                peak_env = oversampled_peak_envelope_window(
+                    gained_slice, 4, local_start, local_needed_end
+                )
+                inst_gain = np.ones(len(peak_env), dtype=np.float32)
+                over = peak_env > ceiling_linear
+                inst_gain[over] = ceiling_linear / (peak_env[over] + 1e-12)
+                if lookahead_samples > 0 and total_samples > 1:
+                    size = min(lookahead_samples + 1, total_samples)
+                    windowed = scipy.ndimage.minimum_filter1d(
+                        inst_gain,
+                        size=size,
+                        origin=-(size // 2),
+                        mode="nearest",
+                    )
+                else:
+                    windowed = inst_gain
+                anticipated = _slope_limited_min_envelope(windowed, lookahead_samples)
+                smooth = np.ascontiguousarray(anticipated[: end - start], dtype=np.float32)
+                release_state = _release_smooth_carried(smooth, release_coeff, release_state)
+                if smooth.size:
+                    min_gain = min(min_gain, float(np.min(smooth)))
+
+                limited_core = np.multiply(
+                    gained_slice[:, local_start:local_end], smooth, dtype=np.float32
+                )
+                writer.write(limited_core.T)
+                post_loudness.push(limited_core)
+                post_tp4.push(limited_core)
+                post_tp8.push(limited_core)
+                post_lra.push(limited_core)
+
+        tp8 = post_tp8.finish()
+        final_tmp = tmp_path
+        if tp8 > ceiling_linear:
+            trim = float(np.float32((ceiling_linear / tp8) * (1.0 - 1e-6)))
+            min_gain *= trim
+            post_loudness = StreamingLoudnessMeter(sample_rate, channels)
+            post_tp4 = _StreamingTruePeakMeter(channels, factor=4)
+            post_tp8 = _StreamingTruePeakMeter(channels, factor=8)
+            post_lra = _StreamingLraMeter(sample_rate, channels)
+            with (
+                sf.SoundFile(str(tmp_path), mode="r") as reader,
+                sf.SoundFile(
+                    str(tmp_trim_path),
+                    mode="w",
+                    samplerate=sample_rate,
+                    channels=channels,
+                    subtype="FLOAT",
+                    format=container,
+                ) as writer,
+            ):
+                while True:
+                    block = reader.read(frames=limiter_step, dtype="float32", always_2d=True)
+                    if block.size == 0:
+                        break
+                    trimmed = np.multiply(
+                        np.ascontiguousarray(block.T, dtype=np.float32),
+                        np.float32(trim),
+                        dtype=np.float32,
+                    )
+                    writer.write(trimmed.T)
+                    post_loudness.push(trimmed)
+                    post_tp4.push(trimmed)
+                    post_tp8.push(trimmed)
+                    post_lra.push(trimmed)
+            tp8 = post_tp8.finish()
+            if tp8 > ceiling_linear:
+                raise OutputValidationError(
+                    f"Limiter failed to enforce ceiling: true peak {tp8:.6f} > {ceiling_linear:.6f}"
+                )
+            tmp_path.unlink(missing_ok=True)
+            final_tmp = tmp_trim_path
+
+        post = post_loudness.finish(post_tp4.finish())
+        lra = post_lra.finish()
+        max_gr_db = float(-20.0 * np.log10(max(min_gain, 1e-6)))
+
+        _finalize_deterministic_wav(final_tmp)
+        if is_reparse_or_symlink(out_resolved):
+            raise ValueError(
+                f"Destination path must not be a symlink or reparse point: {out_resolved}"
+            )
+        os.replace(final_tmp, out_resolved)
+        return {
+            "preset": preset,
+            "limiter_mode": "lookahead",
+            "input_lufs": float(pre.integrated_lufs),
+            "target_lufs": float(target),
+            "applied_gain_db": gain_db,
+            "integrated_lufs": float(post.integrated_lufs),
+            "true_peak_dbtp": float(post.true_peak_dbtp),
+            "sample_peak_dbfs": float(post.sample_peak_dbfs),
+            "loudness_range_lu": float(lra),
+            "limiter_max_gr_db": max_gr_db,
+            "ceiling_dbtp": float(ceiling),
+        }
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        tmp_trim_path.unlink(missing_ok=True)
+        raise
 
 
 @dataclass(frozen=True)

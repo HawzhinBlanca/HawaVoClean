@@ -50,6 +50,174 @@ _SLICE_FILE_RE = re.compile(r"^unit_(\d+)_ch(\d+)\.npz$")
 
 DEFAULT_MAX_SLICE_JOBS = 32
 DEFAULT_MAX_SLICE_AGE_S = 7.0 * 86400.0
+MAX_UNIT_SLICE_JOB_BYTES = 256 * 1024 * 1024
+MAX_UNIT_SLICE_TOTAL_BYTES = 1024 * 1024 * 1024
+MAX_UNIT_SLICE_MB_ENV = "HAWAVOCLEAN_MAX_UNIT_SLICE_MB"
+MAX_UNIT_SLICE_TOTAL_MB_ENV = "HAWAVOCLEAN_MAX_UNIT_SLICE_TOTAL_MB"
+SLICE_TRUNCATED_MARKER = "truncated.json"
+
+
+class SliceCacheBudgetError(ValueError):
+    """Raised when a job's unit slice cache exceeded its disk budget and was truncated."""
+
+
+def resolve_max_unit_slice_job_bytes(override_bytes: int | None = None) -> int:
+    """Resolve per-job slice cache byte cap from explicit override or env var."""
+    if override_bytes is not None:
+        if isinstance(override_bytes, bool) or override_bytes < 1:
+            raise ValueError(f"max_job_bytes must be >= 1, got {override_bytes!r}")
+        return int(override_bytes)
+    raw = os.environ.get(MAX_UNIT_SLICE_MB_ENV, "").strip()
+    if raw:
+        try:
+            mb = float(raw)
+        except ValueError:
+            return MAX_UNIT_SLICE_JOB_BYTES
+        if math.isfinite(mb) and mb > 0.0:
+            return max(1, int(round(mb * 1024.0 * 1024.0)))
+    return MAX_UNIT_SLICE_JOB_BYTES
+
+
+def resolve_max_unit_slice_total_bytes(override_bytes: int | None = None) -> int:
+    """Resolve global unit_slices/ byte cap from explicit override or env var."""
+    if override_bytes is not None:
+        if isinstance(override_bytes, bool) or override_bytes < 1:
+            raise ValueError(f"max_total_bytes must be >= 1, got {override_bytes!r}")
+        return int(override_bytes)
+    raw = os.environ.get(MAX_UNIT_SLICE_TOTAL_MB_ENV, "").strip()
+    if raw:
+        try:
+            mb = float(raw)
+        except ValueError:
+            return MAX_UNIT_SLICE_TOTAL_BYTES
+        if math.isfinite(mb) and mb > 0.0:
+            return max(1, int(round(mb * 1024.0 * 1024.0)))
+    return MAX_UNIT_SLICE_TOTAL_BYTES
+
+
+def dir_slice_bytes(directory: Path) -> int:
+    """Sum byte sizes of regular non-temp files inside a job slice directory."""
+    if not directory.is_dir() or is_reparse_or_symlink(directory):
+        return 0
+    total = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name.startswith(".") and entry.name.endswith(".tmp"):
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if entry.is_file(follow_symlinks=False):
+                    total += int(st.st_size)
+    except OSError:
+        return total
+    return total
+
+
+def write_slice_truncated_marker(
+    job_dir: Path,
+    *,
+    limit_bytes: int,
+    used_bytes: int | None = None,
+    unit_id: int | None = None,
+) -> Path:
+    """Atomically write ``truncated.json`` into ``job_dir`` to mark budget exhaustion."""
+    target_dir = Path(job_dir).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = target_dir / SLICE_TRUNCATED_MARKER
+    payload: dict[str, Any] = {
+        "truncated": True,
+        "reason": "slice_cache_budget_exceeded",
+        "limit_bytes": int(limit_bytes),
+    }
+    if used_bytes is not None:
+        payload["used_bytes"] = int(used_bytes)
+    if unit_id is not None:
+        payload["stopped_at_unit_id"] = int(unit_id)
+
+    encoded = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    tmp_path = target_dir / (f".{SLICE_TRUNCATED_MARKER}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, marker_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return marker_path
+
+
+def read_slice_truncated_marker(job_dir: Path) -> dict[str, Any] | None:
+    """Return marker payload if ``truncated.json`` exists in ``job_dir`` (fail-closed)."""
+    target_dir = Path(job_dir).resolve()
+    marker_path = target_dir / SLICE_TRUNCATED_MARKER
+    if not os.path.lexists(marker_path):
+        return None
+    if is_reparse_or_symlink(marker_path) or not marker_path.is_file():
+        return {"truncated": True, "reason": "slice_cache_budget_exceeded"}
+    try:
+        loaded = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"truncated": True, "reason": "slice_cache_budget_exceeded"}
+    if isinstance(loaded, dict):
+        if loaded.get("truncated", True):
+            return loaded
+        return None
+    return {"truncated": True, "reason": "slice_cache_budget_exceeded"}
+
+
+def prune_unit_slices_lru(
+    base_dir: Path,
+    *,
+    max_total_bytes: int | None = None,
+    protect: Path | None = None,
+    reserve_bytes: int = 0,
+) -> list[str]:
+    """LRU-evict oldest sibling job slice directories when total bytes exceed the global cap."""
+    limit = resolve_max_unit_slice_total_bytes(max_total_bytes)
+    resolved_base = Path(base_dir).resolve()
+    if not resolved_base.is_dir() or is_reparse_or_symlink(resolved_base):
+        return []
+    protected_resolved = Path(protect).resolve() if protect is not None else None
+
+    total_bytes = max(0, int(reserve_bytes))
+    evictable: list[tuple[float, str, Path, int]] = []
+    try:
+        children = list(resolved_base.iterdir())
+    except OSError:
+        return []
+
+    for child in children:
+        if is_reparse_or_symlink(child) or not child.is_dir():
+            continue
+        if not _SAFE_JOB_ID_RE.match(child.name) or ".." in child.name:
+            continue
+        size = dir_slice_bytes(child)
+        total_bytes += size
+        if protected_resolved is not None and child.resolve() == protected_resolved:
+            continue
+        try:
+            mtime = child.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        evictable.append((mtime, child.name, child, size))
+
+    if total_bytes <= limit or not evictable:
+        return []
+
+    evictable.sort(key=lambda item: (item[0], item[1]))
+    removed: list[str] = []
+    for _mtime, name, child, size in evictable:
+        if total_bytes <= limit:
+            break
+        shutil.rmtree(child, ignore_errors=True)
+        removed.append(name)
+        total_bytes = max(0, total_bytes - size)
+    return removed
 
 
 def _validate_job_id(job_id: str) -> str:
@@ -85,8 +253,19 @@ def save_unit_slice_to_dir(
     unit_meta: dict[str, Any] | None = None,
     *,
     channel: int = 0,
-) -> Path:
-    """Atomically write one unit's ``(original, candidate, unit_meta)`` slice into ``job_dir``."""
+    max_job_bytes: int | None = None,
+    max_total_bytes: int | None = None,
+    current_job_bytes: int | None = None,
+    prune_siblings: bool = True,
+) -> Path | None:
+    """Atomically write one unit's ``(original, candidate, unit_meta)`` slice into ``job_dir``.
+
+    Enforces ``MAX_UNIT_SLICE_JOB_BYTES`` (or ``HAWAVOCLEAN_MAX_UNIT_SLICE_MB``)
+    per job and LRU-prunes oldest sibling job slice dirs under ``unit_slices/``
+    against ``MAX_UNIT_SLICE_TOTAL_BYTES`` (or ``HAWAVOCLEAN_MAX_UNIT_SLICE_TOTAL_MB``).
+    When adding the next slice would exceed the budget, writes ``truncated.json``
+    and returns ``None`` cleanly without writing further slices.
+    """
     orig_arr = np.ascontiguousarray(original, dtype=np.float32)
     if orig_arr.ndim != 1:
         raise ValueError(f"original slice must be 1D, got shape {orig_arr.shape}")
@@ -110,9 +289,32 @@ def save_unit_slice_to_dir(
         allow_nan=False,
     ).encode("utf-8")
 
+    job_limit = resolve_max_unit_slice_job_bytes(max_job_bytes)
+    total_limit = resolve_max_unit_slice_total_bytes(max_total_bytes)
+    slice_name = _slice_filename(unit_id, channel)
+
     target_dir = Path(job_dir).resolve()
+    if read_slice_truncated_marker(target_dir) is not None:
+        return None
+
     target_dir.mkdir(parents=True, exist_ok=True)
-    final_path = target_dir / _slice_filename(unit_id, channel)
+    final_path = target_dir / slice_name
+    existing_size = (
+        int(final_path.stat().st_size)
+        if final_path.is_file() and not is_reparse_or_symlink(final_path)
+        else 0
+    )
+    used_bytes = (
+        int(current_job_bytes) if current_job_bytes is not None else dir_slice_bytes(target_dir)
+    )
+
+    min_new_bytes = int(orig_arr.nbytes) + int(cand_arr.nbytes) + len(meta_payload)
+    if used_bytes - existing_size + min_new_bytes > job_limit:
+        write_slice_truncated_marker(
+            target_dir, limit_bytes=job_limit, used_bytes=used_bytes, unit_id=unit_id
+        )
+        return None
+
     tmp_path = target_dir / (f".{final_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
 
     try:
@@ -126,6 +328,33 @@ def save_unit_slice_to_dir(
             )
             handle.flush()
             os.fsync(handle.fileno())
+        actual_size = int(tmp_path.stat().st_size)
+        delta_bytes = actual_size - existing_size
+        projected_job_bytes = used_bytes + delta_bytes
+        if projected_job_bytes > job_limit:
+            tmp_path.unlink(missing_ok=True)
+            write_slice_truncated_marker(
+                target_dir, limit_bytes=job_limit, used_bytes=used_bytes, unit_id=unit_id
+            )
+            return None
+
+        if prune_siblings and target_dir.parent.name == "unit_slices":
+            prune_unit_slices_lru(
+                target_dir.parent,
+                max_total_bytes=total_limit,
+                protect=target_dir,
+                reserve_bytes=max(0, delta_bytes),
+            )
+            if projected_job_bytes > total_limit:
+                tmp_path.unlink(missing_ok=True)
+                write_slice_truncated_marker(
+                    target_dir,
+                    limit_bytes=min(job_limit, total_limit),
+                    used_bytes=used_bytes,
+                    unit_id=unit_id,
+                )
+                return None
+
         os.replace(tmp_path, final_path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -188,24 +417,49 @@ class UnitSliceStore:
         *,
         max_jobs: int = DEFAULT_MAX_SLICE_JOBS,
         max_age_s: float = DEFAULT_MAX_SLICE_AGE_S,
+        max_job_bytes: int | None = None,
+        max_total_bytes: int | None = None,
     ) -> None:
         if isinstance(max_jobs, bool) or max_jobs < 1:
             raise ValueError(f"max_jobs must be >= 1, got {max_jobs!r}")
         if not math.isfinite(max_age_s) or max_age_s <= 0.0:
             raise ValueError(f"max_age_s must be positive finite, got {max_age_s!r}")
+        if max_job_bytes is not None:
+            resolve_max_unit_slice_job_bytes(max_job_bytes)
+        if max_total_bytes is not None:
+            resolve_max_unit_slice_total_bytes(max_total_bytes)
 
         self._work_dir = (Path(work_dir) if work_dir is not None else work_root()).resolve()
         self._base_dir = self._work_dir / "unit_slices"
         self._max_jobs = int(max_jobs)
         self._max_age_s = float(max_age_s)
+        self._max_job_bytes = max_job_bytes
+        self._max_total_bytes = max_total_bytes
+        self._job_bytes: dict[str, int] = {}
 
     @property
     def base_dir(self) -> Path:
         return self._base_dir
 
+    @property
+    def max_job_bytes(self) -> int:
+        return resolve_max_unit_slice_job_bytes(self._max_job_bytes)
+
+    @property
+    def max_total_bytes(self) -> int:
+        return resolve_max_unit_slice_total_bytes(self._max_total_bytes)
+
     def job_dir(self, job_id: str) -> Path:
         safe = _validate_job_id(job_id)
         return self._base_dir / safe
+
+    def is_truncated(self, job_id: str) -> bool:
+        """Return True if ``job_id``'s slice cache hit its disk budget and was truncated."""
+        return read_slice_truncated_marker(self.job_dir(job_id)) is not None
+
+    def job_bytes(self, job_id: str) -> int:
+        """Return total cached slice bytes currently stored for ``job_id``."""
+        return dir_slice_bytes(self.job_dir(job_id))
 
     def save_unit(
         self,
@@ -216,16 +470,35 @@ class UnitSliceStore:
         unit_meta: dict[str, Any] | None = None,
         *,
         channel: int = 0,
-    ) -> Path:
-        """Atomically save a unit slice under ``unit_slices/<job_id>/``."""
-        return save_unit_slice_to_dir(
-            self.job_dir(job_id),
+    ) -> Path | None:
+        """Atomically save a unit slice under ``unit_slices/<job_id>/`` within disk budget."""
+        safe = _validate_job_id(job_id)
+        jdir = self._base_dir / safe
+        if not jdir.is_dir() or safe not in self._job_bytes:
+            self._job_bytes[safe] = dir_slice_bytes(jdir)
+        final_path = jdir / _slice_filename(unit_id, channel)
+        prev_size = (
+            int(final_path.stat().st_size)
+            if final_path.is_file() and not is_reparse_or_symlink(final_path)
+            else 0
+        )
+        saved = save_unit_slice_to_dir(
+            jdir,
             unit_id=unit_id,
             original=original,
             candidate=candidate,
             unit_meta=unit_meta,
             channel=channel,
+            max_job_bytes=self._max_job_bytes,
+            max_total_bytes=self._max_total_bytes,
+            current_job_bytes=self._job_bytes[safe],
+            prune_siblings=True,
         )
+        if saved is not None and saved.is_file():
+            self._job_bytes[safe] = max(
+                0, self._job_bytes[safe] - prev_size + int(saved.stat().st_size)
+            )
+        return saved
 
     def load_unit(
         self,
@@ -256,21 +529,23 @@ class UnitSliceStore:
 
     def delete_job(self, job_id: str) -> bool:
         """Delete all cached slices for ``job_id``."""
-        directory = self.job_dir(job_id)
+        safe = _validate_job_id(job_id)
+        directory = self._base_dir / safe
+        self._job_bytes.pop(safe, None)
         if not directory.exists():
             return False
         shutil.rmtree(directory)
         return True
 
     def cleanup(self) -> list[str]:
-        """Remove expired or excess job slice directories under ``unit_slices/``."""
+        """Remove expired, excess, or over-budget job slice directories under ``unit_slices/``."""
         if not self._base_dir.is_dir():
             return []
 
         now = time.time()
         entries: list[tuple[float, str, Path]] = []
         for child in self._base_dir.iterdir():
-            if not child.is_dir():
+            if not child.is_dir() or is_reparse_or_symlink(child):
                 continue
             try:
                 mtime = child.stat().st_mtime
@@ -283,6 +558,7 @@ class UnitSliceStore:
         for mtime, name, child in entries:
             if (now - mtime) > self._max_age_s:
                 shutil.rmtree(child, ignore_errors=True)
+                self._job_bytes.pop(name, None)
                 removed.append(name)
             else:
                 survivors.append((mtime, name, child))
@@ -290,6 +566,15 @@ class UnitSliceStore:
         survivors.sort(key=lambda item: item[0], reverse=True)
         for _mtime, name, child in survivors[self._max_jobs :]:
             shutil.rmtree(child, ignore_errors=True)
+            self._job_bytes.pop(name, None)
+            removed.append(name)
+
+        lru_removed = prune_unit_slices_lru(
+            self._base_dir,
+            max_total_bytes=self._max_total_bytes,
+        )
+        for name in lru_removed:
+            self._job_bytes.pop(name, None)
             removed.append(name)
         return removed
 
@@ -427,6 +712,14 @@ def restitch_master_with_overrides(
         raise ValueError(f"channels must be >= 1, got {channels!r}")
 
     resolved_job_dir = Path(job_dir).resolve()
+    truncated_marker = read_slice_truncated_marker(resolved_job_dir)
+    if truncated_marker is not None:
+        reason = str(truncated_marker.get("reason", "slice_cache_budget_exceeded"))
+        limit_bytes = truncated_marker.get("limit_bytes")
+        raise SliceCacheBudgetError(
+            f"Unit slice cache is truncated ({reason}, limit_bytes={limit_bytes}); "
+            "re-stitching refused to avoid partial or corrupt output"
+        )
     by_channel: dict[int, list[_ResolvedUnit]] = {ch: [] for ch in range(channels)}
     total_samples = 0
 

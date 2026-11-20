@@ -40,6 +40,7 @@ def test_unit_slice_store_roundtrip_and_retention(tmp_path: Path) -> None:
         unit_meta={"is_speech": True, "forced_boundary": False},
         channel=0,
     )
+    assert saved is not None
     assert saved.is_file()
     assert saved.parent == (tmp_path / "unit_slices" / "job_001").resolve()
 

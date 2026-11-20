@@ -45,18 +45,26 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from hawavoclean import __version__
-from hawavoclean.audio.decode import decode_audio, iter_decode_audio
+from hawavoclean.audio.decode import (
+    decode_audio_window,
+    iter_decode_audio,
+    window_sample_bounds,
+)
 from hawavoclean.audio.delivery import (
     EXPORT_FORMAT_EXTENSIONS,
     DeliveryPreset,
     ExportFormat,
-    apply_delivery_loudness,
-    compute_loudness_range_lu,
+    apply_delivery_loudness_streaming,
     export_delivery_artifact,
     extract_wav_metadata_chunks,
     inject_wav_metadata_chunks,
+    measure_delivery_loudness_streaming,
 )
-from hawavoclean.audio.encode import encode_audio
+from hawavoclean.audio.encode import (
+    _finalize_deterministic_wav,
+    _wav_container_format,
+    encode_audio,
+)
 from hawavoclean.audio.multitrack import extract_polywav_tracks, inspect_polywav_tracks
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.audio.types import AudioBuffer
@@ -93,6 +101,7 @@ from hawavoclean.server.analysis import (
     compute_peaks_window,
 )
 from hawavoclean.server.contracts import (
+    MAX_SPECTROGRAM_WINDOW_S,
     CapabilitiesResponseV1,
     CapabilityStatusV1,
     DeliveryExportRequestV1,
@@ -137,9 +146,11 @@ from hawavoclean.server.spectrogram import (
     compute_spectrogram_tile,
 )
 from hawavoclean.server.unit_restitch import (
+    SliceCacheBudgetError,
     UnitOverrideAction,
     UnitSliceStore,
     load_unit_slice,
+    read_slice_truncated_marker,
     restitch_master_with_overrides,
 )
 from hawavoclean.server.warm_worker import (
@@ -1651,59 +1662,145 @@ def _is_managed_extracted_track_file(raw: str, resolved: Path) -> bool:
     return True
 
 
+_SPECTRAL_REPAIR_MARGIN_S = 0.15
+_SPECTRAL_STREAM_CHUNK_SAMPLES = 1 << 18
+
+
+def stream_spectral_box_repair(
+    source_path: Path,
+    output_path: Path,
+    *,
+    start_s: float,
+    end_s: float,
+    f_low_hz: float,
+    f_high_hz: float,
+    attenuation_db: float = 24.0,
+    chunk_samples: int = _SPECTRAL_STREAM_CHUNK_SAMPLES,
+) -> tuple[float, float]:
+    """Apply 2D spectral box repair via streaming windowed splice in bounded RAM.
+
+    Decodes only ``[max(0, start_s - margin), min(duration_s, end_s + margin)]``
+    via :func:`decode_audio_window`, applies :func:`apply_spectral_box_repair`
+    on that local window, and streams the output WAV chunk-by-chunk via
+    :func:`iter_decode_audio` + :class:`soundfile.SoundFile` so samples outside
+    the repaired window remain bit-identical and peak RAM stays bounded even on
+    multi-hour stereo files.
+    """
+    if (end_s - start_s) > MAX_SPECTROGRAM_WINDOW_S:
+        raise ValueError(
+            f"Spectral repair window duration ({end_s - start_s:.2f}s) exceeds maximum "
+            f"{MAX_SPECTROGRAM_WINDOW_S:.1f}s"
+        )
+    if isinstance(chunk_samples, bool) or chunk_samples < 1:
+        raise ValueError(f"chunk_samples must be >= 1, got {chunk_samples!r}")
+
+    probe = probe_audio(source_path)
+    sr = int(probe.sample_rate)
+    channels = int(probe.channels)
+    file_duration_s = probe.samples / float(sr)
+    if start_s >= file_duration_s:
+        raise ValueError(f"start_s {start_s:.3f}s is at or past file end ({file_duration_s:.3f}s)")
+    effective_end_s = min(end_s, file_duration_s)
+    if effective_end_s <= start_s:
+        raise ValueError("Clamped spectral repair time window is empty")
+
+    nyquist = 0.5 * float(sr)
+    if f_high_hz > nyquist:
+        raise ValueError(f"fHighHz ({f_high_hz:g} Hz) exceeds Nyquist ({nyquist:g} Hz)")
+
+    margin_s = max(_SPECTRAL_REPAIR_MARGIN_S, (2048 + 512) / float(sr) + 0.02)
+    raw_win_start_s = max(0.0, start_s - margin_s)
+    raw_win_end_s = min(file_duration_s, effective_end_s + margin_s)
+    win_start_idx, win_end_idx = window_sample_bounds(probe, raw_win_start_s, raw_win_end_s)
+    win_start_s = win_start_idx / float(sr)
+    win_end_s = win_end_idx / float(sr)
+
+    local_buf = decode_audio_window(probe, win_start_s, win_end_s)
+    actual_win_len = int(local_buf.data.shape[1])
+    local_start_s = max(0.0, start_s - win_start_s)
+    local_end_s = min(actual_win_len / float(sr), effective_end_s - win_start_s)
+    if local_end_s <= local_start_s:
+        raise ValueError("Clamped spectral repair time window is empty")
+
+    repaired_win = apply_spectral_box_repair(
+        local_buf.data,
+        sr,
+        start_s=local_start_s,
+        end_s=local_end_s,
+        f_low_hz=f_low_hz,
+        f_high_hz=f_high_hz,
+        attenuation_db=attenuation_db,
+    )
+    del local_buf
+    win_splice_end = win_start_idx + int(repaired_win.shape[1])
+
+    dest_path = Path(output_path).resolve()
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest_path.with_name(
+        f".{dest_path.stem}_{os.getpid()}_{threading.get_ident()}.tmp.wav"
+    )
+    container = _wav_container_format(channels, max(probe.samples, 1), "PCM_24")
+    try:
+        written = 0
+        with sf.SoundFile(
+            str(tmp_path),
+            mode="w",
+            samplerate=sr,
+            channels=channels,
+            subtype="PCM_24",
+            format=container,
+        ) as writer:
+            for chunk in iter_decode_audio(probe, chunk_samples=chunk_samples):
+                chunk_len = int(chunk.data.shape[1])
+                chunk_start = written
+                chunk_end = written + chunk_len
+                if chunk_end <= win_start_idx or chunk_start >= win_splice_end:
+                    writer.write(chunk.data.T)
+                else:
+                    ov_start = max(chunk_start, win_start_idx)
+                    ov_end = min(chunk_end, win_splice_end)
+                    if ov_start > chunk_start:
+                        writer.write(chunk.data[:, : ov_start - chunk_start].T)
+                    writer.write(
+                        repaired_win[:, ov_start - win_start_idx : ov_end - win_start_idx].T
+                    )
+                    if ov_end < chunk_end:
+                        writer.write(chunk.data[:, ov_end - chunk_start :].T)
+                written = chunk_end
+        _finalize_deterministic_wav(tmp_path)
+        os.replace(tmp_path, dest_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return start_s, effective_end_s
+
+
 def _run_spectral_box_repair(
     source_path: Path,
     req: SpectralRepairRequestV1,
 ) -> dict[str, Any]:
-    """Decode source, apply 2D spectral box attenuation, and write atomic ``spectral_<id>.wav``."""
+    """Stream-splice 2D spectral box attenuation and write atomic ``spectral_<id>.wav``."""
     t0 = time.perf_counter()
-    probe = probe_audio(source_path)
-    file_duration_s = probe.samples / float(probe.sample_rate)
-    if req.start_s >= file_duration_s:
-        raise ValueError(
-            f"start_s {req.start_s:.3f}s is at or past file end ({file_duration_s:.3f}s)"
-        )
-    effective_end_s = min(req.end_s, file_duration_s)
-    if effective_end_s <= req.start_s:
-        raise ValueError("Clamped spectral repair time window is empty")
-
-    nyquist = 0.5 * float(probe.sample_rate)
-    if req.f_high_hz > nyquist:
-        raise ValueError(f"fHighHz ({req.f_high_hz:g} Hz) exceeds Nyquist ({nyquist:g} Hz)")
-
-    decoded = decode_audio(probe)
-    repaired = apply_spectral_box_repair(
-        decoded.data,
-        decoded.sample_rate,
-        start_s=req.start_s,
-        end_s=effective_end_s,
-        f_low_hz=req.f_low_hz,
-        f_high_hz=req.f_high_hz,
-        attenuation_db=req.attenuation_db,
-    )
-
     preview_dir = (work_root() / "previews").resolve()
     preview_dir.mkdir(parents=True, exist_ok=True)
     key_material = (
-        f"{source_path}:{req.start_s:.6f}:{effective_end_s:.6f}:"
+        f"{source_path}:{req.start_s:.6f}:{req.end_s:.6f}:"
         f"{req.f_low_hz:.2f}:{req.f_high_hz:.2f}:{req.attenuation_db:.2f}:"
         f"{time.time_ns()}:{os.getpid()}:{threading.get_ident()}"
     )
     digest = hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:16]
     final_path = preview_dir / f"spectral_{digest}.wav"
-    tmp_path = preview_dir / f".spectral_{digest}_{os.getpid()}_{threading.get_ident()}.tmp.wav"
-    try:
-        encode_audio(
-            AudioBuffer(data=repaired, sample_rate=decoded.sample_rate),
-            tmp_path,
-            output_bit_depth="pcm24",
-            dither=False,
-            seed_context=f"spectral:{digest}",
-        )
-        os.replace(tmp_path, final_path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
+
+    start_s, effective_end_s = stream_spectral_box_repair(
+        source_path,
+        final_path,
+        start_s=req.start_s,
+        end_s=req.end_s,
+        f_low_hz=req.f_low_hz,
+        f_high_hz=req.f_high_hz,
+        attenuation_db=req.attenuation_db,
+    )
 
     cleanup_preview_dir(preview_dir, protect=final_path)
 
@@ -1712,7 +1809,7 @@ def _run_spectral_box_repair(
     return {
         "outputPath": output_path_str,
         "audioUrl": f"/api/audio?{urlencode({'path': output_path_str})}",
-        "startS": req.start_s,
+        "startS": start_s,
         "endS": effective_end_s,
         "fLowHz": req.f_low_hz,
         "fHighHz": req.f_high_hz,
@@ -1779,24 +1876,17 @@ def _run_delivery_export(
     source_resolved: Path | None,
     preserve_metadata: bool,
 ) -> dict[str, Any]:
-    """Apply optional delivery loudness and export the master artifact synchronously."""
-    raw_audio, sr = sf.read(str(master_resolved), dtype="float32", always_2d=True)
-    wave_2d = np.ascontiguousarray(raw_audio.T, dtype=np.float32)
-
+    """Apply optional streaming delivery loudness and export the master artifact synchronously."""
     if delivery_preset != "match_input":
-        processed, metrics = apply_delivery_loudness(wave_2d, int(sr), delivery_preset)
         dest_resolved.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix=".hawa-export-", dir=dest_resolved.parent
         ) as tmp_dir:
             tmp_master = Path(tmp_dir) / "delivered.wav"
-            bit_depth: Literal["pcm24", "float32"] = "float32" if fmt == "wav32f" else "pcm24"
-            encode_audio(
-                AudioBuffer(data=processed, sample_rate=int(sr)),
+            metrics = apply_delivery_loudness_streaming(
+                master_resolved,
                 tmp_master,
-                output_bit_depth=bit_depth,
-                dither=bit_depth != "float32",
-                seed_context=f"export:{delivery_preset}",
+                delivery_preset,
             )
             if preserve_metadata and fmt in ("wav24", "wav32f"):
                 master_meta = extract_wav_metadata_chunks(master_resolved)
@@ -1820,8 +1910,8 @@ def _run_delivery_export(
             source_media_path=source_resolved,
             preserve_metadata=preserve_metadata,
         )
-        meas = measure_loudness_and_peaks(wave_2d, int(sr))
-        lra_lu = round(float(compute_loudness_range_lu(wave_2d, int(sr))), 2)
+        meas, lra = measure_delivery_loudness_streaming(master_resolved)
+        lra_lu = round(float(lra), 2)
         integrated_lufs = round(float(meas.integrated_lufs), 2)
         true_peak_dbtp = round(float(meas.true_peak_dbtp), 2)
 
@@ -2912,11 +3002,20 @@ def create_app(
                     )
             assert target_idx is not None
 
-            job_slice_dir: Path | None = None
+            candidate_dir: Path | None = None
             with contextlib.suppress(ValueError):
                 candidate_dir = UnitSliceStore(work_root()).job_dir(job_id)
-                if _has_complete_unit_slices(candidate_dir, units):
-                    job_slice_dir = candidate_dir
+            if candidate_dir is not None and read_slice_truncated_marker(candidate_dir) is not None:
+                raise ApiError(
+                    409,
+                    "slice_cache_budget_exceeded",
+                    "unit slice cache exceeded disk budget; live re-stitching is unavailable for this job",
+                )
+            job_slice_dir: Path | None = (
+                candidate_dir
+                if candidate_dir is not None and _has_complete_unit_slices(candidate_dir, units)
+                else None
+            )
 
             if job_slice_dir is not None:
                 try:
@@ -2930,6 +3029,12 @@ def create_app(
                         job_slice_dir=job_slice_dir,
                         manager=manager,
                     )
+                except SliceCacheBudgetError as exc:
+                    raise ApiError(
+                        409,
+                        "slice_cache_budget_exceeded",
+                        _sanitize_api_error(str(exc), job_slice_dir),
+                    ) from exc
                 except ValueError as exc:
                     raise ApiError(
                         400,

@@ -846,6 +846,16 @@ def _run_after_preflight(
     # 7. Guard-A decisions for every unit (finishing comes after continuity)
     slice_dir_env = os.environ.get(UNIT_SLICE_DIR_ENV, "").strip()
     unit_slice_dir: Path | None = Path(slice_dir_env).resolve() if slice_dir_env else None
+    slice_cache_truncated = False
+    slice_bytes_written = 0
+    if unit_slice_dir is not None and unit_slice_dir.is_dir():
+        from hawavoclean.server.unit_restitch import (
+            dir_slice_bytes,
+            read_slice_truncated_marker,
+        )
+
+        slice_cache_truncated = read_slice_truncated_marker(unit_slice_dir) is not None
+        slice_bytes_written = dir_slice_bytes(unit_slice_dir)
     decisions: list[UnitPolicyDecision] = []
     cand_hashes: list[str | None] = []
     unit_runtimes: list[float] = []
@@ -915,11 +925,11 @@ def _run_after_preflight(
             t_unit_start = time.perf_counter()
 
             if not u.is_speech:
-                if unit_slice_dir is not None:
+                if unit_slice_dir is not None and not slice_cache_truncated:
                     try:
                         from hawavoclean.server.unit_restitch import save_unit_slice_to_dir
 
-                        save_unit_slice_to_dir(
+                        saved_slice = save_unit_slice_to_dir(
                             unit_slice_dir,
                             unit_id=u.unit_id,
                             original=core_orig,
@@ -936,7 +946,16 @@ def _run_after_preflight(
                                 "duplicate_to_stereo": duplicate_to_stereo,
                             },
                             channel=u.channel_id,
+                            current_job_bytes=slice_bytes_written,
                         )
+                        if saved_slice is None:
+                            slice_cache_truncated = True
+                            logger.warning(
+                                f"Unit slice cache budget exceeded at unit {u.unit_id}; "
+                                "stopping further slice writes for this job"
+                            )
+                        else:
+                            slice_bytes_written += int(saved_slice.stat().st_size)
                     except Exception as exc:
                         logger.warning(
                             f"Failed to cache non-speech slice for unit {u.unit_id}: {exc}"
@@ -1022,11 +1041,11 @@ def _run_after_preflight(
             )
             decisions.append(persist_decision(u, pol_dec))
             cand_hashes.append(cand_sha256)
-            if unit_slice_dir is not None:
+            if unit_slice_dir is not None and not slice_cache_truncated:
                 try:
                     from hawavoclean.server.unit_restitch import save_unit_slice_to_dir
 
-                    save_unit_slice_to_dir(
+                    saved_slice = save_unit_slice_to_dir(
                         unit_slice_dir,
                         unit_id=u.unit_id,
                         original=core_orig,
@@ -1043,7 +1062,16 @@ def _run_after_preflight(
                             "duplicate_to_stereo": duplicate_to_stereo,
                         },
                         channel=u.channel_id,
+                        current_job_bytes=slice_bytes_written,
                     )
+                    if saved_slice is None:
+                        slice_cache_truncated = True
+                        logger.warning(
+                            f"Unit slice cache budget exceeded at unit {u.unit_id}; "
+                            "stopping further slice writes for this job"
+                        )
+                    else:
+                        slice_bytes_written += int(saved_slice.stat().st_size)
                 except Exception as exc:
                     logger.warning(f"Failed to cache speech slice for unit {u.unit_id}: {exc}")
             # Per-unit WORK, not per-unit wall clock: under a pool the two
