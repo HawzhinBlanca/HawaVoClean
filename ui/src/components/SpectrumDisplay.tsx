@@ -1,8 +1,35 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { getPlayer } from '../audio/player';
 import { SpectrumRenderer } from '../render/spectrum';
 import '../render/spectrum.css';
+import { updateRackSettings } from '../state/actions';
+import { scheduleLivePreview } from '../state/liveAudition';
+import { HPF_MAX_HZ, HPF_MIN_HZ } from '../state/presets';
 import { useStore } from '../state/store';
+
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'] as const;
+
+export function hzToMusicalNote(hz: number): string {
+  if (!Number.isFinite(hz) || hz <= 0) return '—';
+  const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+  const note = NOTE_NAMES[((midi % 12) + 12) % 12] ?? 'A';
+  const oct = Math.floor(midi / 12) - 1;
+  return `${note}${oct}`;
+}
+
+const SPEC_F_MIN = 20;
+const SPEC_F_MAX = 20000;
+const SPEC_LOG_SPAN = Math.log2(SPEC_F_MAX / SPEC_F_MIN);
+
+function hzToNormX(hz: number): number {
+  const clamped = Math.min(SPEC_F_MAX, Math.max(SPEC_F_MIN, hz));
+  return Math.log2(clamped / SPEC_F_MIN) / SPEC_LOG_SPAN;
+}
+
+function normXToHpfHz(normX: number): number {
+  const f = SPEC_F_MIN * Math.pow(2, Math.min(1, Math.max(0, normX)) * SPEC_LOG_SPAN);
+  return Math.min(HPF_MAX_HZ, Math.max(HPF_MIN_HZ, Math.round(f / 5) * 5));
+}
 
 /** The canvas carries a handle to its renderer so perf probes and scripted
  *  browser checks can step the display without going through React. */
@@ -47,7 +74,10 @@ export function SpectrumDisplay() {
   const cleaned = useStore((s) => s.cleaned);
   const abMode = useStore((s) => s.abMode);
   const playing = useStore((s) => s.playing);
+  const rackSettings = useStore((s) => s.rackSettings);
   const [removedCoverage, setRemovedCoverage] = useState(0);
+  const [draggingHpf, setDraggingHpf] = useState(false);
+  const displayRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current as SpectrumCanvas | null;
@@ -106,6 +136,43 @@ export function SpectrumDisplay() {
   // The band is lit by the pixels it will have, not by the pair of curves.
   const hasRemoved = both && removedCoverage > 0;
   const removedPct = Math.round(removedCoverage * 100);
+  const hpfEnabled = rackSettings.hpfEnabled !== false;
+  const hpfHz = rackSettings.hpfCutoffHz;
+  const hpfLeftPct = Math.min(48, Math.max(2, hzToNormX(hpfHz) * 100));
+
+  const updateHpfFromPointer = (clientX: number): void => {
+    const rect = displayRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const normX = (clientX - rect.left) / rect.width;
+    const nextHz = normXToHpfHz(normX);
+    if (nextHz !== rackSettings.hpfCutoffHz || !hpfEnabled) {
+      updateRackSettings({ ...rackSettings, hpfEnabled: true, hpfCutoffHz: nextHz });
+      scheduleLivePreview();
+    }
+  };
+
+  const onHpfPointerDown = (e: ReactPointerEvent<HTMLButtonElement>): void => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    setDraggingHpf(true);
+    updateHpfFromPointer(e.clientX);
+  };
+
+  const onHpfPointerMove = (e: ReactPointerEvent<HTMLButtonElement>): void => {
+    if (!draggingHpf) return;
+    updateHpfFromPointer(e.clientX);
+  };
+
+  const onHpfPointerUp = (e: ReactPointerEvent<HTMLButtonElement>): void => {
+    if (!draggingHpf) return;
+    setDraggingHpf(false);
+    try {
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+  };
 
   return (
     <>
@@ -116,9 +183,25 @@ export function SpectrumDisplay() {
               the panel is showing, said once, where the panel is named */}
           <span className="sub">· LTAS</span>
         </h2>
+        <button
+          type="button"
+          className="spec-hpf-chip"
+          aria-pressed={hpfEnabled}
+          onClick={() => {
+            updateRackSettings({ ...rackSettings, hpfEnabled: !hpfEnabled });
+            scheduleLivePreview();
+          }}
+          title="Toggle High-Pass rumble filter — or drag the cyan node on the spectrum"
+        >
+          <span>HPF {hpfEnabled ? `${hpfHz} Hz · ${hzToMusicalNote(hpfHz)}` : 'Bypass'}</span>
+        </button>
       </div>
       <div className="spectrum-body">
-        <div className="display spectrum-display">
+        <div
+          ref={displayRef}
+          className="display spectrum-display"
+          style={{ position: 'relative' }}
+        >
           {/* D1 · a canvas with no role is an unlabelled graphic. The plot
               is not interactive — it is a picture of the two spectra — so it
               is named as one, and the key below it (a real list, in the
@@ -137,6 +220,84 @@ export function SpectrumDisplay() {
                     : 'Long-term average spectrum: no signal yet'
             }
           />
+          {hpfEnabled ? (
+            <div
+              aria-hidden="true"
+              style={{
+                position: 'absolute',
+                top: 0,
+                bottom: 0,
+                left: 0,
+                width: `${hpfLeftPct}%`,
+                background: 'linear-gradient(90deg, rgba(44,212,255,0.16), rgba(44,212,255,0.03))',
+                borderRight: '1.5px solid rgba(44,212,255,0.75)',
+                pointerEvents: 'none',
+              }}
+            />
+          ) : null}
+          <button
+            type="button"
+            aria-label={`High-pass rumble filter node: ${hpfEnabled ? `${hpfHz} Hz (${hzToMusicalNote(hpfHz)})` : 'bypassed'}. Drag horizontally or press arrow keys to adjust.`}
+            title={
+              hpfEnabled
+                ? `HPF ${hpfHz} Hz (${hzToMusicalNote(hpfHz)}) — drag horizontally or double-click to bypass`
+                : 'HPF bypassed — double-click to enable'
+            }
+            onPointerDown={onHpfPointerDown}
+            onPointerMove={onHpfPointerMove}
+            onPointerUp={onHpfPointerUp}
+            onPointerCancel={onHpfPointerUp}
+            onDoubleClick={() => {
+              updateRackSettings({ ...rackSettings, hpfEnabled: !hpfEnabled });
+              scheduleLivePreview();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                updateRackSettings({
+                  ...rackSettings,
+                  hpfEnabled: true,
+                  hpfCutoffHz: Math.min(HPF_MAX_HZ, hpfHz + 5),
+                });
+                scheduleLivePreview();
+              } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+                e.preventDefault();
+                updateRackSettings({
+                  ...rackSettings,
+                  hpfEnabled: true,
+                  hpfCutoffHz: Math.max(HPF_MIN_HZ, hpfHz - 5),
+                });
+                scheduleLivePreview();
+              }
+            }}
+            style={{
+              position: 'absolute',
+              left: `${hpfLeftPct}%`,
+              top: '50%',
+              transform: 'translate(-50%, -50%)',
+              width: '24px',
+              height: '24px',
+              borderRadius: '50%',
+              border: hpfEnabled ? '2px solid var(--cyan-2)' : '1.5px dashed var(--fg-4)',
+              background: hpfEnabled ? 'rgba(44, 212, 255, 0.28)' : 'rgba(14, 18, 26, 0.72)',
+              boxShadow: hpfEnabled ? '0 0 12px var(--cyan-glow)' : 'none',
+              cursor: 'ew-resize',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              zIndex: 4,
+            }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                background: hpfEnabled ? 'var(--cyan-2)' : 'var(--fg-4)',
+              }}
+            />
+          </button>
         </div>
         {/*
           ONE key, directly under the picture it explains.

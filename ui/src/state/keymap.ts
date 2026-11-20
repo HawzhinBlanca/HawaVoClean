@@ -51,12 +51,16 @@ export function handleKeyDown(e: KeyboardEvent): void {
   if (isEditable(e.target)) return;
   const st = getState();
 
-  // Cmd/Ctrl+Z (Undo) and Cmd/Ctrl+Shift+Z (Redo) when not typing in an input.
+  // Cmd/Ctrl+Z (Undo), Cmd/Ctrl+Shift+Z (Redo), and Cmd/Ctrl+K (AI Assistant drawer).
   if ((e.metaKey || e.ctrlKey) && !e.altKey) {
-    if (!st.shortcutsOpen && e.key.toLowerCase() === 'z') {
+    const k = e.key.toLowerCase();
+    if (!st.shortcutsOpen && k === 'z') {
       e.preventDefault();
       if (e.shiftKey) redoAction();
       else undoAction();
+    } else if (!st.shortcutsOpen && k === 'k') {
+      e.preventDefault();
+      st.setAssistantDrawerOpen(!st.assistantDrawerOpen);
     }
     return;
   }
@@ -79,7 +83,8 @@ export function handleKeyDown(e: KeyboardEvent): void {
       e.preventDefault();
       // Esc means "stop the thing that is happening", innermost first:
       // an upload in flight, then an analysis, then a running job, then the selection.
-      if (st.upload) cancelUpload();
+      if (st.assistantDrawerOpen) st.setAssistantDrawerOpen(false);
+      else if (st.upload) cancelUpload();
       else if (isAnalyzing()) cancelAnalysis();
       else if (running) void cancelJob();
       else if (st.rejection) st.setRejection(null);

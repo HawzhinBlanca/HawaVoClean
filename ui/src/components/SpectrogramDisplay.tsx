@@ -142,8 +142,13 @@ export function SpectrogramDisplay({
   const analyzing = useStore((s) => s.analyzing);
   const storeSpectralSelection = useStore((s) => s.spectralSelection);
   const setSpectralSelection = useStore((s) => s.setSpectralSelection);
+  const stageBlend = useStore((s) => s.stageBlend);
 
   const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (stageBlend > 0) setVisible(true);
+  }, [stageBlend]);
   const [viewMode, setViewMode] = useState<SpectrogramViewMode>(abMode);
   const [scale, setScale] = useState<FrequencyScale>('log');
   const [selection, setSelection] = useState<SpectralSelection | null>(null);
@@ -173,9 +178,12 @@ export function SpectrogramDisplay({
     }
   }, [hasCleaned, viewMode]);
 
-  // Clear stale 2D selection and server tile cache when a new source clip is loaded.
+  // Clear stale 2D selection and server tile cache only when the source clip actually changes.
   const sourcePath = original?.path ?? null;
+  const prevSourcePathRef = useRef<string | null>(sourcePath);
   useEffect(() => {
+    if (prevSourcePathRef.current === sourcePath) return;
+    prevSourcePathRef.current = sourcePath;
     setSelection(null);
     setDragRect(null);
     setSpectralSelection(null);

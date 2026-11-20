@@ -184,8 +184,22 @@ export function Header() {
   const report = useStore((s) => s.report);
   const job = useStore((s) => s.job);
   const analyzing = useStore((s) => s.analyzing);
+  const workspaceMode = useStore((s) => s.workspaceMode);
+  const setWorkspaceMode = useStore((s) => s.setWorkspaceMode);
+  const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
+  const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
   const reduced = useReducedMotion() === true;
   const { locale, setLocale, t } = useI18n();
+
+  const switchMode = (next: 'simple' | 'pro'): void => {
+    if (next === workspaceMode) return;
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => void };
+    if (!reduced && typeof doc.startViewTransition === 'function') {
+      doc.startViewTransition(() => setWorkspaceMode(next));
+    } else {
+      setWorkspaceMode(next);
+    }
+  };
 
   const workspacePhase = deriveWorkspacePhase({
     source,
@@ -257,6 +271,39 @@ export function Header() {
           the one engine transition that is *not* covered elsewhere — the
           engine going away — is announced assertively by the offline banner. */}
       <div className="header-right">
+        <div className="hdr-mode-group" role="group" aria-label="Workspace mode">
+          <button
+            type="button"
+            className={`hdr-mode-btn${workspaceMode === 'simple' ? ' active' : ''}`}
+            aria-pressed={workspaceMode === 'simple'}
+            onClick={() => switchMode('simple')}
+            title="Simple Studio — effortless 3-step voice cleanup"
+          >
+            Simple
+          </button>
+          <button
+            type="button"
+            className={`hdr-mode-btn${workspaceMode === 'pro' ? ' active' : ''}`}
+            aria-pressed={workspaceMode === 'pro'}
+            onClick={() => switchMode('pro')}
+            title="Pro Studio — spectrogram, spectrum HPF, surgical repair, and broadcast delivery"
+          >
+            Pro Studio
+          </button>
+        </div>
+        <button
+          type="button"
+          className="hdr-ai-btn"
+          aria-expanded={assistantDrawerOpen}
+          aria-label="Open AI Audio Assistant"
+          title="AI Audio Assistant (Cmd+K)"
+          onClick={() => setAssistantDrawerOpen(!assistantDrawerOpen)}
+        >
+          <span>AI Assistant</span>
+          <kbd className="hdr-ai-kbd" aria-hidden="true">
+            ⌘K
+          </kbd>
+        </button>
         <button
           type="button"
           className="lang-toggle"

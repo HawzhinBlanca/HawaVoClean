@@ -2,24 +2,26 @@ import { useEffect, useState } from 'react';
 import { getPlayer } from './audio/player';
 import { Actions } from './components/Actions';
 import { AudioAssistant } from './components/AudioAssistant';
+import { AudioStage } from './components/AudioStage';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
 import { JobHistory } from './components/JobHistory';
 import { MetricsTiles } from './components/MetricsTiles';
 import { ProcessButton } from './components/ProcessButton';
+import { SimpleWorkspace } from './components/SimpleWorkspace';
+import { SlideOverDrawer } from './components/SlideOverDrawer';
 import { SmartExplanation } from './components/SmartExplanation';
 import { AdvancedControls } from './components/AdvancedControls';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { SourceStrip } from './components/SourceStrip';
 import { SpectrumDisplay } from './components/SpectrumDisplay';
-import { SpectrogramDisplay } from './components/SpectrogramDisplay';
 import { TakeSwitcher } from './components/TakeSwitcher';
+import { ToastStack } from './components/ToastStack';
 import { BatchQueue } from './components/BatchQueue';
 import { Transport } from './components/Transport';
 import { UnitInspector } from './components/UnitInspector';
 import { VideoPreview, sourceHasVideo } from './components/VideoPreview';
-import { WaveformDisplay } from './components/WaveformDisplay';
 import {
   installRendererProofResponder,
   RENDERER_PROOF_CONTRACT,
@@ -151,6 +153,9 @@ export default function App() {
   const activeTakeId = useStore((s) => s.activeTakeId);
   const engineStatus = useStore((s) => s.engineStatus);
   const offlineSince = useStore((s) => s.engineOfflineSince);
+  const workspaceMode = useStore((s) => s.workspaceMode);
+  const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
+  const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
   const deck = abMode === 'cleaned' && (cleanedPath || previewActive) ? 'cleaned' : 'original';
   const effectiveActiveTake =
     abMode === 'original' ? 'original' : (activeTakeId ?? takes[takes.length - 1]?.id ?? 'original');
@@ -211,6 +216,7 @@ export default function App() {
       data-drag={dragOver ? 'true' : 'false'}
       data-engine={engineStatus}
       data-offline={offline ? 'true' : 'false'}
+      data-workspace={workspaceMode}
     >
       <Header />
       <EngineBanner />
@@ -220,54 +226,58 @@ export default function App() {
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {announcement}
       </p>
-      <main className="main">
-        <div className="left">
-          <WaveformDisplay />
-          {takes.length >= 2 ? (
-            <div className="app-take-strip">
-              <TakeSwitcher
-                takes={takes}
-                activeId={effectiveActiveTake}
-                onSelect={selectTake}
-                onTogglePin={pinTake}
-                onRemoveTake={removeTake}
-              />
+      {workspaceMode === 'simple' ? (
+        <SimpleWorkspace />
+      ) : (
+        <main className="main">
+          <div className="left">
+            <AudioStage />
+            {takes.length >= 2 ? (
+              <div className="app-take-strip">
+                <TakeSwitcher
+                  takes={takes}
+                  activeId={effectiveActiveTake}
+                  onSelect={selectTake}
+                  onTogglePin={pinTake}
+                  onRemoveTake={removeTake}
+                />
+              </div>
+            ) : null}
+            {/* The inspector answers "why did this unit go that way"; the run
+                list answers "which pass am I looking at". They share the bottom
+                row because they are the same kind of question about the same
+                report, and neither needs the full width. */}
+            <div className="deskrow">
+              <UnitInspector />
+              {batch ? <BatchQueue /> : <JobHistory />}
             </div>
-          ) : null}
-          <SpectrogramDisplay />
-          {/* The inspector answers "why did this unit go that way"; the run
-              list answers "which pass am I looking at". They share the bottom
-              row because they are the same kind of question about the same
-              report, and neither needs the full width. */}
-          <div className="deskrow">
-            <UnitInspector />
-            {batch ? <BatchQueue /> : <JobHistory />}
           </div>
-        </div>
-        <aside className="right" aria-label="Analysis and controls">
-          <SyncedVideoPreview />
-          <section className="panel spectrum-panel" aria-label="Spectrum">
-            <SpectrumDisplay />
-            <MetricsTiles />
-          </section>
-          <section className="panel controls" aria-label="Processing controls">
-            {/* The only panel with no visible title, so it is the only one
-                with no heading to land on. It gets a hidden one rather than a
-                visible one, because the controls below name themselves and a
-                title here would be chrome for its own sake. `aria-label` on
-                the section stays: it names the landmark, which is a different
-                job from being a stop in the heading list. */}
-            <h2 className="sr-only">Processing controls</h2>
-            <AudioAssistant />
-            <SmartExplanation />
-            <ProcessButton />
-            <Transport />
-            <Actions />
-            <AdvancedControls />
-          </section>
-        </aside>
-      </main>
+          <aside className="right" aria-label="Analysis and controls">
+            <SyncedVideoPreview />
+            <section className="panel spectrum-panel" aria-label="Spectrum">
+              <SpectrumDisplay />
+              <MetricsTiles />
+            </section>
+            <section className="panel controls" aria-label="Processing controls">
+              <h2 className="sr-only">Processing controls</h2>
+              <SmartExplanation />
+              <ProcessButton />
+              <Transport />
+              <Actions />
+              <AdvancedControls />
+            </section>
+          </aside>
+        </main>
+      )}
       <Footer />
+      <SlideOverDrawer
+        open={assistantDrawerOpen}
+        title="AI Audio Assistant"
+        onClose={() => setAssistantDrawerOpen(false)}
+      >
+        <AudioAssistant />
+      </SlideOverDrawer>
+      <ToastStack />
       <ShortcutOverlay />
     </div>
   );

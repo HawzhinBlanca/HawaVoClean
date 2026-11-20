@@ -21,6 +21,7 @@ import {
   type UserPreset,
 } from '../state/presets';
 import '../styles/studio-rack.css';
+import { RotaryKnob } from './controls/RotaryKnob';
 
 export interface StudioRackProps {
   settings: StudioRackSettings;
@@ -549,32 +550,22 @@ export function StudioRack({
         )
       ) : null}
 
-      {/* Amount / Strength */}
-      <div className="sr-section">
-        <div className="sr-row-head">
-          <label htmlFor={`${uid}-strength`} className="sr-label">
-            Amount / Strength
-          </label>
-          <span className="sr-readout" data-testid="strength-readout">
-            {strengthPct}%
-          </span>
-        </div>
-        <input
-          id={`${uid}-strength`}
-          type="range"
-          className="sr-slider"
+      {/* Amount / Strength — FabFilter/Waves tactile rotary dial with accessible range input */}
+      <div className="sr-section" style={{ alignItems: 'center' }}>
+        <RotaryKnob
+          inputId={`${uid}-strength`}
+          label="Amount / Strength"
+          value={strengthPct}
           min={10}
           max={100}
           step={5}
-          value={strengthPct}
+          defaultValue={75}
+          formatValue={(v) => `${Math.round(v)}%`}
+          readoutTestId="strength-readout"
+          accent="cyan"
+          size="md"
           disabled={disabled}
-          aria-valuetext={`${strengthPct}%`}
-          onChange={(e) => {
-            const pct = Number(e.target.value);
-            if (Number.isFinite(pct)) {
-              patchSettings({ strength: Math.round(pct) / 100 });
-            }
-          }}
+          onChange={(pct) => patchSettings({ strength: Math.round(pct) / 100 })}
         />
       </div>
 
@@ -655,28 +646,25 @@ export function StudioRack({
         </div>
 
         {hpfActive ? (
-          <div className="sr-hpf-row">
-            <label htmlFor={`${uid}-hpf-hz`} className="sr-label">
-              HPF Cutoff
-            </label>
-            <input
-              id={`${uid}-hpf-hz`}
-              type="range"
-              className="sr-slider"
+          <div className="sr-hpf-row" style={{ justifyContent: 'center' }}>
+            <RotaryKnob
+              inputId={`${uid}-hpf-hz`}
+              label="HPF Cutoff"
+              value={settings.hpfCutoffHz}
               min={HPF_MIN_HZ}
               max={HPF_MAX_HZ}
               step={5}
-              value={settings.hpfCutoffHz}
+              defaultValue={80}
+              formatValue={(v) => `${Math.round(v)} Hz`}
+              accent="amber"
+              size="sm"
               disabled={disabled}
-              aria-valuetext={`${settings.hpfCutoffHz} Hz`}
-              onChange={(e) => {
-                const hz = Number(e.target.value);
-                if (Number.isFinite(hz)) {
-                  patchSettings({ hpfCutoffHz: Math.min(HPF_MAX_HZ, Math.max(HPF_MIN_HZ, Math.round(hz))) });
-                }
-              }}
+              onChange={(hz) =>
+                patchSettings({
+                  hpfCutoffHz: Math.min(HPF_MAX_HZ, Math.max(HPF_MIN_HZ, Math.round(hz))),
+                })
+              }
             />
-            <span className="sr-readout">{settings.hpfCutoffHz} Hz</span>
           </div>
         ) : null}
       </div>

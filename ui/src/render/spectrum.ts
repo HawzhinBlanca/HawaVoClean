@@ -140,19 +140,28 @@ const BANDS = bandCentres();
  * entry against tokens.css so the two cannot separate again.
  */
 const FALLBACK: Record<string, string> = {
-  '--amber': '#ffb347',
-  '--amber-2': '#ffd28a',
-  '--cyan': '#39d0ff',
-  '--cyan-2': '#9ae8ff',
-  '--display': '#07080a',
-  '--display-2': '#0a0c0f',
-  '--fg-2': '#aab2bf',
+  '--amber': '#ffb44c',
+  '--amber-2': '#ffd694',
+  '--cyan': '#2cd4ff',
+  '--cyan-2': '#9cecff',
+  '--display': '#05070b',
+  '--display-2': '#090c12',
+  '--fg-2': '#b4bece',
   '--fg-3': '#949daa',
   '--fg-4': '#86909f',
   '--font-mono': "'SF Mono', ui-monospace, Menlo, Monaco, Consolas, monospace",
   '--font-ui':
     "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif",
 };
+
+const PITCH_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'] as const;
+
+function freqToNoteLabel(hz: number): string {
+  if (!Number.isFinite(hz) || hz <= 0) return '';
+  const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+  const name = PITCH_NAMES[((midi % 12) + 12) % 12] ?? 'A';
+  return `${name}${Math.floor(midi / 12) - 1}`;
+}
 
 function parseColor(raw: string, fb: RGB): RGB {
   const s = raw.trim();
@@ -1434,7 +1443,9 @@ export class SpectrumRenderer {
     if (dbC !== null) this.dot(sx, this.yOf(dbC, p), this.paints.cyan);
     ctx.restore();
 
-    const fLabel = f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz` : `${Math.round(f)} Hz`;
+    const baseFreq = f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz` : `${Math.round(f)} Hz`;
+    const note = freqToNoteLabel(f);
+    const fLabel = note ? `${baseFreq} · ${note}` : baseFreq;
     ctx.font = this.paints.fontChip;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';

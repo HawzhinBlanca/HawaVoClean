@@ -33,6 +33,40 @@ export interface SpectralSelectionBox {
 export type EngineStatus = 'connecting' | 'ready' | 'offline';
 export type SourceOrigin = 'resolve' | 'file' | 'drop' | 'upload';
 export type AbMode = 'original' | 'cleaned';
+export type WorkspaceMode = 'simple' | 'pro';
+
+export interface ToastItem {
+  id: string;
+  text: string;
+  kind: 'info' | 'ok' | 'err';
+}
+
+const WORKSPACE_MODE_KEY = 'hawavoclean.workspaceMode';
+const LIVE_PREVIEW_KEY = 'hawavoclean.livePreview';
+
+function loadWorkspaceMode(): WorkspaceMode {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(WORKSPACE_MODE_KEY) : null;
+    if (raw === 'pro' || raw === 'simple') return raw;
+  } catch {
+    // ignore storage errors
+  }
+  return 'simple';
+}
+
+function loadLivePreview(): boolean {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(LIVE_PREVIEW_KEY) : null;
+    if (raw === 'false') return false;
+    if (raw === 'true') return true;
+  } catch {
+    // ignore storage errors
+  }
+  return true;
+}
+
+let toastSeq = 0;
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
  * What the engine can still serve of the run that is on screen.
@@ -342,6 +376,14 @@ export interface AppState {
   videoPreviewCollapsed: boolean;
   batchNamingTemplate: string;
 
+  // Studio 4.0 workspace & non-technical UX state
+  workspaceMode: WorkspaceMode;
+  livePreviewEnabled: boolean;
+  assistantDrawerOpen: boolean;
+  activeGoalId: string | null;
+  stageBlend: number;
+  toasts: ToastItem[];
+
   // actions
   setHost(host: HawaHost): void;
   setEngine(status: EngineStatus, client: EngineClient | null, version: string | null): void;
@@ -400,6 +442,13 @@ export interface AppState {
   setSpectralSelection(sel: SpectralSelectionBox | null): void;
   setVideoPreviewCollapsed(collapsed: boolean): void;
   setBatchNamingTemplate(template: string): void;
+  setWorkspaceMode(mode: WorkspaceMode): void;
+  setLivePreviewEnabled(enabled: boolean): void;
+  setAssistantDrawerOpen(open: boolean): void;
+  setActiveGoalId(goalId: string | null): void;
+  setStageBlend(blend: number): void;
+  pushToast(text: string, kind?: ToastItem['kind'], durationMs?: number): void;
+  dismissToast(id: string): void;
   resetForNewSource(): void;
 }
 
@@ -477,6 +526,13 @@ export const useStore = create<AppState>((set) => ({
   spectralSelection: null,
   videoPreviewCollapsed: false,
   batchNamingTemplate: DEFAULT_NAMING_TEMPLATE,
+
+  workspaceMode: loadWorkspaceMode(),
+  livePreviewEnabled: loadLivePreview(),
+  assistantDrawerOpen: false,
+  activeGoalId: 'auto_smart',
+  stageBlend: 0,
+  toasts: [],
 
   setHost: (host) => set({ host }),
   // Losing the engine must not lose anything else: the client object is a URL
@@ -642,6 +698,46 @@ export const useStore = create<AppState>((set) => ({
       batchNamingTemplate,
       rackSettings: { ...s.rackSettings, namingTemplate: batchNamingTemplate },
     })),
+  setWorkspaceMode: (workspaceMode) => {
+    try {
+      if (typeof window !== 'undefined') window.localStorage.setItem(WORKSPACE_MODE_KEY, workspaceMode);
+    } catch {
+      // ignore storage errors
+    }
+    set({ workspaceMode });
+  },
+  setLivePreviewEnabled: (livePreviewEnabled) => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(LIVE_PREVIEW_KEY, livePreviewEnabled ? 'true' : 'false');
+      }
+    } catch {
+      // ignore storage errors
+    }
+    set({ livePreviewEnabled });
+  },
+  setAssistantDrawerOpen: (assistantDrawerOpen) => set({ assistantDrawerOpen }),
+  setActiveGoalId: (activeGoalId) => set({ activeGoalId }),
+  setStageBlend: (blend) => set({ stageBlend: Math.min(1, Math.max(0, Number.isFinite(blend) ? blend : 0)) }),
+  pushToast: (text, kind = 'info', durationMs = 4200) => {
+    const id = `toast-${++toastSeq}`;
+    set((s) => ({ toasts: [...s.toasts.slice(-2), { id, text, kind }] }));
+    if (durationMs > 0) {
+      const timer = setTimeout(() => {
+        toastTimers.delete(id);
+        set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+      }, durationMs);
+      toastTimers.set(id, timer);
+    }
+  },
+  dismissToast: (id) => {
+    const timer = toastTimers.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      toastTimers.delete(id);
+    }
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
   resetForNewSource: () =>
     set({
       original: null,
