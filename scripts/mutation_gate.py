@@ -1225,6 +1225,88 @@ _TORCH_BACKED: dict[str, str] = {
             "tests/unit/test_wave_f_packaging.py::test_relocate_fails_loudly_if_homebrew_ref_survives_rewrite",
         ),
     ),
+    Mutation(
+        "M76",
+        "--web-public work_root-only path lockdown disabled in server/policy.py",
+        "src/hawavoclean/server/policy.py",
+        """    if is_web_public_mode(web_public):
+        return [work_root().resolve()]""",
+        """    if False and is_web_public_mode(web_public):
+        return [work_root().resolve()]""",
+        owners=(
+            "tests/unit/test_web_public_and_pro_chat.py::test_policy_web_public_locks_allowed_roots_to_work_dir",
+            "tests/unit/test_web_public_and_pro_chat.py::test_web_public_server_lockdown_and_upload_flow",
+        ),
+    ),
+    Mutation(
+        "M77",
+        "--web-public model-install admin 403 guard disabled in server/app.py",
+        "src/hawavoclean/server/app.py",
+        """    @app.post("/api/v1/models/{model_id}/install")
+    async def install_v1_model(model_id: str) -> dict[str, Any]:
+        if is_web_public:""",
+        """    @app.post("/api/v1/models/{model_id}/install")
+    async def install_v1_model(model_id: str) -> dict[str, Any]:
+        if False and is_web_public:""",
+        owners=(
+            "tests/unit/test_web_public_and_pro_chat.py::test_web_public_server_lockdown_and_upload_flow",
+        ),
+    ),
+    Mutation(
+        "M78",
+        "Pro-Repair DSP modifier extraction disabled in assistant.py",
+        "src/hawavoclean/assistant.py",
+        """    if pr:
+        mods["pro_repair"] = ProRepairPlan(**pr)""",
+        """    if False and pr:
+        mods["pro_repair"] = ProRepairPlan(**pr)""",
+        owners=(
+            "tests/unit/test_audio_aware_assistant.py::test_universal_chat_controls_all_studio_operations_and_modifiers",
+            "tests/unit/test_web_public_and_pro_chat.py::test_pro_studio_natural_presets_and_relative_refinements",
+        ),
+    ),
+    Mutation(
+        "M79",
+        "2D spectral box [Band: ...] chat parser disabled in assistant.py",
+        "src/hawavoclean/assistant.py",
+        """    band_tag = _BAND_TAG_RE.search(request.message)
+    if band_tag and re.search(""",
+        """    band_tag = _BAND_TAG_RE.search(request.message)
+    if False and band_tag and re.search(""",
+        owners=(
+            "tests/unit/test_audio_aware_assistant.py::test_universal_chat_controls_all_studio_operations_and_modifiers",
+        ),
+    ),
+    Mutation(
+        "M80",
+        "acoustic diagnosis telemetry summary disabled in assistant.py",
+        "src/hawavoclean/assistant.py",
+        """    if flags:
+        return (
+            f"Measured clip ({summary}): detected {', '.join(flags)}.""",
+        """    if False and flags:
+        return (
+            f"Measured clip ({summary}): detected {', '.join(flags)}.""",
+        owners=(
+            "tests/unit/test_web_public_and_pro_chat.py::test_acoustic_diagnosis_reports_all_measured_flags_and_clean_state",
+        ),
+    ),
+    Mutation(
+        "M81",
+        "relative dial-it-back chat refinement disabled in assistant.py",
+        "src/hawavoclean/assistant.py",
+        """    if re.search(
+        r"\\b(dial\\s+it\\s+back|less\\s+aggressive|too\\s+processed|sounds?\\s+robotic|more\\s+gentle|tone\\s+it\\s+down)\\b",
+        text,
+    ):""",
+        """    if False and re.search(
+        r"\\b(dial\\s+it\\s+back|less\\s+aggressive|too\\s+processed|sounds?\\s+robotic|more\\s+gentle|tone\\s+it\\s+down)\\b",
+        text,
+    ):""",
+        owners=(
+            "tests/unit/test_web_public_and_pro_chat.py::test_pro_studio_natural_presets_and_relative_refinements",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
