@@ -3,6 +3,7 @@ import { getPlayer } from '../audio/player';
 import { previewRegion, updateRackSettings } from '../state/actions';
 import { scheduleLivePreview } from '../state/liveAudition';
 import { jobInFlight, useStore } from '../state/store';
+import { NeuralHaloCanvas } from './controls/NeuralHaloCanvas';
 import { PillToggle } from './controls/PillToggle';
 import { RotaryKnob } from './controls/RotaryKnob';
 
@@ -55,13 +56,17 @@ export function HeroMacroConsole() {
   const setLivePreviewEnabled = useStore((s) => s.setLivePreviewEnabled);
   const previewActive = useStore((s) => s.previewActive);
   const cleanedPath = useStore((s) => s.cleanedPath);
+  const abMode = useStore((s) => s.abMode);
 
   const [mixPct, setMixPct] = useState(100);
+  const [deltaMode, setDeltaMode] = useState(false);
 
   useEffect(() => {
     const unsub = getPlayer().subscribe((snap) => {
       const m = Math.round((snap.wetDryMix ?? 1) * 100);
       setMixPct((prev) => (prev === m ? prev : m));
+      const d = Boolean(snap.deltaMode);
+      setDeltaMode((prev) => (prev === d ? prev : d));
     });
     return unsub;
   }, []);
@@ -107,6 +112,12 @@ export function HeroMacroConsole() {
 
   return (
     <section className="panel hero-console" aria-label="Quick voice controls">
+      <NeuralHaloCanvas
+        playing={playing}
+        deck={abMode}
+        deltaMode={deltaMode}
+        strength={strengthPct / 100}
+      />
       <div className="hc-side">
         <RotaryKnob
           label="Natural Room"

@@ -42,6 +42,7 @@ import { AudioStage } from './AudioStage';
 import { RotaryKnob } from './controls/RotaryKnob';
 import { PillToggle } from './controls/PillToggle';
 import { Header } from './Header';
+import { ProWorkspace } from './ProWorkspace';
 import { SimpleWorkspace } from './SimpleWorkspace';
 import { SlideOverDrawer } from './SlideOverDrawer';
 import { hzToMusicalNote, SpectrumDisplay } from './SpectrumDisplay';
@@ -346,6 +347,40 @@ describe('Studio 4.0 — Header Mode Switch, Pro AudioStage, Spectrum HPF, Drawe
       hpfNode!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     });
     expect(getState().rackSettings.hpfEnabled).toBe(false);
+  });
+
+  it('ProWorkspace renders full-width FabFilter spectrum with piano ruler, band overlays, rotary console, and drawers', async () => {
+    useStore.setState({
+      engineStatus: 'ready',
+      source: { path: '/a.wav', name: 'a.wav', origin: 'file' },
+      original: fakeAnalysis(),
+      rackSettings: {
+        ...getState().rackSettings,
+        deplosive: true,
+        tonalRestoration: true,
+        deess: true,
+      },
+    });
+    await act(async () => {
+      root.render(createElement(ProWorkspace));
+    });
+    expect(host.querySelector('.spec-piano-ruler')).not.toBeNull();
+    expect(host.querySelector('.band-deplosive')).not.toBeNull();
+    expect(host.querySelector('.band-tonal')).not.toBeNull();
+    expect(host.querySelector('.band-deess')).not.toBeNull();
+    expect(host.querySelector('aside.right.pro-console')).not.toBeNull();
+    expect(host.querySelector('button.process[aria-label="PROCESS"]')).not.toBeNull();
+    expect(await runAxe(host)).toEqual([]);
+
+    // Opening Units drawer works cleanly
+    const unitsBtn = Array.from(host.querySelectorAll<HTMLButtonElement>('.pc-drawer-btn')).find((b) =>
+      b.textContent?.includes('Units'),
+    );
+    expect(unitsBtn).toBeDefined();
+    await act(async () => {
+      unitsBtn!.click();
+    });
+    expect(host.querySelector('[role="dialog"][aria-label="Unit Guard Inspector"]')).not.toBeNull();
   });
 
   it('AudioStage blend slider updates stageBlend and surfaces 2D box repair toolbar', async () => {

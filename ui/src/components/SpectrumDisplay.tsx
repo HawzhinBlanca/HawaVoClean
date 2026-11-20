@@ -67,7 +67,23 @@ function LegendItem({ kind, label, on, deck, hint, offHint }: LegendItemProps) {
   );
 }
 
-export function SpectrumDisplay() {
+const PIANO_OCTAVES: readonly { label: string; hz: number }[] = [
+  { label: 'C1', hz: 32.7 },
+  { label: 'C2', hz: 65.41 },
+  { label: 'C3', hz: 130.81 },
+  { label: 'C4', hz: 261.63 },
+  { label: 'C5', hz: 523.25 },
+  { label: 'C6', hz: 1046.5 },
+  { label: 'C7', hz: 2093.0 },
+  { label: 'C8', hz: 4186.01 },
+];
+
+export interface SpectrumDisplayProps {
+  /** Show the FabFilter-style piano keyboard pitch scale and inline telemetry pills. */
+  wide?: boolean;
+}
+
+export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rendererRef = useRef<SpectrumRenderer | null>(null);
   const original = useStore((s) => s.original);
@@ -140,6 +156,21 @@ export function SpectrumDisplay() {
   const hpfHz = rackSettings.hpfCutoffHz;
   const hpfLeftPct = Math.min(48, Math.max(2, hzToNormX(hpfHz) * 100));
 
+  // Smooth FabFilter-style 24 dB/oct HPF roll-off curve in SVG 0..100 coordinates
+  const hpfCurvePath = `M 0 100 C ${(hpfLeftPct * 0.42).toFixed(2)} 100, ${(hpfLeftPct * 0.78).toFixed(2)} 42, ${hpfLeftPct.toFixed(2)} 38 L 100 38`;
+  const hpfFillPath = `${hpfCurvePath} L 100 100 Z`;
+
+  // Active finishing band highlights (logarithmic 20 Hz - 20 kHz projection)
+  const deplosiveRightPct = hzToNormX(160) * 100;
+  const tonalLeftPct = hzToNormX(1200) * 100;
+  const tonalWidthPct = (hzToNormX(4000) - hzToNormX(1200)) * 100;
+  const deessLeftPct = hzToNormX(4500) * 100;
+  const deessWidthPct = (hzToNormX(9500) - hzToNormX(4500)) * 100;
+
+  const activeLufs = (cleaned ?? original)?.loudness.integrated_lufs ?? null;
+  const activePeak = (cleaned ?? original)?.loudness.true_peak_dbtp ?? null;
+  const activeNoise = (cleaned ?? original)?.noise_floor_db ?? null;
+
   const updateHpfFromPointer = (clientX: number): void => {
     const rect = displayRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
@@ -179,22 +210,44 @@ export function SpectrumDisplay() {
       <div className="panel-head">
         <h2 className="panel-title">
           <span>Spectrum</span>
-          {/* the same `title · qualifier` head the waveform panel uses: what
-              the panel is showing, said once, where the panel is named */}
           <span className="sub">· LTAS</span>
         </h2>
-        <button
-          type="button"
-          className="spec-hpf-chip"
-          aria-pressed={hpfEnabled}
-          onClick={() => {
-            updateRackSettings({ ...rackSettings, hpfEnabled: !hpfEnabled });
-            scheduleLivePreview();
-          }}
-          title="Toggle High-Pass rumble filter — or drag the cyan node on the spectrum"
-        >
-          <span>HPF {hpfEnabled ? `${hpfHz} Hz · ${hzToMusicalNote(hpfHz)}` : 'Bypass'}</span>
-        </button>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          {wide && original ? (
+            <div className="spec-inline-telemetry" aria-label="Loudness and noise telemetry">
+              <span className="sit-pill">
+                <span className="sit-k">LUFS</span>
+                <span className="sit-v mono">
+                  {activeLufs !== null && Number.isFinite(activeLufs) ? activeLufs.toFixed(1) : '—'}
+                </span>
+              </span>
+              <span className="sit-pill">
+                <span className="sit-k">PEAK</span>
+                <span className="sit-v mono">
+                  {activePeak !== null && Number.isFinite(activePeak) ? `${activePeak.toFixed(1)} dBTP` : '—'}
+                </span>
+              </span>
+              <span className="sit-pill">
+                <span className="sit-k">NOISE</span>
+                <span className="sit-v mono">
+                  {activeNoise !== null && Number.isFinite(activeNoise) ? `${activeNoise.toFixed(1)} dB` : '—'}
+                </span>
+              </span>
+            </div>
+          ) : null}
+          <button
+            type="button"
+            className="spec-hpf-chip"
+            aria-pressed={hpfEnabled}
+            onClick={() => {
+              updateRackSettings({ ...rackSettings, hpfEnabled: !hpfEnabled });
+              scheduleLivePreview();
+            }}
+            title="Toggle High-Pass rumble filter — or drag the cyan node on the spectrum"
+          >
+            <span>HPF {hpfEnabled ? `${hpfHz} Hz · ${hzToMusicalNote(hpfHz)}` : 'Bypass'}</span>
+          </button>
+        </div>
       </div>
       <div className="spectrum-body">
         <div
@@ -220,20 +273,59 @@ export function SpectrumDisplay() {
                     : 'Long-term average spectrum: no signal yet'
             }
           />
-          {hpfEnabled ? (
+          {/* Active repair band overlays (FabFilter-style frequency zone shading) */}
+          {rackSettings.deplosive ? (
             <div
+              className="spec-band-overlay band-deplosive"
               aria-hidden="true"
-              style={{
-                position: 'absolute',
-                top: 0,
-                bottom: 0,
-                left: 0,
-                width: `${hpfLeftPct}%`,
-                background: 'linear-gradient(90deg, rgba(44,212,255,0.16), rgba(44,212,255,0.03))',
-                borderRight: '1.5px solid rgba(44,212,255,0.75)',
-                pointerEvents: 'none',
-              }}
-            />
+              style={{ left: '0%', width: `${deplosiveRightPct.toFixed(2)}%` }}
+            >
+              <span>De-Plosive</span>
+            </div>
+          ) : null}
+          {rackSettings.tonalRestoration ? (
+            <div
+              className="spec-band-overlay band-tonal"
+              aria-hidden="true"
+              style={{ left: `${tonalLeftPct.toFixed(2)}%`, width: `${tonalWidthPct.toFixed(2)}%` }}
+            >
+              <span>Tonal</span>
+            </div>
+          ) : null}
+          {rackSettings.deess ? (
+            <div
+              className="spec-band-overlay band-deess"
+              aria-hidden="true"
+              style={{ left: `${deessLeftPct.toFixed(2)}%`, width: `${deessWidthPct.toFixed(2)}%` }}
+            >
+              <span>De-Ess</span>
+            </div>
+          ) : null}
+
+          {/* Smooth 24 dB/oct Butterworth-style HPF roll-off SVG curve */}
+          {hpfEnabled ? (
+            <svg
+              className="spec-hpf-svg"
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+              aria-hidden="true"
+            >
+              <defs>
+                <linearGradient id="hawa-hpf-grad" x1="0" y1="0" x2="1" y2="0">
+                  <stop offset="0%" stopColor="rgba(44,212,255,0.22)" />
+                  <stop offset={`${hpfLeftPct.toFixed(1)}%`} stopColor="rgba(44,212,255,0.06)" />
+                  <stop offset="100%" stopColor="rgba(44,212,255,0)" />
+                </linearGradient>
+              </defs>
+              <path d={hpfFillPath} fill="url(#hawa-hpf-grad)" />
+              <path
+                d={hpfCurvePath}
+                fill="none"
+                stroke="rgba(156,236,255,0.85)"
+                strokeWidth="1.5"
+                vectorEffect="non-scaling-stroke"
+              />
+            </svg>
           ) : null}
           <button
             type="button"
@@ -273,14 +365,14 @@ export function SpectrumDisplay() {
             style={{
               position: 'absolute',
               left: `${hpfLeftPct}%`,
-              top: '50%',
+              top: '38%',
               transform: 'translate(-50%, -50%)',
               width: '24px',
               height: '24px',
               borderRadius: '50%',
               border: hpfEnabled ? '2px solid var(--cyan-2)' : '1.5px dashed var(--fg-4)',
               background: hpfEnabled ? 'rgba(44, 212, 255, 0.28)' : 'rgba(14, 18, 26, 0.72)',
-              boxShadow: hpfEnabled ? '0 0 12px var(--cyan-glow)' : 'none',
+              boxShadow: hpfEnabled ? '0 0 14px var(--cyan-glow)' : 'none',
               cursor: 'ew-resize',
               display: 'flex',
               alignItems: 'center',
@@ -299,6 +391,19 @@ export function SpectrumDisplay() {
             />
           </button>
         </div>
+        {wide ? (
+          <div className="spec-piano-ruler" aria-hidden="true">
+            {PIANO_OCTAVES.map((oct) => (
+              <span
+                key={oct.label}
+                className="spec-piano-note"
+                style={{ left: `${(hzToNormX(oct.hz) * 100).toFixed(2)}%` }}
+              >
+                {oct.label}
+              </span>
+            ))}
+          </div>
+        ) : null}
         {/*
           ONE key, directly under the picture it explains.
 

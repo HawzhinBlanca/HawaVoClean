@@ -36,8 +36,10 @@ export function AudioStage() {
     }
   };
 
+  const blendMode = stageBlend >= 0.95 ? 'full' : stageBlend > 0 ? 'true' : 'false';
+
   return (
-    <div className="as-stack" data-blended={stageBlend > 0 ? 'true' : 'false'}>
+    <div className="as-stack" data-blended={blendMode}>
       {hasSource ? (
         <div className="audio-stage-bar" role="toolbar" aria-label="Audio stage view">
           <div className="as-blend-wrap">
@@ -99,14 +101,7 @@ export function AudioStage() {
         </div>
       ) : null}
 
-      <div
-        className="as-wave-layer"
-        style={
-          stageBlend >= 0.95
-            ? { opacity: 0.25, transition: 'opacity 160ms ease-out' }
-            : { opacity: 1 - stageBlend * 0.45, transition: 'opacity 160ms ease-out' }
-        }
-      >
+      <div className="as-wave-layer">
         <WaveformDisplay />
       </div>
 

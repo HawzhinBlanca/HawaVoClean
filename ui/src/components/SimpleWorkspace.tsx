@@ -261,6 +261,20 @@ export function SimpleWorkspace() {
             />
             <button
               type="button"
+              className="btn-level-match"
+              disabled={!hasAudio || !masterServed}
+              onPointerDown={() => setAb('original')}
+              onPointerUp={() => setAb('cleaned')}
+              onPointerLeave={() => {
+                if (abMode === 'original' && masterServed) setAb('cleaned');
+              }}
+              title="Press and hold to briefly hear the raw original recording"
+              style={{ minHeight: '32px', padding: '0 12px' }}
+            >
+              <span>Hold for Original</span>
+            </button>
+            <button
+              type="button"
               className={`btn-level-match btn-delta${deltaMode && masterServed ? ' on' : ''}`}
               disabled={!hasAudio || !masterServed}
               aria-pressed={deltaMode && masterServed}

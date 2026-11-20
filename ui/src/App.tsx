@@ -1,26 +1,15 @@
 import { useEffect, useState } from 'react';
 import { getPlayer } from './audio/player';
-import { Actions } from './components/Actions';
 import { AudioAssistant } from './components/AudioAssistant';
-import { AudioStage } from './components/AudioStage';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
-import { JobHistory } from './components/JobHistory';
-import { MetricsTiles } from './components/MetricsTiles';
-import { ProcessButton } from './components/ProcessButton';
+import { ProWorkspace } from './components/ProWorkspace';
 import { SimpleWorkspace } from './components/SimpleWorkspace';
 import { SlideOverDrawer } from './components/SlideOverDrawer';
-import { SmartExplanation } from './components/SmartExplanation';
-import { AdvancedControls } from './components/AdvancedControls';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { SourceStrip } from './components/SourceStrip';
-import { SpectrumDisplay } from './components/SpectrumDisplay';
-import { TakeSwitcher } from './components/TakeSwitcher';
 import { ToastStack } from './components/ToastStack';
-import { BatchQueue } from './components/BatchQueue';
-import { Transport } from './components/Transport';
-import { UnitInspector } from './components/UnitInspector';
 import { VideoPreview, sourceHasVideo } from './components/VideoPreview';
 import {
   installRendererProofResponder,
@@ -29,10 +18,7 @@ import {
 import {
   connectEngine,
   ingestDataTransfer,
-  pinTake,
-  removeTake,
   seekTo,
-  selectTake,
 } from './state/actions';
 import { useJobAnnouncer } from './state/announcer';
 import { useKeyboardMap } from './state/keymap';
@@ -148,17 +134,12 @@ export default function App() {
   const abMode = useStore((s) => s.abMode);
   const cleanedPath = useStore((s) => s.cleanedPath);
   const previewActive = useStore((s) => s.previewActive);
-  const batch = useStore((s) => s.batch);
-  const takes = useStore((s) => s.takes);
-  const activeTakeId = useStore((s) => s.activeTakeId);
   const engineStatus = useStore((s) => s.engineStatus);
   const offlineSince = useStore((s) => s.engineOfflineSince);
   const workspaceMode = useStore((s) => s.workspaceMode);
   const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
   const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
   const deck = abMode === 'cleaned' && (cleanedPath || previewActive) ? 'cleaned' : 'original';
-  const effectiveActiveTake =
-    abMode === 'original' ? 'original' : (activeTakeId ?? takes[takes.length - 1]?.id ?? 'original');
   // The banner is a *row* of the shell grid, never an overlay: a bar that
   // floats over the chassis is a bar that can cover a control, and the one
   // moment the user most needs to reach the controls is the moment something
@@ -229,45 +210,10 @@ export default function App() {
       {workspaceMode === 'simple' ? (
         <SimpleWorkspace />
       ) : (
-        <main className="main">
-          <div className="left">
-            <AudioStage />
-            {takes.length >= 2 ? (
-              <div className="app-take-strip">
-                <TakeSwitcher
-                  takes={takes}
-                  activeId={effectiveActiveTake}
-                  onSelect={selectTake}
-                  onTogglePin={pinTake}
-                  onRemoveTake={removeTake}
-                />
-              </div>
-            ) : null}
-            {/* The inspector answers "why did this unit go that way"; the run
-                list answers "which pass am I looking at". They share the bottom
-                row because they are the same kind of question about the same
-                report, and neither needs the full width. */}
-            <div className="deskrow">
-              <UnitInspector />
-              {batch ? <BatchQueue /> : <JobHistory />}
-            </div>
-          </div>
-          <aside className="right" aria-label="Analysis and controls">
-            <SyncedVideoPreview />
-            <section className="panel spectrum-panel" aria-label="Spectrum">
-              <SpectrumDisplay />
-              <MetricsTiles />
-            </section>
-            <section className="panel controls" aria-label="Processing controls">
-              <h2 className="sr-only">Processing controls</h2>
-              <SmartExplanation />
-              <ProcessButton />
-              <Transport />
-              <Actions />
-              <AdvancedControls />
-            </section>
-          </aside>
-        </main>
+        <>
+          <SyncedVideoPreview />
+          <ProWorkspace />
+        </>
       )}
       <Footer />
       <SlideOverDrawer
