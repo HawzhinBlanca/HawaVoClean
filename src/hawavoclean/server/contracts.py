@@ -24,6 +24,26 @@ def _reject_bool_number(value: Any) -> Any:
     return value
 
 
+def _require_bool_or_none(value: Any) -> Any:
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("Boolean field must be a boolean")
+    return value
+
+
+def _validate_pro_repair_dict(value: Any) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("proRepair must be an object mapping repair flag names to booleans")
+    unknown = sorted(str(k) for k in value if k not in _ALLOWED_PRO_REPAIR_KEYS)
+    if unknown:
+        raise ValueError(f"Unsupported proRepair flag(s): {', '.join(unknown)}")
+    for key, flag in value.items():
+        if not isinstance(flag, bool):
+            raise ValueError(f"proRepair[{key!r}] must be a boolean")
+    return value
+
+
 def _validate_time_range(value: tuple[float, float] | None) -> tuple[float, float] | None:
     if value is None:
         return None
@@ -44,7 +64,9 @@ class ContractModel(BaseModel):
 
 
 RestorePolicy = Literal["disabled", "source_allowed", "enrolled_only", "auto"]
-DeliveryPresetV1 = Literal["match_input", "ebu_r128", "atsc_a85", "podcast", "streaming"]
+DeliveryPresetV1 = Literal[
+    "match_input", "ebu_r128", "atsc_a85", "dialogue_gated", "podcast", "streaming"
+]
 StereoModeV1 = Literal["auto", "dual_mono_same", "split_speakers", "true_stereo_ms"]
 ExportFormatV1 = Literal["wav24", "wav32f", "flac", "aac", "video_mux"]
 PreviewProfileV1 = Literal["production", "studio", "studio_pro", "dereverb", "lowband"]
@@ -94,6 +116,27 @@ class SmartSafeStrategyV1(ContractModel):
     restore_policy: RestorePolicy = "disabled"
     speaker_profile_id: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
     allow_generative_reconstruction: bool = False
+    hpf_enabled: bool | None = None
+    hpf_cutoff_hz: float | None = Field(default=None, ge=20.0, le=250.0, allow_inf_nan=False)
+    ambience_floor_db: float | None = Field(default=None, ge=-120.0, le=-12.0, allow_inf_nan=False)
+    delivery_preset: DeliveryPresetV1 | None = None
+    stereo_mode: StereoModeV1 | None = None
+    pro_repair: dict[str, bool] | None = None
+
+    @field_validator("hpf_enabled", mode="before")
+    @classmethod
+    def _validate_hpf_enabled(cls, value: Any) -> Any:
+        return _require_bool_or_none(value)
+
+    @field_validator("hpf_cutoff_hz", "ambience_floor_db", mode="before")
+    @classmethod
+    def _validate_numeric_not_bool(cls, value: Any) -> Any:
+        return _reject_bool_number(value)
+
+    @field_validator("pro_repair", mode="before")
+    @classmethod
+    def _validate_pro_repair(cls, value: Any) -> Any:
+        return _validate_pro_repair_dict(value)
 
     @model_validator(mode="after")
     def validate_restore_consent(self) -> SmartSafeStrategyV1:
@@ -118,8 +161,15 @@ class ManualStrategyV1(ContractModel):
     delivery_preset: DeliveryPresetV1 | None = None
     stereo_mode: StereoModeV1 | None = None
     pro_repair: dict[str, bool] | None = None
+    hpf_enabled: bool | None = None
+    hpf_cutoff_hz: float | None = Field(default=None, ge=20.0, le=250.0, allow_inf_nan=False)
 
-    @field_validator("strength", "ambience_floor_db", mode="before")
+    @field_validator("hpf_enabled", mode="before")
+    @classmethod
+    def _validate_hpf_enabled(cls, value: Any) -> Any:
+        return _require_bool_or_none(value)
+
+    @field_validator("strength", "ambience_floor_db", "hpf_cutoff_hz", mode="before")
     @classmethod
     def _validate_numeric_not_bool(cls, value: Any) -> Any:
         return _reject_bool_number(value)
@@ -127,17 +177,7 @@ class ManualStrategyV1(ContractModel):
     @field_validator("pro_repair", mode="before")
     @classmethod
     def _validate_pro_repair(cls, value: Any) -> Any:
-        if value is None:
-            return None
-        if not isinstance(value, dict):
-            raise ValueError("proRepair must be an object mapping repair flag names to booleans")
-        unknown = sorted(str(k) for k in value if k not in _ALLOWED_PRO_REPAIR_KEYS)
-        if unknown:
-            raise ValueError(f"Unsupported proRepair flag(s): {', '.join(unknown)}")
-        for key, flag in value.items():
-            if not isinstance(flag, bool):
-                raise ValueError(f"proRepair[{key!r}] must be a boolean")
-        return value
+        return _validate_pro_repair_dict(value)
 
     @field_validator("time_range", mode="before")
     @classmethod
@@ -396,11 +436,28 @@ class RegionPreviewRequestV1(ContractModel):
     strength: float = Field(default=1.0, ge=0.0, le=1.0, allow_inf_nan=False)
     ambience_floor_db: float | None = Field(default=None, ge=-120.0, le=-12.0, allow_inf_nan=False)
     include_perceptual_mos: bool = False
+    hpf_enabled: bool | None = None
+    hpf_cutoff_hz: float | None = Field(default=None, ge=20.0, le=250.0, allow_inf_nan=False)
+    pro_repair: dict[str, bool] | None = None
+    stereo_mode: StereoModeV1 | None = None
+    delivery_preset: DeliveryPresetV1 | None = None
 
-    @field_validator("start_s", "end_s", "strength", "ambience_floor_db", mode="before")
+    @field_validator("hpf_enabled", mode="before")
+    @classmethod
+    def _validate_hpf_enabled(cls, value: Any) -> Any:
+        return _require_bool_or_none(value)
+
+    @field_validator(
+        "start_s", "end_s", "strength", "ambience_floor_db", "hpf_cutoff_hz", mode="before"
+    )
     @classmethod
     def _reject_bool_fields(cls, value: Any) -> Any:
         return _reject_bool_number(value)
+
+    @field_validator("pro_repair", mode="before")
+    @classmethod
+    def _validate_pro_repair(cls, value: Any) -> Any:
+        return _validate_pro_repair_dict(value)
 
     @model_validator(mode="after")
     def validate_window(self) -> RegionPreviewRequestV1:

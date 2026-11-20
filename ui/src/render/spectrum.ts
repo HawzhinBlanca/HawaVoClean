@@ -51,6 +51,14 @@ const DB_MAX = 0;
 const LOG_SPAN = Math.log2(F_MAX / F_MIN);
 const DB_SPAN = DB_MAX - DB_MIN;
 
+/** Exact CSS pixel insets of the active frequency/dB plot rectangle inside the spectrum canvas. */
+export const SPECTRUM_PLOT_INSETS = Object.freeze({
+  left: 33,
+  right: 9,
+  top: 11,
+  bottom: 17,
+});
+
 /**
  * How far below the original the cleaned curve has to sit before the REMOVED
  * band is something you can actually see.
@@ -702,10 +710,7 @@ export class SpectrumRenderer {
   // ---- geometry -----------------------------------------------------------
 
   private get plot(): Plot {
-    const left = 33;
-    const right = 9;
-    const top = 11;
-    const bottom = 17;
+    const { left, right, top, bottom } = SPECTRUM_PLOT_INSETS;
     return {
       x: left,
       y: top,

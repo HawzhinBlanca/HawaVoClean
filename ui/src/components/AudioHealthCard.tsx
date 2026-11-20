@@ -1,3 +1,4 @@
+import { useI18n } from '../state/i18n';
 import { useStore } from '../state/store';
 import { IconBolt, IconCheck } from './Icons';
 import { sourceHasVideo } from './VideoPreview';
@@ -16,6 +17,7 @@ function fmtMinSec(seconds: number): string {
 }
 
 export function AudioHealthCard() {
+  const { t } = useI18n();
   const source = useStore((s) => s.source);
   const original = useStore((s) => s.original);
   const cleaned = useStore((s) => s.cleaned);
@@ -30,7 +32,11 @@ export function AudioHealthCard() {
       <div className="health-card" role="region" aria-label="Audio health check">
         <div className="hc-headline">
           <span className="se-spinner" aria-hidden="true" />
-          <span>Listening to “{source.name}” to check background noise and clarity…</span>
+          <span>
+            {t.healthListeningPrefix}
+            {source.name}
+            {t.healthListeningSuffix}
+          </span>
         </div>
       </div>
     );
@@ -48,25 +54,25 @@ export function AudioHealthCard() {
     const total = report.summary.units_total ?? 0;
     if (origNoise !== null && cleanNoise !== null && origNoise - cleanNoise >= 3) {
       chips.push({
-        label: `Background noise reduced (${Math.round(origNoise - cleanNoise)} dB quieter)`,
+        label: `${t.healthNoiseReducedPrefix}${Math.round(origNoise - cleanNoise)}${t.healthNoiseReducedSuffix}`,
         severity: 'good',
         title: `Noise floor improved from ${origNoise.toFixed(1)} dB to ${cleanNoise.toFixed(1)} dB`,
       });
     } else if (enhanced > 0) {
       chips.push({
-        label: 'Voice cleaned & balanced',
+        label: t.healthVoiceCleaned,
         severity: 'good',
         title: `${enhanced} of ${total} speech segments enhanced`,
       });
     } else {
       chips.push({
-        label: 'Original voice preserved cleanly',
+        label: t.healthVoicePreserved,
         severity: 'good',
         title: 'Your recording was already clean, so original vocal fidelity was preserved.',
       });
     }
     chips.push({
-      label: 'Voice safety verified',
+      label: t.healthSafetyVerified,
       severity: 'info',
       title: `Guard checked ${total} speech segments automatically.`,
     });
@@ -74,19 +80,19 @@ export function AudioHealthCard() {
     if (origNoise !== null && Number.isFinite(origNoise)) {
       if (origNoise > -45) {
         chips.push({
-          label: 'Heavy background noise detected',
+          label: t.healthHeavyNoise,
           severity: 'high',
           title: `Measured background noise floor: ${origNoise.toFixed(1)} dB`,
         });
       } else if (origNoise > -55) {
         chips.push({
-          label: 'Noticeable background noise',
+          label: t.healthNoticeableNoise,
           severity: 'high',
           title: `Measured background noise floor: ${origNoise.toFixed(1)} dB`,
         });
       } else {
         chips.push({
-          label: 'Low background noise',
+          label: t.healthLowNoise,
           severity: 'good',
           title: `Measured background noise floor: ${origNoise.toFixed(1)} dB`,
         });
@@ -96,13 +102,13 @@ export function AudioHealthCard() {
     if (origLufs !== null && Number.isFinite(origLufs)) {
       if (origLufs < -26) {
         chips.push({
-          label: 'Voice is quiet — will gently boost',
+          label: t.healthVoiceQuiet,
           severity: 'info',
           title: `Integrated loudness: ${origLufs.toFixed(1)} LUFS`,
         });
       } else if (origLufs > -13) {
         chips.push({
-          label: 'Loud recording — headroom protected',
+          label: t.healthLoudRecording,
           severity: 'info',
           title: `Integrated loudness: ${origLufs.toFixed(1)} LUFS`,
         });
@@ -111,24 +117,24 @@ export function AudioHealthCard() {
 
     if (origPeak !== null && Number.isFinite(origPeak) && origPeak > -0.3) {
       chips.push({
-        label: 'Some distortion peaks detected',
+        label: t.healthDistortionPeaks,
         severity: 'high',
         title: `Peak level: ${origPeak.toFixed(1)} dBTP`,
       });
     }
 
     chips.push({
-      label: `${hasVideo ? 'Video with audio' : 'Audio recording'} · ${fmtMinSec(original.duration_s)}`,
+      label: `${hasVideo ? t.healthVideoWithAudio : t.healthAudioRecording} · ${fmtMinSec(original.duration_s)}`,
       severity: 'info',
       title: `${Math.round(original.sample_rate / 1000)} kHz · ${original.channels}ch`,
     });
   }
 
   const headline = report
-    ? 'Ready to compare — toggle Original / Cleaned below'
+    ? t.healthHeadlineDone
     : previewActive
-      ? 'Auditioning live preview — click Clean Audio to apply to the full recording'
-      : 'Ready to clean — pick a goal or turn the Clean dial';
+      ? t.healthHeadlinePreview
+      : t.healthHeadlineReady;
 
   return (
     <div className="health-card" role="region" aria-label="Audio health diagnosis">

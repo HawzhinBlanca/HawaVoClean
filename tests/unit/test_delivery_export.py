@@ -80,6 +80,7 @@ def test_delivery_presets_registry() -> None:
         "match_input",
         "ebu_r128",
         "atsc_a85",
+        "dialogue_gated",
         "podcast",
         "streaming",
     }
@@ -90,6 +91,10 @@ def test_delivery_presets_registry() -> None:
     assert DELIVERY_PRESETS["ebu_r128"].true_peak_ceiling_dbtp == -1.0
     assert DELIVERY_PRESETS["atsc_a85"].target_lufs_stereo == -24.0
     assert DELIVERY_PRESETS["atsc_a85"].true_peak_ceiling_dbtp == -2.0
+    assert DELIVERY_PRESETS["atsc_a85"].dialogue_gated is True
+    assert DELIVERY_PRESETS["dialogue_gated"].target_lufs_stereo == -27.0
+    assert DELIVERY_PRESETS["dialogue_gated"].true_peak_ceiling_dbtp == -2.0
+    assert DELIVERY_PRESETS["dialogue_gated"].dialogue_gated is True
     assert DELIVERY_PRESETS["podcast"].target_lufs_stereo == -16.0
     assert DELIVERY_PRESETS["podcast"].target_lufs_mono == -19.0
     assert DELIVERY_PRESETS["streaming"].target_lufs_stereo == -14.0

@@ -47,6 +47,9 @@ def apply_finishing_stages(
     config: FinishingConfig,
     intensity: Literal["gentle", "minimal"],
     tilt: SpeechTiltReport | None = None,
+    *,
+    hpf_enabled: bool | None = None,
+    hpf_cutoff_hz: float | None = None,
 ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], list[str]]:
     """Apply deterministic finishing chain conditioned on defect detection.
 
@@ -62,8 +65,15 @@ def apply_finishing_stages(
 
     defects = detect_defects(current, sample_rate)
 
-    # 1. DC & Subsonic Rumble removal
-    if defects.has_dc_offset or config.dc_subsonic_cutoff_hz > 30.0:
+    # 1. DC & Subsonic Rumble removal (honors explicit hpf_enabled/hpf_cutoff_hz overrides;
+    # default None preserves 100% bit-identity with config.dc_subsonic_cutoff_hz).
+    if hpf_enabled is False:
+        pass
+    elif hpf_cutoff_hz is not None or hpf_enabled is True:
+        eff_hpf_hz = float(hpf_cutoff_hz) if hpf_cutoff_hz is not None else 80.0
+        current = remove_dc_subsonic(current, sample_rate, cutoff_hz=eff_hpf_hz)
+        actions.append(f"dc_subsonic_removed(cutoff={eff_hpf_hz:g}Hz)")
+    elif defects.has_dc_offset or config.dc_subsonic_cutoff_hz > 30.0:
         current = remove_dc_subsonic(current, sample_rate, cutoff_hz=config.dc_subsonic_cutoff_hz)
         actions.append(f"dc_subsonic_removed(cutoff={config.dc_subsonic_cutoff_hz}Hz)")
 
@@ -174,6 +184,9 @@ def safe_finish_speech_unit(
     guard_config: GuardConfig,
     cached_pre_finish_probe: ProbeResult | None = None,
     tilt: SpeechTiltReport | None = None,
+    *,
+    hpf_enabled: bool | None = None,
+    hpf_cutoff_hz: float | None = None,
 ) -> tuple[SafeFinishResult, ProbeResult]:
     """Execute safe finishing ladder guarded by Guard B.
 
@@ -195,7 +208,13 @@ def safe_finish_speech_unit(
 
     # Step 1: Try Gentle preset
     gentle_wave, gentle_actions = apply_finishing_stages(
-        pre_finish_waveform, sample_rate, finishing_config, intensity="gentle", tilt=tilt
+        pre_finish_waveform,
+        sample_rate,
+        finishing_config,
+        intensity="gentle",
+        tilt=tilt,
+        hpf_enabled=hpf_enabled,
+        hpf_cutoff_hz=hpf_cutoff_hz,
     )
     guard_b_gentle, _ = evaluate_guard_pass(
         orig_waveform=pre_finish_waveform,
@@ -222,7 +241,13 @@ def safe_finish_speech_unit(
 
     # Step 2: Try Minimal preset
     min_wave, min_actions = apply_finishing_stages(
-        pre_finish_waveform, sample_rate, finishing_config, intensity="minimal", tilt=tilt
+        pre_finish_waveform,
+        sample_rate,
+        finishing_config,
+        intensity="minimal",
+        tilt=tilt,
+        hpf_enabled=hpf_enabled,
+        hpf_cutoff_hz=hpf_cutoff_hz,
     )
     guard_b_min, _ = evaluate_guard_pass(
         orig_waveform=pre_finish_waveform,

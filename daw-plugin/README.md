@@ -11,10 +11,10 @@ Real-time, zero-audio-thread-allocation speech restoration plugin built in Rust 
     - `delta_listen` (boolean — phase-inverted `dry_aligned - wet` audition of removed noise)
     - `wet_dry` (`0..100%`, delay-compensated)
     - `output_gain_db` (`-24..+24 dB`)
-  - Wait-free fixed-capacity SPSC ring buffer (`FixedRingBuffer<N>`) + 50%-overlap periodic-Hann COLA frame accumulator (`512` samples, `256` hop, `512`-sample reported DAW PDC latency = `10.67 ms @ 48 kHz`).
+  - Wait-free fixed-capacity SPSC ring buffer (`FixedRingBuffer<N>`) + 50%-overlap `sqrt(Hann)` analysis & synthesis COLA frame engine (`960` samples, `480` hop, `481` FFT bins, `960`-sample reported DAW PDC latency = `20.0 ms @ 48 kHz`, matching DeepFilterNet3 causal streaming geometry).
   - Pluggable `FrameProcessor` trait:
-    - **`WienerFallbackProcessor`**: self-contained, zero-allocation frequency-domain Wiener denoiser (in-place radix-2 FFT + asymmetric noise-floor tracker).
-    - **`OnnxFrameProcessor`** (`--features onnx`): ONNX Runtime execution hook supporting CoreML EP (Apple Silicon) and CPU EP.
+    - **`WienerFallbackProcessor`**: self-contained, zero-allocation frequency-domain Wiener denoiser (mixed-radix `Fft960` + asymmetric noise-floor tracker).
+    - **`OnnxFrameProcessor`** (`--features onnx`): ONNX Runtime streaming mask processor (`[1, 1, 481]` magnitude -> `[1, 1, 481]` gain mask) supporting CoreML EP (Apple Silicon) and safe CPU / Wiener fallback.
 - **`export_onnx.py`**:
   - Standalone CLI exporter for `mossformer2`, `deepfilternet3`, and `gap-urgenet` with preflight diagnostics, SHA-256 sidecar metadata (`.onnx.meta.json`), and PyTorch-vs-ONNX-Runtime float32 parity verification.
 

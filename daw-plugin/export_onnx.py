@@ -5,14 +5,17 @@ Exports HawaVoClean's pure-PyTorch enhancement / dereverberation models to ONNX 
 native real-time DAW plugin execution (ONNX Runtime with CoreML / DirectML / CPU EP):
 
   - ``mossformer2``   : ``MossFormer2SE48K`` (48 kHz STFT mask network, [B, T, 180] -> [B, T, 961])
-  - ``deepfilternet3``: ``DeepFilterNet3`` (48 kHz streaming ERB/DF mask wrapper)
+  - ``deepfilternet3``: ``DeepFilterNet3`` (48 kHz causal streaming 960/480 STFT, 481 bins;
+                        ``--untrained-smoke`` exports the exact DAW plugin single-frame mask
+                        signature ``[1, 1, 481]`` magnitude -> ``[1, 1, 481]`` gain mask with
+                        ``sqrt(Hann)`` COLA windowing)
   - ``gap-urgenet``   : ``GAP-URGENet`` Predictor ``TFGridNetV3`` (16 kHz waveform dereverberation)
 
 Usage examples::
 
     python3 daw-plugin/export_onnx.py --preflight-only
+    python3 daw-plugin/export_onnx.py --model deepfilternet3 --untrained-smoke --frames 1 --output daw-plugin/models/model.onnx --verify
     python3 daw-plugin/export_onnx.py --model mossformer2 --output build/mossformer2.onnx --verify
-    python3 daw-plugin/export_onnx.py --model mossformer2 --untrained-smoke --output /tmp/mf2_smoke.onnx
     python3 daw-plugin/export_onnx.py --model gap-urgenet --output build/gap_urgenet.onnx --verify
 """
 
@@ -35,6 +38,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC_DIR = _REPO_ROOT / "src"
 if _SRC_DIR.is_dir() and str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
+
+# Exact causal streaming STFT geometry shared with daw-plugin/src/lib.rs (48 kHz, 20 ms / 10 ms hop).
+DAW_SAMPLE_RATE = 48000
+DAW_FFT_LEN = 960
+DAW_HOP_LEN = 480
+DAW_NUM_BINS = DAW_FFT_LEN // 2 + 1  # 481
+DAW_WINDOW = "sqrt_hann"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -254,9 +264,14 @@ def _build_export_spec(
             }
 
         class StreamingErbMaskWrapper(nn.Module):
-            """Lightweight causal streaming STFT magnitude mask network for DAW smoke export."""
+            """Causal streaming STFT magnitude -> gain mask network matching daw-plugin/src/lib.rs.
 
-            def __init__(self, n_bins: int = 257, hidden: int = 64) -> None:
+            Input : ``stft_magnitude`` float32 tensor of shape ``[B, T, 481]`` (DAW single-frame: ``[1, 1, 481]``)
+            Output: ``gain_mask``      float32 tensor of shape ``[B, T, 481]`` in ``[0, 1]``
+            STFT  : 48 kHz, ``fft_len=960`` (20 ms), ``hop_len=480`` (10 ms), ``sqrt(Hann)`` COLA window.
+            """
+
+            def __init__(self, n_bins: int = DAW_NUM_BINS, hidden: int = 64) -> None:
                 super().__init__()
                 self.net = nn.Sequential(
                     nn.Linear(n_bins, hidden),
@@ -269,24 +284,27 @@ def _build_export_spec(
 
             def forward(self, mag_frame: torch.Tensor) -> torch.Tensor:
                 mask: torch.Tensor = self.net(mag_frame)
-                return mag_frame * mask
+                return mask
 
-        smoke_wrapper: nn.Module = StreamingErbMaskWrapper().eval()
+        smoke_wrapper: nn.Module = StreamingErbMaskWrapper(n_bins=DAW_NUM_BINS).eval()
         torch.manual_seed(42)
-        dummy_input = torch.rand(1, max(1, frames), 257, dtype=torch.float32)
+        t_frames = max(1, frames)
+        dummy_input = torch.rand(1, t_frames, DAW_NUM_BINS, dtype=torch.float32)
         return {
-            "model_id": "deepfilternet3-streaming-smoke-48k",
+            "model_id": "deepfilternet3-streaming-mask-48k",
             "module": smoke_wrapper,
             "dummy_input": dummy_input,
             "input_names": ["stft_magnitude"],
-            "output_names": ["masked_magnitude"],
+            "output_names": ["gain_mask"],
             "dynamic_axes": {
                 "stft_magnitude": {0: "batch", 1: "frames"},
-                "masked_magnitude": {0: "batch", 1: "frames"},
+                "gain_mask": {0: "batch", 1: "frames"},
             },
-            "sample_rate": 48000,
-            "fft_len": 512,
-            "hop_len": 256,
+            "sample_rate": DAW_SAMPLE_RATE,
+            "fft_len": DAW_FFT_LEN,
+            "hop_len": DAW_HOP_LEN,
+            "num_bins": DAW_NUM_BINS,
+            "window": DAW_WINDOW,
             "checkpoint_sha256": None,
         }
 
@@ -485,6 +503,8 @@ def export_model_to_onnx(
         "sample_rate": spec["sample_rate"],
         "fft_len": spec["fft_len"],
         "hop_len": spec["hop_len"],
+        "num_bins": spec.get("num_bins", spec["fft_len"] // 2 + 1),
+        "window": spec.get("window", DAW_WINDOW),
         "input_names": spec["input_names"],
         "output_names": spec["output_names"],
         "checkpoint_sha256": spec["checkpoint_sha256"],

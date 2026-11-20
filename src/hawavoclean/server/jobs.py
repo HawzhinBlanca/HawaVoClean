@@ -177,6 +177,8 @@ class JobRecord:
     delivery_preset: str | None = None
     stereo_mode: str | None = None
     pro_repair: dict[str, bool] | None = None
+    hpf_enabled: bool | None = None
+    hpf_cutoff_hz: float | None = None
     speaker_id: str | None = None
     cutoff_hz: float | None = None
     record_bundle: bool = False
@@ -242,6 +244,10 @@ class JobRecord:
             out["stereo_mode"] = self.stereo_mode
         if self.pro_repair is not None:
             out["pro_repair"] = dict(self.pro_repair)
+        if self.hpf_enabled is not None:
+            out["hpf_enabled"] = self.hpf_enabled
+        if self.hpf_cutoff_hz is not None:
+            out["hpf_cutoff_hz"] = self.hpf_cutoff_hz
         if self.unit is not None:
             out["unit"] = dict(self.unit)
         if self.idempotency_key is not None:
@@ -286,6 +292,8 @@ class JobRecord:
             "delivery_preset": self.delivery_preset,
             "stereo_mode": self.stereo_mode,
             "pro_repair": dict(self.pro_repair) if self.pro_repair is not None else None,
+            "hpf_enabled": self.hpf_enabled,
+            "hpf_cutoff_hz": self.hpf_cutoff_hz,
             "speaker_id": self.speaker_id,
             "cutoff_hz": self.cutoff_hz,
             "record_bundle": self.record_bundle,
@@ -369,6 +377,12 @@ class JobRecord:
                 {str(k): bool(v) for k, v in value["pro_repair"].items()}
                 if isinstance(value.get("pro_repair"), dict)
                 else None
+            ),
+            hpf_enabled=(
+                bool(value["hpf_enabled"]) if value.get("hpf_enabled") is not None else None
+            ),
+            hpf_cutoff_hz=(
+                float(value["hpf_cutoff_hz"]) if value.get("hpf_cutoff_hz") is not None else None
             ),
             speaker_id=(str(value["speaker_id"]) if value.get("speaker_id") is not None else None),
             cutoff_hz=(float(value["cutoff_hz"]) if value.get("cutoff_hz") is not None else None),
@@ -470,12 +484,19 @@ def default_command(record: JobRecord) -> list[str]:
             cmd += ["--strength", str(record.strength)]
         if record.time_range is not None:
             cmd += ["--time-range", str(record.time_range[0]), str(record.time_range[1])]
+    if record.mode in ("natural", "restore", "smart_safe"):
         if record.ambience_floor_db is not None:
             cmd += ["--ambience-floor-db", str(record.ambience_floor_db)]
         if record.delivery_preset is not None:
             cmd += ["--delivery-preset", str(record.delivery_preset)]
         if record.stereo_mode is not None and record.stereo_mode != "auto":
             cmd += ["--stereo-mode", str(record.stereo_mode)]
+        if record.hpf_enabled is False:
+            cmd += ["--no-hpf"]
+        elif record.hpf_cutoff_hz is not None:
+            cmd += ["--hpf-cutoff-hz", str(record.hpf_cutoff_hz)]
+        elif record.hpf_enabled is True:
+            cmd += ["--hpf-cutoff-hz", "80.0"]
         if record.pro_repair:
             finishing_toggle_keys = {
                 "deess",
@@ -984,6 +1005,8 @@ class JobManager:
         delivery_preset: str | None = None,
         stereo_mode: str | None = None,
         pro_repair: dict[str, bool] | None = None,
+        hpf_enabled: bool | None = None,
+        hpf_cutoff_hz: float | None = None,
         speaker_id: str | None = None,
         cutoff_hz: float | None = None,
         idempotency_key: str | None = None,
@@ -1081,6 +1104,10 @@ class JobManager:
                 request_payload["stereo_mode"] = stereo_mode
             if pro_repair is not None:
                 request_payload["pro_repair"] = dict(pro_repair)
+            if hpf_enabled is not None:
+                request_payload["hpf_enabled"] = hpf_enabled
+            if hpf_cutoff_hz is not None:
+                request_payload["hpf_cutoff_hz"] = hpf_cutoff_hz
             request_hash = canonical_request_hash(request_payload)
 
             with self._wake:
@@ -1129,6 +1156,8 @@ class JobManager:
                 delivery_preset=delivery_preset,
                 stereo_mode=stereo_mode,
                 pro_repair=dict(pro_repair) if pro_repair is not None else None,
+                hpf_enabled=hpf_enabled,
+                hpf_cutoff_hz=hpf_cutoff_hz,
                 speaker_id=speaker_id,
                 cutoff_hz=cutoff_hz,
                 record_bundle=record_bundle,

@@ -58,10 +58,15 @@ remove_transaction_tree() {
 verify_tree() {
   local root="$1" listed actual target rel actual_files listed_files
   [ -d "$root" ] && [ ! -L "$root" ] || return 1
-  for rel in PLUGIN_ID VERSION SHA256SUMS SYMLINKS manifest.xml package.json main.js preload.js session-auth.js engine-discovery.js timeline-transactions.js engine.json index.html engine/hawavoclean-engine; do
+  for rel in PLUGIN_ID VERSION SHA256SUMS SYMLINKS manifest.xml package.json main.js preload.js session-auth.js engine-discovery.js sdk-preflight.js timeline-transactions.js engine.json index.html; do
     [ -e "$root/$rel" ] || { printf 'missing staged file: %s\n' "$rel" >&2; return 1; }
   done
-  [ -x "$root/engine/hawavoclean-engine" ] || { printf 'engine launcher is not executable\n' >&2; return 1; }
+  if [ -f "$root/ENGINE_MODE" ] && [ "$(tr -d '\r\n' < "$root/ENGINE_MODE")" = "shared-desktop-engine" ]; then
+    :
+  else
+    [ -e "$root/engine/hawavoclean-engine" ] || { printf 'missing staged file: engine/hawavoclean-engine\n' >&2; return 1; }
+    [ -x "$root/engine/hawavoclean-engine" ] || { printf 'engine launcher is not executable\n' >&2; return 1; }
+  fi
   [ "$(tr -d '\r\n' < "$root/PLUGIN_ID")" = "$PLUGIN_ID" ] || return 1
   grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' "$root/VERSION" || return 1
   [ -z "$(find "$root" ! -type d ! -type f ! -type l -print -quit)" ] || {

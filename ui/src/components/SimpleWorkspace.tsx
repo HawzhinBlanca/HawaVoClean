@@ -4,7 +4,7 @@ import {
   ACCEPTED_EXTENSIONS,
   cancelJob,
   exportWithDelivery,
-  ingestFile,
+  ingestFiles,
   openFileDialog,
   saveCleanedMaster,
   setAb,
@@ -12,10 +12,12 @@ import {
   togglePlay,
   updateRackSettings,
 } from '../state/actions';
+import { useI18n } from '../state/i18n';
 import { deriveProcessingReadiness } from '../state/machines';
 import type { ExportFormatId } from '../state/presets';
 import { useStore, type AbMode } from '../state/store';
 import { AudioHealthCard } from './AudioHealthCard';
+import { MicTestButton } from './controls/MicTestButton';
 import { GoalPresets } from './GoalPresets';
 import { HeroMacroConsole } from './HeroMacroConsole';
 import { IconBolt, IconCancel, IconCheck, IconDrop, IconFolder, IconPause, IconPlay } from './Icons';
@@ -25,19 +27,11 @@ import { WaveformDisplay } from './WaveformDisplay';
 
 const ACCEPT_ATTR = ACCEPTED_EXTENSIONS.map((ext) => `.${ext}`).join(',');
 
-const SIMPLE_STAGE_TEXT: Record<string, string> = {
-  preflight: 'Checking your recording…',
-  decode: 'Reading audio…',
-  segment: 'Finding speech sections…',
-  enhance: 'Removing background noise…',
-  guard: 'Verifying natural voice clarity…',
-  finish: 'Balancing loudness & polish…',
-  publish: 'Finalizing cleaned audio…',
-  done: 'Cleaning complete!',
-};
-
 export function SimpleWorkspace() {
+  const { t } = useI18n();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const holdingOrigRef = useRef(false);
+  const prevDeckRef = useRef<AbMode>('cleaned');
   const host = useStore((s) => s.host);
   const engineStatus = useStore((s) => s.engineStatus);
   const source = useStore((s) => s.source);
@@ -51,6 +45,7 @@ export function SimpleWorkspace() {
   const artifacts = useStore((s) => s.artifacts);
   const deckFault = useStore((s) => s.deckFault);
   const abMode = useStore((s) => s.abMode);
+  const loudnessMatch = useStore((s) => s.loudnessMatch);
   const playing = useStore((s) => s.playing);
   const profile = useStore((s) => s.profile);
   const mode = useStore((s) => s.mode);
@@ -96,7 +91,17 @@ export function SimpleWorkspace() {
 
   const progress = Math.min(1, Math.max(0, job?.status?.progress ?? 0));
   const stageKey = job?.status?.stage ?? 'enhance';
-  const stageText = SIMPLE_STAGE_TEXT[stageKey] ?? 'Cleaning your audio…';
+  const stageMap: Record<string, string> = {
+    preflight: t.stagePreflight,
+    decode: t.stageDecode,
+    segment: t.stageSegment,
+    enhance: t.stageEnhance,
+    guard: t.stageGuard,
+    finish: t.stageFinish,
+    publish: t.stagePublish,
+    done: t.stageDone,
+  };
+  const stageText = stageMap[stageKey] ?? t.stageDefault;
 
   const handleChooseFile = (): void => {
     if (host === 'electron' || host === 'resolve') {
@@ -107,14 +112,29 @@ export function SimpleWorkspace() {
   };
 
   const handleFileInput = (e: ChangeEvent<HTMLInputElement>): void => {
-    const file = e.target.files?.[0];
+    const files = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = '';
-    if (file) void ingestFile(file);
+    if (files.length > 0) void ingestFiles(files);
   };
 
   const handleFormatChange = (e: ChangeEvent<HTMLSelectElement>): void => {
     const fmt = e.target.value as ExportFormatId;
     updateRackSettings({ ...rackSettings, exportFormat: fmt });
+  };
+
+  const startHoldOriginal = (): void => {
+    if (!hasAudio || !masterServed || holdingOrigRef.current) return;
+    holdingOrigRef.current = true;
+    prevDeckRef.current = abMode;
+    setAb('original');
+  };
+
+  const endHoldOriginal = (): void => {
+    if (!holdingOrigRef.current) return;
+    holdingOrigRef.current = false;
+    if (prevDeckRef.current === 'cleaned' && masterServed) {
+      setAb('cleaned');
+    }
   };
 
   const handleSave = async (): Promise<void> => {
@@ -147,6 +167,7 @@ export function SimpleWorkspace() {
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         accept={ACCEPT_ATTR}
         className="sr-only"
         aria-label="Choose audio or video file"
@@ -157,33 +178,24 @@ export function SimpleWorkspace() {
         {/* 1. Hero Audio Stage */}
         <section className="panel simple-stage-card" aria-label="Audio stage">
           {!source ? (
-            <div
-              className="simple-welcome"
-              role="button"
-              tabIndex={0}
-              aria-label="Drop an audio or video file here, or press Enter to choose a file"
-              onClick={handleChooseFile}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  handleChooseFile();
-                }
-              }}
-            >
+            <div className="simple-welcome">
               <div className="sw-crest" aria-hidden="true">
                 <IconDrop size={26} />
               </div>
-              <h2 className="sw-title">Make any voice sound studio-recorded</h2>
-              <p className="sw-sub">
-                Drop a phone voice memo, podcast, interview, or video here. HawaVoClean removes noise and room echo offline while protecting your natural voice.
-              </p>
+              <h2 className="sw-title">{t.welcomeTitle}</h2>
+              <p className="sw-sub">{t.welcomeSub}</p>
               <div className="sw-actions">
-                <span className="sw-primary-btn">
+                <button
+                  type="button"
+                  className="sw-primary-btn"
+                  onClick={handleChooseFile}
+                >
                   <IconFolder size={16} />
-                  <span>Choose Audio or Video</span>
-                </span>
+                  <span>{t.chooseFileBtn}</span>
+                </button>
+                <MicTestButton />
               </div>
-              <span className="sw-formats">Supports WAV, M4A, MP3, FLAC, MP4, MOV · 100% private &amp; offline</span>
+              <span className="sw-formats">{t.welcomeFormats}</span>
             </div>
           ) : (
             <>
@@ -205,8 +217,17 @@ export function SimpleWorkspace() {
                 <span>{stageText}</span>
                 <span className="mono">{Math.round(progress * 100)}%</span>
               </div>
-              <div className="sd-progress-track" role="progressbar" aria-valuenow={Math.round(progress * 100)} aria-valuemin={0} aria-valuemax={100}>
-                <div className="sd-progress-fill" style={{ width: `${Math.max(4, Math.round(progress * 100))}%` }} />
+              <div
+                className="sd-progress-track"
+                role="progressbar"
+                aria-valuenow={Math.round(progress * 100)}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              >
+                <div
+                  className="sd-progress-fill"
+                  style={{ width: `${Math.max(4, Math.round(progress * 100))}%` }}
+                />
               </div>
             </div>
           ) : null}
@@ -220,7 +241,7 @@ export function SimpleWorkspace() {
                 onClick={() => void cancelJob()}
               >
                 <IconCancel size={16} />
-                <span>Cancel</span>
+                <span>{t.cancelBtn}</span>
               </button>
             ) : (
               <button
@@ -232,7 +253,7 @@ export function SimpleWorkspace() {
                 title={readiness.blockedReason ?? 'Clean the entire recording with voice protection'}
               >
                 {report ? <IconCheck size={17} /> : <IconBolt size={17} />}
-                <span>Process</span>
+                <span>{t.processBtn}</span>
               </button>
             )}
             <button
@@ -240,8 +261,8 @@ export function SimpleWorkspace() {
               className={`playbtn${playing ? ' on' : ''}`}
               disabled={!hasAudio}
               onClick={togglePlay}
-              aria-label={playing ? 'Pause playback' : 'Play audio'}
-              title={playing ? 'Pause (Space)' : 'Play (Space)'}
+              aria-label={playing ? `${t.pause} playback` : `${t.play} audio`}
+              title={playing ? `${t.pause} (Space)` : `${t.play} (Space)`}
             >
               {playing ? <IconPause size={16} /> : <IconPlay size={16} />}
             </button>
@@ -255,23 +276,37 @@ export function SimpleWorkspace() {
               value={abMode}
               onChange={setAb}
               options={[
-                { value: 'original', label: 'Original', className: 'orig', disabled: !hasAudio },
-                { value: 'cleaned', label: 'Cleaned', className: 'clean', disabled: !masterServed },
+                { value: 'original', label: t.original, className: 'orig', disabled: !hasAudio },
+                { value: 'cleaned', label: t.cleaned, className: 'clean', disabled: !masterServed },
               ]}
             />
             <button
               type="button"
-              className="btn-level-match"
+              className="btn-level-match btn-hold-orig"
               disabled={!hasAudio || !masterServed}
-              onPointerDown={() => setAb('original')}
-              onPointerUp={() => setAb('cleaned')}
-              onPointerLeave={() => {
-                if (abMode === 'original' && masterServed) setAb('cleaned');
+              onPointerDown={(e) => {
+                if (e.button === 0) startHoldOriginal();
               }}
-              title="Press and hold to briefly hear the raw original recording"
+              onPointerUp={endHoldOriginal}
+              onPointerCancel={endHoldOriginal}
+              onPointerLeave={endHoldOriginal}
+              onKeyDown={(e) => {
+                if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+                  e.preventDefault();
+                  startHoldOriginal();
+                }
+              }}
+              onKeyUp={(e) => {
+                if (e.key === ' ' || e.key === 'Enter') {
+                  e.preventDefault();
+                  endHoldOriginal();
+                }
+              }}
+              onBlur={endHoldOriginal}
+              title={t.holdForOriginalTitle}
               style={{ minHeight: '32px', padding: '0 12px' }}
             >
-              <span>Hold for Original</span>
+              <span>{t.holdForOriginal}</span>
             </button>
             <button
               type="button"
@@ -279,11 +314,11 @@ export function SimpleWorkspace() {
               disabled={!hasAudio || !masterServed}
               aria-pressed={deltaMode && masterServed}
               onClick={() => getPlayer().toggleDeltaMode()}
-              title="Hear only the background noise & echo that was removed (D)"
+              title={t.hearRemovedTitle}
               style={{ minHeight: '32px', padding: '0 12px' }}
             >
               <span aria-hidden="true">Δ</span>
-              <span>Hear Removed</span>
+              <span>{t.hearRemoved}</span>
             </button>
           </div>
 
@@ -295,10 +330,10 @@ export function SimpleWorkspace() {
               disabled={!canSaveFull || saving}
               onChange={handleFormatChange}
             >
-              <option value="wav24">Best Quality (WAV)</option>
-              <option value="aac">Small File (AAC / M4A)</option>
-              <option value="flac">Lossless (FLAC)</option>
-              {hasVideo ? <option value="video_mux">Cleaned Video (MP4)</option> : null}
+              <option value="wav24">{t.formatWav}</option>
+              <option value="aac">{t.formatAac}</option>
+              <option value="flac">{t.formatFlac}</option>
+              {hasVideo ? <option value="video_mux">{t.formatVideoMux}</option> : null}
             </select>
             <button
               type="button"
@@ -309,16 +344,18 @@ export function SimpleWorkspace() {
               <IconCheck size={15} />
               <span>
                 {saving
-                  ? 'Saving…'
+                  ? t.saving
                   : effectiveExportFormat === 'video_mux'
-                    ? 'Save Cleaned Video'
-                    : 'Save Cleaned Audio'}
+                    ? t.saveCleanedVideo
+                    : t.saveCleanedAudio}
               </span>
             </button>
           </div>
 
           <div className="sd-trust" style={{ width: '100%' }}>
-            <span>100% Private &amp; Offline · Your original file is never modified · Level-matched comparison active</span>
+            <span>
+              {t.trustPrefix} · {loudnessMatch ? t.trustLevelMatchOn : t.trustLevelMatchOff}
+            </span>
           </div>
         </aside>
       </div>

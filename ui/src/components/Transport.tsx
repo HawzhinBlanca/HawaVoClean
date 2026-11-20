@@ -2,59 +2,36 @@ import { useEffect, useRef, useState } from 'react';
 import { getPlayer } from '../audio/player';
 import { formatTime } from '../render/ticks';
 import { setAb, toggleLoudnessMatch, togglePlay } from '../state/actions';
+import { useI18n } from '../state/i18n';
 import { useStore, type AbMode } from '../state/store';
 import { IconPause, IconPlay, IconWarn } from './Icons';
 import { LiveMeter } from './LiveMeter';
 import { Segmented } from './Segmented';
 
 export function Transport() {
+  const { t } = useI18n();
   const abMode = useStore((s) => s.abMode);
-  const setAbMode = useStore((s) => s.setAbMode);
   const loudnessMatch = useStore((s) => s.loudnessMatch);
   const gainOffsetDb = useStore((s) => s.gainOffsetDb);
-  const setGainOffsetDb = useStore((s) => s.setGainOffsetDb);
   const cleaned = useStore((s) => s.cleanedPath);
   const previewActive = useStore((s) => s.previewActive);
   const artifacts = useStore((s) => s.artifacts);
   const deckFault = useStore((s) => s.deckFault);
   const original = useStore((s) => s.original);
-  const selectionRange = useStore((s) => s.selectionRange);
-  const setPlaying = useStore((s) => s.setPlaying);
   const playing = useStore((s) => s.playing);
   const [clock, setClock] = useState({ t: '00:00.0', d: '00:00.0' });
   const [deltaMode, setDeltaMode] = useState(false);
   const [loopEnabled, setLoopEnabled] = useState(false);
   const [wetDryMix, setWetDryMix] = useState(1);
-  const hadSelectionRef = useRef(false);
+  const holdingOrigRef = useRef(false);
+  const prevDeckRef = useRef<AbMode>('cleaned');
 
   useEffect(() => {
     let lastText = '';
-    let lastPlaying: boolean | null = null;
-    let lastDeck: AbMode | null = null;
-    let lastGain: number | null = null;
     let lastDelta: boolean | null = null;
     let lastLoop: boolean | null = null;
     let lastMix: number | null = null;
     const unsub = getPlayer().subscribe((snap) => {
-      if (snap.playing !== lastPlaying) {
-        lastPlaying = snap.playing;
-        setPlaying(snap.playing);
-      }
-      // The switch renders the player, not its own memory of what was pressed.
-      // `pending` is the deck a `setActive` is still waiting on (a fetch in
-      // flight); `active` is the deck actually making sound. Reading the pair
-      // is what makes it impossible for the control to claim CLEANED while the
-      // ORIGINAL element is the one being heard — the exact lie that used to
-      // survive a cleaned deck failing to load.
-      const deck = snap.pending ?? snap.active;
-      if (deck !== lastDeck) {
-        lastDeck = deck;
-        setAbMode(deck);
-      }
-      if (snap.gainOffsetDb !== undefined && snap.gainOffsetDb !== lastGain) {
-        lastGain = snap.gainOffsetDb;
-        setGainOffsetDb(snap.gainOffsetDb);
-      }
       const nextDelta = snap.deltaMode ?? false;
       if (nextDelta !== lastDelta) {
         lastDelta = nextDelta;
@@ -71,27 +48,18 @@ export function Transport() {
         setWetDryMix(nextMix);
       }
       // Tenth-of-a-second resolution keeps React updates at ~10 Hz, not 60.
-      const t = formatTime(Math.floor(snap.time * 10) / 10, false) + '.' + Math.floor((snap.time * 10) % 10);
-      const d = formatTime(Math.floor(snap.duration * 10) / 10, false) + '.' + Math.floor((snap.duration * 10) % 10);
-      const text = `${t}|${d}`;
+      const tStr =
+        formatTime(Math.floor(snap.time * 10) / 10, false) + '.' + Math.floor((snap.time * 10) % 10);
+      const dStr =
+        formatTime(Math.floor(snap.duration * 10) / 10, false) + '.' + Math.floor((snap.duration * 10) % 10);
+      const text = `${tStr}|${dStr}`;
       if (text !== lastText) {
         lastText = text;
-        setClock({ t, d });
+        setClock({ t: tStr, d: dStr });
       }
     });
     return unsub;
-  }, [setPlaying, setAbMode, setGainOffsetDb]);
-
-  // Keep player loop range synced with the waveform selection range.
-  useEffect(() => {
-    if (selectionRange && selectionRange.end > selectionRange.start) {
-      hadSelectionRef.current = true;
-      getPlayer().setLoopRange([selectionRange.start, selectionRange.end]);
-    } else if (hadSelectionRef.current) {
-      hadSelectionRef.current = false;
-      getPlayer().setLoopRange(null);
-    }
-  }, [selectionRange]);
+  }, []);
 
   const hasAudio = Boolean(original);
   // A path is not a deck. The master can be gone — deleted, moved, or written
@@ -100,6 +68,21 @@ export function Transport() {
   const masterServed =
     ((Boolean(cleaned) && artifacts?.master !== false) || previewActive) &&
     deckFault?.deck !== 'cleaned';
+
+  const startHoldOrig = (): void => {
+    if (!hasAudio || !masterServed || holdingOrigRef.current) return;
+    holdingOrigRef.current = true;
+    prevDeckRef.current = abMode;
+    setAb('original');
+  };
+
+  const endHoldOrig = (): void => {
+    if (!holdingOrigRef.current) return;
+    holdingOrigRef.current = false;
+    if (prevDeckRef.current === 'cleaned' && masterServed) {
+      setAb('cleaned');
+    }
+  };
   // Key bindings live in one map (App.useKeyboardMap) so Space/A/B/D/L cannot be
   // claimed twice; this component only draws the transport.
   const mixPct = Math.round(wetDryMix * 100);
@@ -163,6 +146,36 @@ export function Transport() {
             </span>
           ) : null}
         </button>
+        <button
+          type="button"
+          className="btn-level-match btn-hold-orig"
+          disabled={!hasAudio || !masterServed}
+          onPointerDown={(e) => {
+            if (e.button === 0) startHoldOrig();
+          }}
+          onPointerUp={endHoldOrig}
+          onPointerCancel={endHoldOrig}
+          onPointerLeave={endHoldOrig}
+          onKeyDown={(e) => {
+            if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+              e.preventDefault();
+              startHoldOrig();
+            }
+          }}
+          onKeyUp={(e) => {
+            if (e.key === ' ' || e.key === 'Enter') {
+              e.preventDefault();
+              endHoldOrig();
+            }
+          }}
+          onBlur={endHoldOrig}
+          aria-label={t.holdForOriginal}
+          title={t.holdForOriginalTitle}
+          style={{ minHeight: '28px', height: '28px', padding: '0 8px' }}
+        >
+          <span>{t.holdOrigShort}</span>
+        </button>
+
         <button
           type="button"
           className={`btn-level-match btn-delta${deltaMode && masterServed ? ' on' : ''}`}

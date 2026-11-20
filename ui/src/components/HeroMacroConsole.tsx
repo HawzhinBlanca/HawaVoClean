@@ -1,18 +1,19 @@
 import { useEffect, useState } from 'react';
 import { getPlayer } from '../audio/player';
 import { previewRegion, updateRackSettings } from '../state/actions';
+import { useI18n, type TranslationCatalog } from '../state/i18n';
 import { scheduleLivePreview } from '../state/liveAudition';
 import { jobInFlight, useStore } from '../state/store';
 import { NeuralHaloCanvas } from './controls/NeuralHaloCanvas';
 import { PillToggle } from './controls/PillToggle';
 import { RotaryKnob } from './controls/RotaryKnob';
 
-const ROOM_STEPS: readonly { idx: number; db: number | null; label: string }[] = [
-  { idx: 0, db: null, label: 'Dry' },
-  { idx: 1, db: -42, label: 'Subtle' },
-  { idx: 2, db: -36, label: 'Natural' },
-  { idx: 3, db: -30, label: 'Warm' },
-  { idx: 4, db: -24, label: 'Full' },
+const ROOM_STEPS: readonly { idx: number; db: number | null; labelKey: keyof TranslationCatalog }[] = [
+  { idx: 0, db: null, labelKey: 'roomDry' },
+  { idx: 1, db: -42, labelKey: 'roomSubtle' },
+  { idx: 2, db: -36, labelKey: 'roomNatural' },
+  { idx: 3, db: -30, labelKey: 'roomWarm' },
+  { idx: 4, db: -24, labelKey: 'roomFull' },
 ];
 
 function ambienceToStep(db: number | null): number {
@@ -46,6 +47,7 @@ function polishScoreFromRack(rack: {
 }
 
 export function HeroMacroConsole() {
+  const { t } = useI18n();
   const rackSettings = useStore((s) => s.rackSettings);
   const playing = useStore((s) => s.playing);
   const source = useStore((s) => s.source);
@@ -111,7 +113,7 @@ export function HeroMacroConsole() {
   };
 
   return (
-    <section className="panel hero-console" aria-label="Quick voice controls">
+    <section className="panel hero-console" aria-label={t.quickControlsAria}>
       <NeuralHaloCanvas
         playing={playing}
         deck={abMode}
@@ -120,28 +122,31 @@ export function HeroMacroConsole() {
       />
       <div className="hc-side">
         <RotaryKnob
-          label="Natural Room"
+          label={t.naturalRoom}
           value={roomIdx}
           min={0}
           max={4}
           step={1}
           defaultValue={2}
-          formatValue={(v) => ROOM_STEPS[Math.round(v)]?.label ?? 'Natural'}
-          hint="Keeps pauses natural"
+          formatValue={(v) => {
+            const step = ROOM_STEPS[Math.round(v)];
+            return step ? t[step.labelKey] : t.roomNatural;
+          }}
+          hint={t.roomHint}
           accent="amber"
           size="md"
           disabled={disabled}
           onChange={onRoomChange}
         />
         <RotaryKnob
-          label="Voice Polish"
+          label={t.voicePolish}
           value={polishPct}
           min={0}
           max={100}
           step={25}
           defaultValue={25}
-          formatValue={(v) => (v === 0 ? 'Off' : `${v}%`)}
-          hint="Smoothness & clarity"
+          formatValue={(v) => (v === 0 ? t.polishOff : `${v}%`)}
+          hint={t.polishHint}
           accent="emerald"
           size="md"
           disabled={disabled}
@@ -151,8 +156,8 @@ export function HeroMacroConsole() {
 
       <div className="hc-center">
         <RotaryKnob
-          label="Clean Amount"
-          subLabel="CLEAN"
+          label={t.cleanAmount}
+          subLabel={t.cleanSub}
           value={strengthPct}
           min={10}
           max={100}
@@ -168,20 +173,20 @@ export function HeroMacroConsole() {
         />
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
           <PillToggle
-            label={livePreviewEnabled ? 'Auto-Preview On' : 'Auto-Preview Off'}
+            label={livePreviewEnabled ? t.autoPreviewOn : t.autoPreviewOff}
             pressed={livePreviewEnabled}
             onToggle={() => setLivePreviewEnabled(!livePreviewEnabled)}
-            title="Automatically audition an 8-second loop when you turn a dial"
+            title={t.autoPreviewTitle}
           />
           {canAudition ? (
             <button
               type="button"
               className="hc-preview-pill"
               data-live={previewActive ? 'true' : 'false'}
-              onClick={() => void previewRegion()}
-              title="Audition an 8-second preview right now (P)"
+              onClick={() => void previewRegion({ autoPlay: true })}
+              title={t.audition8sTitle}
             >
-              {previewActive ? '● Live Preview Active' : 'Audition 8s (P)'}
+              {previewActive ? t.livePreviewActive : t.audition8s}
             </button>
           ) : null}
         </div>
@@ -189,14 +194,14 @@ export function HeroMacroConsole() {
 
       <div className="hc-side">
         <RotaryKnob
-          label="Wet / Dry Mix"
+          label={t.wetDryMix}
           value={mixPct}
           min={0}
           max={100}
           step={1}
           defaultValue={100}
           formatValue={(v) => `${Math.round(v)}%`}
-          hint={hasCleanedAudio ? 'Real-time blend' : 'Active after clean'}
+          hint={hasCleanedAudio ? t.realTimeBlend : t.activeAfterClean}
           accent="cyan"
           size="md"
           disabled={!hasCleanedAudio}
@@ -204,7 +209,7 @@ export function HeroMacroConsole() {
         />
         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-start' }}>
           <PillToggle
-            label="De-Click"
+            label={t.deClick}
             pressed={rackSettings.mouthDeclick}
             disabled={disabled}
             title="Remove lip and mouth clicks"
@@ -214,7 +219,7 @@ export function HeroMacroConsole() {
             }}
           />
           <PillToggle
-            label="De-Clip"
+            label={t.deClip}
             pressed={rackSettings.declip}
             disabled={disabled}
             title="Fix distorted loud peaks"

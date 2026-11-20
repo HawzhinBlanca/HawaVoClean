@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getPlayer } from './audio/player';
 import { AudioAssistant } from './components/AudioAssistant';
+import { BatchQueue } from './components/BatchQueue';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
@@ -21,8 +22,55 @@ import {
   seekTo,
 } from './state/actions';
 import { useJobAnnouncer } from './state/announcer';
+import { useI18n } from './state/i18n';
 import { useKeyboardMap } from './state/keymap';
-import { getState, jobInFlight, useStore } from './state/store';
+import { getState, jobInFlight, useStore, type AbMode } from './state/store';
+
+/**
+ * Single app-level player & loop synchronizer.
+ * Subscribes once to `getPlayer()` so BOTH Simple Studio and Pro Studio receive
+ * live `playing`, `abMode`, and `gainOffsetDb` updates, and keeps the player's
+ * loop range locked to the waveform selection range.
+ */
+export function usePlayerSync(): void {
+  const setPlaying = useStore((s) => s.setPlaying);
+  const setAbMode = useStore((s) => s.setAbMode);
+  const setGainOffsetDb = useStore((s) => s.setGainOffsetDb);
+  const selectionRange = useStore((s) => s.selectionRange);
+  const hadSelectionRef = useRef(false);
+
+  useEffect(() => {
+    let lastPlaying: boolean | null = null;
+    let lastDeck: AbMode | null = null;
+    let lastGain: number | null = null;
+    const unsub = getPlayer().subscribe((snap) => {
+      if (snap.playing !== lastPlaying) {
+        lastPlaying = snap.playing;
+        setPlaying(snap.playing);
+      }
+      const deck = snap.pending ?? snap.active;
+      if (deck !== lastDeck) {
+        lastDeck = deck;
+        setAbMode(deck);
+      }
+      if (snap.gainOffsetDb !== undefined && snap.gainOffsetDb !== lastGain) {
+        lastGain = snap.gainOffsetDb;
+        setGainOffsetDb(snap.gainOffsetDb);
+      }
+    });
+    return unsub;
+  }, [setPlaying, setAbMode, setGainOffsetDb]);
+
+  useEffect(() => {
+    if (selectionRange && selectionRange.end > selectionRange.start) {
+      hadSelectionRef.current = true;
+      getPlayer().setLoopRange([selectionRange.start, selectionRange.end]);
+    } else if (hadSelectionRef.current) {
+      hadSelectionRef.current = false;
+      getPlayer().setLoopRange(null);
+    }
+  }, [selectionRange]);
+}
 
 /** What the whole screen is doing, as one word the stylesheet can key on. */
 export type Phase = 'idle' | 'analyzing' | 'ready' | 'running' | 'done' | 'failed';
@@ -128,6 +176,8 @@ function SyncedVideoPreview() {
 
 export default function App() {
   useKeyboardMap();
+  usePlayerSync();
+  const { t } = useI18n();
   const phase = usePhase();
   const announcement = useJobAnnouncer();
   const dragOver = useDragWatch();
@@ -139,6 +189,8 @@ export default function App() {
   const workspaceMode = useStore((s) => s.workspaceMode);
   const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
   const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
+  const batchDrawerOpen = useStore((s) => s.batchDrawerOpen);
+  const setBatchDrawerOpen = useStore((s) => s.setBatchDrawerOpen);
   const deck = abMode === 'cleaned' && (cleanedPath || previewActive) ? 'cleaned' : 'original';
   // The banner is a *row* of the shell grid, never an overlay: a bar that
   // floats over the chassis is a bar that can cover a control, and the one
@@ -207,21 +259,22 @@ export default function App() {
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {announcement}
       </p>
-      {workspaceMode === 'simple' ? (
-        <SimpleWorkspace />
-      ) : (
-        <>
-          <SyncedVideoPreview />
-          <ProWorkspace />
-        </>
-      )}
+      <SyncedVideoPreview />
+      {workspaceMode === 'simple' ? <SimpleWorkspace /> : <ProWorkspace />}
       <Footer />
       <SlideOverDrawer
         open={assistantDrawerOpen}
-        title="AI Audio Assistant"
+        title={t.drawerAiTitle}
         onClose={() => setAssistantDrawerOpen(false)}
       >
         <AudioAssistant />
+      </SlideOverDrawer>
+      <SlideOverDrawer
+        open={batchDrawerOpen}
+        title={t.drawerBatchTitle}
+        onClose={() => setBatchDrawerOpen(false)}
+      >
+        <BatchQueue />
       </SlideOverDrawer>
       <ToastStack />
       <ShortcutOverlay />

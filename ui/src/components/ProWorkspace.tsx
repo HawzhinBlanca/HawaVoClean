@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { pinTake, removeTake, selectTake, updateRackSettings } from '../state/actions';
+import { useI18n, type TranslationCatalog } from '../state/i18n';
 import { scheduleLivePreview } from '../state/liveAudition';
 import { HPF_MAX_HZ, HPF_MIN_HZ, type DeliveryPresetId, type StereoModeId } from '../state/presets';
 import { jobInFlight, useStore } from '../state/store';
@@ -19,21 +20,22 @@ import { UnitInspector } from './UnitInspector';
 
 type ProDrawer = null | 'units' | 'history' | 'rack';
 
-const DELIVERY_PILLS: readonly { id: DeliveryPresetId; label: string }[] = [
-  { id: 'match_input', label: 'Match' },
-  { id: 'podcast', label: 'Podcast -16' },
-  { id: 'ebu_r128', label: 'EBU -23' },
-  { id: 'streaming', label: 'Stream -14' },
+const DELIVERY_PILLS: readonly { id: DeliveryPresetId; labelKey: keyof TranslationCatalog }[] = [
+  { id: 'match_input', labelKey: 'proDeliveryMatch' },
+  { id: 'podcast', labelKey: 'proDeliveryPodcast' },
+  { id: 'ebu_r128', labelKey: 'proDeliveryEbu' },
+  { id: 'streaming', labelKey: 'proDeliveryStream' },
 ];
 
-const STEREO_PILLS: readonly { id: StereoModeId; label: string }[] = [
-  { id: 'auto', label: 'Auto' },
-  { id: 'true_stereo_ms', label: 'M/S' },
-  { id: 'dual_mono_same', label: 'Mono' },
-  { id: 'split_speakers', label: 'Split' },
+const STEREO_PILLS: readonly { id: StereoModeId; labelKey: keyof TranslationCatalog }[] = [
+  { id: 'auto', labelKey: 'proStereoAuto' },
+  { id: 'true_stereo_ms', labelKey: 'proStereoMs' },
+  { id: 'dual_mono_same', labelKey: 'proStereoMono' },
+  { id: 'split_speakers', labelKey: 'proStereoSplit' },
 ];
 
 export function ProWorkspace() {
+  const { t } = useI18n();
   const abMode = useStore((s) => s.abMode);
   const takes = useStore((s) => s.takes);
   const activeTakeId = useStore((s) => s.activeTakeId);
@@ -78,7 +80,7 @@ export function ProWorkspace() {
       </div>
 
       {/* Row 2: Full-Width FabFilter-Style Interactive Spectrum & Piano Scale */}
-      <section className="panel pro-spectrum-row" aria-label="Spectrum">
+      <section className="panel spectrum-panel pro-spectrum-row" aria-label="Spectrum">
         <SpectrumDisplay wide />
       </section>
 
@@ -93,7 +95,7 @@ export function ProWorkspace() {
         <div className="pc-zone pc-dsp">
           <div className="pc-knobs">
             <RotaryKnob
-              label="Clean"
+              label={t.proClean}
               value={strengthPct}
               min={10}
               max={100}
@@ -108,13 +110,13 @@ export function ProWorkspace() {
               onChange={(pct) => patchRack({ strength: Math.round(pct) / 100 })}
             />
             <RotaryKnob
-              label="HPF"
+              label={t.proHpf}
               value={rackSettings.hpfCutoffHz}
               min={HPF_MIN_HZ}
               max={HPF_MAX_HZ}
               step={5}
               defaultValue={80}
-              formatValue={(v) => (rackSettings.hpfEnabled === false ? 'Off' : `${Math.round(v)}Hz`)}
+              formatValue={(v) => (rackSettings.hpfEnabled === false ? t.polishOff : `${Math.round(v)}Hz`)}
               accent="amber"
               size="sm"
               disabled={busy}
@@ -125,37 +127,37 @@ export function ProWorkspace() {
           <div className="pc-modules">
             <div className="pc-pill-row" role="group" aria-label="Surgical repair modules">
               <PillToggle
-                label="De-Plosive"
+                label={t.proDePlosive}
                 pressed={rackSettings.deplosive}
                 disabled={busy}
                 onToggle={() => patchRack({ deplosive: !rackSettings.deplosive })}
               />
               <PillToggle
-                label="De-Click"
+                label={t.deClick}
                 pressed={rackSettings.mouthDeclick}
                 disabled={busy}
                 onToggle={() => patchRack({ mouthDeclick: !rackSettings.mouthDeclick })}
               />
               <PillToggle
-                label="De-Clip"
+                label={t.deClip}
                 pressed={rackSettings.declip}
                 disabled={busy}
                 onToggle={() => patchRack({ declip: !rackSettings.declip })}
               />
               <PillToggle
-                label="De-Ess"
+                label={t.proDeEss}
                 pressed={rackSettings.deess}
                 disabled={busy}
                 onToggle={() => patchRack({ deess: !rackSettings.deess })}
               />
               <PillToggle
-                label="Tonal"
+                label={t.proTonal}
                 pressed={rackSettings.tonalRestoration}
                 disabled={busy}
                 onToggle={() => patchRack({ tonalRestoration: !rackSettings.tonalRestoration })}
               />
               <PillToggle
-                label="Leveler"
+                label={t.proLeveler}
                 pressed={rackSettings.levelRider}
                 disabled={busy}
                 onToggle={() => patchRack({ levelRider: !rackSettings.levelRider })}
@@ -173,7 +175,7 @@ export function ProWorkspace() {
                     disabled={busy}
                     onClick={() => patchRack({ deliveryPreset: d.id })}
                   >
-                    {d.label}
+                    {t[d.labelKey]}
                   </button>
                 ))}
               </div>
@@ -188,7 +190,7 @@ export function ProWorkspace() {
                     disabled={busy}
                     onClick={() => patchRack({ stereoMode: s.id })}
                   >
-                    {s.label}
+                    {t[s.labelKey]}
                   </button>
                 ))}
               </div>
@@ -208,7 +210,7 @@ export function ProWorkspace() {
               onClick={() => setDrawer('units')}
               title="Inspect and override individual speech units"
             >
-              <span>Units</span>
+              <span>{t.proUnits}</span>
               {unitCount > 0 ? <span className="pc-badge mono">{unitCount}</span> : null}
             </button>
             <button
@@ -217,7 +219,7 @@ export function ProWorkspace() {
               onClick={() => setDrawer('history')}
               title="View session runs and batch queue"
             >
-              <span>{batch ? 'Batch' : 'Runs'}</span>
+              <span>{batch ? t.proBatch : t.proRuns}</span>
               {runCount > 0 ? <span className="pc-badge mono">{runCount}</span> : null}
             </button>
             <button
@@ -229,7 +231,7 @@ export function ProWorkspace() {
               }}
               title="Open full Studio Rack, profiles, restore, and preset manager"
             >
-              <span>Engine &amp; Presets</span>
+              <span>{t.proEnginePresets}</span>
             </button>
           </div>
           <Actions />
@@ -238,7 +240,7 @@ export function ProWorkspace() {
 
       <SlideOverDrawer
         open={drawer === 'units'}
-        title="Unit Guard Inspector"
+        title={t.drawerUnitsTitle}
         onClose={() => setDrawer(null)}
       >
         <UnitInspector />
@@ -246,7 +248,7 @@ export function ProWorkspace() {
 
       <SlideOverDrawer
         open={drawer === 'history'}
-        title={batch ? 'Batch Queue' : 'Session Runs'}
+        title={batch ? t.drawerBatchTitle : t.drawerRunsTitle}
         onClose={() => setDrawer(null)}
       >
         {batch ? <BatchQueue /> : <JobHistory />}
@@ -254,7 +256,7 @@ export function ProWorkspace() {
 
       <SlideOverDrawer
         open={drawer === 'rack'}
-        title="Engine, Restore & Presets"
+        title={t.drawerEngineTitle}
         onClose={() => setDrawer(null)}
       >
         <AdvancedControls />

@@ -1,10 +1,13 @@
-import { useState } from 'react';
+import { useState, type CSSProperties } from 'react';
 import { applySpectralBoxRepair } from '../state/actions';
+import { useI18n } from '../state/i18n';
 import { jobInFlight, useStore } from '../state/store';
+import { FloatingPopover } from './controls/FloatingPopover';
 import { SpectrogramDisplay } from './SpectrogramDisplay';
 import { WaveformDisplay } from './WaveformDisplay';
 
 export function AudioStage() {
+  const { t } = useI18n();
   const stageBlend = useStore((s) => s.stageBlend);
   const setStageBlend = useStore((s) => s.setStageBlend);
   const spectralSelection = useStore((s) => s.spectralSelection);
@@ -36,14 +39,22 @@ export function AudioStage() {
     }
   };
 
-  const blendMode = stageBlend >= 0.95 ? 'full' : stageBlend > 0 ? 'true' : 'false';
+  const blendMode = stageBlend >= 0.99 ? 'full' : stageBlend > 0 ? 'blend' : 'wave';
+  // Smooth RX-11 continuous alpha crossfade on one shared full-height stage
+  const waveOpacity = stageBlend >= 0.99 ? 0 : Math.max(0.16, 1 - stageBlend * 0.78);
+  const specOpacity = stageBlend;
+  const specInteractive = stageBlend >= 0.35;
 
   return (
-    <div className="as-stack" data-blended={blendMode}>
+    <div
+      className="as-stack"
+      data-blended={blendMode}
+      style={{ '--stage-blend': String(stageBlend) } as CSSProperties}
+    >
       {hasSource ? (
         <div className="audio-stage-bar" role="toolbar" aria-label="Audio stage view">
           <div className="as-blend-wrap">
-            <span>Waveform</span>
+            <span>{t.waveformLabel}</span>
             <input
               type="range"
               className="as-blend-slider"
@@ -55,14 +66,46 @@ export function AudioStage() {
               aria-valuetext={`${blendPct}% spectrogram`}
               onChange={(e) => setStageBlend(Number(e.target.value) / 100)}
             />
-            <span>Spectrogram</span>
+            <span>{t.spectrogramLabel}</span>
             <span className="mono" style={{ fontSize: '11px', color: 'var(--cyan-2)', minWidth: '34px' }}>
               {blendPct}%
             </span>
           </div>
+        </div>
+      ) : null}
 
+      <div className="as-stage-viewport">
+        <div
+          className="as-wave-layer"
+          style={{
+            opacity: waveOpacity,
+            pointerEvents: specInteractive ? 'none' : 'auto',
+          }}
+        >
+          <WaveformDisplay />
+        </div>
+
+        {stageBlend > 0 && hasSource ? (
+          <div
+            className="as-spec-layer"
+            style={{
+              opacity: specOpacity,
+              pointerEvents: specInteractive ? 'auto' : 'none',
+            }}
+          >
+            <SpectrogramDisplay embedded onRequestHide={() => setStageBlend(0)} />
+          </div>
+        ) : null}
+
+        <FloatingPopover
+          id="as-spectral-repair-popover"
+          open={Boolean(hasSource && spectralSelection)}
+          onClose={() => setSpectralSelection(null)}
+          ariaLabel="Spectral box repair actions"
+          className="as-repair-popover"
+        >
           {spectralSelection ? (
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+            <div className="as-repair-popover-row">
               <span className="mono" style={{ fontSize: '11px', color: 'var(--coral-2)' }}>
                 {Math.round(spectralSelection.fLowHz)}–{Math.round(spectralSelection.fHighHz)} Hz
               </span>
@@ -72,7 +115,7 @@ export function AudioStage() {
                 disabled={!canRepair}
                 onClick={() => void handleQuickRepair(24)}
               >
-                {repairing ? 'Attenuating…' : 'Attenuate −24 dB'}
+                {repairing ? t.attenuating : t.attenuate24}
               </button>
               <button
                 type="button"
@@ -80,33 +123,25 @@ export function AudioStage() {
                 disabled={!canRepair}
                 onClick={() => void handleQuickRepair(12)}
               >
-                −12 dB
+                {t.attenuate12}
               </button>
               <button
                 type="button"
                 className="sr-btn"
                 onClick={() => setAssistantDrawerOpen(true)}
               >
-                Ask AI
+                {t.askAi}
               </button>
               <button
                 type="button"
                 className="sr-btn"
                 onClick={() => setSpectralSelection(null)}
               >
-                Clear
+                {t.clear}
               </button>
             </div>
           ) : null}
-        </div>
-      ) : null}
-
-      <div className="as-wave-layer">
-        <WaveformDisplay />
-      </div>
-
-      <div className="as-spec-layer">
-        <SpectrogramDisplay />
+        </FloatingPopover>
       </div>
     </div>
   );

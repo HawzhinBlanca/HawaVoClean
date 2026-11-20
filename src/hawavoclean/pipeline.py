@@ -29,7 +29,11 @@ from hawavoclean.audio.channels import (
     handle_channel_layout,
 )
 from hawavoclean.audio.decode import decode_audio, decode_audio_to_memmap
-from hawavoclean.audio.delivery import DeliveryPreset, apply_delivery_loudness
+from hawavoclean.audio.delivery import (
+    DeliveryPreset,
+    apply_delivery_loudness,
+    apply_delivery_loudness_streaming,
+)
 from hawavoclean.audio.encode import encode_audio, encode_audio_streaming
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.audio.types import AudioBuffer, AudioProbeResult, ChannelMode
@@ -208,6 +212,179 @@ def _release_audio_memmap(
     cast(Any, mapping)._mmap.close()  # numpy exposes no public close API
     registry[:] = [candidate for candidate in registry if candidate is not mapping]
     filename.unlink(missing_ok=True)
+
+
+_STREAM_STAGE_CHUNK_SAMPLES = 512 * 1024
+
+
+def _apply_declip_streaming(
+    src: np.ndarray[Any, np.dtype[np.float32]],
+    sample_rate: int,
+    dst: np.memmap[Any, np.dtype[np.float32]],
+    *,
+    chunk_samples: int = _STREAM_STAGE_CHUNK_SAMPLES,
+) -> int:
+    """Chunk-streamed pre-enhancement declip with overlap-discard so RAM stays bounded."""
+    from hawavoclean.finishing.pro_repair import apply_declip
+
+    channels, total = int(src.shape[0]), int(src.shape[1])
+    overlap = 64
+    total_clips = 0
+    for start in range(0, total, chunk_samples):
+        end = min(total, start + chunk_samples)
+        lo = max(0, start - overlap)
+        hi = min(total, end + overlap)
+        chunk = np.ascontiguousarray(src[:, lo:hi], dtype=np.float32)
+        repaired, clips = apply_declip(chunk, sample_rate)
+        total_clips += clips
+        dst[:, start:end] = repaired[:, start - lo : end - lo]
+    dst.flush()
+    _ = channels
+    return total_clips
+
+
+def _apply_hpf_streaming(
+    src: np.ndarray[Any, np.dtype[np.float32]],
+    sample_rate: int,
+    cutoff_hz: float,
+    dst: np.memmap[Any, np.dtype[np.float32]],
+    *,
+    chunk_samples: int = _STREAM_STAGE_CHUNK_SAMPLES,
+) -> None:
+    """Chunk-streamed zero-phase HPF with overlap-discard so multi-hour files stay O(1) RAM."""
+    from hawavoclean.finishing.repair import remove_dc_subsonic
+
+    channels, total = int(src.shape[0]), int(src.shape[1])
+    overlap = min(8192, max(256, int(round(sample_rate * 0.15))))
+    for start in range(0, total, chunk_samples):
+        end = min(total, start + chunk_samples)
+        lo = max(0, start - overlap)
+        hi = min(total, end + overlap)
+        for ch in range(channels):
+            chunk = np.ascontiguousarray(src[ch, lo:hi], dtype=np.float32)
+            filtered = remove_dc_subsonic(chunk, sample_rate, cutoff_hz=cutoff_hz)
+            dst[ch, start:end] = filtered[start - lo : end - lo]
+    dst.flush()
+
+
+def _apply_pro_repair_streaming(
+    src: np.ndarray[Any, np.dtype[np.float32]],
+    sample_rate: int,
+    options: Any,
+    dst: np.memmap[Any, np.dtype[np.float32]],
+    *,
+    chunk_samples: int = _STREAM_STAGE_CHUNK_SAMPLES,
+) -> list[str]:
+    """Chunk-streamed surgical repair (deplosive/mouth_declick) with overlap-discard."""
+    from hawavoclean.finishing.pro_repair import apply_pro_repair_chain
+
+    total = int(src.shape[1])
+    overlap = min(8192, max(512, int(round(sample_rate * 0.10))))
+    seen_actions: list[str] = []
+    for start in range(0, total, chunk_samples):
+        end = min(total, start + chunk_samples)
+        lo = max(0, start - overlap)
+        hi = min(total, end + overlap)
+        chunk = np.ascontiguousarray(src[:, lo:hi], dtype=np.float32)
+        repaired, actions = apply_pro_repair_chain(chunk, sample_rate, options)
+        for act in actions:
+            if act not in seen_actions:
+                seen_actions.append(act)
+        dst[:, start:end] = repaired[:, start - lo : end - lo]
+    dst.flush()
+    return seen_actions
+
+
+def _apply_room_tone_floor_streaming(
+    orig: np.ndarray[Any, np.dtype[np.float32]],
+    cleaned: np.ndarray[Any, np.dtype[np.float32]],
+    sample_rate: int,
+    target_floor_db: float,
+    dst: np.memmap[Any, np.dtype[np.float32]],
+    *,
+    chunk_samples: int = _STREAM_STAGE_CHUNK_SAMPLES,
+) -> None:
+    """Chunk-streamed room-tone floor extraction + synthesis for multi-hour memmaps."""
+    from hawavoclean.finishing.pro_repair import _extract_ambient_profile, _synthesize_room_tone
+
+    channels, total = int(cleaned.shape[0]), int(cleaned.shape[1])
+    if total < 64 or channels == 0:
+        dst[:, :] = cleaned[:, :]
+        dst.flush()
+        return
+
+    # Sample up to 30 seconds across start/middle/end to estimate ambient spectrum in O(1) RAM.
+    sample_win = min(total, max(1024, sample_rate * 10))
+    anchors = (
+        [0]
+        if total <= sample_win
+        else sorted({0, max(0, (total - sample_win) // 2), max(0, total - sample_win)})
+    )
+    target_rms = float(10.0 ** (max(target_floor_db, -300.0) / 20.0))
+
+    profiles: list[tuple[np.ndarray[Any, np.dtype[np.float64]], float] | None] = []
+    for ch in range(channels):
+        orig_seg = np.concatenate(
+            [
+                orig[ch, a : min(total, a + sample_win)].astype(np.float64, copy=False)
+                for a in anchors
+            ]
+        )
+        clean_seg = np.concatenate(
+            [
+                cleaned[ch, a : min(total, a + sample_win)].astype(np.float64, copy=False)
+                for a in anchors
+            ]
+        )
+        prof = _extract_ambient_profile(orig_seg, clean_seg, sample_rate)
+        if prof is None:
+            profiles.append(None)
+            continue
+        mag_profile, _ambient_rms, cleaned_floor_rms = prof
+        if cleaned_floor_rms >= target_rms:
+            profiles.append(None)
+            continue
+        fill_rms = math.sqrt(
+            max(0.0, target_rms * target_rms - cleaned_floor_rms * cleaned_floor_rms)
+        )
+        profiles.append((mag_profile, fill_rms) if fill_rms > 1e-8 else None)
+
+    for start in range(0, total, chunk_samples):
+        end = min(total, start + chunk_samples)
+        n = end - start
+        for ch in range(channels):
+            blk = cleaned[ch, start:end].astype(np.float64, copy=True)
+            ch_prof = profiles[ch]
+            if ch_prof is not None:
+                mag_profile, fill_rms = ch_prof
+                bed = _synthesize_room_tone(
+                    mag_profile, n, fill_rms, f"hawavoclean:rt:ch_{ch}:{start}"
+                )
+                blk += bed
+            dst[ch, start:end] = np.ascontiguousarray(blk, dtype=np.float32)
+    dst.flush()
+
+
+def _stream_wav_into_memmap(
+    wav_path: Path,
+    dst: np.memmap[Any, np.dtype[np.float32]],
+    *,
+    chunk_samples: int = _STREAM_STAGE_CHUNK_SAMPLES,
+) -> None:
+    """Stream-copy a WAV file into a planar float32 memmap in bounded RAM."""
+    offset = 0
+    total = int(dst.shape[1])
+    with soundfile.SoundFile(str(wav_path), mode="r") as reader:
+        while offset < total:
+            block = reader.read(
+                frames=min(chunk_samples, total - offset), dtype="float32", always_2d=True
+            )
+            if block.size == 0:
+                break
+            n = int(block.shape[0])
+            dst[:, offset : offset + n] = block.T
+            offset += n
+    dst.flush()
 
 
 # Validate both the user-facing extension and the probed container. This
@@ -390,6 +567,8 @@ def run_pipeline(
     delivery_preset: DeliveryPreset | None = None,
     pro_repair: dict[str, bool] | None = None,
     stereo_mode: str | None = None,
+    hpf_enabled: bool | None = None,
+    hpf_cutoff_hz: float | None = None,
 ) -> HawaVoCleanReport:
     """Execute the complete end-to-end HawaVoClean pipeline.
 
@@ -444,6 +623,14 @@ def run_pipeline(
         raise InvalidUserInputError(
             f"Unknown stereo_mode: '{stereo_mode}' "
             "(expected auto|dual_mono_same|split_speakers|true_stereo_ms)"
+        )
+    if hpf_cutoff_hz is not None and (
+        isinstance(hpf_cutoff_hz, bool)
+        or not math.isfinite(hpf_cutoff_hz)
+        or not 20.0 <= float(hpf_cutoff_hz) <= 250.0
+    ):
+        raise InvalidUserInputError(
+            f"hpf_cutoff_hz must be a finite number between 20.0 and 250.0 Hz, got {hpf_cutoff_hz!r}"
         )
     if cutoff == "manual" and cutoff_hz is None:
         raise InvalidUserInputError("--cutoff manual requires an explicit --cutoff-hz <Hz>")
@@ -554,6 +741,8 @@ def run_pipeline(
             delivery_preset=delivery_preset,
             pro_repair=pro_repair,
             stereo_mode=stereo_mode,
+            hpf_enabled=hpf_enabled,
+            hpf_cutoff_hz=hpf_cutoff_hz,
         )
     except HawaVoCleanError:
         # Known, reported failures (bad input, refused destination, ...) must
@@ -685,6 +874,8 @@ def _run_after_preflight(
     delivery_preset: DeliveryPreset | None = None,
     pro_repair: dict[str, bool] | None = None,
     stereo_mode: str | None = None,
+    hpf_enabled: bool | None = None,
+    hpf_cutoff_hz: float | None = None,
 ) -> HawaVoCleanReport:
     """Everything after preflight; split out so the caller can scope cleanup."""
     # Probe metadata is not trusted to choose the decoder: a damaged container
@@ -729,6 +920,12 @@ def _run_after_preflight(
             allow_research_restore=allow_research_restore,
             on_progress=on_progress,
             clean_only=clean_only,
+            ambience_floor_db=ambience_floor_db,
+            delivery_preset=delivery_preset,
+            pro_repair=pro_repair,
+            stereo_mode=stereo_mode,
+            hpf_enabled=hpf_enabled,
+            hpf_cutoff_hz=hpf_cutoff_hz,
         )
 
     decoded_bytes = audio_buf.samples * audio_buf.channels * np.dtype(np.float32).itemsize
@@ -753,12 +950,92 @@ def _run_after_preflight(
         if streaming_natural
         else measure_loudness_and_peaks(audio_buf.data, audio_buf.sample_rate)
     )
+
+    # 4.25. Opt-in pre-enhancement de-clip and explicit user HPF.
+    # De-clip MUST run right after decode, before HPF or neural STFT destroys
+    # flat-top clipped plateaus. Both stages are strictly no-ops when unrequested,
+    # preserving 100% bit-identity on default runs.
+    working_buf = audio_buf
+    pre_stage_memmaps: list[np.memmap[Any, np.dtype[np.float32]]] = []
+    want_pre_declip = bool(pro_repair and pro_repair.get("declip"))
+    want_pre_hpf = hpf_enabled is not False and (hpf_cutoff_hz is not None or hpf_enabled is True)
+    if want_pre_declip:
+        if streaming_natural:
+            declip_stage = _create_audio_memmap(
+                workspace.root / "pre-declip.f32",
+                working_buf.channels,
+                working_buf.samples,
+            )
+            disk_mappings.append(declip_stage)
+            pre_stage_memmaps.append(declip_stage)
+            clips_repaired = _apply_declip_streaming(
+                working_buf.data, working_buf.sample_rate, declip_stage
+            )
+            working_buf = AudioBuffer(data=declip_stage, sample_rate=working_buf.sample_rate)
+        else:
+            from hawavoclean.finishing.pro_repair import apply_declip
+
+            declipped, clips_repaired = apply_declip(working_buf.data, working_buf.sample_rate)
+            working_buf = AudioBuffer(data=declipped, sample_rate=working_buf.sample_rate)
+        if clips_repaired > 0:
+            logger.info(f"Pre-enhancement de-clip repaired {clips_repaired} clipped plateau(s)")
+
+    if want_pre_hpf:
+        eff_hpf_hz = float(hpf_cutoff_hz) if hpf_cutoff_hz is not None else 80.0
+        if streaming_natural:
+            hpf_stage = _create_audio_memmap(
+                workspace.root / "pre-hpf.f32",
+                working_buf.channels,
+                working_buf.samples,
+            )
+            disk_mappings.append(hpf_stage)
+            pre_stage_memmaps.append(hpf_stage)
+            _apply_hpf_streaming(working_buf.data, working_buf.sample_rate, eff_hpf_hz, hpf_stage)
+            working_buf = AudioBuffer(data=hpf_stage, sample_rate=working_buf.sample_rate)
+        else:
+            from hawavoclean.finishing.repair import remove_dc_subsonic
+
+            hpf_channels = [
+                remove_dc_subsonic(
+                    working_buf.data[ch], working_buf.sample_rate, cutoff_hz=eff_hpf_hz
+                )
+                for ch in range(working_buf.channels)
+            ]
+            working_buf = AudioBuffer(
+                data=np.ascontiguousarray(np.stack(hpf_channels, axis=0), dtype=np.float32),
+                sample_rate=working_buf.sample_rate,
+            )
+        logger.info(f"Pre-enhancement HPF applied at {eff_hpf_hz:g} Hz")
+
     ms_side_channel: np.ndarray[Any, np.dtype[np.float32]] | None = None
-    if stereo_mode == "true_stereo_ms" and audio_buf.channels == 2:
+    ms_mid_stage: np.memmap[Any, np.dtype[np.float32]] | None = None
+    ms_side_stage: np.memmap[Any, np.dtype[np.float32]] | None = None
+    if stereo_mode == "true_stereo_ms" and working_buf.channels == 2:
         from hawavoclean.audio.multitrack import encode_mid_side
 
-        mid_ch, side_ch = encode_mid_side(audio_buf.data[0], audio_buf.data[1])
+        if streaming_natural:
+            ms_mid_stage = _create_audio_memmap(
+                workspace.root / "ms-mid.f32", 1, working_buf.samples
+            )
+            ms_side_stage = _create_audio_memmap(
+                workspace.root / "ms-side.f32", 1, working_buf.samples
+            )
+            disk_mappings.extend([ms_mid_stage, ms_side_stage])
+            for start in range(0, working_buf.samples, _STREAM_STAGE_CHUNK_SAMPLES):
+                end = min(working_buf.samples, start + _STREAM_STAGE_CHUNK_SAMPLES)
+                m_blk, s_blk = encode_mid_side(
+                    working_buf.data[0, start:end], working_buf.data[1, start:end]
+                )
+                ms_mid_stage[0, start:end] = m_blk
+                ms_side_stage[0, start:end] = s_blk
+            ms_mid_stage.flush()
+            ms_side_stage.flush()
+            mid_ch: np.ndarray[Any, np.dtype[np.float32]] = ms_mid_stage[0]
+            side_ch: np.ndarray[Any, np.dtype[np.float32]] = ms_side_stage[0]
+        else:
+            mid_ch, side_ch = encode_mid_side(working_buf.data[0], working_buf.data[1])
         channel_mode = ChannelMode.DUAL_MONO_SAME
+        working_buf.channel_mode = channel_mode
         audio_buf.channel_mode = channel_mode
         channels_to_process = [mid_ch]
         duplicate_to_stereo = False
@@ -777,14 +1054,15 @@ def _run_after_preflight(
     else:
         effective_channel_mode = (
             stereo_mode
-            if stereo_mode in ("dual_mono_same", "split_speakers") and audio_buf.channels == 2
+            if stereo_mode in ("dual_mono_same", "split_speakers") and working_buf.channels == 2
             else config.input.channel_mode
         )
         channel_mode = (
-            classify_channels_bounded(audio_buf, declared_mode=effective_channel_mode)
+            classify_channels_bounded(working_buf, declared_mode=effective_channel_mode)
             if streaming_natural
-            else classify_channels(audio_buf, declared_mode=effective_channel_mode)
+            else classify_channels(working_buf, declared_mode=effective_channel_mode)
         )
+        working_buf.channel_mode = channel_mode
         audio_buf.channel_mode = channel_mode
         logger.info(f"Channel classification: {channel_mode}")
         workspace.journal.append(JournalEvent.AUDIO_DECODED, {"channel_mode": str(channel_mode)})
@@ -798,7 +1076,7 @@ def _run_after_preflight(
             ),
         )
 
-        channels_to_process, duplicate_to_stereo = handle_channel_layout(audio_buf, channel_mode)
+        channels_to_process, duplicate_to_stereo = handle_channel_layout(working_buf, channel_mode)
     processing_channel_count = len(channels_to_process)
 
     # 5. Segmentation
@@ -991,6 +1269,12 @@ def _run_after_preflight(
                                 "duplicate_to_stereo": duplicate_to_stereo,
                             },
                             channel=u.channel_id,
+                            side_original=(
+                                ms_side_channel[u.start_sample : u.end_sample]
+                                if ms_side_channel is not None and u.channel_id == 0
+                                else None
+                            ),
+                            side_candidate=None,
                             current_job_bytes=slice_bytes_written,
                         )
                         if saved_slice is None:
@@ -1090,6 +1374,15 @@ def _run_after_preflight(
                 try:
                     from hawavoclean.server.unit_restitch import save_unit_slice_to_dir
 
+                    side_orig_slice: np.ndarray[Any, np.dtype[np.float32]] | None = None
+                    side_cand_slice: np.ndarray[Any, np.dtype[np.float32]] | None = None
+                    if ms_side_channel is not None and u.channel_id == 0:
+                        from hawavoclean.audio.multitrack import denoise_side_channel
+
+                        side_orig_slice = ms_side_channel[u.start_sample : u.end_sample]
+                        side_cand_slice = denoise_side_channel(
+                            side_orig_slice, audio_buf.sample_rate
+                        )
                     saved_slice = save_unit_slice_to_dir(
                         unit_slice_dir,
                         unit_id=u.unit_id,
@@ -1107,6 +1400,8 @@ def _run_after_preflight(
                             "duplicate_to_stereo": duplicate_to_stereo,
                         },
                         channel=u.channel_id,
+                        side_original=side_orig_slice,
+                        side_candidate=side_cand_slice,
                         current_job_bytes=slice_bytes_written,
                     )
                     if saved_slice is None:
@@ -1188,6 +1483,29 @@ def _run_after_preflight(
             if finishing_updates:
                 effective_finishing = config.finishing.model_copy(update=finishing_updates)
 
+        if unit_slice_dir is not None and not slice_cache_truncated:
+            try:
+                from hawavoclean.server.unit_restitch import save_job_restitch_meta
+
+                save_job_restitch_meta(
+                    unit_slice_dir,
+                    {
+                        "stereo_mode": stereo_mode,
+                        "duplicate_to_stereo": duplicate_to_stereo,
+                        "delivery_preset": delivery_preset,
+                        "ambience_floor_db": ambience_floor_db,
+                        "pro_repair": dict(pro_repair) if pro_repair is not None else None,
+                        "hpf_enabled": hpf_enabled,
+                        "hpf_cutoff_hz": hpf_cutoff_hz,
+                        "finishing": effective_finishing.model_dump(mode="json"),
+                        "loudness": config.loudness.model_dump(mode="json"),
+                        "source_lufs": float(source_loudness.integrated_lufs),
+                        "source_media_path": str(in_path),
+                    },
+                )
+            except Exception as exc:
+                logger.warning(f"Failed to persist unit restitch job metadata: {exc}")
+
         file_tilt: SpeechTiltReport | None = None
         if effective_finishing.enabled and effective_finishing.tonal_restoration:
             per_unit_tilts = [
@@ -1197,6 +1515,11 @@ def _run_after_preflight(
             ]
             if per_unit_tilts:
                 file_tilt = aggregate_speech_tilt(per_unit_tilts)
+
+        # If user explicitly disabled HPF or we already applied explicit pre-enhancement HPF,
+        # tell safe_finish_speech_unit not to run a second/unwanted HPF; otherwise pass None
+        # to preserve 100% bit-identity with default FinishingConfig.
+        finish_hpf_flag: bool | None = False if (hpf_enabled is False or want_pre_hpf) else None
 
         for idx, u in enumerate(all_units):
             dec = decisions[idx]
@@ -1217,6 +1540,7 @@ def _run_after_preflight(
                     finishing_config=effective_finishing,
                     guard_config=active_guard_cfg,
                     tilt=file_tilt,
+                    hpf_enabled=finish_hpf_flag,
                 )
                 final_wave = finish_res.finished_waveform
                 finish_preset = finish_res.preset_applied
@@ -1301,6 +1625,12 @@ def _run_after_preflight(
         orig_core_waveforms.clear()
         context_items.clear()
         channels_to_process.clear()
+        for pre_mm in pre_stage_memmaps:
+            _release_audio_memmap(pre_mm, disk_mappings)
+        pre_stage_memmaps.clear()
+        if ms_mid_stage is not None:
+            _release_audio_memmap(ms_mid_stage, disk_mappings)
+            ms_mid_stage = None
         assert selected_stage is not None and isinstance(audio_buf.data, np.memmap)
         if ambience_floor_db is None:
             _release_audio_memmap(audio_buf.data, disk_mappings)
@@ -1328,14 +1658,52 @@ def _run_after_preflight(
                 sample_rate=audio_buf.sample_rate,
             )
         if ms_side_channel is not None:
-            from hawavoclean.audio.multitrack import decode_mid_side
+            from hawavoclean.audio.multitrack import decode_mid_side, denoise_side_channel
 
-            attenuated_side = np.ascontiguousarray(ms_side_channel * np.float32(0.5))
-            left_out, right_out = decode_mid_side(assembled_data[0], attenuated_side)
-            assembled_data[0, :] = left_out
-            assembled_data[1, :] = right_out
+            side_out_stage = _create_audio_memmap(
+                workspace.root / "ms-side-out.f32", 1, media.samples
+            )
+            disk_mappings.append(side_out_stage)
+            side_unit_waves: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+            ch0_units = [u for u in all_units if u.channel_id == 0]
+            for i, u in enumerate(all_units):
+                if u.channel_id != 0:
+                    continue
+                orig_s = np.ascontiguousarray(
+                    ms_side_channel[u.start_sample : u.end_sample], dtype=np.float32
+                )
+                if decisions[i].is_enhanced:
+                    denoised_s = denoise_side_channel(orig_s, audio_buf.sample_rate)
+                    if taper_in[i] > 0 or taper_out[i] > 0:
+                        denoised_s = apply_continuity_taper(
+                            denoised_s, orig_s, taper_in[i], taper_out[i]
+                        )
+                    side_unit_waves.append(denoised_s)
+                else:
+                    side_unit_waves.append(orig_s)
+            assemble_channel_timeline_into(
+                side_out_stage[0],
+                units=ch0_units,
+                unit_waveforms=side_unit_waves,
+                total_samples=media.samples,
+                sample_rate=audio_buf.sample_rate,
+            )
+            side_unit_waves.clear()
+            for start in range(0, media.samples, _STREAM_STAGE_CHUNK_SAMPLES):
+                end = min(media.samples, start + _STREAM_STAGE_CHUNK_SAMPLES)
+                left_blk, right_blk = decode_mid_side(
+                    assembled_data[0, start:end], side_out_stage[0, start:end]
+                )
+                assembled_data[0, start:end] = left_blk
+                assembled_data[1, start:end] = right_blk
+            _release_audio_memmap(side_out_stage, disk_mappings)
+            if ms_side_stage is not None:
+                _release_audio_memmap(ms_side_stage, disk_mappings)
+                ms_side_stage = None
         elif duplicate_to_stereo:
-            assembled_data[1, :] = assembled_data[0, :]
+            for start in range(0, media.samples, _STREAM_STAGE_CHUNK_SAMPLES):
+                end = min(media.samples, start + _STREAM_STAGE_CHUNK_SAMPLES)
+                assembled_data[1, start:end] = assembled_data[0, start:end]
         assembled_data.flush()
     else:
         assembled_channels: list[np.ndarray[Any, np.dtype[np.float32]]] = []
@@ -1352,10 +1720,32 @@ def _run_after_preflight(
             assembled_channels.append(ch_timeline)
 
         if ms_side_channel is not None and len(assembled_channels) == 1:
-            from hawavoclean.audio.multitrack import decode_mid_side
+            from hawavoclean.audio.multitrack import decode_mid_side, denoise_side_channel
 
-            attenuated_side = np.ascontiguousarray(ms_side_channel * np.float32(0.5))
-            left_out, right_out = decode_mid_side(assembled_channels[0], attenuated_side)
+            side_unit_waves = []
+            ch0_units = [u for u in all_units if u.channel_id == 0]
+            for i, u in enumerate(all_units):
+                if u.channel_id != 0:
+                    continue
+                orig_s = np.ascontiguousarray(
+                    ms_side_channel[u.start_sample : u.end_sample], dtype=np.float32
+                )
+                if decisions[i].is_enhanced:
+                    denoised_s = denoise_side_channel(orig_s, audio_buf.sample_rate)
+                    if taper_in[i] > 0 or taper_out[i] > 0:
+                        denoised_s = apply_continuity_taper(
+                            denoised_s, orig_s, taper_in[i], taper_out[i]
+                        )
+                    side_unit_waves.append(denoised_s)
+                else:
+                    side_unit_waves.append(orig_s)
+            side_timeline = assemble_channel_timeline(
+                units=ch0_units,
+                unit_waveforms=side_unit_waves,
+                total_samples=media.samples,
+                sample_rate=audio_buf.sample_rate,
+            )
+            left_out, right_out = decode_mid_side(assembled_channels[0], side_timeline)
             assembled_channels = [left_out, right_out]
         elif duplicate_to_stereo and len(assembled_channels) == 1:
             assembled_channels.append(assembled_channels[0].copy())
@@ -1462,13 +1852,13 @@ def _run_after_preflight(
             channel_mode=channel_mode,
         )
 
-    # 10.75. Opt-in surgical dialogue repair and room-tone ambience floor.
+    # 10.75. Opt-in post-enhancement surgical dialogue repair (deplosive/mouth declick)
+    # and room-tone ambience floor. Note: declip already ran pre-enhancement before HPF/STFT.
     # Strictly skipped when unrequested so default production/studio runs stay bit-identical.
     has_surgical_repair = bool(
         pro_repair
         and (
-            pro_repair.get("declip")
-            or pro_repair.get("deplosive")
+            pro_repair.get("deplosive")
             or pro_repair.get("declick")
             or pro_repair.get("mouthDeclick")
             or pro_repair.get("mouth_declick")
@@ -1478,7 +1868,7 @@ def _run_after_preflight(
         from hawavoclean.finishing.pro_repair import ProRepairOptions, apply_pro_repair_chain
 
         repair_opts = ProRepairOptions(
-            declip=bool(pro_repair.get("declip", False)),
+            declip=False,
             deplosive=bool(pro_repair.get("deplosive", False)),
             declick=bool(
                 pro_repair.get(
@@ -1488,11 +1878,29 @@ def _run_after_preflight(
             ),
             room_tone_floor=False,
         )
-        repaired_data, repair_actions = apply_pro_repair_chain(
-            assembled_buffer.data,
-            assembled_buffer.sample_rate,
-            repair_opts,
-        )
+        if streaming_natural:
+            repaired_stage = _create_audio_memmap(
+                workspace.root / "repaired-natural.f32",
+                assembled_buffer.channels,
+                assembled_buffer.samples,
+            )
+            disk_mappings.append(repaired_stage)
+            repair_actions = _apply_pro_repair_streaming(
+                assembled_buffer.data,
+                assembled_buffer.sample_rate,
+                repair_opts,
+                repaired_stage,
+            )
+            if isinstance(assembled_data, np.memmap):
+                _release_audio_memmap(assembled_data, disk_mappings)
+            assembled_data = repaired_stage
+            repaired_data: np.ndarray[Any, np.dtype[np.float32]] = repaired_stage
+        else:
+            repaired_data, repair_actions = apply_pro_repair_chain(
+                assembled_buffer.data,
+                assembled_buffer.sample_rate,
+                repair_opts,
+            )
         if repair_actions:
             logger.info(f"Pro surgical repair applied: {', '.join(repair_actions)}")
         assembled_buffer = AudioBuffer(
@@ -1506,12 +1914,31 @@ def _run_after_preflight(
 
         orig_for_floor = audio_buf.data
         if orig_for_floor.shape == assembled_buffer.data.shape:
-            floored_data = apply_room_tone_floor(
-                orig_for_floor,
-                assembled_buffer.data,
-                assembled_buffer.sample_rate,
-                target_floor_db=float(ambience_floor_db),
-            )
+            if streaming_natural:
+                floored_stage = _create_audio_memmap(
+                    workspace.root / "floored-natural.f32",
+                    assembled_buffer.channels,
+                    assembled_buffer.samples,
+                )
+                disk_mappings.append(floored_stage)
+                _apply_room_tone_floor_streaming(
+                    orig_for_floor,
+                    assembled_buffer.data,
+                    assembled_buffer.sample_rate,
+                    float(ambience_floor_db),
+                    floored_stage,
+                )
+                if isinstance(assembled_data, np.memmap):
+                    _release_audio_memmap(assembled_data, disk_mappings)
+                assembled_data = floored_stage
+                floored_data: np.ndarray[Any, np.dtype[np.float32]] = floored_stage
+            else:
+                floored_data = apply_room_tone_floor(
+                    orig_for_floor,
+                    assembled_buffer.data,
+                    assembled_buffer.sample_rate,
+                    target_floor_db=float(ambience_floor_db),
+                )
             assembled_buffer = AudioBuffer(
                 data=floored_data,
                 sample_rate=assembled_buffer.sample_rate,
@@ -1530,12 +1957,39 @@ def _run_after_preflight(
                 f"Applying delivery preset ({delivery_preset})",
             ),
         )
-        final_mastered_data, _delivery_metrics = apply_delivery_loudness(
-            assembled_buffer.data,
-            assembled_buffer.sample_rate,
-            delivery_preset,
-            input_lufs=source_loudness.integrated_lufs,
-        )
+        if streaming_natural:
+            pre_delivery_wav = workspace.root / "pre-delivery.wav"
+            delivered_wav = workspace.root / "delivered.wav"
+            encode_audio_streaming(
+                buffer=assembled_buffer,
+                output_path=pre_delivery_wav,
+                output_bit_depth="float32",
+                dither=False,
+                seed_context=workspace.job_id,
+            )
+            apply_delivery_loudness_streaming(
+                pre_delivery_wav,
+                delivered_wav,
+                delivery_preset,
+                input_lufs=source_loudness.integrated_lufs,
+            )
+            pre_delivery_wav.unlink(missing_ok=True)
+            mastered_stage = _create_audio_memmap(
+                workspace.root / "mastered-natural.f32",
+                assembled_buffer.channels,
+                assembled_buffer.samples,
+            )
+            disk_mappings.append(mastered_stage)
+            _stream_wav_into_memmap(delivered_wav, mastered_stage)
+            delivered_wav.unlink(missing_ok=True)
+            final_mastered_data: np.ndarray[Any, np.dtype[np.float32]] = mastered_stage
+        else:
+            final_mastered_data, _delivery_metrics = apply_delivery_loudness(
+                assembled_buffer.data,
+                assembled_buffer.sample_rate,
+                delivery_preset,
+                input_lufs=source_loudness.integrated_lufs,
+            )
     else:
         premaster_loudness = (
             measure_loudness_and_peaks_streaming(
@@ -1895,10 +2349,35 @@ def _run_smart_safe(
     allow_research_restore: bool = False,
     on_progress: ProgressCallback | None = None,
     clean_only: bool = False,
+    ambience_floor_db: float | None = None,
+    delivery_preset: DeliveryPreset | None = None,
+    pro_repair: dict[str, bool] | None = None,
+    stereo_mode: str | None = None,
+    hpf_enabled: bool | None = None,
+    hpf_cutoff_hz: float | None = None,
 ) -> HawaVoCleanReport:
     from hawavoclean.audio.encode import encode_audio
+    from hawavoclean.audio.multitrack import decode_mid_side, denoise_side_channel, encode_mid_side
     from hawavoclean.audio.types import AudioBuffer, ChannelMode
+    from hawavoclean.finishing.deess import apply_split_band_deesser
+    from hawavoclean.finishing.detect import (
+        TILT_MAX_BRILLIANCE_LIFT_DB,
+        TILT_MAX_LOW_CUT_DB,
+        TILT_MAX_LOW_LIFT_DB,
+        TILT_MAX_PRESENCE_LIFT_DB,
+        aggregate_speech_tilt,
+        measure_speech_tilt,
+    )
+    from hawavoclean.finishing.dynamics import apply_dialogue_leveler
+    from hawavoclean.finishing.eq import apply_tonal_restoration, solve_tonal_gains
     from hawavoclean.finishing.limiter import apply_lookahead_limiter
+    from hawavoclean.finishing.pro_repair import (
+        ProRepairOptions,
+        apply_declip,
+        apply_pro_repair_chain,
+        apply_room_tone_floor,
+    )
+    from hawavoclean.finishing.repair import remove_dc_subsonic
     from hawavoclean.hashing import hash_file
     from hawavoclean.report.summary import generate_human_summary
     from hawavoclean.report.writer import serialize_json_report
@@ -1910,30 +2389,46 @@ def _run_smart_safe(
     )
 
     emit_progress(on_progress, ProgressEvent("decode", 0.15, "Analyzing acoustic environment"))
-    raw_data = audio_buf.data
-    sr = audio_buf.sample_rate
+    orig_raw = np.ascontiguousarray(audio_buf.data, dtype=np.float32)
+    orig_sr = int(audio_buf.sample_rate)
+    orig_2d = orig_raw if orig_raw.ndim == 2 else orig_raw.reshape(1, -1)
+    source_loudness = measure_loudness_and_peaks(orig_2d, orig_sr)
 
-    # Ensure 48 kHz
-    if sr != 48000:
-        gcd = math.gcd(sr, 48000)
-        down = sr // gcd
+    # Pre-enhancement de-clip and explicit HPF on native-rate working copy (no-op if unrequested)
+    repair_flags = pro_repair or {}
+    work_native = orig_2d.copy()
+    if repair_flags.get("declip"):
+        work_native, _ = apply_declip(work_native, orig_sr)
+    if hpf_enabled is not False and (hpf_cutoff_hz is not None or hpf_enabled is True):
+        eff_hpf_hz = float(hpf_cutoff_hz) if hpf_cutoff_hz is not None else 80.0
+        work_native = np.ascontiguousarray(
+            np.vstack(
+                [
+                    remove_dc_subsonic(work_native[ch], orig_sr, cutoff_hz=eff_hpf_hz)
+                    for ch in range(work_native.shape[0])
+                ]
+            ),
+            dtype=np.float32,
+        )
+
+    # Resample to 48 kHz only for SmartSafe acoustic analysis / neural candidate evaluation.
+    if orig_sr != 48000:
+        gcd = math.gcd(orig_sr, 48000)
+        down = orig_sr // gcd
         up = 48000 // gcd
-        raw_data = scipy.signal.resample_poly(raw_data, up, down, axis=-1).astype(np.float32)
-        sr = 48000
-
-    # Extract 1D mono for analysis
-    if raw_data.ndim == 2:
-        mono_raw = np.mean(raw_data, axis=0).astype(np.float32)
+        raw_48k = scipy.signal.resample_poly(work_native, up, down, axis=-1).astype(np.float32)
+        orig_48k = scipy.signal.resample_poly(orig_2d, up, down, axis=-1).astype(np.float32)
     else:
-        mono_raw = raw_data.astype(np.float32)
+        raw_48k = work_native
+        orig_48k = orig_2d
+    sr = 48000
 
-    # 1. Bounded Streaming Acoustic Analysis (preserve original channel layout so
-    # stereo coherence/crosstalk analysis sees both channels when stereo, and
-    # mono audio is analyzed natively as mono).
-    analysis_data = raw_data if raw_data.ndim == 2 else raw_data.reshape(1, -1)
-    analysis_mode = audio_buf.channel_mode if analysis_data.shape[0] == 2 else ChannelMode.MONO
+    mono_raw = np.mean(raw_48k, axis=0).astype(np.float32)
+
+    # 1. Bounded Streaming Acoustic Analysis
+    analysis_mode = audio_buf.channel_mode if raw_48k.shape[0] == 2 else ChannelMode.MONO
     input_chunk = AudioBuffer(
-        data=analysis_data.astype(np.float32, copy=False),
+        data=raw_48k.astype(np.float32, copy=False),
         sample_rate=sr,
         channel_mode=analysis_mode,
     )
@@ -1973,66 +2468,208 @@ def _run_smart_safe(
     )
     selected_route = decision.selected_route
 
-    # 4. Full Master Render
+    def _render_with_stereo_mode(
+        route_name: Any,
+        source_2d: np.ndarray[Any, np.dtype[np.float32]],
+        sample_rate_hz: int,
+    ) -> tuple[np.ndarray[Any, np.dtype[np.float32]], str | None]:
+        if route_name == "preserve":
+            return source_2d.copy(), None
+        if stereo_mode == "true_stereo_ms" and source_2d.shape[0] == 2:
+            mid_in, side_in = encode_mid_side(source_2d[0], source_2d[1])
+            mid_out, err = engine.render_route_audio(
+                route_name,
+                mid_in,
+                sample_rate_hz,
+                speaker_profile_id=speaker_id,
+                allow_research_restore=allow_research_restore,
+            )
+            side_out = denoise_side_channel(side_in, sample_rate_hz)
+            n_target = min(len(mid_out), len(side_out))
+            l_out, r_out = decode_mid_side(mid_out[:n_target], side_out[:n_target])
+            return np.ascontiguousarray(np.vstack((l_out, r_out)), dtype=np.float32), err
+        if stereo_mode == "dual_mono_same" and source_2d.shape[0] == 2:
+            mono_in = np.ascontiguousarray(0.5 * (source_2d[0] + source_2d[1]), dtype=np.float32)
+            mono_out, err = engine.render_route_audio(
+                route_name,
+                mono_in,
+                sample_rate_hz,
+                speaker_profile_id=speaker_id,
+                allow_research_restore=allow_research_restore,
+            )
+            return np.ascontiguousarray(np.vstack((mono_out, mono_out)), dtype=np.float32), err
+        rendered, err = engine.render_route_audio(
+            route_name,
+            source_2d,
+            sample_rate_hz,
+            speaker_profile_id=speaker_id,
+            allow_research_restore=allow_research_restore,
+        )
+        rendered_2d = rendered if rendered.ndim == 2 else rendered.reshape(1, -1)
+        return np.ascontiguousarray(rendered_2d, dtype=np.float32), err
+
+    # 4. Full Master Render (avoid unnecessary 44.1 -> 48 kHz resampling on preserve!)
     emit_progress(
         on_progress,
         ProgressEvent("enhance", 0.70, f"Rendering full master ({selected_route})"),
     )
-    master_audio, render_err = engine.render_route_audio(
-        selected_route,
-        raw_data,
-        sr,
-        speaker_profile_id=speaker_id,
-        allow_research_restore=allow_research_restore,
-    )
+    if selected_route == "preserve":
+        master_audio = work_native.copy()
+        render_err: str | None = None
+        out_sr = orig_sr
+        orig_for_floor = orig_2d
+    else:
+        master_audio, render_err = _render_with_stereo_mode(selected_route, raw_48k, sr)
+        out_sr = sr
+        orig_for_floor = orig_48k
 
     # 5. Post-Master Invariant Verification
     emit_progress(on_progress, ProgressEvent("guard", 0.85, "Verifying post-master invariants"))
-    check_mono = (
-        np.mean(master_audio, axis=0).astype(np.float32) if master_audio.ndim == 2 else master_audio
+    check_mono = np.mean(master_audio, axis=0).astype(np.float32)
+    ref_for_verify = (
+        np.mean(work_native, axis=0).astype(np.float32) if out_sr == orig_sr else mono_raw
     )
     verify_kwargs: dict[str, Any] = {}
     if speaker_profile is not None:
         verify_kwargs["speaker_profile"] = speaker_profile
     passed, post_master_reason = verify_post_master_invariants(
         check_mono,
-        mono_raw,
+        ref_for_verify,
         selected_route,
-        sr,
+        out_sr,
         **verify_kwargs,
     )
     post_master_abstained = (not passed) or (render_err is not None)
 
     if post_master_abstained:
         selected_route = abstain_to_least_intervention(previews, failed_route=selected_route)
-        master_audio, _ = engine.render_route_audio(
-            selected_route,
-            raw_data,
-            sr,
-            speaker_profile_id=speaker_id,
-            allow_research_restore=allow_research_restore,
+        if selected_route == "preserve":
+            master_audio = work_native.copy()
+            out_sr = orig_sr
+            orig_for_floor = orig_2d
+        else:
+            master_audio, _ = _render_with_stereo_mode(selected_route, raw_48k, sr)
+            out_sr = sr
+            orig_for_floor = orig_48k
+
+    # 5.5 Opt-in post-enhancement pro_repair & ambience floor
+    want_post_surgical = bool(
+        repair_flags.get("deplosive")
+        or repair_flags.get("declick")
+        or repair_flags.get("mouthDeclick")
+        or repair_flags.get("mouth_declick")
+    )
+    if want_post_surgical:
+        master_audio, _ = apply_pro_repair_chain(
+            master_audio,
+            out_sr,
+            ProRepairOptions(
+                declip=False,
+                deplosive=bool(repair_flags.get("deplosive", False)),
+                declick=bool(
+                    repair_flags.get(
+                        "declick",
+                        repair_flags.get("mouthDeclick", repair_flags.get("mouth_declick", False)),
+                    )
+                ),
+                room_tone_floor=False,
+            ),
+        )
+    if repair_flags.get("tonal_restoration") or repair_flags.get("tonalRestoration"):
+        tilts = [
+            measure_speech_tilt(master_audio[ch], out_sr) for ch in range(master_audio.shape[0])
+        ]
+        agg_tilt = aggregate_speech_tilt(tilts)
+        if agg_tilt.measured and agg_tilt.is_correction:
+            cap = float(config.finishing.max_tonal_gain_db)
+            low_g, pres_g, bril_g = solve_tonal_gains(
+                out_sr,
+                agg_tilt.low_shelf_db,
+                agg_tilt.presence_db,
+                agg_tilt.brilliance_db,
+                max_low_cut_db=min(TILT_MAX_LOW_CUT_DB, cap),
+                max_low_lift_db=min(TILT_MAX_LOW_LIFT_DB, cap),
+                max_presence_db=min(TILT_MAX_PRESENCE_LIFT_DB, cap),
+                max_brilliance_db=min(TILT_MAX_BRILLIANCE_LIFT_DB, cap),
+            )
+            master_audio = np.ascontiguousarray(
+                np.vstack(
+                    [
+                        apply_tonal_restoration(
+                            master_audio[ch], out_sr, low_g, pres_g, bril_g, max_abs_gain_db=cap
+                        )
+                        for ch in range(master_audio.shape[0])
+                    ]
+                ),
+                dtype=np.float32,
+            )
+    if repair_flags.get("deess"):
+        master_audio = np.ascontiguousarray(
+            np.vstack(
+                [
+                    apply_split_band_deesser(
+                        master_audio[ch], out_sr, max_reduction_db=config.finishing.max_deess_gr_db
+                    )[0]
+                    for ch in range(master_audio.shape[0])
+                ]
+            ),
+            dtype=np.float32,
+        )
+    if repair_flags.get("level_rider") or repair_flags.get("levelRider"):
+        master_audio = np.ascontiguousarray(
+            np.vstack(
+                [
+                    apply_dialogue_leveler(
+                        master_audio[ch],
+                        out_sr,
+                        max_gain_reduction_db=config.finishing.max_compression_gr_db,
+                    )[0]
+                    for ch in range(master_audio.shape[0])
+                ]
+            ),
+            dtype=np.float32,
+        )
+    if ambience_floor_db is not None and orig_for_floor.shape == master_audio.shape:
+        master_audio = apply_room_tone_floor(
+            orig_for_floor,
+            master_audio,
+            out_sr,
+            target_floor_db=float(ambience_floor_db),
         )
 
-    # 6. True-Peak Limiting (mastering) — bypass when abstaining to preserve
-    # so clean speech passes through unmodified without unnecessary peak reduction.
-    if selected_route == "preserve":
+    # 6. Delivery preset or True-Peak Limiting (bypass limiter on unmodified preserve)
+    has_explicit_dsp = bool(
+        any(repair_flags.values())
+        or ambience_floor_db is not None
+        or (hpf_enabled is not False and (hpf_cutoff_hz is not None or hpf_enabled is True))
+    )
+    if delivery_preset is not None:
+        master_final, _ = apply_delivery_loudness(
+            master_audio,
+            out_sr,
+            delivery_preset,
+            input_lufs=source_loudness.integrated_lufs,
+        )
+    elif selected_route == "preserve" and not has_explicit_dsp:
         master_final = master_audio
     else:
-        limiter_in = master_audio if master_audio.ndim == 2 else master_audio.reshape(1, -1)
         res = apply_lookahead_limiter(
-            limiter_in, sr, ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp
+            master_audio, out_sr, ceiling_dbtp=config.loudness.true_peak_ceiling_dbtp
         )
-        master_final = res.limited_waveform if master_audio.ndim == 2 else res.limited_waveform[0]
+        master_final = res.limited_waveform
 
-    # 7. Write temp audio and serialize report
+    # 7. Write temp audio with TPDF dither and populate loudness stats in report
     tmp_out = workspace.root / "master.wav"
     out_buf_data = master_final if master_final.ndim == 2 else master_final.reshape(1, -1)
-    channel_mode = audio_buf.channel_mode if master_final.ndim == 2 else ChannelMode.MONO
-    out_buffer = AudioBuffer(data=out_buf_data, sample_rate=sr, channel_mode=channel_mode)
+    channel_mode = audio_buf.channel_mode if out_buf_data.shape[0] == 2 else ChannelMode.MONO
+    out_buffer = AudioBuffer(data=out_buf_data, sample_rate=out_sr, channel_mode=channel_mode)
+    final_loudness = measure_loudness_and_peaks(out_buf_data, out_sr)
     encode_audio(
         out_buffer,
         tmp_out,
-        output_bit_depth="pcm24",
+        output_bit_depth=config.input.output_bit_depth,
+        dither=config.loudness.dither,
+        seed_context=workspace.job_id,
     )
 
     from dataclasses import asdict
@@ -2072,16 +2709,20 @@ def _run_smart_safe(
         channels=media.channels,
         sample_rate=media.sample_rate,
         duration_s=media.duration_s,
+        integrated_lufs=source_loudness.integrated_lufs,
+        true_peak_dbtp=source_loudness.true_peak_dbtp,
     )
     out_sha = hash_file(tmp_out)
-    out_samples = master_final.shape[-1]
+    out_samples = out_buf_data.shape[-1]
     out_stats = MediaStats(
         path=str(out_path),
         sha256=out_sha,
         samples=out_samples,
-        channels=master_final.shape[0] if master_final.ndim == 2 else 1,
-        sample_rate=sr,
-        duration_s=out_samples / float(sr),
+        channels=out_buf_data.shape[0],
+        sample_rate=out_sr,
+        duration_s=out_samples / float(out_sr),
+        integrated_lufs=final_loudness.integrated_lufs,
+        true_peak_dbtp=final_loudness.true_peak_dbtp,
     )
 
     report = HawaVoCleanReport(

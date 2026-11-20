@@ -44,25 +44,60 @@ export function NeuralHaloCanvas({
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
     ro?.observe(canvas);
 
-    const analyser = playing ? getPlayer().getAnalyser() : null;
-    const freqBuf = analyser ? new Uint8Array(Math.min(analyser.frequencyBinCount || 64, 128)) : null;
+    let analyser: AnalyserNode | null = playing ? getPlayer().getAnalyser() : null;
+    let freqBuf: Uint8Array<ArrayBuffer> | null = analyser
+      ? new Uint8Array(Math.min(analyser.frequencyBinCount || 64, 128))
+      : null;
+    let timeBuf: Float32Array<ArrayBuffer> | null = analyser
+      ? new Float32Array(Math.min(analyser.fftSize || 1024, 1024))
+      : null;
 
     let raf = 0;
     let phase = 0;
+    let smoothEnergy = 0.16 + strength * 0.12;
 
     const draw = (): void => {
       const w = canvas.width;
       const h = canvas.height;
       ctx.clearRect(0, 0, w, h);
 
-      let energy = 0.14 + strength * 0.12;
-      if (analyser && freqBuf && typeof analyser.getByteFrequencyData === 'function') {
-        analyser.getByteFrequencyData(freqBuf);
-        let sum = 0;
-        for (let i = 2; i < Math.min(48, freqBuf.length); i++) sum += freqBuf[i] ?? 0;
-        const avg = sum / (Math.min(48, freqBuf.length) * 255);
-        energy = Math.min(1, 0.18 + avg * 2.2);
+      if (playing && !analyser) {
+        analyser = getPlayer().getAnalyser();
+        if (analyser) {
+          freqBuf = new Uint8Array(Math.min(analyser.frequencyBinCount || 64, 128));
+          timeBuf = new Float32Array(Math.min(analyser.fftSize || 1024, 1024));
+        }
       }
+
+      let targetEnergy = 0.14 + strength * 0.12;
+      if (playing && analyser) {
+        let specAvg = 0;
+        if (freqBuf && typeof analyser.getByteFrequencyData === 'function') {
+          analyser.getByteFrequencyData(freqBuf);
+          let sum = 0;
+          const count = Math.min(48, freqBuf.length);
+          for (let i = 2; i < count; i++) sum += freqBuf[i] ?? 0;
+          specAvg = count > 2 ? sum / ((count - 2) * 255) : 0;
+        }
+        let rms = 0;
+        if (timeBuf && typeof analyser.getFloatTimeDomainData === 'function') {
+          analyser.getFloatTimeDomainData(timeBuf);
+          let sq = 0;
+          for (let i = 0; i < timeBuf.length; i++) {
+            const s = timeBuf[i] ?? 0;
+            sq += s * s;
+          }
+          rms = Math.sqrt(sq / Math.max(1, timeBuf.length));
+        }
+        const liveNr = getPlayer().getLiveMeterLevels().nrDb;
+        const nrBoost =
+          deck === 'cleaned' && typeof liveNr === 'number' && Number.isFinite(liveNr) && liveNr > 0
+            ? Math.min(0.4, liveNr / 36)
+            : 0;
+        targetEnergy = Math.min(1, 0.18 + Math.max(specAvg * 2.2, rms * 3.4) + nrBoost);
+      }
+      smoothEnergy = smoothEnergy * 0.76 + targetEnergy * 0.24;
+      const energy = smoothEnergy;
 
       const rgb = deltaMode
         ? [255, 107, 139]

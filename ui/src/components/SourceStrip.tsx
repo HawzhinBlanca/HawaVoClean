@@ -9,12 +9,13 @@ import {
   cancelUpload,
   extractAndLoadTrack,
   ingestDataTransfer,
-  ingestFile,
+  ingestFiles,
   openFileDialog,
   rateWarning,
   sourceFailureLabel,
   useResolveClip,
 } from '../state/actions';
+import { useI18n } from '../state/i18n';
 import { useStore, jobInFlight } from '../state/store';
 import { IconCancel, IconClip, IconDrop, IconFolder, IconWarn } from './Icons';
 
@@ -177,6 +178,7 @@ function DropRejectionNote() {
 }
 
 export function SourceStrip() {
+  const { t } = useI18n();
   const bridge = getBridge();
   const hasResolve = Boolean(bridge.resolve);
   const isWeb = bridge.host === 'web';
@@ -333,18 +335,31 @@ export function SourceStrip() {
       ) : (
         <span />
       )}
-      <button
-        className="btn"
-        type="button"
-        aria-disabled={disabled || undefined}
-        title={why ?? 'Choose an audio or video file to clean'}
-        onClick={() => {
-          if (!disabled) onOpen();
-        }}
-      >
-        <IconFolder />
-        <span>Open file…</span>
-      </button>
+      <div className="source-open-btns" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+        <button
+          className="btn"
+          type="button"
+          aria-disabled={disabled || undefined}
+          title={why ?? 'Choose an audio or video file to clean'}
+          onClick={() => {
+            if (!disabled) onOpen();
+          }}
+        >
+          <IconFolder />
+          <span>Open file…</span>
+        </button>
+        <button
+          className="btn btn-batch-pick"
+          type="button"
+          aria-disabled={disabled || undefined}
+          title={why ?? 'Select multiple audio or video files to process as a batch queue'}
+          onClick={() => {
+            if (!disabled) onOpen();
+          }}
+        >
+          <span>{t.batchBtn}</span>
+        </button>
+      </div>
       {uploading ? (
         <UploadProgress />
       ) : analyzing && source ? (
@@ -382,15 +397,16 @@ export function SourceStrip() {
             <input
               ref={inputRef}
               type="file"
+              multiple
               accept={ACCEPT_ATTR}
               disabled={disabled}
               // D1 · a `title` is not a label: the control had no accessible
               // name at all in the tree.
-              aria-label="Choose an audio or video file to clean"
-              title="Choose a file"
+              aria-label="Choose audio or video files to clean"
+              title="Choose one or more files"
               onChange={(e) => {
-                const f = e.currentTarget.files?.item(0);
-                if (f) void ingestFile(f);
+                const picked = e.currentTarget.files ? Array.from(e.currentTarget.files) : [];
+                if (picked.length > 0) void ingestFiles(picked);
                 e.currentTarget.value = '';
               }}
             />

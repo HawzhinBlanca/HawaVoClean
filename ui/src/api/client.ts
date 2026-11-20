@@ -304,8 +304,11 @@ export class EngineClient {
       outputPath: j.outputPath ?? j.output_path,
       reportPath: j.reportPath ?? j.report_path,
     }));
+    const batchId = res.batchId ?? res.batch_id;
     return {
       schemaVersion: res.schemaVersion ?? res.schema_version ?? 1,
+      ...(typeof batchId === 'string' && batchId ? { batchId } : {}),
+      ...(typeof res.execution === 'string' ? { execution: res.execution } : {}),
       jobs,
     };
   }
@@ -671,6 +674,11 @@ export class EngineClient {
     if (req.profile !== undefined) body.profile = req.profile;
     if (req.strength !== undefined) body.strength = req.strength;
     if (req.ambienceFloorDb !== undefined) body.ambienceFloorDb = req.ambienceFloorDb;
+    if (req.hpfEnabled !== undefined) body.hpfEnabled = req.hpfEnabled;
+    if (req.hpfCutoffHz !== undefined) body.hpfCutoffHz = req.hpfCutoffHz;
+    if (req.deliveryPreset !== undefined) body.deliveryPreset = req.deliveryPreset;
+    if (req.stereoMode !== undefined) body.stereoMode = req.stereoMode;
+    if (req.proRepair !== undefined) body.proRepair = req.proRepair;
 
     const raw = await this.json<Record<string, unknown>>(
       '/api/v1/preview',

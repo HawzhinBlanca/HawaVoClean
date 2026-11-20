@@ -578,6 +578,21 @@ def cmd_process(args: argparse.Namespace) -> int:
             )
         if parsed_repair:
             pro_repair = parsed_repair
+    raw_no_hpf = bool(getattr(args, "no_hpf", False))
+    raw_hpf_cutoff_hz = getattr(args, "hpf_cutoff_hz", None)
+    hpf_enabled: bool | None = None
+    hpf_cutoff_hz: float | None = None
+    if raw_no_hpf:
+        hpf_enabled = False
+    elif raw_hpf_cutoff_hz is not None:
+        val_hpf = float(raw_hpf_cutoff_hz)
+        if not math.isfinite(val_hpf) or not 20.0 <= val_hpf <= 250.0:
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                "--hpf-cutoff-hz must be a finite number between 20.0 and 250.0",
+            )
+        hpf_enabled = True
+        hpf_cutoff_hz = val_hpf
     time_range: tuple[float, float] | None = None
     if strength is not None and (
         not math.isfinite(float(strength)) or not 0.1 <= float(strength) <= 1.0
@@ -652,6 +667,12 @@ def cmd_process(args: argparse.Namespace) -> int:
                 time_range=time_range,
                 clean_only=clean_only,
                 on_progress=on_progress,
+                ambience_floor_db=ambience_floor_db,
+                delivery_preset=delivery_preset,
+                pro_repair=pro_repair,
+                stereo_mode=stereo_mode,
+                hpf_enabled=hpf_enabled,
+                hpf_cutoff_hz=hpf_cutoff_hz,
             )
         elif needs_edit_blend:
             _run_natural_edit_blend(
@@ -665,6 +686,8 @@ def cmd_process(args: argparse.Namespace) -> int:
                 delivery_preset=delivery_preset,
                 pro_repair=pro_repair,
                 stereo_mode=stereo_mode,
+                hpf_enabled=hpf_enabled,
+                hpf_cutoff_hz=hpf_cutoff_hz,
             )
         elif passes == 1:
             # The default path: byte-identical to a run before --passes
@@ -688,6 +711,8 @@ def cmd_process(args: argparse.Namespace) -> int:
                 delivery_preset=delivery_preset,
                 pro_repair=pro_repair,
                 stereo_mode=stereo_mode,
+                hpf_enabled=hpf_enabled,
+                hpf_cutoff_hz=hpf_cutoff_hz,
             )
         else:
             run_multipass(
@@ -827,6 +852,24 @@ def _surgical_encode_params(
     return "pcm24", False
 
 
+def _match_segment_loudness(
+    reference: np.ndarray[Any, np.dtype[np.float32]],
+    candidate: np.ndarray[Any, np.dtype[np.float32]],
+    sample_rate: int,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Level-match ``candidate`` to ``reference`` so splices and partial blends never step-jump."""
+    ref_m = measure_loudness_and_peaks(reference, sample_rate)
+    cand_m = measure_loudness_and_peaks(candidate, sample_rate)
+    if ref_m.integrated_lufs <= -65.0 or cand_m.integrated_lufs <= -65.0:
+        return candidate
+    gain_db = float(np.clip(ref_m.integrated_lufs - cand_m.integrated_lufs, -24.0, 24.0))
+    if abs(gain_db) < 0.05:
+        return candidate
+    return np.ascontiguousarray(
+        candidate.astype(np.float64) * (10.0 ** (gain_db / 20.0)), dtype=np.float32
+    )
+
+
 def _run_natural_edit_blend(
     *,
     args: argparse.Namespace,
@@ -839,6 +882,8 @@ def _run_natural_edit_blend(
     delivery_preset: DeliveryPreset | None = None,
     pro_repair: dict[str, bool] | None = None,
     stereo_mode: str | None = None,
+    hpf_enabled: bool | None = None,
+    hpf_cutoff_hz: float | None = None,
 ) -> None:
     """Run single-pass natural cleanup with wet/dry strength and/or surgical time_range."""
     from hawavoclean.audio.decode import decode_audio
@@ -848,6 +893,7 @@ def _run_natural_edit_blend(
     from hawavoclean.audio.types import AudioBuffer
     from hawavoclean.enhancement.studio_pro import blend_wet_dry
     from hawavoclean.finishing.limiter import apply_lookahead_limiter
+    from hawavoclean.finishing.loudness import compute_static_master_gain
     from hawavoclean.publication import publish_output_generation
     from hawavoclean.report.schema import HawaVoCleanReport, MediaStats
     from hawavoclean.report.summary import generate_human_summary
@@ -877,6 +923,8 @@ def _run_natural_edit_blend(
             pad_end = min(original.samples, end_idx + pad_samples)
             tmp_in = work / "slice_in.wav"
             sf.write(tmp_in, orig_data[:, pad_start:pad_end].T, sr, subtype="FLOAT")
+            # Use match_input inside the slice so the processed window never steps +-10 dB
+            # away from the surrounding untouched context.
             report = run_pipeline(
                 input_path=tmp_in,
                 output_path=tmp_out,
@@ -889,15 +937,18 @@ def _run_natural_edit_blend(
                 original_input_path=getattr(args, "original_input_path", None) or str(source),
                 allow_research_restore=allow_research_restore,
                 ambience_floor_db=ambience_floor_db,
+                delivery_preset="match_input",
                 pro_repair=pro_repair,
                 stereo_mode=stereo_mode,
+                hpf_enabled=hpf_enabled,
+                hpf_cutoff_hz=hpf_cutoff_hz,
             )
             enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
             enh_window = resample_audio(enh_raw.T, enh_sr, sr, pad_end - pad_start)
             inner_start = start_idx - pad_start
             inner_end = end_idx - pad_start
             orig_seg = orig_data[:, start_idx:end_idx]
-            enh_seg = enh_window[:, inner_start:inner_end]
+            enh_seg = _match_segment_loudness(orig_seg, enh_window[:, inner_start:inner_end], sr)
             if strength < 1.0:
                 blended_seg = np.stack(
                     [
@@ -909,7 +960,12 @@ def _run_natural_edit_blend(
             else:
                 blended_seg = enh_seg
             result = _splice_time_range_waveform(orig_data, blended_seg, start_idx, end_idx, sr)
+            if delivery_preset is not None:
+                in_lufs = measure_loudness_and_peaks(orig_data, sr).integrated_lufs
+                result, _ = apply_delivery_loudness(result, sr, delivery_preset, input_lufs=in_lufs)
         else:
+            # Render wet track level-matched to input so partial strength blends
+            # two loudness-aligned signals before final mastering/delivery.
             report = run_pipeline(
                 input_path=args.input,
                 output_path=tmp_out,
@@ -922,11 +978,16 @@ def _run_natural_edit_blend(
                 original_input_path=getattr(args, "original_input_path", None),
                 allow_research_restore=allow_research_restore,
                 ambience_floor_db=ambience_floor_db,
+                delivery_preset="match_input",
                 pro_repair=pro_repair,
                 stereo_mode=stereo_mode,
+                hpf_enabled=hpf_enabled,
+                hpf_cutoff_hz=hpf_cutoff_hz,
             )
             enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
-            enh_full = resample_audio(enh_raw.T, enh_sr, sr, original.samples)
+            enh_full = _match_segment_loudness(
+                orig_data, resample_audio(enh_raw.T, enh_sr, sr, original.samples), sr
+            )
             result = np.stack(
                 [
                     blend_wet_dry(orig_data[ch], enh_full[ch], sr, strength)
@@ -938,7 +999,19 @@ def _run_natural_edit_blend(
                 in_lufs = measure_loudness_and_peaks(orig_data, sr).integrated_lufs
                 result, _ = apply_delivery_loudness(result, sr, delivery_preset, input_lufs=in_lufs)
             else:
-                result = apply_lookahead_limiter(result, sr).limited_waveform
+                blended_m = measure_loudness_and_peaks(result, sr)
+                target_lufs = -16.0 if original.channels > 1 else -19.0
+                gain_db = compute_static_master_gain(
+                    measured_lufs=blended_m.integrated_lufs,
+                    target_lufs=target_lufs,
+                    current_true_peak_dbtp=blended_m.true_peak_dbtp,
+                    true_peak_ceiling_dbtp=-1.0,
+                    max_limiter_reduction_db=2.5,
+                )
+                gained = np.ascontiguousarray(
+                    result * float(10.0 ** (gain_db / 20.0)), dtype=np.float32
+                )
+                result = apply_lookahead_limiter(gained, sr, ceiling_dbtp=-1.0).limited_waveform
 
         tmp_final = work / "final.wav"
         output_bit_depth, use_dither = _surgical_encode_params(source, time_range)
@@ -1019,6 +1092,12 @@ def _run_source_restoration(
     time_range: tuple[float, float] | None,
     clean_only: bool,
     on_progress: Any,
+    ambience_floor_db: float | None = None,
+    delivery_preset: DeliveryPreset | None = None,
+    pro_repair: dict[str, bool] | None = None,
+    stereo_mode: str | None = None,
+    hpf_enabled: bool | None = None,
+    hpf_cutoff_hz: float | None = None,
 ) -> None:
     """Execute guarded 48 kHz source-conditioned bandwidth restoration (LavaSR v2)."""
     from hawavoclean.audio.decode import decode_audio
@@ -1160,6 +1239,12 @@ def _run_source_restoration(
             mode="natural",
             clean_only=True,
             original_input_path=orig_path_str,
+            ambience_floor_db=ambience_floor_db,
+            delivery_preset="match_input" if time_range is not None else delivery_preset,
+            pro_repair=pro_repair,
+            stereo_mode=stereo_mode,
+            hpf_enabled=hpf_enabled,
+            hpf_cutoff_hz=hpf_cutoff_hz,
         )
         clean_raw, clean_sr = sf.read(tmp_clean_out, dtype="float32", always_2d=True)
         cleaned_48k = (
@@ -1377,12 +1462,22 @@ def _run_source_restoration(
             )
             inner_start = start_idx - pad_start
             inner_end = end_idx - pad_start
-            rest_seg = shipped_window[:, inner_start:inner_end]
+            rest_seg = _match_segment_loudness(
+                orig_data[:, start_idx:end_idx],
+                shipped_window[:, inner_start:inner_end],
+                sr,
+            )
             result = _splice_time_range_waveform(orig_data, rest_seg, start_idx, end_idx, sr)
             out_sr = sr
         else:
             result = shipped_48k
             out_sr = work_sr
+
+        if delivery_preset is not None:
+            from hawavoclean.audio.delivery import apply_delivery_loudness
+
+            in_lufs = measure_loudness_and_peaks(orig_data, sr).integrated_lufs
+            result, _ = apply_delivery_loudness(result, out_sr, delivery_preset, input_lufs=in_lufs)
 
         tmp_final = work_dir / "final.wav"
         output_bit_depth, use_dither = _surgical_encode_params(source, time_range)
@@ -2785,6 +2880,18 @@ def _main() -> None:
         "--pro-repair",
         default=None,
         help="Optional comma-separated surgical dialogue repair flags (declip,deplosive,declick)",
+    )
+    p_proc.add_argument(
+        "--hpf-cutoff-hz",
+        type=float,
+        default=None,
+        help="Optional high-pass filter cutoff in Hz ([20.0, 250.0])",
+    )
+    p_proc.add_argument(
+        "--no-hpf",
+        action="store_true",
+        default=False,
+        help="Disable high-pass / subsonic filtering",
     )
     p_proc.add_argument(
         "--overwrite", action="store_true", help="Overwrite destination output if exists"

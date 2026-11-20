@@ -1,6 +1,6 @@
 [package]
 name = "hawavoclean-daw"
-version = "0.1.0"
+version = "3.3.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "HawaVoClean native VST3 / CLAP real-time dialogue restoration plugin"
@@ -17,7 +17,7 @@ onnx = ["dep:ort"]
 
 [dependencies]
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
-ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "coreml"] }
 
 [profile.release]
 lto = "thin"

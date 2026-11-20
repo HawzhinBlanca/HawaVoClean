@@ -1189,7 +1189,7 @@ def test_v1_override_workflow_lifecycle(client: TestClient, work: Path) -> None:
     data1 = override1.json()
     assert data1["job_id"] == job_id
     assert data1["unit_index"] == 0
-    assert data1["new_decision"] == "reverted"
+    assert data1["new_decision"] == "REVERTED"
     assert data1["override"] == "force_original"
 
     # Force enhanced on unit 0
@@ -1200,7 +1200,7 @@ def test_v1_override_workflow_lifecycle(client: TestClient, work: Path) -> None:
     )
     assert override2.status_code == 200
     data2 = override2.json()
-    assert data2["new_decision"] == "enhanced"
+    assert data2["new_decision"] == "ENHANCED"
     assert data2["override"] == "force_enhanced"
 
     # Auto restore on unit 0

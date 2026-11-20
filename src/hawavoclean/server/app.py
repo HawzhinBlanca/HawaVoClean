@@ -149,6 +149,7 @@ from hawavoclean.server.unit_restitch import (
     SliceCacheBudgetError,
     UnitOverrideAction,
     UnitSliceStore,
+    load_job_restitch_meta,
     load_unit_slice,
     read_slice_truncated_marker,
     restitch_master_with_overrides,
@@ -1867,6 +1868,31 @@ def _default_export_dest_path(
     return resolve_client_output_path(str(candidate))
 
 
+def _measure_source_lufs_for_export(source_resolved: Path) -> float | None:
+    """Measure integrated LUFS of ``source_resolved`` in bounded RAM (WAV or FFmpeg media)."""
+    import math
+
+    try:
+        src_meas, _ = measure_delivery_loudness_streaming(source_resolved)
+        val = float(src_meas.integrated_lufs)
+        return val if math.isfinite(val) and val > -69.0 else None
+    except Exception:
+        pass
+    try:
+        from hawavoclean.audio.decode import iter_decode_audio
+        from hawavoclean.finishing.loudness import StreamingLoudnessMeter
+
+        src_probe = probe_audio(source_resolved, max_sample_rate=384000)
+        meter = StreamingLoudnessMeter(src_probe.sample_rate, src_probe.channels)
+        for chunk in iter_decode_audio(src_probe):
+            meter.push(chunk.data)
+        meas = meter.finish(1.0)
+        val = float(meas.integrated_lufs)
+        return val if math.isfinite(val) and val > -69.0 else None
+    except Exception:
+        return None
+
+
 def _run_delivery_export(
     *,
     master_resolved: Path,
@@ -1877,7 +1903,15 @@ def _run_delivery_export(
     preserve_metadata: bool,
 ) -> dict[str, Any]:
     """Apply optional streaming delivery loudness and export the master artifact synchronously."""
-    if delivery_preset != "match_input":
+    match_input_lufs: float | None = None
+    if (
+        delivery_preset == "match_input"
+        and source_resolved is not None
+        and source_resolved.is_file()
+    ):
+        match_input_lufs = _measure_source_lufs_for_export(source_resolved)
+
+    if delivery_preset != "match_input" or match_input_lufs is not None:
         dest_resolved.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix=".hawa-export-", dir=dest_resolved.parent
@@ -1887,6 +1921,7 @@ def _run_delivery_export(
                 master_resolved,
                 tmp_master,
                 delivery_preset,
+                input_lufs=match_input_lufs,
             )
             if preserve_metadata and fmt in ("wav24", "wav32f"):
                 master_meta = extract_wav_metadata_chunks(master_resolved)
@@ -2030,6 +2065,11 @@ def _live_restitch_unit_override(
 
     out_path = public_output_path(str(snapshot["output_path"]))
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_bwf: dict[bytes, bytes] = {}
+    if out_path.is_file():
+        with contextlib.suppress(Exception):
+            existing_bwf = extract_wav_metadata_chunks(out_path)
+    job_meta = load_job_restitch_meta(job_slice_dir) or {}
     with tempfile.TemporaryDirectory(prefix=".hawa-restitch-", dir=out_path.parent) as tmp_dir:
         tmp_master = Path(tmp_dir) / "restitched.wav"
         restitch_res = restitch_master_with_overrides(
@@ -2043,7 +2083,12 @@ def _live_restitch_unit_override(
         )
         master_sha256 = str(restitch_res["master_sha256"])
 
-        if restitch_channels == 1 and output_channels == 2:
+        restitched_channels = int(restitch_res.get("channels", restitch_channels))
+        if (
+            restitched_channels == 1
+            and output_channels == 2
+            and str(job_meta.get("stereo_mode", "")) != "true_stereo_ms"
+        ):
             mono_wave, mono_sr = sf.read(str(tmp_master), dtype="float32", always_2d=True)
             stereo_data = np.ascontiguousarray(
                 np.vstack((mono_wave[:, 0], mono_wave[:, 0])), dtype=np.float32
@@ -2058,6 +2103,11 @@ def _live_restitch_unit_override(
             )
             tmp_master = tmp_stereo
             master_sha256 = hash_file(tmp_master)
+
+        if existing_bwf:
+            with contextlib.suppress(Exception):
+                if inject_wav_metadata_chunks(tmp_master, existing_bwf):
+                    master_sha256 = hash_file(tmp_master)
 
         final_audio, final_sr = sf.read(str(tmp_master), dtype="float32", always_2d=True)
         final_meas = measure_loudness_and_peaks(
@@ -2658,6 +2708,11 @@ def create_app(
             strength=req.strength,
             ambience_floor_db=req.ambience_floor_db,
             include_perceptual_mos=req.include_perceptual_mos,
+            hpf_enabled=req.hpf_enabled,
+            hpf_cutoff_hz=req.hpf_cutoff_hz,
+            pro_repair=req.pro_repair,
+            stereo_mode=req.stereo_mode,
+            delivery_preset=req.delivery_preset,
         )
         try:
             async with app.state.preview_slots:
@@ -3081,33 +3136,39 @@ def create_app(
                 # Restore the automatic guard decision (remove override)
                 unit.pop("manual_override", None)
                 # Restore original decision from guard verdict
-                verdict = unit.get("guard_a_verdict", "FAIL")
+                verdict = str(unit.get("guard_a_verdict", "FAIL")).upper()
                 if verdict == "PASS":
-                    unit["final_decision"] = "enhanced"
+                    unit["final_decision"] = "ENHANCED"
                     unit["decision_reason"] = "guard PASS (auto restored)"
                 else:
-                    unit["final_decision"] = "reverted"
+                    unit["final_decision"] = "REVERTED"
                     unit["decision_reason"] = f"guard {verdict} (auto restored)"
             elif req.decision == "force_original":
-                unit["final_decision"] = "reverted"
+                unit["final_decision"] = "REVERTED"
                 unit["manual_override"] = "force_original"
                 unit["decision_reason"] = f"manual override: force_original (was {old_decision})"
             elif req.decision == "force_enhanced":
-                unit["final_decision"] = "enhanced"
+                unit["final_decision"] = "ENHANCED"
                 unit["manual_override"] = "force_enhanced"
                 unit["decision_reason"] = f"manual override: force_enhanced (was {old_decision})"
             elif req.decision == "custom_strength":
                 assert req.strength is not None
                 unit["chosen_strength"] = round(float(req.strength), 4)
-                unit["final_decision"] = "reverted" if req.strength == 0.0 else "enhanced"
+                unit["final_decision"] = "REVERTED" if req.strength == 0.0 else "ENHANCED"
                 unit["manual_override"] = f"custom_strength:{req.strength:.3f}"
                 unit["decision_reason"] = (
                     f"manual override: custom_strength={req.strength} (was {old_decision})"
                 )
 
-            # Update the summary counts
-            enhanced_count = sum(1 for u in updated_units if u.get("final_decision") == "enhanced")
-            reverted_count = sum(1 for u in updated_units if u.get("final_decision") == "reverted")
+            # Update the summary counts (case-insensitive across legacy/canonical decisions)
+            enhanced_count = sum(
+                1 for u in updated_units if str(u.get("final_decision", "")).upper() == "ENHANCED"
+            )
+            reverted_count = sum(
+                1
+                for u in updated_units
+                if str(u.get("final_decision", "")).upper() in ("REVERTED", "ORIGINAL_REVERTED")
+            )
             if "summary" in updated_report and isinstance(updated_report["summary"], dict):
                 updated_report["summary"]["enhanced"] = enhanced_count
                 updated_report["summary"]["reverted"] = reverted_count
@@ -3185,6 +3246,8 @@ def create_app(
         submit_delivery_preset: str | None = None
         submit_stereo_mode: str | None = None
         submit_pro_repair: dict[str, bool] | None = None
+        submit_hpf_enabled: bool | None = None
+        submit_hpf_cutoff_hz: float | None = None
         if isinstance(req.strategy, SmartSafeStrategyV1):
             smart_cap = next(
                 (c for c in capabilities_v1().capabilities if c.capability_id == "smart_safe"),
@@ -3201,6 +3264,12 @@ def create_app(
             submit_mode = "smart_safe"
             submit_profile = "production"
             submit_speaker_id = req.strategy.speaker_profile_id
+            submit_ambience_floor_db = req.strategy.ambience_floor_db
+            submit_delivery_preset = req.strategy.delivery_preset
+            submit_stereo_mode = req.strategy.stereo_mode
+            submit_pro_repair = req.strategy.pro_repair
+            submit_hpf_enabled = req.strategy.hpf_enabled
+            submit_hpf_cutoff_hz = req.strategy.hpf_cutoff_hz
             output_profile = "smart_safe"
         elif isinstance(req.strategy, SeparationStrategyV1):
             from hawavoclean.separation import probe_runtime
@@ -3250,6 +3319,8 @@ def create_app(
                 submit_delivery_preset = req.strategy.delivery_preset
                 submit_stereo_mode = req.strategy.stereo_mode
                 submit_pro_repair = req.strategy.pro_repair
+                submit_hpf_enabled = req.strategy.hpf_enabled
+                submit_hpf_cutoff_hz = req.strategy.hpf_cutoff_hz
                 output_profile = "restore_source"
             elif req.strategy.route in {
                 "production",
@@ -3275,6 +3346,8 @@ def create_app(
                 submit_delivery_preset = req.strategy.delivery_preset
                 submit_stereo_mode = req.strategy.stereo_mode
                 submit_pro_repair = req.strategy.pro_repair
+                submit_hpf_enabled = req.strategy.hpf_enabled
+                submit_hpf_cutoff_hz = req.strategy.hpf_cutoff_hz
                 output_profile = req.strategy.route
             else:
                 raise ApiError(
@@ -3367,6 +3440,8 @@ def create_app(
                             delivery_preset=submit_delivery_preset,
                             stereo_mode=submit_stereo_mode,
                             pro_repair=submit_pro_repair,
+                            hpf_enabled=submit_hpf_enabled,
+                            hpf_cutoff_hz=submit_hpf_cutoff_hz,
                             speaker_id=submit_speaker_id,
                             cutoff_hz=submit_cutoff_hz,
                             idempotency_key=item_keys[index],

@@ -43,6 +43,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import scipy.ndimage
+import scipy.signal
 
 from hawavoclean.alignment.delay import estimate_gcc_phat_delay
 from hawavoclean.audio.resample import resample_audio
@@ -479,6 +481,94 @@ def _chunked_overlap_add(
     return out
 
 
+def _preserve_high_band_air(
+    original: np.ndarray[Any, np.dtype[np.float32]],
+    dereverbed: np.ndarray[Any, np.dtype[np.float32]],
+    sample_rate: int,
+    *,
+    crossover_hz: float = 7200.0,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Preserve natural >8 kHz consonant air on >16 kHz inputs via LR4 crossover + HF envelope.
+
+    Uses a complementary zero-phase 4th-order Linkwitz-Riley split (2nd-order
+    Butterworth passed through ``sosfiltfilt``, whose squared magnitudes satisfy
+    ``|H_lp(w)|^2 + |H_hp(w)|^2 == 1`` everywhere with zero phase shift) and
+    tracks the 3-7 kHz dereverbed/original envelope ratio so dry consonant air
+    is preserved while late high-frequency reverb tails stay suppressed.
+    """
+    n = len(original)
+    if sample_rate <= _INTERNAL_SAMPLE_RATE or n < 128 or crossover_hz >= 0.45 * sample_rate:
+        return np.ascontiguousarray(dereverbed, dtype=np.float32)
+
+    orig64 = original.astype(np.float64, copy=False)
+    derev_aligned = estimate_gcc_phat_delay(
+        original,
+        _match_length(dereverbed, n),
+        sample_rate=sample_rate,
+        max_delay_ms=50.0,
+    ).aligned_candidate[:n]
+    derev64 = derev_aligned.astype(np.float64, copy=False)
+
+    sos_lp = scipy.signal.butter(2, crossover_hz, btype="lowpass", fs=sample_rate, output="sos")
+    sos_hp = scipy.signal.butter(2, crossover_hz, btype="highpass", fs=sample_rate, output="sos")
+
+    derev_low = np.asarray(scipy.signal.sosfiltfilt(sos_lp, derev64), dtype=np.float64)
+    orig_low = np.asarray(scipy.signal.sosfiltfilt(sos_lp, orig64), dtype=np.float64)
+    orig_high = np.asarray(scipy.signal.sosfiltfilt(sos_hp, orig64), dtype=np.float64)
+
+    # Track gain-matched envelope ratio in the upper-mid reference band (2.5-6.5 kHz)
+    # strictly inside the low-passed (<crossover_hz) band so >8 kHz consonant air
+    # cannot leak into orig_ref and falsely attenuate itself.
+    ref_lo = min(2500.0, crossover_hz * 0.4)
+    ref_hi = min(6500.0, crossover_hz * 0.9)
+    sos_ref = scipy.signal.butter(
+        4, [ref_lo, ref_hi], btype="bandpass", fs=sample_rate, output="sos"
+    )
+    orig_ref = np.asarray(scipy.signal.sosfiltfilt(sos_ref, orig_low), dtype=np.float64)
+    derev_ref = np.asarray(scipy.signal.sosfiltfilt(sos_ref, derev_low), dtype=np.float64)
+
+    env_win = max(16, int(round(sample_rate * 0.020)))
+    smooth_win = max(8, int(round(sample_rate * 0.010)))
+    orig_env = np.sqrt(
+        np.maximum(
+            scipy.ndimage.uniform_filter1d(orig_ref * orig_ref, size=env_win, mode="nearest"), 0.0
+        )
+        + 1e-12
+    )
+    derev_env = np.sqrt(
+        np.maximum(
+            scipy.ndimage.uniform_filter1d(derev_ref * derev_ref, size=env_win, mode="nearest"),
+            0.0,
+        )
+        + 1e-12
+    )
+    # Also include low-band envelope fallback when input has strong >8 kHz air without 2.5-6.5 kHz content
+    orig_low_env = np.sqrt(
+        np.maximum(
+            scipy.ndimage.uniform_filter1d(orig_low * orig_low, size=env_win, mode="nearest"), 0.0
+        )
+        + 1e-12
+    )
+    derev_low_env = np.sqrt(
+        np.maximum(
+            scipy.ndimage.uniform_filter1d(derev_low * derev_low, size=env_win, mode="nearest"),
+            0.0,
+        )
+        + 1e-12
+    )
+    ref_active = orig_env > np.maximum(1e-4, 0.02 * orig_low_env)
+    ratio_ref = np.clip(derev_env / (orig_env + 1e-9), 0.0, 1.0)
+    ratio_low = np.clip(derev_low_env / (orig_low_env + 1e-9), 0.0, 1.0)
+    hf_gain = np.where(ref_active, ratio_ref, ratio_low)
+    hf_gain = scipy.ndimage.uniform_filter1d(hf_gain, size=smooth_win, mode="nearest")
+    hf_gain = np.clip(hf_gain, 0.0, 1.0)
+
+    combined = derev_low + orig_high * hf_gain
+    if not bool(np.all(np.isfinite(combined))):
+        return np.ascontiguousarray(dereverbed, dtype=np.float32)
+    return np.ascontiguousarray(combined, dtype=np.float32)
+
+
 def _blend_strength(
     original: np.ndarray[Any, np.dtype[np.float32]],
     dereverbed: np.ndarray[Any, np.dtype[np.float32]],
@@ -588,9 +678,11 @@ class NeuralDereverberator:
         return derev_48k, False, None
 
     def warmup(self) -> None:
-        """Load weights and run a short silent forward pass to compile device kernels."""
+        """Load weights and run a short non-zero test tone so device/MPS kernels compile."""
         self._ensure_model()
-        dummy = np.zeros(_BWE_SAMPLE_RATE // 2, dtype=np.float32)
+        n_warm = _BWE_SAMPLE_RATE // 2
+        t = np.arange(n_warm, dtype=np.float32) / float(_BWE_SAMPLE_RATE)
+        dummy = np.ascontiguousarray(1e-3 * np.sin(2.0 * np.pi * 440.0 * t), dtype=np.float32)
         self.dereverb(dummy, _BWE_SAMPLE_RATE)
 
     def dereverb(
@@ -675,6 +767,13 @@ class NeuralDereverberator:
             derev_out = resample_audio(
                 derev_48k, _BWE_SAMPLE_RATE, sample_rate, target_samples=orig_len
             )
+            if not bwe_applied:
+                derev_out = _preserve_high_band_air(
+                    orig32,
+                    derev_out,
+                    sample_rate,
+                    crossover_hz=self._bwe_cutoff_hz,
+                )
         else:
             derev_out = resample_audio(
                 derev_16k, _INTERNAL_SAMPLE_RATE, sample_rate, target_samples=orig_len

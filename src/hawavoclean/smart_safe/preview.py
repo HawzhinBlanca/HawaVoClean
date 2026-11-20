@@ -14,8 +14,10 @@ This module enforces True-10 invariants for Smart Safe:
 from __future__ import annotations
 
 import inspect
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import TypeVar, cast
 
 import numpy as np
 from scipy import signal
@@ -322,12 +324,40 @@ def _enhancement_hf_artifact_ok(
     )
 
 
-def _instantiate_enhancer(enhancer_class: type[object]) -> object:
-    """Construct an enhancer core using ``device="auto"`` when supported."""
+_ROUTE_ENHANCER_CACHE_LOCK = threading.Lock()
+_ROUTE_ENHANCER_CACHE: dict[tuple[type[object], str | None], object] = {}
+
+
+def _instantiate_enhancer(enhancer_class: type[object], *, device: str | None = None) -> object:
+    """Construct an enhancer core using ``device`` (default ``"auto"``) when supported."""
     params = inspect.signature(enhancer_class.__init__).parameters
     if "device" in params:
-        return enhancer_class(device="auto")  # type: ignore[call-arg]
+        dev = "auto" if device is None else device
+        return enhancer_class(device=dev)  # type: ignore[call-arg]
     return enhancer_class()
+
+
+_EnhancerT = TypeVar("_EnhancerT")
+
+
+def _get_cached_enhancer(
+    enhancer_class: type[_EnhancerT], *, device: str | None = None
+) -> _EnhancerT:
+    """Return a module-level cached stateless enhancer instance for Smart Safe route reuse."""
+    key: tuple[type[object], str | None] = (enhancer_class, device)
+    with _ROUTE_ENHANCER_CACHE_LOCK:
+        cached = _ROUTE_ENHANCER_CACHE.get(key)
+        if cached is not None:
+            return cast(_EnhancerT, cached)
+    instance = _instantiate_enhancer(enhancer_class, device=device)
+    with _ROUTE_ENHANCER_CACHE_LOCK:
+        existing = _ROUTE_ENHANCER_CACHE.get(key)
+        if existing is not None:
+            return cast(_EnhancerT, existing)
+        if len(_ROUTE_ENHANCER_CACHE) >= 16:
+            _ROUTE_ENHANCER_CACHE.clear()
+        _ROUTE_ENHANCER_CACHE[key] = instance
+    return cast(_EnhancerT, instance)
 
 
 def passes_perceptual_artifact_check(
@@ -540,8 +570,8 @@ class SmartSafePreviewEngine:
             reg = CORE_REGISTRY.get(STUDIO_PRO_CORE_ID)
             if reg is None:
                 return audio.copy(), f"studio_pro core ({STUDIO_PRO_CORE_ID}) is not registered"
-            enhancer = _instantiate_enhancer(reg.enhancer_class)
-            return enhancer.enhance(audio, sample_rate).waveform, None  # type: ignore[attr-defined]
+            enhancer = _get_cached_enhancer(reg.enhancer_class)
+            return enhancer.enhance(audio, sample_rate).waveform, None
 
         def _render_dereverb() -> tuple[np.ndarray, str | None]:
             from hawavoclean.enhancement.factory import CORE_REGISTRY
@@ -549,8 +579,8 @@ class SmartSafePreviewEngine:
             reg = CORE_REGISTRY.get(STUDIO_DEREVERB_CORE_ID)
             if reg is None:
                 return audio.copy(), f"dereverb core ({STUDIO_DEREVERB_CORE_ID}) is not registered"
-            enhancer = _instantiate_enhancer(reg.enhancer_class)
-            return enhancer.enhance(audio, sample_rate).waveform, None  # type: ignore[attr-defined]
+            enhancer = _get_cached_enhancer(reg.enhancer_class)
+            return enhancer.enhance(audio, sample_rate).waveform, None
 
         def _render_restore(*, enrolled: bool) -> tuple[np.ndarray, str | None]:
             if not allow_restore:
@@ -595,27 +625,41 @@ class SmartSafePreviewEngine:
             "preserve": ("preserve", lambda: (audio.copy(), None)),
             "production": (
                 "production",
-                lambda: (WienerSpectralEnhancer().enhance(audio, sample_rate).waveform, None),
+                lambda: (
+                    _get_cached_enhancer(WienerSpectralEnhancer)
+                    .enhance(audio, sample_rate)
+                    .waveform,
+                    None,
+                ),
             ),
             "studio": (
                 "studio core",
-                lambda: (StudioVoiceCore(device="cpu").enhance(audio, sample_rate).waveform, None),
+                lambda: (
+                    _get_cached_enhancer(StudioVoiceCore, device="cpu")
+                    .enhance(audio, sample_rate)
+                    .waveform,
+                    None,
+                ),
             ),
             "studio_pro": ("studio_pro core", _render_studio_pro),
             "dereverb": ("dereverb core", _render_dereverb),
             "lowband": (
                 "lowband core",
                 lambda: (
-                    StudioLowBandCore(device="cpu").enhance(audio, sample_rate).waveform,
+                    _get_cached_enhancer(StudioLowBandCore, device="cpu")
+                    .enhance(audio, sample_rate)
+                    .waveform,
                     None,
                 ),
             ),
             "lowband_then_production": (
                 "lowband+production",
                 lambda: (
-                    WienerSpectralEnhancer()
+                    _get_cached_enhancer(WienerSpectralEnhancer)
                     .enhance(
-                        StudioLowBandCore(device="cpu").enhance(audio, sample_rate).waveform,
+                        _get_cached_enhancer(StudioLowBandCore, device="cpu")
+                        .enhance(audio, sample_rate)
+                        .waveform,
                         sample_rate,
                     )
                     .waveform,

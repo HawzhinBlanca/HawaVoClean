@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { redoAction, undoAction } from '../state/actions';
 import { useI18n } from '../state/i18n';
 import { deriveEnginePhase, deriveWorkspacePhase } from '../state/machines';
 import { useReducedMotion } from '../state/reducedMotion';
-import { useStore } from '../state/store';
+import { jobInFlight, useStore } from '../state/store';
 import { Led, type LedState } from './Led';
 
 const HOST_LABEL: Record<string, string> = {
@@ -188,8 +189,17 @@ export function Header() {
   const setWorkspaceMode = useStore((s) => s.setWorkspaceMode);
   const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
   const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
+  const rackUndo = useStore((s) => s.rackUndo);
+  const overrideUndo = useStore((s) => s.overrideUndo);
+  const spectralUndo = useStore((s) => s.spectralUndo);
+  const running = useStore((s) => jobInFlight(s.job));
   const reduced = useReducedMotion() === true;
   const { locale, setLocale, t } = useI18n();
+
+  const canUndo =
+    !running && (rackUndo.canUndo || overrideUndo.canUndo || spectralUndo.canUndo);
+  const canRedo =
+    !running && (rackUndo.canRedo || overrideUndo.canRedo || spectralUndo.canRedo);
 
   const switchMode = (next: 'simple' | 'pro'): void => {
     if (next === workspaceMode) return;
@@ -271,35 +281,57 @@ export function Header() {
           the one engine transition that is *not* covered elsewhere — the
           engine going away — is announced assertively by the offline banner. */}
       <div className="header-right">
+        <div className="hdr-undo-group" role="group" aria-label="History">
+          <button
+            type="button"
+            className="hdr-undo-btn"
+            disabled={!canUndo}
+            onClick={undoAction}
+            aria-label={`${t.undo} (Cmd+Z)`}
+            title={`${t.undo} (⌘Z)`}
+          >
+            <span aria-hidden="true">↶</span>
+          </button>
+          <button
+            type="button"
+            className="hdr-undo-btn"
+            disabled={!canRedo}
+            onClick={redoAction}
+            aria-label={`${t.redo} (Cmd+Shift+Z)`}
+            title={`${t.redo} (⇧⌘Z)`}
+          >
+            <span aria-hidden="true">↷</span>
+          </button>
+        </div>
         <div className="hdr-mode-group" role="group" aria-label="Workspace mode">
           <button
             type="button"
             className={`hdr-mode-btn${workspaceMode === 'simple' ? ' active' : ''}`}
             aria-pressed={workspaceMode === 'simple'}
             onClick={() => switchMode('simple')}
-            title="Simple Studio — effortless 3-step voice cleanup"
+            title={t.modeSimpleTitle}
           >
-            Simple
+            {t.modeSimple}
           </button>
           <button
             type="button"
             className={`hdr-mode-btn${workspaceMode === 'pro' ? ' active' : ''}`}
             aria-pressed={workspaceMode === 'pro'}
             onClick={() => switchMode('pro')}
-            title="Pro Studio — spectrogram, spectrum HPF, surgical repair, and broadcast delivery"
+            title={t.modeProTitle}
           >
-            Pro Studio
+            {t.modePro}
           </button>
         </div>
         <button
           type="button"
           className="hdr-ai-btn"
           aria-expanded={assistantDrawerOpen}
-          aria-label="Open AI Audio Assistant"
-          title="AI Audio Assistant (Cmd+K)"
+          aria-label={t.aiAssistant}
+          title={t.aiAssistantTitle}
           onClick={() => setAssistantDrawerOpen(!assistantDrawerOpen)}
         >
-          <span>AI Assistant</span>
+          <span>{t.aiAssistant}</span>
           <kbd className="hdr-ai-kbd" aria-hidden="true">
             ⌘K
           </kbd>

@@ -59,6 +59,8 @@ export interface LiveMeterLevels {
   shortTermLufs: number;
   peakDbfs: number;
   truePeakHoldDbfs: number;
+  /** Instantaneous noise reduction in dB (Original RMS - Cleaned RMS) when both decks play; null otherwise. */
+  nrDb?: number | null;
 }
 
 /**
@@ -109,6 +111,8 @@ type FaultListener = (fault: DeckFault) => void;
 type DeckState = 'empty' | 'loading' | 'ready';
 
 const FADE_S = 0.006;
+const SEEK_THROTTLE_MS = 32;
+const SEEK_DUCK_S = 0.01;
 const SYNC_TOLERANCE_S = 0.035;
 const METER_FLOOR_DB = -70;
 const MOMENTARY_WINDOW_MS = 400;
@@ -146,6 +150,27 @@ export class DualPlayer {
   private deltaInverter: GainNode | null = null;
   private deltaGain: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
+  /** ITU-R BS.1770 K-weighting filter chain feeding a dedicated metering analyser (unconnected to destination). */
+  private kStage1: BiquadFilterNode | null = null;
+  private kStage2: BiquadFilterNode | null = null;
+  private kAnalyser: AnalyserNode | null = null;
+  /** Per-deck pre-fader analysers for real-time Noise Reduction (NR dB Removed) measurement. */
+  private origAnalyser: AnalyserNode | null = null;
+  private cleanAnalyser: AnalyserNode | null = null;
+  /** Raw bytes and decoded PCM AudioBuffers for 0-sample-skew AudioBufferSourceNode playback. */
+  private rawBytes: Record<Deck, ArrayBuffer | null> = { original: null, cleaned: null };
+  private buffers: Record<Deck, AudioBuffer | null> = { original: null, cleaned: null };
+  private bufferSources: Record<Deck, AudioBufferSourceNode | null> = { original: null, cleaned: null };
+  private decodeInFlight: Record<Deck, Promise<void> | null> = { original: null, cleaned: null };
+  private bufferSourceToken = 0;
+  private bufferPlaying = false;
+  private bufferStartCtxTime = 0;
+  private bufferStartOffset = 0;
+  private bufferPosition = 0;
+  /** Scrubbing seek throttle state (32 ms cadence with 10 ms momentary gain ducking). */
+  private lastSeekAppliedMs = 0;
+  private pendingScrubTime: number | null = null;
+  private seekThrottleTimer: ReturnType<typeof setTimeout> | null = null;
   private active: Deck = 'original';
   private state: Record<Deck, DeckState> = { original: 'empty', cleaned: 'empty' };
   /** The engine URL the deck has been asked to hold (null = retired). */
@@ -199,7 +224,12 @@ export class DualPlayer {
   private loopRangeValue: [number, number] | null = null;
   private wetDryMixValue = 1.0;
   private meterBuf: Float32Array<ArrayBuffer> | null = null;
-  private lufsHistory: Array<{ t: number; ms: number }> = [];
+  private kMeterBuf: Float32Array<ArrayBuffer> | null = null;
+  private origMeterBuf: Float32Array<ArrayBuffer> | null = null;
+  private cleanMeterBuf: Float32Array<ArrayBuffer> | null = null;
+  private lufsHistory: Array<{ t: number; ms: number; weight: number }> = [];
+  private lastMeterSampleTime = 0;
+  private smoothNrDb = 0;
   private peakHoldDbfs = METER_FLOOR_DB;
 
   constructor() {
@@ -320,13 +350,50 @@ export class DualPlayer {
    * Element-level mute is the pre-graph A/B mechanism and still works; a
    * webview without WebAudio should lose the fade, not the sound.
    */
+  private stopBufferSources(): void {
+    this.bufferSourceToken += 1;
+    this.bufferPlaying = false;
+    for (const deck of ['original', 'cleaned'] as const) {
+      const src = this.bufferSources[deck];
+      this.bufferSources[deck] = null;
+      if (src) {
+        src.onended = null;
+        try {
+          src.stop();
+        } catch {
+          // Ignore if already stopped.
+        }
+        try {
+          src.disconnect();
+        } catch {
+          // Ignore disconnect errors.
+        }
+      }
+    }
+  }
+
+  private clearSeekThrottle(): void {
+    if (this.seekThrottleTimer !== null) {
+      clearTimeout(this.seekThrottleTimer);
+      this.seekThrottleTimer = null;
+    }
+    this.pendingScrubTime = null;
+  }
+
   private teardownGraph(closeContext = false): void {
+    this.stopBufferSources();
+    this.clearSeekThrottle();
     try {
       this.gains?.original.disconnect();
       this.gains?.cleaned.disconnect();
       this.deltaInverter?.disconnect();
       this.deltaGain?.disconnect();
       this.analyser?.disconnect();
+      this.kStage1?.disconnect();
+      this.kStage2?.disconnect();
+      this.kAnalyser?.disconnect();
+      this.origAnalyser?.disconnect();
+      this.cleanAnalyser?.disconnect();
     } catch {
       // Ignore disconnect errors on torn-down or closed contexts.
     }
@@ -336,6 +403,11 @@ export class DualPlayer {
     this.deltaInverter = null;
     this.deltaGain = null;
     this.analyser = null;
+    this.kStage1 = null;
+    this.kStage2 = null;
+    this.kAnalyser = null;
+    this.origAnalyser = null;
+    this.cleanAnalyser = null;
     if (closeContext && ctx && ctx.state !== 'closed') {
       try {
         void ctx.close().catch(() => undefined);
@@ -391,6 +463,55 @@ export class DualPlayer {
     deltaInverter.connect(deltaGain);
     deltaGain.connect(analyser);
 
+    // ITU-R BS.1770 K-weighting chain ahead of dedicated LUFS metering analyser
+    // (Stage 1: high-shelf +4.0 dB @ 1681 Hz, Stage 2: high-pass 38 Hz Q=0.5).
+    // Never connected to ctx.destination so audition audio remains completely uncolored.
+    let kStage1: BiquadFilterNode | null = null;
+    let kStage2: BiquadFilterNode | null = null;
+    let kAnalyser: AnalyserNode | null = null;
+    let origAnalyser: AnalyserNode | null = null;
+    let cleanAnalyser: AnalyserNode | null = null;
+
+    if (typeof ctx.createBiquadFilter === 'function') {
+      try {
+        const s1 = ctx.createBiquadFilter();
+        s1.type = 'highshelf';
+        s1.frequency.value = 1681.97;
+        s1.gain.value = 4.0;
+        s1.Q.value = 0.7071;
+
+        const s2 = ctx.createBiquadFilter();
+        s2.type = 'highpass';
+        s2.frequency.value = 38.135;
+        s2.Q.value = 0.5003;
+
+        const ka = ctx.createAnalyser();
+        if (ka && ka !== analyser) {
+          ka.fftSize = 4096;
+          ka.smoothingTimeConstant = 0;
+          analyser.connect(s1);
+          s1.connect(s2);
+          s2.connect(ka);
+          kStage1 = s1;
+          kStage2 = s2;
+          kAnalyser = ka;
+        }
+
+        const oa = ctx.createAnalyser();
+        const ca = ctx.createAnalyser();
+        if (oa && ca && oa !== analyser && ca !== analyser && oa !== ca) {
+          oa.fftSize = 2048;
+          ca.fftSize = 2048;
+          origSrc.connect(oa);
+          cleanSrc.connect(ca);
+          origAnalyser = oa;
+          cleanAnalyser = ca;
+        }
+      } catch {
+        // Fail soft if biquad filters or secondary analysers are unsupported.
+      }
+    }
+
     for (const deck of ['original', 'cleaned'] as const) {
       // Element-level mute was the pre-graph A/B mechanism; from here on the
       // gain nodes own it (a muted element also mutes its source node).
@@ -401,7 +522,147 @@ export class DualPlayer {
     this.deltaInverter = deltaInverter;
     this.deltaGain = deltaGain;
     this.analyser = analyser;
+    this.kStage1 = kStage1;
+    this.kStage2 = kStage2;
+    this.kAnalyser = kAnalyser;
+    this.origAnalyser = origAnalyser;
+    this.cleanAnalyser = cleanAnalyser;
     this.applyTargetGain(true);
+
+    // Trigger background decode for any in-memory decks already fetched.
+    for (const deck of ['original', 'cleaned'] as const) {
+      if (this.rawBytes[deck] && !this.buffers[deck] && this.state[deck] === 'ready') {
+        void this.decodeDeckBuffer(deck, this.epoch[deck]);
+      }
+    }
+  }
+
+  /**
+   * Decode in-memory audio bytes into an AudioBuffer for sample-locked
+   * AudioBufferSourceNode playback (0-sample skew for Delta & Wet/Dry Mix).
+   */
+  private decodeDeckBuffer(deck: Deck, gen: number): Promise<void> {
+    if (!this.ctx || typeof this.ctx.decodeAudioData !== 'function') {
+      return Promise.resolve();
+    }
+    const raw = this.rawBytes[deck];
+    if (!raw || raw.byteLength === 0) return Promise.resolve();
+    if (this.buffers[deck]) return Promise.resolve();
+    if (this.decodeInFlight[deck]) return this.decodeInFlight[deck]!;
+
+    const ctx = this.ctx;
+    let p: Promise<void> | null = null;
+    p = (async () => {
+      try {
+        // Slice a fresh copy because decodeAudioData detaches its ArrayBuffer.
+        const copy = raw.slice(0);
+        const decoded = await ctx.decodeAudioData(copy);
+        if (this.disposed || this.epoch[deck] !== gen || this.ctx !== ctx) return;
+        if (decoded && Number.isFinite(decoded.duration) && decoded.duration > 0) {
+          this.buffers[deck] = decoded;
+        }
+      } catch {
+        // Seamless fallback to <audio> element streaming when decodeAudioData fails.
+      } finally {
+        if (this.decodeInFlight[deck] === p) {
+          this.decodeInFlight[deck] = null;
+        }
+      }
+    })();
+    this.decodeInFlight[deck] = p;
+    return p;
+  }
+
+  private canUseBufferMode(): boolean {
+    if (!this.ctx || this.ctx.state === 'closed' || !this.gains) return false;
+    if (typeof this.ctx.createBufferSource !== 'function') return false;
+    if (!this.buffers[this.active]) return false;
+    const other: Deck = this.active === 'original' ? 'cleaned' : 'original';
+    if (this.state[other] === 'ready' && !this.buffers[other]) return false;
+    return true;
+  }
+
+  private startBufferPlaybackAt(timelinePos: number): boolean {
+    if (!this.canUseBufferMode() || !this.ctx || !this.gains) return false;
+    this.stopBufferSources();
+    for (const deck of ['original', 'cleaned'] as const) {
+      this.els[deck].pause();
+    }
+    const ctx = this.ctx;
+    const t0 = ctx.currentTime + 0.005;
+    const token = ++this.bufferSourceToken;
+    let startedActive = false;
+
+    for (const deck of ['original', 'cleaned'] as const) {
+      if (this.state[deck] !== 'ready') continue;
+      const buf = this.buffers[deck];
+      if (!buf) continue;
+      const deckOffset = this.timelineToDeck(deck, timelinePos);
+      if (deckOffset >= buf.duration) continue;
+
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.gains[deck]);
+      if (deck === 'original' && this.origAnalyser) {
+        src.connect(this.origAnalyser);
+      } else if (deck === 'cleaned') {
+        if (this.deltaInverter) src.connect(this.deltaInverter);
+        if (this.cleanAnalyser) src.connect(this.cleanAnalyser);
+      }
+
+      src.onended = () => {
+        if (this.disposed || token !== this.bufferSourceToken || !this.bufferPlaying) return;
+        if (deck !== this.active) return;
+        if (this.loopEnabledFlag) {
+          const bounds = this.effectiveLoopBounds();
+          const restartAt = bounds ? bounds[0] : 0;
+          this.restartLoopAt(restartAt);
+          return;
+        }
+        this.wantPlaying = false;
+        this.bufferPosition = this.duration;
+        this.pauseAll();
+        this.emit();
+      };
+
+      // Schedule both decks on the exact same AudioContext.currentTime frame (0-sample skew).
+      src.start(t0, deckOffset);
+      this.bufferSources[deck] = src;
+      if (deck === this.active) startedActive = true;
+    }
+
+    if (!startedActive) {
+      this.stopBufferSources();
+      return false;
+    }
+    this.bufferStartCtxTime = t0;
+    this.bufferStartOffset = timelinePos;
+    this.bufferPosition = timelinePos;
+    this.bufferPlaying = true;
+    return true;
+  }
+
+  /** Momentary 10 ms gain ducking during rapid scrub seeks to eliminate click/stutter. */
+  private duckForSeek(): void {
+    if (!this.gains || !this.ctx || this.ctx.state === 'closed') return;
+    try {
+      const now = this.ctx.currentTime;
+      const branch = this.computeBranchGains();
+      const half = SEEK_DUCK_S * 0.4;
+      const duckNode = (param: AudioParam, target: number): void => {
+        param.cancelScheduledValues(now);
+        param.setValueAtTime(param.value, now);
+        param.linearRampToValueAtTime(0, now + half);
+        param.linearRampToValueAtTime(target, now + SEEK_DUCK_S);
+      };
+      duckNode(this.gains.original.gain, branch.original);
+      duckNode(this.gains.cleaned.gain, branch.cleaned);
+      if (this.deltaGain) {
+        duckNode(this.deltaGain.gain, branch.delta);
+      }
+    } catch {
+      // Ignore if context closed mid-duck.
+    }
   }
 
   setLoudnessMatch(enabled: boolean, lufsIn: number | null, lufsOut: number | null): void {
@@ -607,7 +868,12 @@ export class DualPlayer {
 
   private timelineToDeck(deck: Deck, timelineTime: number): number {
     const raw = timelineTime - this.offset[deck];
-    const d = this.els[deck].duration;
+    const bufDur = this.buffers[deck]?.duration;
+    const elDur = this.els[deck].duration;
+    const d =
+      typeof bufDur === 'number' && Number.isFinite(bufDur) && bufDur > 0
+        ? bufDur
+        : elDur;
     if (Number.isFinite(d) && d > 0) {
       return Math.max(0, Math.min(d, raw));
     }
@@ -615,6 +881,12 @@ export class DualPlayer {
   }
 
   private restartLoopAt(loopStart: number): void {
+    this.bufferPosition = loopStart;
+    if (this.wantPlaying && this.canUseBufferMode()) {
+      this.startBufferPlaybackAt(loopStart);
+      this.emit();
+      return;
+    }
     for (const deck of ['original', 'cleaned'] as const) {
       if (this.state[deck] !== 'ready') continue;
       const el = this.els[deck];
@@ -627,8 +899,9 @@ export class DualPlayer {
   }
 
   /**
-   * Live broadcast-style LUFS (Momentary 400ms, Short-Term 3s) and Peak / True-Peak Hold
-   * computed from the AnalyserNode float time-domain buffer.
+   * Live broadcast-style ITU-R BS.1770 K-weighted LUFS (Momentary 400ms, Short-Term 3s),
+   * Peak / True-Peak Hold, and real-time Noise Reduction (NR dB Removed) comparing
+   * Original vs Cleaned energy.
    * Returns clean finite floor (-70) when silent or when no AudioContext exists.
    */
   getLiveMeterLevels(): LiveMeterLevels {
@@ -639,6 +912,7 @@ export class DualPlayer {
         shortTermLufs: METER_FLOOR_DB,
         peakDbfs: METER_FLOOR_DB,
         truePeakHoldDbfs: this.peakHoldDbfs,
+        nrDb: null,
       };
     }
 
@@ -654,21 +928,20 @@ export class DualPlayer {
         shortTermLufs: METER_FLOOR_DB,
         peakDbfs: METER_FLOOR_DB,
         truePeakHoldDbfs: this.peakHoldDbfs,
+        nrDb: null,
       };
     }
 
+    // Unweighted sample peak + 4-point Catmull-Rom cubic inter-sample true peak.
     const buf = this.meterBuf;
-    let sumSq = 0;
     let samplePeak = 0;
     for (let i = 0; i < buf.length; i++) {
       const raw = buf[i] ?? 0;
       const s = Number.isFinite(raw) ? raw : 0;
-      sumSq += s * s;
       const a = Math.abs(s);
       if (a > samplePeak) samplePeak = a;
     }
 
-    // 4-point Catmull-Rom cubic inter-sample peak estimation around loud samples.
     let truePeak = samplePeak;
     if (samplePeak > 1e-4 && buf.length >= 4) {
       const thresh = samplePeak * 0.65;
@@ -693,7 +966,41 @@ export class DualPlayer {
       }
     }
 
-    const ms = buf.length > 0 ? sumSq / buf.length : 0;
+    // K-weighted signal for ITU-R BS.1770 LUFS integration (fallback to main analyser when biquad unsupported).
+    let kBuf: Float32Array<ArrayBuffer> = buf;
+    if (this.kAnalyser) {
+      const kSize = this.kAnalyser.fftSize > 0 ? this.kAnalyser.fftSize : 2048;
+      if (!this.kMeterBuf || this.kMeterBuf.length !== kSize) {
+        this.kMeterBuf = new Float32Array(kSize);
+      }
+      try {
+        this.kAnalyser.getFloatTimeDomainData(this.kMeterBuf);
+        kBuf = this.kMeterBuf;
+      } catch {
+        kBuf = buf;
+      }
+    }
+
+    // Deduplicate overlapping AnalyserNode time-domain samples based on elapsed wall time.
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const sr = this.sampleRate;
+    const bufDurationMs = (kBuf.length / Math.max(8000, sr)) * 1000;
+    const dtMs = this.lastMeterSampleTime > 0 ? nowMs - this.lastMeterSampleTime : 0;
+    const freshCount =
+      dtMs > 0 && dtMs < bufDurationMs
+        ? Math.min(kBuf.length, Math.max(1, Math.round((dtMs / 1000) * sr)))
+        : kBuf.length;
+    this.lastMeterSampleTime = nowMs;
+
+    const startIdx = Math.max(0, kBuf.length - freshCount);
+    let sumSq = 0;
+    for (let i = startIdx; i < kBuf.length; i++) {
+      const raw = kBuf[i] ?? 0;
+      const s = Number.isFinite(raw) ? raw : 0;
+      sumSq += s * s;
+    }
+    const ms = freshCount > 0 ? sumSq / freshCount : 0;
+
     const peakDbfs =
       samplePeak > 1e-7 ? Math.max(METER_FLOOR_DB, 20 * Math.log10(samplePeak)) : METER_FLOOR_DB;
     const truePeakDbfs =
@@ -702,8 +1009,7 @@ export class DualPlayer {
       this.peakHoldDbfs = truePeakDbfs;
     }
 
-    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    this.lufsHistory.push({ t: nowMs, ms });
+    this.lufsHistory.push({ t: nowMs, ms, weight: freshCount });
     // Prune entries older than the 3-second Short-Term window.
     const cutoffShort = nowMs - SHORT_TERM_WINDOW_MS;
     while (this.lufsHistory.length > 1 && (this.lufsHistory[0]?.t ?? nowMs) < cutoffShort) {
@@ -711,18 +1017,20 @@ export class DualPlayer {
     }
 
     const cutoffMomentary = nowMs - MOMENTARY_WINDOW_MS;
-    let momSum = 0;
-    let momCount = 0;
-    let shortSum = 0;
+    let momWeightedSum = 0;
+    let momWeight = 0;
+    let shortWeightedSum = 0;
+    let shortWeight = 0;
     for (const entry of this.lufsHistory) {
-      shortSum += entry.ms;
+      shortWeightedSum += entry.ms * entry.weight;
+      shortWeight += entry.weight;
       if (entry.t >= cutoffMomentary) {
-        momSum += entry.ms;
-        momCount += 1;
+        momWeightedSum += entry.ms * entry.weight;
+        momWeight += entry.weight;
       }
     }
-    const momentaryMs = momCount > 0 ? momSum / momCount : ms;
-    const shortTermMs = this.lufsHistory.length > 0 ? shortSum / this.lufsHistory.length : ms;
+    const momentaryMs = momWeight > 0 ? momWeightedSum / momWeight : ms;
+    const shortTermMs = shortWeight > 0 ? shortWeightedSum / shortWeight : ms;
 
     const momentaryLufs =
       momentaryMs > 1e-7
@@ -733,11 +1041,53 @@ export class DualPlayer {
         ? Math.max(METER_FLOOR_DB, -0.691 + 10 * Math.log10(shortTermMs))
         : METER_FLOOR_DB;
 
+    // Instantaneous Noise Reduction (NR dB Removed): compare Original vs level-matched Cleaned RMS.
+    let nrDb: number | null = null;
+    if (this.bothDecksReady() && this.origAnalyser && this.cleanAnalyser) {
+      const oSize = this.origAnalyser.fftSize > 0 ? this.origAnalyser.fftSize : 2048;
+      const cSize = this.cleanAnalyser.fftSize > 0 ? this.cleanAnalyser.fftSize : 2048;
+      if (!this.origMeterBuf || this.origMeterBuf.length !== oSize) {
+        this.origMeterBuf = new Float32Array(oSize);
+      }
+      if (!this.cleanMeterBuf || this.cleanMeterBuf.length !== cSize) {
+        this.cleanMeterBuf = new Float32Array(cSize);
+      }
+      try {
+        this.origAnalyser.getFloatTimeDomainData(this.origMeterBuf);
+        this.cleanAnalyser.getFloatTimeDomainData(this.cleanMeterBuf);
+        let oSq = 0;
+        let cSq = 0;
+        for (let i = 0; i < this.origMeterBuf.length; i++) {
+          const v = this.origMeterBuf[i] ?? 0;
+          if (Number.isFinite(v)) oSq += v * v;
+        }
+        for (let i = 0; i < this.cleanMeterBuf.length; i++) {
+          const v = this.cleanMeterBuf[i] ?? 0;
+          if (Number.isFinite(v)) cSq += v * v;
+        }
+        const rmsOrig = Math.sqrt(oSq / Math.max(1, this.origMeterBuf.length));
+        const rmsClean =
+          Math.sqrt(cSq / Math.max(1, this.cleanMeterBuf.length)) * this.getTargetGain('cleaned');
+        if (rmsOrig > 1e-5) {
+          const rawNr = Math.max(0, Math.min(48, 20 * Math.log10(rmsOrig / Math.max(1e-6, rmsClean))));
+          const alpha = rawNr > this.smoothNrDb ? 0.35 : 0.14;
+          this.smoothNrDb = this.smoothNrDb * (1 - alpha) + rawNr * alpha;
+          nrDb = this.smoothNrDb;
+        } else {
+          this.smoothNrDb *= 0.85;
+          nrDb = this.smoothNrDb > 0.05 ? this.smoothNrDb : 0;
+        }
+      } catch {
+        nrDb = null;
+      }
+    }
+
     return {
       momentaryLufs,
       shortTermLufs,
       peakDbfs,
       truePeakHoldDbfs: this.peakHoldDbfs,
+      nrDb,
     };
   }
 
@@ -876,6 +1226,18 @@ export class DualPlayer {
       this.deltaModeEnabled = false;
       this.loopRangeValue = null;
       this.loopEnabledFlag = false;
+      this.resetPeakHold();
+      this.lufsHistory = [];
+      this.lastMeterSampleTime = 0;
+      this.smoothNrDb = 0;
+      this.bufferPosition = 0;
+    }
+    this.rawBytes[deck] = null;
+    this.buffers[deck] = null;
+    this.decodeInFlight[deck] = null;
+    if (this.bufferPlaying) {
+      this.bufferPosition = this.time;
+      this.stopBufferSources();
     }
     // Preserve timeline position when reloading the currently active cleaned deck
     // (e.g. live unit re-stitch or spectral box repair while playing/scrubbed),
@@ -1004,7 +1366,19 @@ export class DualPlayer {
             const res = await fetch(url, { cache: 'no-store' });
             if (res.ok) {
               const blob = await res.blob();
-              if (this.epoch[deck] === gen) src = URL.createObjectURL(blob);
+              if (this.epoch[deck] === gen) {
+                src = URL.createObjectURL(blob);
+                if (typeof blob.arrayBuffer === 'function') {
+                  try {
+                    const ab = await blob.arrayBuffer();
+                    if (this.epoch[deck] === gen && ab && ab.byteLength > 0) {
+                      this.rawBytes[deck] = ab;
+                    }
+                  } catch {
+                    // Fail soft to <audio> blob playback.
+                  }
+                }
+              }
             }
           } catch {
             // The pull died where the probe had succeeded: the engine went
@@ -1041,6 +1415,9 @@ export class DualPlayer {
     // The element has already moved off the old resource; the URL handle can go.
     if (stale && stale !== src) URL.revokeObjectURL(stale);
     this.state[deck] = 'ready';
+    if (this.rawBytes[deck] && this.ctx && typeof this.ctx.decodeAudioData === 'function') {
+      void this.decodeDeckBuffer(deck, this.epoch[deck]);
+    }
     this.afterAttach(deck);
   }
 
@@ -1129,6 +1506,13 @@ export class DualPlayer {
     this.pendingSeekTime[deck] = null;
     this.seekOnMeta[deck] = null;
     this.state[deck] = 'empty';
+    this.rawBytes[deck] = null;
+    this.buffers[deck] = null;
+    this.decodeInFlight[deck] = null;
+    if (this.bufferPlaying) {
+      this.bufferPosition = this.time;
+      this.stopBufferSources();
+    }
     this.deltaModeEnabled = false;
     if (deck === 'original') {
       this.loopRangeValue = null;
@@ -1245,6 +1629,13 @@ export class DualPlayer {
     this.active = deck;
     this.pendingActive = null;
     this.deltaModeEnabled = false;
+    // In sample-locked AudioBufferSourceNode mode both decks are already running
+    // on the exact same AudioContext frame — switching A/B is a pure 6 ms gain crossfade.
+    if (this.bufferPlaying) {
+      this.applyTargetGain();
+      this.emit();
+      return;
+    }
     const from = this.els[prev];
     const to = this.els[deck];
     const maxTime = this.duration;
@@ -1294,19 +1685,38 @@ export class DualPlayer {
       this.emit();
       return;
     }
+    // Decode any in-memory decks so AudioBufferSourceNode playback starts sample-locked.
+    if (this.ctx && typeof this.ctx.decodeAudioData === 'function') {
+      const decodes: Promise<void>[] = [];
+      for (const deck of ['original', 'cleaned'] as const) {
+        if (this.state[deck] === 'ready' && this.rawBytes[deck] && !this.buffers[deck]) {
+          decodes.push(this.decodeDeckBuffer(deck, this.epoch[deck]));
+        }
+      }
+      if (decodes.length > 0) {
+        await Promise.all(decodes);
+        if (this.disposed || !this.wantPlaying || this.playToken !== token) return;
+      }
+    }
     if (this.loopEnabledFlag && this.loopRangeValue) {
       const bounds = this.effectiveLoopBounds();
       if (bounds) {
         const [loopStart, loopEnd] = bounds;
         const cur = this.time;
         if (cur < loopStart || cur >= loopEnd) {
-          this.seek(loopStart);
+          this.applySeekImmediate(loopStart, false);
         }
       }
     } else if (this.duration > 0 && this.time >= this.duration) {
-      this.seek(0);
+      this.applySeekImmediate(0, false);
     }
     const t = this.time;
+    if (this.canUseBufferMode() && this.startBufferPlaybackAt(t)) {
+      this.applyTargetGain(true);
+      this.startTicker();
+      this.emit();
+      return;
+    }
     const plays: Promise<void>[] = [];
     for (const deck of ['original', 'cleaned'] as const) {
       if (this.state[deck] !== 'ready') continue;
@@ -1335,10 +1745,14 @@ export class DualPlayer {
     else void this.play();
   }
 
-  seek(time: number): void {
-    if (this.disposed || !Number.isFinite(time)) return;
-    const d = this.duration;
-    const t = Math.max(0, Math.min(d > 0 ? d : time, time));
+  private applySeekImmediate(t: number, duck: boolean): void {
+    this.bufferPosition = t;
+    if (duck) {
+      this.duckForSeek();
+    }
+    if (this.bufferPlaying && this.wantPlaying && this.canUseBufferMode()) {
+      this.startBufferPlaybackAt(t);
+    }
     for (const deck of ['original', 'cleaned'] as const) {
       this.seekOnMeta[deck] = null;
       if (this.state[deck] === 'ready') {
@@ -1348,29 +1762,83 @@ export class DualPlayer {
         this.pendingSeekTime[deck] = t;
       }
     }
+  }
+
+  seek(time: number): void {
+    if (this.disposed || !Number.isFinite(time)) return;
+    const d = this.duration;
+    const t = Math.max(0, Math.min(d > 0 ? d : time, time));
+    if (!this.wantPlaying) {
+      this.clearSeekThrottle();
+      this.applySeekImmediate(t, false);
+      this.emit();
+      return;
+    }
+    const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const elapsed = nowMs - this.lastSeekAppliedMs;
+    if (elapsed >= SEEK_THROTTLE_MS || this.lastSeekAppliedMs === 0) {
+      this.clearSeekThrottle();
+      this.lastSeekAppliedMs = nowMs;
+      this.applySeekImmediate(t, true);
+      this.emit();
+      return;
+    }
+    // Rapid scrubbing while playing: keep UI playhead responsive immediately and
+    // throttle audio seek + 10 ms ducking to a clean 32 ms cadence.
+    this.pendingScrubTime = t;
+    if (this.seekThrottleTimer === null) {
+      const waitMs = Math.max(1, SEEK_THROTTLE_MS - elapsed);
+      this.seekThrottleTimer = setTimeout(() => {
+        this.seekThrottleTimer = null;
+        if (this.disposed) return;
+        const target = this.pendingScrubTime;
+        this.pendingScrubTime = null;
+        if (target === null) return;
+        this.lastSeekAppliedMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        this.applySeekImmediate(target, this.wantPlaying);
+        this.emit();
+      }, waitMs);
+    }
     this.emit();
   }
 
   get time(): number {
+    if (this.pendingScrubTime !== null && Number.isFinite(this.pendingScrubTime)) {
+      return this.pendingScrubTime;
+    }
     if (this.state[this.active] === 'loading') {
       const pending = this.pendingSeekTime[this.active];
       if (pending !== null && Number.isFinite(pending)) return pending;
     }
+    if (this.bufferPlaying && this.ctx) {
+      const elapsed = Math.max(0, this.ctx.currentTime - this.bufferStartCtxTime);
+      const raw = this.bufferStartOffset + elapsed;
+      const d = this.duration;
+      return d > 0 ? Math.min(d, raw) : raw;
+    }
     const t = this.els[this.active].currentTime;
-    return Number.isFinite(t) ? this.deckToTimeline(this.active, t) : 0;
+    return Number.isFinite(t) ? this.deckToTimeline(this.active, t) : this.bufferPosition;
   }
 
   get duration(): number {
     const origReady = this.state.original === 'ready';
     const cleanReady = this.state.cleaned === 'ready';
-    const dOrig =
-      origReady && Number.isFinite(this.els.original.duration) && this.els.original.duration > 0
+    const origBufDur = this.buffers.original?.duration;
+    const cleanBufDur = this.buffers.cleaned?.duration;
+    const dOrig = origReady
+      ? Number.isFinite(this.els.original.duration) && this.els.original.duration > 0
         ? this.els.original.duration
-        : null;
-    const dClean =
-      cleanReady && Number.isFinite(this.els.cleaned.duration) && this.els.cleaned.duration > 0
+        : typeof origBufDur === 'number' && Number.isFinite(origBufDur) && origBufDur > 0
+          ? origBufDur
+          : null
+      : null;
+    const dClean = cleanReady
+      ? Number.isFinite(this.els.cleaned.duration) && this.els.cleaned.duration > 0
         ? this.els.cleaned.duration
-        : null;
+        : typeof cleanBufDur === 'number' && Number.isFinite(cleanBufDur) && cleanBufDur > 0
+          ? cleanBufDur
+          : null
+      : null;
 
     if (dOrig !== null && dClean !== null) {
       if (this.isPreviewDeck.cleaned || this.isPreviewDeck.original) {
@@ -1384,7 +1852,7 @@ export class DualPlayer {
   }
 
   get playing(): boolean {
-    return this.wantPlaying && !this.els[this.active].paused;
+    return this.wantPlaying && (this.bufferPlaying || !this.els[this.active].paused);
   }
 
   snapshot(): PlayerSnapshot {
@@ -1415,6 +1883,17 @@ export class DualPlayer {
   }
 
   private pauseAll(): void {
+    this.clearSeekThrottle();
+    if (this.bufferPlaying) {
+      const pos = this.time;
+      this.bufferPosition = pos;
+      this.stopBufferSources();
+      for (const deck of ['original', 'cleaned'] as const) {
+        if (this.state[deck] === 'ready') {
+          this.els[deck].currentTime = this.timelineToDeck(deck, pos);
+        }
+      }
+    }
     for (const deck of ['original', 'cleaned'] as const) {
       this.els[deck].pause();
     }
@@ -1426,11 +1905,37 @@ export class DualPlayer {
     const tick = (): void => {
       this.raf = 0;
       if (!this.wantPlaying) return;
+      const maxTime = this.duration;
+      const bothReady = this.bothDecksReady();
+
+      if (this.bufferPlaying) {
+        const t = this.time;
+        if (this.loopEnabledFlag) {
+          const bounds = this.effectiveLoopBounds();
+          if (bounds) {
+            const [loopStart, loopEnd] = bounds;
+            if (t >= loopEnd) {
+              this.restartLoopAt(loopStart);
+              this.raf = window.requestAnimationFrame(tick);
+              return;
+            }
+          }
+        }
+        if (maxTime > 0 && t >= maxTime) {
+          this.wantPlaying = false;
+          this.bufferPosition = maxTime;
+          this.pauseAll();
+          this.emit();
+          return;
+        }
+        this.emit();
+        this.raf = window.requestAnimationFrame(tick);
+        return;
+      }
+
       const a = this.els[this.active];
       const other: Deck = this.active === 'original' ? 'cleaned' : 'original';
       const b = this.els[other];
-      const maxTime = this.duration;
-      const bothReady = this.bothDecksReady();
       const tA = this.deckToTimeline(this.active, a.currentTime);
       const tB = this.deckToTimeline(other, b.currentTime);
       if (this.loopEnabledFlag) {
@@ -1482,6 +1987,8 @@ export class DualPlayer {
     this.wantPlaying = false;
     this.playToken += 1;
     this.stopTicker();
+    this.clearSeekThrottle();
+    this.stopBufferSources();
     this.listeners.clear();
     this.faultListeners.clear();
     this.faults = { original: null, cleaned: null };
@@ -1493,8 +2000,17 @@ export class DualPlayer {
     this.isPreviewDeck = { original: false, cleaned: false };
     this.pendingSeekTime = { original: null, cleaned: null };
     this.seekOnMeta = { original: null, cleaned: null };
+    this.rawBytes = { original: null, cleaned: null };
+    this.buffers = { original: null, cleaned: null };
+    this.decodeInFlight = { original: null, cleaned: null };
+    this.bufferPosition = 0;
     this.lufsHistory = [];
+    this.lastMeterSampleTime = 0;
+    this.smoothNrDb = 0;
     this.meterBuf = null;
+    this.kMeterBuf = null;
+    this.origMeterBuf = null;
+    this.cleanMeterBuf = null;
     this.peakHoldDbfs = METER_FLOOR_DB;
     for (const deck of ['original', 'cleaned'] as const) {
       const el = this.els[deck];

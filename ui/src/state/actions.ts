@@ -24,6 +24,7 @@ import { getPlayer, type DeckFault } from '../audio/player';
 import { getBridge, type ResolveBatchCleanTrackResult } from '../bridge';
 import { addTakeSnapshot, type TakeSnapshot } from '../components/TakeSwitcher';
 import { waveView } from '../render/viewWindow';
+import { scheduleLivePreview } from './liveAudition';
 import { unitsEnhanced } from './plural';
 import {
   DEFAULT_STUDIO_RACK_SETTINGS,
@@ -1040,8 +1041,8 @@ export async function ingestDataTransfer(dt: DataTransfer): Promise<void> {
       name: firstFolder,
       detail:
         folderNames.length > 1
-          ? `${folderNames.length} folders were dropped. Drop one audio or video file instead — batches are a job for the command line.`
-          : 'Folders are not opened here. Drop one audio or video file instead — batches are a job for the command line.',
+          ? `${folderNames.length} folders were dropped. Select multiple audio or video files directly to run a batch queue.`
+          : 'Folders are not opened directly. Drop one or more audio or video files to clean or queue as a batch.',
     });
     return;
   }
@@ -1105,6 +1106,56 @@ export async function ingestDataTransfer(dt: DataTransfer): Promise<void> {
     });
   }
   await ingestFile(chosen);
+}
+
+/** Handles multi-file picks from `<input type="file" multiple>`: single file loads normally, 2+ accepted files queue a batch. */
+export async function ingestFiles(fileList: FileList | readonly File[]): Promise<void> {
+  const files = Array.from(fileList);
+  if (files.length === 0) return;
+  if (files.length === 1) {
+    await ingestFile(files[0]!);
+    return;
+  }
+  const acceptedFiles = files.filter(isAcceptedFile);
+  if (acceptedFiles.length <= 1) {
+    await ingestFile(acceptedFiles[0] ?? files[0]!);
+    return;
+  }
+  const bridge = getBridge();
+  const sourcesToSubmit: Array<{ path: string; name: string; sourceId?: string }> = [];
+  for (const file of acceptedFiles) {
+    if (file.size === 0) continue;
+    let local: { sourceId: string; path: string } | string | null = null;
+    try {
+      local = bridge.files.registerDroppedFile
+        ? await bridge.files.registerDroppedFile(file)
+        : null;
+    } catch {
+      local = null;
+    }
+    if (local) {
+      if (typeof local === 'object' && local !== null) {
+        sourcesToSubmit.push({ path: local.path, name: file.name, sourceId: local.sourceId });
+      } else {
+        sourcesToSubmit.push({ path: local, name: file.name });
+      }
+    } else {
+      const client = requireClient();
+      const res = await client.upload(file);
+      sourcesToSubmit.push({
+        path: res.path,
+        name: file.name,
+        ...(res.source_id ? { sourceId: res.source_id } : {}),
+      });
+    }
+  }
+  if (sourcesToSubmit.length > 1) {
+    await submitBatch(sourcesToSubmit);
+    return;
+  }
+  if (acceptedFiles[0]) {
+    await ingestFile(acceptedFiles[0]);
+  }
 }
 
 /** Handles both dropped files and <input type=file> picks. */
@@ -1536,6 +1587,135 @@ function unavailableProfileMessage(route: string): string {
   return 'This cleanup option is unavailable.';
 }
 
+export interface RackOverridePayload {
+  strength: number;
+  ambienceFloorDb: number | null;
+  deliveryPreset: StudioRackSettings['deliveryPreset'];
+  stereoMode?: StudioRackSettings['stereoMode'];
+  hpfEnabled: boolean;
+  hpfCutoffHz: number;
+  proRepair: {
+    deplosive: boolean;
+    mouth_declick: boolean;
+    declip: boolean;
+    deess: boolean;
+    tonal_restoration: boolean;
+    level_rider: boolean;
+  };
+}
+
+export function buildRackOverrides(rs: StudioRackSettings): RackOverridePayload {
+  return {
+    strength: rs.strength,
+    ambienceFloorDb: rs.ambienceFloorDb,
+    deliveryPreset: rs.deliveryPreset,
+    ...(rs.stereoMode !== 'auto' ? { stereoMode: rs.stereoMode } : {}),
+    hpfEnabled: rs.hpfEnabled !== false,
+    hpfCutoffHz: rs.hpfCutoffHz,
+    proRepair: {
+      deplosive: rs.deplosive,
+      mouth_declick: rs.mouthDeclick,
+      declip: rs.declip,
+      deess: rs.deess,
+      tonal_restoration: rs.tonalRestoration,
+      level_rider: rs.levelRider,
+    },
+  };
+}
+
+export type BuildStrategyResult =
+  | { ok: true; strategy: ProcessingStrategyV1 }
+  | { ok: false; status: string; error: string; label: string };
+
+/**
+ * Single source of truth for building the engine ProcessingStrategyV1 from store state.
+ * Shared across `startJob()`, `submitBatch()`, and `previewRegion()` so every knob
+ * (including HPF, proRepair modules, deliveryPreset, stereoMode, strength, ambienceFloorDb)
+ * is forwarded consistently — including under `smart_safe` when the user adjusts dials.
+ */
+export function buildStrategyFromState(
+  st: ReturnType<typeof getState> = getState(),
+  profileOverride?: Profile,
+): BuildStrategyResult {
+  const rs = st.rackSettings;
+  const rackModified =
+    st.rackDirty || !shallowRecordEqual(rs, DEFAULT_STUDIO_RACK_SETTINGS);
+  const overrides = rackModified ? buildRackOverrides(rs) : {};
+
+  if (st.mode === 'smart_safe') {
+    if (isRouteBlocked(st.capabilities, 'smart_safe')) {
+      const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
+      return {
+        ok: false,
+        status: `Smart Safe is blocked: ${reason || 'unqualified'}`,
+        error: reason || 'Smart Safe capability is blocked',
+        label: 'Capability blocked',
+      };
+    }
+    return {
+      ok: true,
+      strategy: {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+        ...overrides,
+      },
+    };
+  }
+
+  if (st.mode === 'restore') {
+    const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
+    if (isRouteBlocked(st.capabilities, restoreCapId)) {
+      const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
+      return {
+        ok: false,
+        status: `Restore is blocked: ${reason || 'unqualified'}`,
+        error: reason || 'Restore capability is blocked',
+        label: 'Capability blocked',
+      };
+    }
+    if (!st.reconstructionConsent) {
+      return {
+        ok: false,
+        status: 'Restore requires explicit generative reconstruction consent',
+        error: 'Acknowledge generative reconstruction consent to proceed with Restore',
+        label: 'Consent required',
+      };
+    }
+    return {
+      ok: true,
+      strategy: {
+        kind: 'manual',
+        route: restoreCapId as ManualRoute,
+        speaker_profile_id: st.speakerId,
+        expert_cutoff_hz: st.cutoffHz,
+        allow_generative_reconstruction: true,
+        ...overrides,
+      },
+    };
+  }
+
+  const profile = profileOverride ?? st.profile;
+  if (isProfileUnavailable(st.capabilities, profile)) {
+    const reason = getRouteBlockedReason(st.capabilities, profile);
+    return {
+      ok: false,
+      status: `Route ${profile} is blocked: ${reason || 'unqualified'}`,
+      error: reason || unavailableProfileMessage(profile),
+      label: 'Capability blocked',
+    };
+  }
+  return {
+    ok: true,
+    strategy: {
+      kind: 'manual',
+      route: profile as ManualRoute,
+      allow_generative_reconstruction: false,
+      ...overrides,
+    },
+  };
+}
+
 export async function startJob(strategyOverride?: ProcessingStrategyV1): Promise<void> {
   const st = getState();
   if (!st.source) return;
@@ -1611,69 +1791,14 @@ export async function startJob(strategyOverride?: ProcessingStrategyV1): Promise
         throw new EngineError(503, 'capability_blocked', 'Update the audio engine to use the assistant.');
       }
       strategy = strategyOverride;
-    } else if (st.mode === 'smart_safe') {
-      if (isRouteBlocked(st.capabilities, 'smart_safe')) {
-        const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
-        st.setStatus(`Smart Safe is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || 'Smart Safe capability is blocked', 'Capability blocked');
-        return;
-      }
-      strategy = {
-        kind: 'smart_safe',
-        restore_policy: 'disabled',
-        allow_generative_reconstruction: false,
-      };
-    } else if (st.mode === 'restore') {
-      const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
-      if (isRouteBlocked(st.capabilities, restoreCapId)) {
-        const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
-        st.setStatus(`Restore is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || 'Restore capability is blocked', 'Capability blocked');
-        return;
-      }
-      if (!st.reconstructionConsent) {
-        st.setStatus('Restore requires explicit generative reconstruction consent');
-        st.setError('Acknowledge generative reconstruction consent to proceed with Restore', 'Consent required');
-        return;
-      }
-      strategy = {
-        kind: 'manual',
-        route: restoreCapId as ManualRoute,
-        speaker_profile_id: st.speakerId,
-        expert_cutoff_hz: st.cutoffHz,
-        allow_generative_reconstruction: true,
-      };
     } else {
-      if (isProfileUnavailable(st.capabilities, profile)) {
-        const reason = getRouteBlockedReason(st.capabilities, profile);
-        st.setStatus(`Route ${profile} is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || unavailableProfileMessage(profile), 'Capability blocked');
+      const built = buildStrategyFromState(st, profile);
+      if (!built.ok) {
+        st.setStatus(built.status);
+        st.setError(built.error, built.label);
         return;
       }
-      const rs = st.rackSettings;
-      const rackModified =
-        st.rackDirty || !shallowRecordEqual(rs, DEFAULT_STUDIO_RACK_SETTINGS);
-      strategy = {
-        kind: 'manual',
-        route: profile as ManualRoute,
-        allow_generative_reconstruction: false,
-        ...(rackModified
-          ? {
-              strength: rs.strength,
-              ambienceFloorDb: rs.ambienceFloorDb,
-              deliveryPreset: rs.deliveryPreset,
-              ...(rs.stereoMode !== 'auto' ? { stereoMode: rs.stereoMode } : {}),
-              proRepair: {
-                deplosive: rs.deplosive,
-                mouth_declick: rs.mouthDeclick,
-                declip: rs.declip,
-                deess: rs.deess,
-                tonal_restoration: rs.tonalRestoration,
-                level_rider: rs.levelRider,
-              },
-            }
-          : {}),
-      };
+      strategy = built.strategy;
     }
 
     const sourceId = st.source.sourceId || st.source.path;
@@ -1853,55 +1978,13 @@ export async function submitBatch(
   }
   try {
     const client = requireClient();
-    let strategy: ProcessingStrategyV1;
-    if (st.mode === 'smart_safe') {
-      if (isRouteBlocked(st.capabilities, 'smart_safe')) {
-        const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
-        st.setStatus(`Smart Safe is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || 'Smart Safe capability is blocked', 'Capability blocked');
-        return;
-      }
-      strategy = {
-        kind: 'smart_safe',
-        restore_policy: 'disabled',
-        allow_generative_reconstruction: false,
-      };
-    } else if (st.mode === 'restore') {
-      const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
-      if (isRouteBlocked(st.capabilities, restoreCapId)) {
-        const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
-        st.setStatus(`Restore is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || 'Restore capability is blocked', 'Capability blocked');
-        return;
-      }
-      if (!st.reconstructionConsent) {
-        st.setStatus('Restore requires explicit generative reconstruction consent');
-        st.setError(
-          'Acknowledge generative reconstruction consent to proceed with Restore',
-          'Consent required',
-        );
-        return;
-      }
-      strategy = {
-        kind: 'manual',
-        route: restoreCapId as ManualRoute,
-        speaker_profile_id: st.speakerId,
-        expert_cutoff_hz: st.cutoffHz,
-        allow_generative_reconstruction: true,
-      };
-    } else {
-      if (isProfileUnavailable(st.capabilities, st.profile)) {
-        const reason = getRouteBlockedReason(st.capabilities, st.profile);
-        st.setStatus(`Route ${st.profile} is blocked: ${reason || 'unqualified'}`);
-        st.setError(reason || unavailableProfileMessage(st.profile), 'Capability blocked');
-        return;
-      }
-      strategy = {
-        kind: 'manual',
-        route: st.profile as ManualRoute,
-        allow_generative_reconstruction: false,
-      };
+    const built = buildStrategyFromState(st);
+    if (!built.ok) {
+      st.setStatus(built.status);
+      st.setError(built.error, built.label);
+      return;
     }
+    const strategy = built.strategy;
 
     const sourceIds = sources.map((s) => (typeof s === 'string' ? s : s.sourceId || s.path));
     const idempotencyKey = `v1-batch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -1953,6 +2036,7 @@ export async function submitBatch(
     }));
 
     st.setBatch(initialSummary);
+    st.setBatchDrawerOpen(true);
     startBatchEventSubscription(res.batchId, client);
   } catch (e) {
     probeSoon(e);
@@ -3326,10 +3410,43 @@ export async function applyUnitOverride(
   await applyUnitOverrideInternal(unitId, decision, true);
 }
 
-/** Undo the most recent unit override or StudioRack parameter change. */
+function applySpectralUndoPath(targetPath: string | null): void {
+  const st = getState();
+  const player = getPlayer();
+  const client = st.client;
+  if (targetPath && client) {
+    const wasPlaying = player.playing;
+    const atTime = player.time;
+    st.setCleaned(st.cleaned, targetPath);
+    player.load('cleaned', client.fileUrl(targetPath), st.cleaned?.duration_s ?? st.original?.duration_s ?? null);
+    if (Number.isFinite(atTime) && atTime > 0) player.seek(atTime);
+    player.setActive('cleaned');
+    st.setAbMode('cleaned');
+    if (wasPlaying) void player.play();
+  } else {
+    st.setCleaned(null, null);
+    player.load('cleaned', null);
+    player.setActive('original');
+    st.setAbMode('original');
+  }
+}
+
+/** Undo the most recent spectral repair, unit override, or StudioRack parameter change. */
 export function undoAction(): void {
   const st = getState();
   if (isActiveJobRunning(st)) return;
+
+  if (
+    (st.lastUndoDomain === 'spectral' && st.spectralUndo.canUndo) ||
+    (!st.overrideUndo.canUndo && !st.rackUndo.canUndo && st.spectralUndo.canUndo)
+  ) {
+    const nextStack = st.spectralUndo.undo();
+    st.setSpectralUndo(nextStack);
+    applySpectralUndoPath(nextStack.present);
+    st.setStatus('Undid spectral repair');
+    return;
+  }
+
   const preferOverride =
     st.lastUndoDomain === 'override'
       ? st.overrideUndo.canUndo
@@ -3357,13 +3474,26 @@ export function undoAction(): void {
       !shallowRecordEqual(nextStack.present, DEFAULT_STUDIO_RACK_SETTINGS),
     );
     st.setStatus('Undid Studio Rack change');
+    scheduleLivePreview();
   }
 }
 
-/** Redo the most recently undone unit override or StudioRack parameter change. */
+/** Redo the most recently undone spectral repair, unit override, or StudioRack parameter change. */
 export function redoAction(): void {
   const st = getState();
   if (isActiveJobRunning(st)) return;
+
+  if (
+    (st.lastUndoDomain === 'spectral' && st.spectralUndo.canRedo) ||
+    (!st.overrideUndo.canRedo && !st.rackUndo.canRedo && st.spectralUndo.canRedo)
+  ) {
+    const nextStack = st.spectralUndo.redo();
+    st.setSpectralUndo(nextStack);
+    applySpectralUndoPath(nextStack.present);
+    st.setStatus('Redid spectral repair');
+    return;
+  }
+
   const preferOverride =
     st.lastUndoDomain === 'override'
       ? st.overrideUndo.canRedo
@@ -3391,6 +3521,7 @@ export function redoAction(): void {
       !shallowRecordEqual(nextStack.present, DEFAULT_STUDIO_RACK_SETTINGS),
     );
     st.setStatus('Redid Studio Rack change');
+    scheduleLivePreview();
   }
 }
 
@@ -3578,7 +3709,9 @@ function resolveClientAudioUrl(
  * `cleanedPath`, enable looping over `[startS, endS]`, switch to the cleaned
  * deck, and report render latency + warm-cache status.
  */
-export async function previewRegion(): Promise<RegionPreviewResponse | null> {
+export async function previewRegion(
+  opts: { autoPlay?: boolean } = {},
+): Promise<RegionPreviewResponse | null> {
   const st = getState();
   if (!st.source || !st.original) return null;
 
@@ -3629,13 +3762,19 @@ export async function previewRegion(): Promise<RegionPreviewResponse | null> {
 
   st.setStatus(`Rendering warm preview (${startS.toFixed(1)}s–${endS.toFixed(1)}s)…`);
   try {
+    const overrides = buildRackOverrides(st.rackSettings);
     const res = await client.renderRegionPreview({
       path: st.source.path,
       startS,
       endS,
       profile: st.profile,
-      strength: st.rackSettings.strength,
-      ambienceFloorDb: st.rackSettings.ambienceFloorDb,
+      strength: overrides.strength,
+      ambienceFloorDb: overrides.ambienceFloorDb,
+      hpfEnabled: overrides.hpfEnabled,
+      hpfCutoffHz: overrides.hpfCutoffHz,
+      deliveryPreset: overrides.deliveryPreset,
+      ...(overrides.stereoMode ? { stereoMode: overrides.stereoMode } : {}),
+      proRepair: overrides.proRepair,
     });
     const cur = getState();
     const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
@@ -3666,6 +3805,9 @@ export async function previewRegion(): Promise<RegionPreviewResponse | null> {
     player.seek(startS);
     player.setActive('cleaned');
     cur.setAbMode('cleaned');
+    if (opts.autoPlay && typeof player.play === 'function') {
+      void player.play();
+    }
     const ms = Math.round(res.renderMs);
     const cacheTag = res.warmHit ? 'warm hit' : 'cold render';
     cur.setStatus(
@@ -3741,6 +3883,13 @@ export async function applySpectralBoxRepair(
     const audioUrl = resolveClientAudioUrl(client, res.audioUrl, res.outputPath);
     cur.setDeckFault(null);
     if (res.outputPath) {
+      const baseStack =
+        cur.spectralUndo.present === cur.cleanedPath
+          ? cur.spectralUndo
+          : createUndoStack<string | null>(cur.cleanedPath);
+      const nextSpectralUndo = baseStack.push(res.outputPath);
+      cur.setSpectralUndo(nextSpectralUndo);
+      cur.setLastUndoDomain('spectral');
       cur.setCleaned(cur.cleaned, res.outputPath);
     } else if (audioUrl) {
       cur.setPreviewActive(false);

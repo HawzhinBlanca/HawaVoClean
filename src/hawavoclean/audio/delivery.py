@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import struct
@@ -40,7 +41,9 @@ from hawavoclean.platform_fs import is_reparse_or_symlink
 
 Float32Array = np.ndarray[Any, np.dtype[np.float32]]
 
-DeliveryPreset = Literal["match_input", "ebu_r128", "atsc_a85", "podcast", "streaming"]
+DeliveryPreset = Literal[
+    "match_input", "ebu_r128", "atsc_a85", "dialogue_gated", "podcast", "streaming"
+]
 ExportFormat = Literal["wav24", "wav32f", "flac", "aac", "video_mux"]
 
 EXPORT_FORMAT_EXTENSIONS: dict[ExportFormat, frozenset[str]] = {
@@ -82,6 +85,7 @@ class DeliveryPresetSpec:
     true_peak_ceiling_dbtp: float | None
     bypass_limiter: bool
     description: str
+    dialogue_gated: bool = False
 
 
 DELIVERY_PRESETS: dict[DeliveryPreset, DeliveryPresetSpec] = {
@@ -92,6 +96,7 @@ DELIVERY_PRESETS: dict[DeliveryPreset, DeliveryPresetSpec] = {
         true_peak_ceiling_dbtp=None,
         bypass_limiter=True,
         description="Preserve input integrated loudness with limiter bypassed",
+        dialogue_gated=False,
     ),
     "ebu_r128": DeliveryPresetSpec(
         name="ebu_r128",
@@ -100,6 +105,7 @@ DELIVERY_PRESETS: dict[DeliveryPreset, DeliveryPresetSpec] = {
         true_peak_ceiling_dbtp=-1.0,
         bypass_limiter=False,
         description="EBU R128 broadcast (-23.0 LUFS, -1.0 dBTP)",
+        dialogue_gated=False,
     ),
     "atsc_a85": DeliveryPresetSpec(
         name="atsc_a85",
@@ -107,7 +113,17 @@ DELIVERY_PRESETS: dict[DeliveryPreset, DeliveryPresetSpec] = {
         target_lufs_mono=-24.0,
         true_peak_ceiling_dbtp=-2.0,
         bypass_limiter=False,
-        description="ATSC A/85 CALM Act broadcast (-24.0 LKFS, -2.0 dBTP)",
+        description="ATSC A/85 CALM Act dialogue-gated broadcast (-24.0 LKFS, -2.0 dBTP)",
+        dialogue_gated=True,
+    ),
+    "dialogue_gated": DeliveryPresetSpec(
+        name="dialogue_gated",
+        target_lufs_stereo=-27.0,
+        target_lufs_mono=-27.0,
+        true_peak_ceiling_dbtp=-2.0,
+        bypass_limiter=False,
+        description="Dialogue-gated broadcast/streaming (-27.0 LKFS, -2.0 dBTP)",
+        dialogue_gated=True,
     ),
     "podcast": DeliveryPresetSpec(
         name="podcast",
@@ -116,6 +132,7 @@ DELIVERY_PRESETS: dict[DeliveryPreset, DeliveryPresetSpec] = {
         true_peak_ceiling_dbtp=-1.0,
         bypass_limiter=False,
         description="Podcast delivery (-16.0 LUFS stereo / -19.0 LUFS mono, -1.0 dBTP)",
+        dialogue_gated=False,
     ),
     "streaming": DeliveryPresetSpec(
         name="streaming",
@@ -124,6 +141,7 @@ DELIVERY_PRESETS: dict[DeliveryPreset, DeliveryPresetSpec] = {
         true_peak_ceiling_dbtp=-1.0,
         bypass_limiter=False,
         description="Streaming platform delivery (-14.0 LUFS, -1.0 dBTP)",
+        dialogue_gated=False,
     ),
 }
 
@@ -268,7 +286,7 @@ def apply_delivery_loudness(
         }
         return _restore_shape(wave_2d.copy(), was_1d), empty_metrics
 
-    pre = measure_loudness_and_peaks(wave_2d, sample_rate)
+    pre = measure_loudness_and_peaks(wave_2d, sample_rate, dialogue_gated=spec.dialogue_gated)
 
     if spec.bypass_limiter:
         target_lufs = float(input_lufs) if input_lufs is not None else float(pre.integrated_lufs)
@@ -286,7 +304,9 @@ def apply_delivery_loudness(
                 gain_linear = float(10.0 ** (gain_db / 20.0))
                 processed = _scale_to_finite_float32(wave_2d, gain_linear)
 
-        post = measure_loudness_and_peaks(processed, sample_rate)
+        post = measure_loudness_and_peaks(
+            processed, sample_rate, dialogue_gated=spec.dialogue_gated
+        )
         lra = compute_loudness_range_lu(processed, sample_rate)
         metrics: dict[str, float | str] = {
             "preset": preset,
@@ -319,7 +339,7 @@ def apply_delivery_loudness(
 
     limiter_res = apply_lookahead_limiter(gained, sample_rate, ceiling_dbtp=ceiling)
     processed = np.ascontiguousarray(limiter_res.limited_waveform, dtype=np.float32)
-    post = measure_loudness_and_peaks(processed, sample_rate)
+    post = measure_loudness_and_peaks(processed, sample_rate, dialogue_gated=spec.dialogue_gated)
     lra = compute_loudness_range_lu(processed, sample_rate)
 
     metrics = {
@@ -622,7 +642,9 @@ def apply_delivery_loudness_streaming(
         if sample_rate <= 0 or channels <= 0 or total_samples <= 0:
             raise OutputValidationError(f"Master WAV is empty or invalid: {master_resolved}")
 
-        pre_loudness = StreamingLoudnessMeter(sample_rate, channels)
+        pre_loudness = StreamingLoudnessMeter(
+            sample_rate, channels, dialogue_gated=spec.dialogue_gated
+        )
         pre_tp4 = _StreamingTruePeakMeter(channels, factor=4)
         pre_lra_meter = _StreamingLraMeter(sample_rate, channels) if spec.bypass_limiter else None
         pass1_step = min(int(chunk_samples), _STREAM_TRUE_PEAK_MAX_STEP)
@@ -762,7 +784,9 @@ def apply_delivery_loudness_streaming(
         limiter_step = min(int(chunk_samples), _STREAM_LIMITER_MAX_STEP)
         container = _wav_container_for_frames(channels, total_samples, "FLOAT")
 
-        post_loudness = StreamingLoudnessMeter(sample_rate, channels)
+        post_loudness = StreamingLoudnessMeter(
+            sample_rate, channels, dialogue_gated=spec.dialogue_gated
+        )
         post_tp4 = _StreamingTruePeakMeter(channels, factor=4)
         post_tp8 = _StreamingTruePeakMeter(channels, factor=8)
         post_lra = _StreamingLraMeter(sample_rate, channels)
@@ -842,7 +866,9 @@ def apply_delivery_loudness_streaming(
         if tp8 > ceiling_linear:
             trim = float(np.float32((ceiling_linear / tp8) * (1.0 - 1e-6)))
             min_gain *= trim
-            post_loudness = StreamingLoudnessMeter(sample_rate, channels)
+            post_loudness = StreamingLoudnessMeter(
+                sample_rate, channels, dialogue_gated=spec.dialogue_gated
+            )
             post_tp4 = _StreamingTruePeakMeter(channels, factor=4)
             post_tp8 = _StreamingTruePeakMeter(channels, factor=8)
             post_lra = _StreamingLraMeter(sample_rate, channels)
@@ -1283,8 +1309,9 @@ def _export_soundfile(
     *,
     fmt: Literal["wav24", "wav32f", "flac"],
     meta_chunks: dict[bytes, bytes],
+    dither_wav24: bool = True,
 ) -> None:
-    """Stream-transcode master WAV to wav24, wav32f, or flac via soundfile."""
+    """Stream-transcode master WAV to wav24 (with TPDF dither), wav32f, or flac via soundfile."""
     with sf.SoundFile(str(master_resolved), mode="r") as reader:
         sample_rate = int(reader.samplerate)
         channels = int(reader.channels)
@@ -1300,6 +1327,21 @@ def _export_soundfile(
             bytes_per_sample = 3 if subtype == "PCM_24" else 4
             estimated = channels * frames * bytes_per_sample + _WAV_HEADER_RESERVE_BYTES
             container = "RF64" if estimated > _WAV_CLASSIC_LIMIT_BYTES else "WAV"
+
+        apply_dither = fmt == "wav24" and dither_wav24
+        lsb = np.float32(1.0 / (2 ** (24 - 1)))
+        scale = np.float32(2 ** (24 - 1))
+        rngs = [
+            np.random.default_rng(
+                int(
+                    hashlib.sha256(f"delivery:{master_resolved.name}:ch_{ch}".encode()).hexdigest()[
+                        :8
+                    ],
+                    16,
+                )
+            )
+            for ch in range(channels)
+        ]
 
         with sf.SoundFile(
             str(tmp_path),
@@ -1317,10 +1359,26 @@ def _export_soundfile(
                     raise OutputValidationError(
                         f"Master WAV contains NaN or Inf samples: {master_resolved}"
                     )
-                writer.write(block)
+                if apply_dither:
+                    n_blk = int(block.shape[0])
+                    out_blk = np.empty_like(block)
+                    for ch in range(channels):
+                        noise = (
+                            rngs[ch]
+                            .triangular(-float(lsb), 0.0, float(lsb), size=n_blk)
+                            .astype(np.float32)
+                        )
+                        dithered = np.add(block[:, ch], noise, dtype=np.float32)
+                        quant = np.round(dithered * scale) / scale
+                        out_blk[:, ch] = np.clip(quant, -1.0, 1.0 - lsb)
+                    writer.write(out_blk)
+                else:
+                    writer.write(block)
 
-    if fmt in ("wav24", "wav32f") and meta_chunks:
-        inject_wav_metadata_chunks(tmp_path, meta_chunks)
+    if fmt in ("wav24", "wav32f"):
+        _finalize_deterministic_wav(tmp_path)
+        if meta_chunks:
+            inject_wav_metadata_chunks(tmp_path, meta_chunks)
 
 
 def _run_ffmpeg_checked(cmd: list[str], *, timeout_s: float, label: str) -> None:

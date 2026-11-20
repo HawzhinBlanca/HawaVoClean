@@ -55,6 +55,40 @@ MAX_UNIT_SLICE_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_UNIT_SLICE_MB_ENV = "HAWAVOCLEAN_MAX_UNIT_SLICE_MB"
 MAX_UNIT_SLICE_TOTAL_MB_ENV = "HAWAVOCLEAN_MAX_UNIT_SLICE_TOTAL_MB"
 SLICE_TRUNCATED_MARKER = "truncated.json"
+JOB_RESTITCH_META_FILE = "job_meta.json"
+
+
+def save_job_restitch_meta(job_dir: Path, meta: dict[str, Any]) -> Path:
+    """Atomically persist job-level finishing/delivery/stereo metadata alongside unit slices."""
+    target_dir = Path(job_dir).resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    final_path = target_dir / JOB_RESTITCH_META_FILE
+    encoded = json.dumps(meta, sort_keys=True, indent=2) + "\n"
+    tmp_path = target_dir / f".{JOB_RESTITCH_META_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, final_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return final_path
+
+
+def load_job_restitch_meta(job_dir: Path) -> dict[str, Any] | None:
+    """Load job-level finishing/delivery/stereo metadata from ``job_meta.json`` if present."""
+    target_path = Path(job_dir).resolve() / JOB_RESTITCH_META_FILE
+    if not os.path.lexists(target_path):
+        return None
+    if is_reparse_or_symlink(target_path) or not target_path.is_file():
+        return None
+    try:
+        loaded = json.loads(target_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 class SliceCacheBudgetError(ValueError):
@@ -236,13 +270,15 @@ def _slice_filename(unit_id: int, channel: int) -> str:
 
 @dataclass(frozen=True)
 class UnitSlice:
-    """Cached per-unit original/candidate waveforms and metadata."""
+    """Cached per-unit original/candidate waveforms (and optional M/S Side slices) + metadata."""
 
     unit_id: int
     channel: int
     original: np.ndarray[Any, np.dtype[np.float32]]
     candidate: np.ndarray[Any, np.dtype[np.float32]] | None
     unit_meta: dict[str, Any]
+    side_original: np.ndarray[Any, np.dtype[np.float32]] | None = None
+    side_candidate: np.ndarray[Any, np.dtype[np.float32]] | None = None
 
 
 def save_unit_slice_to_dir(
@@ -253,6 +289,8 @@ def save_unit_slice_to_dir(
     unit_meta: dict[str, Any] | None = None,
     *,
     channel: int = 0,
+    side_original: np.ndarray[Any, Any] | None = None,
+    side_candidate: np.ndarray[Any, Any] | None = None,
     max_job_bytes: int | None = None,
     max_total_bytes: int | None = None,
     current_job_bytes: int | None = None,
@@ -282,6 +320,17 @@ def save_unit_slice_to_dir(
     else:
         cand_arr = np.empty(0, dtype=np.float32)
 
+    side_orig_arr: np.ndarray[Any, np.dtype[np.float32]] | None = None
+    side_cand_arr: np.ndarray[Any, np.dtype[np.float32]] | None = None
+    if side_original is not None:
+        side_orig_arr = np.ascontiguousarray(side_original, dtype=np.float32)
+        if side_orig_arr.ndim != 1 or not np.all(np.isfinite(side_orig_arr)):
+            raise ValueError(f"side_original slice for unit {unit_id} must be finite 1D")
+    if side_candidate is not None:
+        side_cand_arr = np.ascontiguousarray(side_candidate, dtype=np.float32)
+        if side_cand_arr.ndim != 1 or not np.all(np.isfinite(side_cand_arr)):
+            raise ValueError(f"side_candidate slice for unit {unit_id} must be finite 1D")
+
     meta_payload = json.dumps(
         unit_meta or {},
         sort_keys=True,
@@ -308,7 +357,13 @@ def save_unit_slice_to_dir(
         int(current_job_bytes) if current_job_bytes is not None else dir_slice_bytes(target_dir)
     )
 
-    min_new_bytes = int(orig_arr.nbytes) + int(cand_arr.nbytes) + len(meta_payload)
+    min_new_bytes = (
+        int(orig_arr.nbytes)
+        + int(cand_arr.nbytes)
+        + (int(side_orig_arr.nbytes) if side_orig_arr is not None else 0)
+        + (int(side_cand_arr.nbytes) if side_cand_arr is not None else 0)
+        + len(meta_payload)
+    )
     if used_bytes - existing_size + min_new_bytes > job_limit:
         write_slice_truncated_marker(
             target_dir, limit_bytes=job_limit, used_bytes=used_bytes, unit_id=unit_id
@@ -317,15 +372,20 @@ def save_unit_slice_to_dir(
 
     tmp_path = target_dir / (f".{final_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
 
+    save_kwargs: dict[str, Any] = {
+        "original": orig_arr,
+        "candidate": cand_arr,
+        "has_candidate": np.asarray(has_candidate, dtype=np.bool_),
+        "meta_json": np.frombuffer(meta_payload, dtype=np.uint8),
+    }
+    if side_orig_arr is not None:
+        save_kwargs["side_original"] = side_orig_arr
+    if side_cand_arr is not None:
+        save_kwargs["side_candidate"] = side_cand_arr
+
     try:
         with open(tmp_path, "wb") as handle:
-            np.savez(
-                handle,
-                original=orig_arr,
-                candidate=cand_arr,
-                has_candidate=np.asarray(has_candidate, dtype=np.bool_),
-                meta_json=np.frombuffer(meta_payload, dtype=np.uint8),
-            )
+            np.savez(handle, **save_kwargs)
             handle.flush()
             os.fsync(handle.fileno())
         actual_size = int(tmp_path.stat().st_size)
@@ -388,6 +448,16 @@ def load_unit_slice(
             )
             raw_meta = archive["meta_json"].tobytes().decode("utf-8")
             meta = json.loads(raw_meta)
+            side_orig_arr: np.ndarray[Any, np.dtype[np.float32]] | None = (
+                np.ascontiguousarray(archive["side_original"], dtype=np.float32)
+                if "side_original" in archive.files
+                else None
+            )
+            side_cand_arr: np.ndarray[Any, np.dtype[np.float32]] | None = (
+                np.ascontiguousarray(archive["side_candidate"], dtype=np.float32)
+                if "side_candidate" in archive.files
+                else None
+            )
     except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile, UnicodeDecodeError) as exc:
         raise ValueError(f"Corrupt cached slice for unit {unit_id} channel {channel}") from exc
 
@@ -397,6 +467,14 @@ def load_unit_slice(
         raise ValueError(
             f"Corrupt candidate waveform in slice for unit {unit_id} channel {channel}"
         )
+    if side_orig_arr is not None and (
+        side_orig_arr.ndim != 1 or not np.all(np.isfinite(side_orig_arr))
+    ):
+        raise ValueError(f"Corrupt side_original waveform in slice for unit {unit_id}")
+    if side_cand_arr is not None and (
+        side_cand_arr.ndim != 1 or not np.all(np.isfinite(side_cand_arr))
+    ):
+        raise ValueError(f"Corrupt side_candidate waveform in slice for unit {unit_id}")
     if not isinstance(meta, dict):
         raise ValueError(f"Corrupt unit metadata for unit {unit_id} channel {channel}")
     return UnitSlice(
@@ -405,6 +483,8 @@ def load_unit_slice(
         original=orig_arr,
         candidate=cand_arr,
         unit_meta=meta,
+        side_original=side_orig_arr,
+        side_candidate=side_cand_arr,
     )
 
 
@@ -470,6 +550,8 @@ class UnitSliceStore:
         unit_meta: dict[str, Any] | None = None,
         *,
         channel: int = 0,
+        side_original: np.ndarray[Any, Any] | None = None,
+        side_candidate: np.ndarray[Any, Any] | None = None,
     ) -> Path | None:
         """Atomically save a unit slice under ``unit_slices/<job_id>/`` within disk budget."""
         safe = _validate_job_id(job_id)
@@ -489,6 +571,8 @@ class UnitSliceStore:
             candidate=candidate,
             unit_meta=unit_meta,
             channel=channel,
+            side_original=side_original,
+            side_candidate=side_candidate,
             max_job_bytes=self._max_job_bytes,
             max_total_bytes=self._max_total_bytes,
             current_job_bytes=self._job_bytes[safe],
@@ -677,6 +761,8 @@ class _ResolvedUnit:
     final_decision: str
     manual_override: str | None
     record: dict[str, Any]
+    side_original: np.ndarray[Any, np.dtype[np.float32]] | None = None
+    side_selected: np.ndarray[Any, np.dtype[np.float32]] | None = None
 
 
 def restitch_master_with_overrides(
@@ -720,6 +806,8 @@ def restitch_master_with_overrides(
             f"Unit slice cache is truncated ({reason}, limit_bytes={limit_bytes}); "
             "re-stitching refused to avoid partial or corrupt output"
         )
+    job_meta = load_job_restitch_meta(resolved_job_dir) or {}
+    is_true_stereo_ms = str(job_meta.get("stereo_mode", "")) == "true_stereo_ms"
     by_channel: dict[int, list[_ResolvedUnit]] = {ch: [] for ch in range(channels)}
     total_samples = 0
 
@@ -750,6 +838,16 @@ def restitch_master_with_overrides(
         cand = (
             _fit_waveform_length(unit_slice.candidate, core_len)
             if unit_slice.candidate is not None
+            else None
+        )
+        side_orig = (
+            _fit_waveform_length(unit_slice.side_original, core_len)
+            if unit_slice.side_original is not None
+            else None
+        )
+        side_cand = (
+            _fit_waveform_length(unit_slice.side_candidate, core_len)
+            if unit_slice.side_candidate is not None
             else None
         )
 
@@ -828,6 +926,19 @@ def restitch_master_with_overrides(
                 final_decision = prev_decision
             manual_override = None
 
+        side_sel: np.ndarray[Any, np.dtype[np.float32]] | None = None
+        if side_orig is not None:
+            if is_enhanced and chosen_strength > 0.0:
+                if side_cand is None:
+                    from hawavoclean.audio.multitrack import denoise_side_channel
+
+                    side_cand = _fit_waveform_length(
+                        denoise_side_channel(side_orig, sample_rate), core_len
+                    )
+                side_sel = _blend_strength(side_orig, side_cand, chosen_strength)
+            else:
+                side_sel = side_orig.copy()
+
         by_channel[ch].append(
             _ResolvedUnit(
                 unit_id=unit_id,
@@ -843,11 +954,38 @@ def restitch_master_with_overrides(
                 final_decision=final_decision,
                 manual_override=manual_override,
                 record=dict(rec),
+                side_original=side_orig,
+                side_selected=side_sel,
             )
         )
 
+    # Re-apply finishing chain on enhanced units when job_meta persisted finishing settings.
+    finishing_cfg = None
+    file_tilt = None
+    raw_fin_meta = job_meta.get("finishing")
+    if isinstance(raw_fin_meta, dict) and raw_fin_meta.get("enabled", False):
+        from hawavoclean.config import FinishingConfig
+        from hawavoclean.finishing.detect import aggregate_speech_tilt, measure_speech_tilt
+
+        try:
+            finishing_cfg = FinishingConfig.model_validate(raw_fin_meta)
+        except Exception:
+            finishing_cfg = None
+        if finishing_cfg is not None and finishing_cfg.tonal_restoration:
+            tilts = [
+                measure_speech_tilt(item.selected, sample_rate)
+                for ch_list in by_channel.values()
+                for item in ch_list
+                if item.is_speech and item.is_enhanced
+            ]
+            if tilts:
+                file_tilt = aggregate_speech_tilt(tilts)
+
     taper_samples = max(0, int(round(sample_rate * (continuity_taper_ms / 1000.0))))
     channel_timelines: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+    orig_timelines: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+    side_timeline_out: np.ndarray[Any, np.dtype[np.float32]] | None = None
+    side_orig_timeline: np.ndarray[Any, np.dtype[np.float32]] | None = None
     updated_records: list[dict[str, Any]] = []
 
     units_total = 0
@@ -857,14 +995,30 @@ def restitch_master_with_overrides(
     continuity_crossfaded_count = 0
     manual_overrides_count = 0
 
+    raw_hpf_enabled = job_meta.get("hpf_enabled")
+    meta_hpf_enabled: bool | None = (
+        bool(raw_hpf_enabled) if isinstance(raw_hpf_enabled, bool) else None
+    )
+    raw_hpf_cutoff = job_meta.get("hpf_cutoff_hz")
+    meta_hpf_cutoff: float | None = (
+        float(raw_hpf_cutoff)
+        if isinstance(raw_hpf_cutoff, (int, float)) and not isinstance(raw_hpf_cutoff, bool)
+        else None
+    )
+
     for ch in range(channels):
         ch_units = sorted(by_channel[ch], key=lambda u: (u.start_sample, u.unit_id))
         if not ch_units:
             channel_timelines.append(np.zeros(total_samples, dtype=np.float32))
+            orig_timelines.append(np.zeros(total_samples, dtype=np.float32))
             continue
 
         speech_units: list[SpeechUnit] = []
         waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+        orig_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+        has_side_all = ch == 0 and all(u.side_original is not None for u in ch_units)
+        side_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+        side_orig_waveforms: list[np.ndarray[Any, np.dtype[np.float32]]] = []
 
         for idx, item in enumerate(ch_units):
             core_len = item.end_sample - item.start_sample
@@ -882,11 +1036,32 @@ def restitch_master_with_overrides(
                     if item.end_sample == next_item.start_sample and not next_item.is_enhanced:
                         fade_out = min(taper_samples, max_taper)
 
+            wave = item.selected
+            if finishing_cfg is not None and item.is_speech and item.is_enhanced:
+                from hawavoclean.finishing.safe_finish import apply_finishing_stages
+
+                # When explicit HPF already ran pre-enhancement, suppress duplicate HPF here.
+                fin_hpf_flag = (
+                    False
+                    if (
+                        meta_hpf_enabled is False
+                        or meta_hpf_cutoff is not None
+                        or meta_hpf_enabled is True
+                    )
+                    else None
+                )
+                wave, _ = apply_finishing_stages(
+                    wave,
+                    sample_rate,
+                    finishing_cfg,
+                    intensity="gentle",
+                    tilt=file_tilt,
+                    hpf_enabled=fin_hpf_flag,
+                )
+
             if fade_in > 0 or fade_out > 0:
-                wave = apply_continuity_taper(item.selected, item.original, fade_in, fade_out)
+                wave = apply_continuity_taper(wave, item.original, fade_in, fade_out)
                 continuity_crossfaded_count += 1
-            else:
-                wave = item.selected
 
             speech_units.append(
                 SpeechUnit(
@@ -901,6 +1076,15 @@ def restitch_master_with_overrides(
                 )
             )
             waveforms.append(wave)
+            orig_waveforms.append(item.original)
+            if has_side_all and item.side_original is not None:
+                s_wave = (
+                    item.side_selected if item.side_selected is not None else item.side_original
+                )
+                if fade_in > 0 or fade_out > 0:
+                    s_wave = apply_continuity_taper(s_wave, item.side_original, fade_in, fade_out)
+                side_waveforms.append(s_wave)
+                side_orig_waveforms.append(item.side_original)
 
             units_total += 1
             if item.manual_override is not None:
@@ -926,12 +1110,165 @@ def restitch_master_with_overrides(
             crossfade_ms=crossfade_ms,
         )
         channel_timelines.append(timeline)
+        orig_timelines.append(
+            assemble_channel_timeline(
+                speech_units,
+                orig_waveforms,
+                total_samples=total_samples,
+                sample_rate=sample_rate,
+                crossfade_ms=crossfade_ms,
+            )
+        )
+        if has_side_all and side_waveforms:
+            side_timeline_out = assemble_channel_timeline(
+                speech_units,
+                side_waveforms,
+                total_samples=total_samples,
+                sample_rate=sample_rate,
+                crossfade_ms=crossfade_ms,
+            )
+            side_orig_timeline = assemble_channel_timeline(
+                speech_units,
+                side_orig_waveforms,
+                total_samples=total_samples,
+                sample_rate=sample_rate,
+                crossfade_ms=crossfade_ms,
+            )
 
-    master_data = np.ascontiguousarray(np.vstack(channel_timelines), dtype=np.float32)
+    if (
+        (is_true_stereo_ms or side_timeline_out is not None)
+        and side_timeline_out is not None
+        and len(channel_timelines) == 1
+    ):
+        from hawavoclean.audio.multitrack import decode_mid_side
+
+        l_out, r_out = decode_mid_side(channel_timelines[0], side_timeline_out)
+        master_data = np.ascontiguousarray(np.vstack((l_out, r_out)), dtype=np.float32)
+        if side_orig_timeline is not None:
+            l_orig, r_orig = decode_mid_side(orig_timelines[0], side_orig_timeline)
+            orig_assembled = np.ascontiguousarray(np.vstack((l_orig, r_orig)), dtype=np.float32)
+        else:
+            orig_assembled = master_data.copy()
+        out_channels = 2
+    else:
+        master_data = np.ascontiguousarray(np.vstack(channel_timelines), dtype=np.float32)
+        orig_assembled = np.ascontiguousarray(np.vstack(orig_timelines), dtype=np.float32)
+        out_channels = channels
+
+    # Re-apply post-assembly pro_repair (deplosive, declick), ambience_floor_db, and
+    # delivery/loudness + true-peak limiting when persisted in job_meta.
+    raw_pro_repair = job_meta.get("pro_repair")
+    if isinstance(raw_pro_repair, dict):
+        want_deplosive = bool(raw_pro_repair.get("deplosive", False))
+        want_declick = bool(
+            raw_pro_repair.get(
+                "declick",
+                raw_pro_repair.get("mouthDeclick", raw_pro_repair.get("mouth_declick", False)),
+            )
+        )
+        if want_deplosive or want_declick:
+            from hawavoclean.finishing.pro_repair import ProRepairOptions, apply_pro_repair_chain
+
+            master_data, _ = apply_pro_repair_chain(
+                master_data,
+                sample_rate,
+                ProRepairOptions(
+                    declip=False,
+                    deplosive=want_deplosive,
+                    declick=want_declick,
+                    room_tone_floor=False,
+                ),
+            )
+
+    raw_amb = job_meta.get("ambience_floor_db")
+    if isinstance(raw_amb, (int, float)) and not isinstance(raw_amb, bool):
+        from hawavoclean.finishing.pro_repair import apply_room_tone_floor
+
+        if orig_assembled.shape == master_data.shape:
+            master_data = apply_room_tone_floor(
+                orig_assembled,
+                master_data,
+                sample_rate,
+                target_floor_db=float(raw_amb),
+            )
+
+    raw_delivery = job_meta.get("delivery_preset")
+    raw_loudness = job_meta.get("loudness")
+    raw_source_lufs = job_meta.get("source_lufs")
+    source_lufs_val: float | None = (
+        float(raw_source_lufs)
+        if isinstance(raw_source_lufs, (int, float))
+        and not isinstance(raw_source_lufs, bool)
+        and math.isfinite(float(raw_source_lufs))
+        else None
+    )
+    if isinstance(raw_delivery, str) and raw_delivery:
+        from hawavoclean.audio.delivery import (
+            DELIVERY_PRESETS,
+            apply_delivery_loudness,
+        )
+
+        if raw_delivery in DELIVERY_PRESETS:
+            preset_spec = DELIVERY_PRESETS[raw_delivery]
+            master_data, _ = apply_delivery_loudness(
+                master_data,
+                sample_rate,
+                preset_spec.name,
+                input_lufs=source_lufs_val,
+            )
+    elif isinstance(raw_loudness, dict):
+        from hawavoclean.finishing.limiter import apply_lookahead_limiter
+        from hawavoclean.finishing.loudness import (
+            compute_static_master_gain,
+            measure_loudness_and_peaks,
+        )
+
+        pre_m = measure_loudness_and_peaks(master_data, sample_rate)
+        target_lufs = float(
+            raw_loudness.get("target_lufs_stereo", -16.0)
+            if out_channels > 1
+            else raw_loudness.get("target_lufs_mono", -19.0)
+        )
+        ceiling_dbtp = float(raw_loudness.get("true_peak_ceiling_dbtp", -1.0))
+        max_lim_gr = float(raw_loudness.get("max_limiter_reduction_db", 2.5))
+        gain_db = compute_static_master_gain(
+            measured_lufs=pre_m.integrated_lufs,
+            target_lufs=target_lufs,
+            current_true_peak_dbtp=pre_m.true_peak_dbtp,
+            true_peak_ceiling_dbtp=ceiling_dbtp,
+            max_limiter_reduction_db=max_lim_gr,
+        )
+        gained = np.ascontiguousarray(
+            master_data * float(10.0 ** (gain_db / 20.0)), dtype=np.float32
+        )
+        master_data = apply_lookahead_limiter(
+            gained, sample_rate, ceiling_dbtp=ceiling_dbtp
+        ).limited_waveform
+
     master_buf = AudioBuffer(data=master_data, sample_rate=sample_rate)
 
     dest_path = Path(master_output_path).resolve()
     dest_path.parent.mkdir(parents=True, exist_ok=True)
+    # Capture BWF/iXML metadata from source_media_path or existing master before atomic replace.
+    bwf_chunks: dict[bytes, bytes] = {}
+    raw_src_media = job_meta.get("source_media_path")
+    if isinstance(raw_src_media, str) and raw_src_media:
+        src_p = Path(raw_src_media)
+        if src_p.is_file():
+            try:
+                from hawavoclean.audio.delivery import extract_wav_metadata_chunks
+
+                bwf_chunks.update(extract_wav_metadata_chunks(src_p))
+            except Exception:
+                pass
+    if dest_path.is_file():
+        try:
+            from hawavoclean.audio.delivery import extract_wav_metadata_chunks
+
+            bwf_chunks.update(extract_wav_metadata_chunks(dest_path))
+        except Exception:
+            pass
+
     tmp_path = dest_path.with_name(
         f".{dest_path.name}.{os.getpid()}.{threading.get_ident()}.tmp.wav"
     )
@@ -943,6 +1280,10 @@ def restitch_master_with_overrides(
             dither=dither,
             seed_context=seed_context,
         )
+        if bwf_chunks:
+            from hawavoclean.audio.delivery import inject_wav_metadata_chunks
+
+            inject_wav_metadata_chunks(tmp_path, bwf_chunks)
         os.replace(tmp_path, dest_path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
@@ -956,7 +1297,7 @@ def restitch_master_with_overrides(
         "master_sha256": master_sha256,
         "restitch_ms": restitch_ms,
         "sample_rate": sample_rate,
-        "channels": channels,
+        "channels": out_channels,
         "total_samples": total_samples,
         "summary": {
             "units_total": units_total,

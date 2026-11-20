@@ -28,20 +28,42 @@ class LoudnessMeasurement:
     true_peak_dbtp: float
 
 
+def _build_dialogue_band_sos(
+    sample_rate: int,
+) -> np.ndarray[Any, np.dtype[np.float64]] | None:
+    """Build 300-3400 Hz speech-band Butterworth SOS for dialogue-gated loudness."""
+    nyquist = 0.5 * float(sample_rate)
+    if nyquist <= 400.0:
+        return None
+    low = min(300.0, nyquist * 0.25) / nyquist
+    high = min(3400.0, nyquist * 0.90) / nyquist
+    if not 0.0 < low < high < 1.0:
+        return None
+    return np.asarray(
+        scipy.signal.butter(2, [low, high], btype="bandpass", output="sos"),
+        dtype=np.float64,
+    )
+
+
 def measure_loudness_and_peaks(
     waveform: np.ndarray[Any, np.dtype[np.float32]],  # shape (channels, samples)
     sample_rate: int,
+    *,
+    dialogue_gated: bool = False,
 ) -> LoudnessMeasurement:
-    """Measure integrated LUFS, loudness range, sample peak, and oversampled true peak."""
+    """Measure integrated LUFS (or dialogue-gated LKFS), sample peak, and oversampled true peak."""
     channels, samples = waveform.shape
+    if dialogue_gated and samples >= int(sample_rate * LOUDNESS_BLOCK_SIZE_S) and channels > 0:
+        meter_dg = StreamingLoudnessMeter(sample_rate, channels, dialogue_gated=True)
+        meter_dg.push(np.ascontiguousarray(waveform, dtype=np.float32))
+        return meter_dg.finish(true_peak_linear(waveform, factor=4))
+
     if samples < sample_rate * 0.4:
         # Too short for BS.1770 gating (<400 ms). Use the ungated mean-square
         # loudness (-0.691 + 10 log10 of channel-summed mean square), which
         # is what the gated measure converges to for short steady content —
         # NOT the sample peak, which sat ~9 dB higher and produced a gain
         # jump at the 400 ms boundary. True peak is still oversampled.
-        from hawavoclean.finishing.truepeak import true_peak_linear
-
         sample_peak = float(np.max(np.abs(waveform))) if samples else 0.0
         sp_db = float(20.0 * np.log10(sample_peak + 1e-9))
         if sample_peak < 1e-4:
@@ -74,8 +96,6 @@ def measure_loudness_and_peaks(
     sample_peak_dbfs = float(20.0 * np.log10(sample_peak + 1e-9))
 
     # 3. 4x oversampled true peak, computed chunk-wise (memory-bounded)
-    from hawavoclean.finishing.truepeak import true_peak_linear
-
     true_peak = true_peak_linear(waveform, factor=4)
     true_peak_dbtp = float(20.0 * np.log10(true_peak + 1e-9))
 
@@ -130,16 +150,34 @@ class StreamingLoudnessMeter:
     float32 quantisation between pyloudnorm's two biquads is preserved.
     """
 
-    def __init__(self, sample_rate: int, channels: int) -> None:
+    def __init__(
+        self,
+        sample_rate: int,
+        channels: int,
+        *,
+        dialogue_gated: bool = False,
+    ) -> None:
         self.sample_rate = int(sample_rate)
         self.channels = int(channels)
+        self.dialogue_gated = bool(dialogue_gated)
         self.total = 0
         self.sample_peak = 0.0
         self.sum_squares = np.zeros(max(self.channels, 1), dtype=np.float64)
         self._blocks: list[np.ndarray[Any, np.dtype[np.float64]]] = []
+        self._dialogue_ratios: list[float] = []
         self._weighted_buffer = np.empty((max(self.channels, 1), 0), dtype=np.float32)
+        self._raw_mono_buffer = np.empty(0, dtype=np.float64)
+        self._speech_mono_buffer = np.empty(0, dtype=np.float64)
         self._weighted_offset = 0
         self._next_block = 0
+        self._dialogue_sos: np.ndarray[Any, np.dtype[np.float64]] | None = (
+            _build_dialogue_band_sos(self.sample_rate) if self.dialogue_gated else None
+        )
+        self._dialogue_zi: np.ndarray[Any, np.dtype[np.float64]] | None = (
+            np.zeros((self._dialogue_sos.shape[0], 2), dtype=np.float64)
+            if self._dialogue_sos is not None
+            else None
+        )
         self._stages: list[
             tuple[
                 np.ndarray[Any, np.dtype[np.float64]],
@@ -176,6 +214,23 @@ class StreamingLoudnessMeter:
         if not self.supported:
             return
 
+        raw_mono: np.ndarray[Any, np.dtype[np.float64]] | None = None
+        speech_mono: np.ndarray[Any, np.dtype[np.float64]] | None = None
+        if self.dialogue_gated:
+            chunk_mono = wide[0] if self.channels == 1 else np.mean(wide, axis=0)
+            if self._dialogue_sos is not None and self._dialogue_zi is not None:
+                chunk_speech, self._dialogue_zi = scipy.signal.sosfilt(
+                    self._dialogue_sos, chunk_mono, zi=self._dialogue_zi
+                )
+            else:
+                chunk_speech = chunk_mono
+            if self._raw_mono_buffer.size > 0:
+                raw_mono = np.concatenate((self._raw_mono_buffer, chunk_mono))
+                speech_mono = np.concatenate((self._speech_mono_buffer, chunk_speech))
+            else:
+                raw_mono = chunk_mono
+                speech_mono = chunk_speech
+
         weighted = data
         for b, a, gain, zi in self._stages:
             out = np.empty_like(weighted)
@@ -211,11 +266,22 @@ class StreamingLoudnessMeter:
                     dtype=np.float64,
                 )
             )
+            if self.dialogue_gated and raw_mono is not None and speech_mono is not None:
+                raw_seg = raw_mono[local_lo:local_hi]
+                sp_seg = speech_mono[local_lo:local_hi]
+                raw_p = float(np.mean(raw_seg * raw_seg))
+                sp_p = float(np.mean(sp_seg * sp_seg))
+                self._dialogue_ratios.append(sp_p / (raw_p + 1e-18) if raw_p > 1e-12 else 0.0)
             self._next_block += 1
 
         next_lo, _ = _loudness_block_bounds(self._next_block, self.sample_rate)
         keep_from = max(0, next_lo - self._weighted_offset)
         self._weighted_buffer = np.array(weighted[:, keep_from:], dtype=np.float32, copy=True)
+        if self.dialogue_gated and raw_mono is not None and speech_mono is not None:
+            self._raw_mono_buffer = np.array(raw_mono[keep_from:], dtype=np.float64, copy=True)
+            self._speech_mono_buffer = np.array(
+                speech_mono[keep_from:], dtype=np.float64, copy=True
+            )
         self._weighted_offset += keep_from
 
     def _integrated_lufs(self) -> float:
@@ -237,6 +303,23 @@ class StreamingLoudnessMeter:
             above_absolute = loud >= LOUDNESS_ABSOLUTE_GATE_LUFS
             if not bool(np.any(above_absolute)):
                 return -70.0
+            if self.dialogue_gated and len(self._dialogue_ratios) > 0:
+                ratios = np.zeros(n_blocks, dtype=np.float64)
+                n_r = min(n_blocks, len(self._dialogue_ratios))
+                ratios[:n_r] = self._dialogue_ratios[:n_r]
+                dialogue_blocks = above_absolute & (ratios >= 0.25)
+                if bool(np.any(dialogue_blocks)):
+                    z_dg = z[:, dialogue_blocks].mean(axis=1)
+                    rel_dg = (
+                        -0.691 + 10.0 * np.log10(float(gains @ z_dg)) + LOUDNESS_RELATIVE_GATE_LU
+                    )
+                    keep_dg = dialogue_blocks & (loud > rel_dg)
+                    if bool(np.any(keep_dg)):
+                        dg_res = float(
+                            -0.691 + 10.0 * np.log10(float(gains @ z[:, keep_dg].mean(axis=1)))
+                        )
+                        if not (math.isnan(dg_res) or math.isinf(dg_res)):
+                            return dg_res
             z_gated = z[:, above_absolute].mean(axis=1)
             relative = -0.691 + 10.0 * np.log10(float(gains @ z_gated)) + LOUDNESS_RELATIVE_GATE_LU
             keep = (loud > relative) & (loud > LOUDNESS_ABSOLUTE_GATE_LUFS)
@@ -268,13 +351,16 @@ def measure_loudness_and_peaks_streaming(
     sample_rate: int,
     *,
     chunk_samples: int = LOUDNESS_CHUNK_SAMPLES,
+    dialogue_gated: bool = False,
 ) -> LoudnessMeasurement:
     """Measure a memory-mapped recording with bounded PCM allocations."""
     if waveform.ndim != 2:
         raise ValueError(f"Waveform must have shape (channels, samples), got {waveform.shape}")
     if chunk_samples < 1:
         raise ValueError(f"chunk_samples must be >= 1, got {chunk_samples}")
-    meter = StreamingLoudnessMeter(sample_rate, int(waveform.shape[0]))
+    meter = StreamingLoudnessMeter(
+        sample_rate, int(waveform.shape[0]), dialogue_gated=dialogue_gated
+    )
     samples = int(waveform.shape[1])
     for start in range(0, samples, chunk_samples):
         end = min(samples, start + chunk_samples)

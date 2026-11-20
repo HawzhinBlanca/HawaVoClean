@@ -302,14 +302,23 @@ describe('Last-Mile Pro Bridges actions', () => {
     });
 
     const res = await previewRegion();
-    expect(renderRegionPreview).toHaveBeenCalledWith({
-      path: '/in/clip.wav',
-      startS: 2,
-      endS: 17,
-      profile: 'studio_pro',
-      strength: 0.85,
-      ambienceFloorDb: -45,
-    });
+    expect(renderRegionPreview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/in/clip.wav',
+        startS: 2,
+        endS: 17,
+        profile: 'studio_pro',
+        strength: 0.85,
+        ambienceFloorDb: -45,
+        hpfEnabled: true,
+        hpfCutoffHz: 80,
+        deliveryPreset: 'ebu_r128',
+        proRepair: expect.objectContaining({
+          deplosive: true,
+          mouth_declick: true,
+        }),
+      }),
+    );
     expect(mockPlayer.load).toHaveBeenCalledWith(
       'cleaned',
       'http://127.0.0.1:8765/api/audio?path=%2Ftmp%2Fprev_1.wav',

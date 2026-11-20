@@ -99,6 +99,19 @@ export interface SmartSafeStrategyV1 {
   speakerProfileId?: string | null;
   allow_generative_reconstruction: boolean;
   allowGenerativeReconstruction?: boolean;
+  strength?: number | undefined;
+  ambience_floor_db?: number | null | undefined;
+  ambienceFloorDb?: number | null | undefined;
+  delivery_preset?: DeliveryPresetId | null | undefined;
+  deliveryPreset?: DeliveryPresetId | null | undefined;
+  stereo_mode?: 'auto' | 'dual_mono_same' | 'split_speakers' | 'true_stereo_ms' | null | undefined;
+  stereoMode?: 'auto' | 'dual_mono_same' | 'split_speakers' | 'true_stereo_ms' | null | undefined;
+  hpf_enabled?: boolean | undefined;
+  hpfEnabled?: boolean | undefined;
+  hpf_cutoff_hz?: number | undefined;
+  hpfCutoffHz?: number | undefined;
+  pro_repair?: Record<string, boolean> | null | undefined;
+  proRepair?: Record<string, boolean> | null | undefined;
 }
 
 export type ManualRoute =
@@ -129,6 +142,10 @@ export interface ManualStrategyV1 {
   deliveryPreset?: DeliveryPresetId | null | undefined;
   stereo_mode?: 'auto' | 'dual_mono_same' | 'split_speakers' | 'true_stereo_ms' | null | undefined;
   stereoMode?: 'auto' | 'dual_mono_same' | 'split_speakers' | 'true_stereo_ms' | null | undefined;
+  hpf_enabled?: boolean | undefined;
+  hpfEnabled?: boolean | undefined;
+  hpf_cutoff_hz?: number | undefined;
+  hpfCutoffHz?: number | undefined;
   pro_repair?: Record<string, boolean> | null | undefined;
   proRepair?: Record<string, boolean> | null | undefined;
 }
@@ -672,6 +689,11 @@ export interface RegionPreviewRequest {
   profile?: Profile | string | undefined;
   strength?: number | undefined;
   ambienceFloorDb?: number | null | undefined;
+  hpfEnabled?: boolean | undefined;
+  hpfCutoffHz?: number | undefined;
+  deliveryPreset?: DeliveryPresetId | null | undefined;
+  stereoMode?: 'auto' | 'dual_mono_same' | 'split_speakers' | 'true_stereo_ms' | null | undefined;
+  proRepair?: Record<string, boolean> | null | undefined;
 }
 
 export interface RegionPreviewMetrics {

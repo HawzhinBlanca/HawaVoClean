@@ -9,6 +9,7 @@ import { getPlayer, type LiveMeterLevels } from '../audio/player';
 import { useStore } from '../state/store';
 import { LiveMeter } from './LiveMeter';
 import { Transport } from './Transport';
+import { usePlayerSync } from '../App';
 
 declare global {
   var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
@@ -178,12 +179,16 @@ describe('Transport pro audition controls', () => {
   });
 
   it('syncs store selectionRange to player loopRange', () => {
+    function SyncedTransport() {
+      usePlayerSync();
+      return createElement(Transport);
+    }
     act(() => {
       useStore.setState({
         original: mockAnalysis('/orig.wav'),
         selectionRange: { start: 2.5, end: 7.5 },
       });
-      root.render(createElement(Transport));
+      root.render(createElement(SyncedTransport));
     });
     expect(getPlayer().snapshot().loopRange).toEqual([2.5, 7.5]);
 

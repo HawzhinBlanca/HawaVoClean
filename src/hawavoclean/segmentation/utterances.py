@@ -34,20 +34,20 @@ def find_lowest_energy_zero_crossing(
         min_idx = int(np.argmin(np.abs(region)))
         return start_search + min_idx
 
-    # Evaluate local RMS in 50ms window around each zero crossing
+    # Evaluate local RMS in 50ms window around each zero crossing in O(N) via cumulative sum.
     window_50ms = min(2400, search_window_samples // 4)
-    best_idx = zero_crossings[0]
-    min_rms = float("inf")
-
-    for zx in zero_crossings:
-        w_start = max(0, zx - window_50ms)
-        w_end = min(total_len, zx + window_50ms)
-        rms = float(np.sqrt(np.mean(waveform[w_start:w_end] ** 2)))
-        if rms < min_rms:
-            min_rms = rms
-            best_idx = zx
-
-    return int(best_idx)
+    w_starts = np.maximum(0, zero_crossings - window_50ms)
+    w_ends = np.minimum(total_len, zero_crossings + window_50ms)
+    span_lo = int(w_starts[0])
+    span_hi = int(w_ends[-1])
+    seg = waveform[span_lo:span_hi].astype(np.float64, copy=False)
+    cs = np.empty(seg.shape[0] + 1, dtype=np.float64)
+    cs[0] = 0.0
+    np.cumsum(seg * seg, out=cs[1:])
+    lengths = np.maximum(1, w_ends - w_starts)
+    mean_sq = np.maximum(0.0, cs[w_ends - span_lo] - cs[w_starts - span_lo]) / lengths
+    best_idx = int(zero_crossings[int(np.argmin(mean_sq))])
+    return best_idx
 
 
 def build_speech_units(

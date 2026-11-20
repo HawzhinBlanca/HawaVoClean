@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -76,17 +77,51 @@ def nisqa_weights_path() -> Path:
     return candidates[0]
 
 
+_VERIFY_CACHE_LOCK = threading.Lock()
+_VERIFY_CACHE: dict[tuple[str, int, int, str], tuple[bool, str]] = {}
+
+
 def verify_nisqa_weights(weights_path: Path | None = None) -> tuple[bool, str]:
     """Verify NISQA v2 checkpoint presence and pinned SHA-256 digest.
+
+    Caches verification results keyed by ``(resolved_path, st_mtime_ns, st_size,
+    expected_sha256)`` so repeated NISQA scoring calls during Smart Safe do not
+    re-hash the checkpoint from disk on every invocation.
 
     Returns ``(ok, path_free_message)``.
     """
     path = nisqa_weights_path() if weights_path is None else weights_path
+    try:
+        st = path.stat()
+    except OSError:
+        return False, f"NISQA v2 weights file missing ({NISQA_WEIGHTS_FILENAME})"
     if not path.is_file():
         return False, f"NISQA v2 weights file missing ({NISQA_WEIGHTS_FILENAME})"
+
+    cache_key = (
+        str(path.resolve()),
+        int(st.st_mtime_ns),
+        int(st.st_size),
+        NISQA_V2_WEIGHTS_SHA256,
+    )
+    with _VERIFY_CACHE_LOCK:
+        cached = _VERIFY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     if hash_file(path) != NISQA_V2_WEIGHTS_SHA256:
-        return False, f"NISQA v2 weights digest mismatch ({NISQA_WEIGHTS_FILENAME})"
-    return True, "NISQA v2 weights verified (MIT)"
+        result: tuple[bool, str] = (
+            False,
+            f"NISQA v2 weights digest mismatch ({NISQA_WEIGHTS_FILENAME})",
+        )
+    else:
+        result = (True, "NISQA v2 weights verified (MIT)")
+
+    with _VERIFY_CACHE_LOCK:
+        if len(_VERIFY_CACHE) >= 64:
+            _VERIFY_CACHE.clear()
+        _VERIFY_CACHE[cache_key] = result
+    return result
 
 
 def _hz_to_mel_slaney(freqs: np.ndarray[Any, Any]) -> np.ndarray[Any, np.dtype[np.float64]]:

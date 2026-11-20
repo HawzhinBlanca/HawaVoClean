@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
+import scipy.ndimage
 import scipy.signal
 import soundfile as sf
 
@@ -94,6 +95,73 @@ def decode_mid_side(
     left = np.ascontiguousarray(np.clip(m_arr + s_arr, -_F32_MAX, _F32_MAX), dtype=np.float32)
     right = np.ascontiguousarray(np.clip(m_arr - s_arr, -_F32_MAX, _F32_MAX), dtype=np.float32)
     return left, right
+
+
+def denoise_side_channel(
+    side: np.ndarray[Any, Any],
+    sample_rate: int,
+    *,
+    max_attenuation_db: float = 14.0,
+    over_subtraction: float = 1.5,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Denoise the stereo Side channel with a real-valued zero-phase Wiener mask.
+
+    Applying a strictly real, non-negative, smoothed STFT gain mask removes
+    stationary room noise from the Side channel while preserving exact L/R phase
+    coherence and natural directional ambience.
+    """
+    s_arr = np.asarray(side, dtype=np.float64)
+    if s_arr.ndim != 1:
+        raise ValueError(f"side channel must be 1D, got shape {s_arr.shape}")
+    n = int(s_arr.shape[0])
+    if n < 128 or sample_rate <= 0:
+        return np.ascontiguousarray(s_arr, dtype=np.float32)
+    _validate_finite_f32_range(s_arr, "side channel")
+    if float(np.max(np.abs(s_arr))) < 1e-7:
+        return np.ascontiguousarray(s_arr, dtype=np.float32)
+
+    n_fft = min(1024, 1 << max(6, int(math.floor(math.log2(n)))))
+    hop = max(1, n_fft // 4)
+    noverlap = n_fft - hop
+    _, _, zxx = scipy.signal.stft(
+        s_arr,
+        fs=float(sample_rate),
+        window="hann",
+        nperseg=n_fft,
+        noverlap=noverlap,
+        boundary="zeros",
+        padded=True,
+    )
+    zxx_arr = np.asarray(zxx, dtype=np.complex128)
+    power = np.abs(zxx_arr) ** 2
+    if power.shape[1] < 2:
+        return np.ascontiguousarray(s_arr, dtype=np.float32)
+
+    # Estimate stationary side noise PSD from the 20th percentile across time frames.
+    noise_psd = np.percentile(power, 20.0, axis=1, keepdims=True)
+    gain_floor = 10.0 ** (-max(0.0, float(max_attenuation_db)) / 20.0)
+    post_snr = power / (noise_psd + 1e-18)
+    raw_gain = np.maximum(gain_floor, (post_snr - float(over_subtraction)) / (post_snr + 1e-12))
+    # Smooth gain slightly across time and frequency to avoid musical-noise artifacts
+    # while keeping gain strictly real-valued (zero phase shift).
+    smooth_gain = scipy.ndimage.uniform_filter(raw_gain, size=(3, 5), mode="nearest")
+    smooth_gain = np.clip(smooth_gain, gain_floor, 1.0)
+
+    _, cleaned = scipy.signal.istft(
+        zxx_arr * smooth_gain,
+        fs=float(sample_rate),
+        window="hann",
+        nperseg=n_fft,
+        noverlap=noverlap,
+        input_onesided=True,
+        boundary=True,
+    )
+    out = np.asarray(cleaned[:n], dtype=np.float64)
+    if out.shape[0] < n:
+        out = np.pad(out, (0, n - out.shape[0]), mode="constant")
+    if not np.all(np.isfinite(out)):
+        return np.ascontiguousarray(s_arr, dtype=np.float32)
+    return np.ascontiguousarray(np.clip(out, -_F32_MAX, _F32_MAX), dtype=np.float32)
 
 
 def enhance_true_stereo_ms(

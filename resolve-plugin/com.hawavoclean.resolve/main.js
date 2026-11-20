@@ -22,7 +22,10 @@
  *   HAWA_ENGINE_TIMEOUT_MS=N   override the 60 s ready timeout (tests only)
  */
 
-const { app, BrowserWindow, ipcMain, dialog, shell, session, protocol } = require('electron');
+const isElectronRuntime = Boolean(process.versions && process.versions.electron);
+const { app, BrowserWindow, ipcMain, dialog, shell, session, protocol } = isElectronRuntime
+  ? require('electron')
+  : {};
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -40,7 +43,15 @@ const {
   withEngineAuthorization,
   withoutRendererCredentials,
 } = require('./session-auth.js');
-const { discoverDesktopEngine } = require('./engine-discovery.js');
+const {
+  discoverDesktopEngine,
+  findDesktopEngineExecutable,
+  verifyEngineExecutable,
+} = require('./engine-discovery.js');
+const {
+  discoverWorkflowIntegrationSdk,
+  acquireWorkflowIntegrationNode,
+} = require('./sdk-preflight.js');
 const {
   TimelineTransactionManager,
   validateBatchCleanTrackPayload,
@@ -80,21 +91,23 @@ const securityEvents = {
 // Must run before `ready`. The app scheme is standard so relative Vite assets resolve, secure so
 // browser APIs behave normally, and explicitly CORS-enabled to avoid the custom-protocol class of
 // cross-origin read flaws. Service workers and CSP bypass remain disabled.
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: APP_SCHEME,
-    privileges: {
-      standard: true,
-      secure: true,
-      supportFetchAPI: true,
-      corsEnabled: true,
-      stream: true,
-      codeCache: true,
-      allowServiceWorkers: false,
-      bypassCSP: false,
+if (isElectronRuntime && protocol && typeof protocol.registerSchemesAsPrivileged === 'function') {
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: APP_SCHEME,
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: true,
+        stream: true,
+        codeCache: true,
+        allowServiceWorkers: false,
+        bypassCSP: false,
+      },
     },
-  },
-]);
+  ]);
+}
 
 // Directories where common CLI tools (ffmpeg etc.) live on macOS but which are missing from
 // the minimal PATH a GUI-launched process inherits from Resolve.
@@ -361,7 +374,7 @@ function readEngineConfig() {
   const file = path.join(__dirname, 'engine.json');
   if (!fs.existsSync(file)) {
     throw new Error(
-      `engine.json not found at ${file}. Copy engine.json.example to engine.json and point "command" at your hawavoclean executable (or run resolve-plugin/install.sh).`,
+      'The HawaVoClean audio engine could not be located. Launch HawaVoClean Desktop from /Applications/HawaVoClean.app or reinstall from the HawaVoClean installer package.',
     );
   }
   let raw;
@@ -590,6 +603,30 @@ function spawnLocalEngine(discovery) {
   engine.ready.then(() => clearTimeout(timer), () => clearTimeout(timer));
 }
 
+/**
+ * Resolves the installed HawaVoClean Desktop engine executable (`/Applications/HawaVoClean.app`)
+ * after a stale rendezvous failure, before falling back to plugin-local `engine.json`.
+ */
+function resolveDesktopEngineFallback(options = {}) {
+  const findExe = options.findDesktopEngineExecutable || findDesktopEngineExecutable;
+  const verifyExe = options.verifyEngineExecutable || verifyEngineExecutable;
+  const executable = options.engineExecutable || findExe();
+  if (!executable || !fs.existsSync(executable)) {
+    return null;
+  }
+  verifyExe(executable);
+  return {
+    type: 'installed_desktop_engine',
+    executable,
+    command: [executable, 'serve'],
+    cwd: os.homedir(),
+    env: {
+      PYTHONNOUSERSITE: '1',
+      PYTHONDONTWRITEBYTECODE: '1',
+    },
+  };
+}
+
 function startEngine() {
   if (engine.phase !== 'idle') return;
   transitionEnginePhase('discovering');
@@ -630,7 +667,7 @@ function startEngine() {
       },
       (err) => {
         if (engine.settled || engine.phase !== 'bootstrapping') return;
-        log(`stale desktop rendezvous (${err.message}); falling back to local engine spawn`);
+        log(`stale desktop rendezvous (${err.message}); falling back to Desktop app engine before local engine.json`);
         engine.endpoint = null;
         engine.session = null;
         engine.pid = null;
@@ -638,7 +675,13 @@ function startEngine() {
         engine.bootstrapping = false;
         engine.shared = false;
         transitionEnginePhase('discovering');
-        spawnLocalEngine(null);
+        let desktopFallback = null;
+        try {
+          desktopFallback = resolveDesktopEngineFallback();
+        } catch (fallbackErr) {
+          log(`Desktop engine fallback rejected (${fallbackErr.message}); checking local engine.json`);
+        }
+        spawnLocalEngine(desktopFallback);
       },
     );
     return;
@@ -740,17 +783,71 @@ let resolveObj = null; // Resolve scripting object (promise flavour when availab
 let host = 'electron'; // 'resolve' | 'electron'
 const knownItems = new Map(); // mediaId -> MediaPoolItem handed out earlier (verified before use)
 
-function loadWorkflowIntegration() {
-  const file = path.join(__dirname, 'WorkflowIntegration.node');
-  if (!fs.existsSync(file)) {
-    log('WorkflowIntegration.node not present; running as standalone Electron app');
+let lastSdkPreflight = null;
+
+function getUserSdkCacheDir() {
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'HawaVoClean', 'resolve-sdk');
+  }
+  return path.join(os.homedir(), '.config', 'hawavoclean', 'resolve-sdk');
+}
+
+function loadWorkflowIntegration(options = {}) {
+  const pluginDir = options.pluginDir || __dirname;
+  const localFile = path.join(pluginDir, 'WorkflowIntegration.node');
+  const requireFn = options.requireFn || require;
+  const discoverFn = options.discoverWorkflowIntegrationSdk || discoverWorkflowIntegrationSdk;
+  const acquireFn = options.acquireWorkflowIntegrationNode || acquireWorkflowIntegrationNode;
+  const cacheDir = options.cacheDir || getUserSdkCacheDir();
+
+  if (fs.existsSync(localFile)) {
+    try {
+      // eslint-disable-next-line import/no-dynamic-require, global-require
+      return requireFn(localFile);
+    } catch (err) {
+      log(`WorkflowIntegration.node could not be loaded (${err.message}); running standalone`);
+      return null;
+    }
+  }
+
+  // Legally discover and acquire Blackmagic's local WorkflowIntegration.node
+  // from the user's licensed DaVinci Resolve Studio installation with checksum verification.
+  const discovery = discoverFn(options.sdkOptions);
+  lastSdkPreflight = discovery;
+  if (!discovery.ok || !discovery.path) {
+    log(`WorkflowIntegration.node unavailable (${discovery.code}): ${discovery.repairGuidance || 'running standalone'}`);
     return null;
   }
+
+  let candidatePath = null;
+  const acquired = acquireFn(pluginDir, {
+    ...(options.sdkOptions || {}),
+    overrideNodePath: discovery.path,
+  });
+  if (acquired.ok && acquired.installedPath) {
+    log(`acquired local WorkflowIntegration.node into plugin directory (sha256=${acquired.sha256 || 'verified'})`);
+    candidatePath = acquired.installedPath;
+  } else {
+    // Plugin directory under /Library/... is typically root-owned at runtime;
+    // stage a checksum-verified copy in the user's Application Support cache or load directly.
+    const cached = acquireFn(cacheDir, {
+      ...(options.sdkOptions || {}),
+      overrideNodePath: discovery.path,
+    });
+    if (cached.ok && cached.installedPath) {
+      log(`acquired local WorkflowIntegration.node into user cache (sha256=${cached.sha256 || 'verified'})`);
+      candidatePath = cached.installedPath;
+    } else {
+      log(`using verified local Resolve SDK WorkflowIntegration.node directly (${discovery.path})`);
+      candidatePath = discovery.path;
+    }
+  }
+
   try {
     // eslint-disable-next-line import/no-dynamic-require, global-require
-    return require(file);
+    return requireFn(candidatePath);
   } catch (err) {
-    log(`WorkflowIntegration.node could not be loaded (${err.message}); running standalone`);
+    log(`WorkflowIntegration.node could not be loaded from ${candidatePath} (${err.message}); running standalone`);
     return null;
   }
 }
@@ -856,6 +953,217 @@ function parseTimecodeSeconds(tc, fps) {
   return h * 3600 + mi * 60 + s + f / rate;
 }
 
+function parseTimecodeFrames(tc, fps) {
+  if (typeof tc !== 'string') return null;
+  const trimmed = tc.trim();
+  const m = trimmed.match(/^(\d+)[:;](\d+)[:;](\d+)([:;])(\d+)$/);
+  if (!m) return null;
+  const rate = Number(fps);
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  const h = Number(m[1]);
+  const mi = Number(m[2]);
+  const s = Number(m[3]);
+  const isDropFrame = trimmed.includes(';');
+  const f = Number(m[5]);
+  const nominalRate = Math.round(rate);
+  if (!Number.isFinite(nominalRate) || nominalRate <= 0) return null;
+  const totalNdf = ((h * 3600) + (mi * 60) + s) * nominalRate + f;
+  if (isDropFrame && (Math.abs(rate - 29.97) < 0.05 || Math.abs(rate - 59.94) < 0.05)) {
+    const dropFrames = Math.abs(rate - 59.94) < 0.05 ? 4 : 2;
+    const totalMinutes = h * 60 + mi;
+    return totalNdf - dropFrames * (totalMinutes - Math.floor(totalMinutes / 10));
+  }
+  return totalNdf;
+}
+
+async function getTimelineFps(timeline) {
+  if (timeline && typeof timeline.GetSetting === 'function') {
+    try {
+      const raw = await timeline.GetSetting('timelineFrameRate');
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0 && parsed <= 1000) {
+        return parsed;
+      }
+    } catch (_) {
+      /* fallback below */
+    }
+  }
+  return 24;
+}
+
+async function getTimelinePlayheadFrame(timeline, fps) {
+  if (!timeline) return null;
+  if (typeof timeline.GetCurrentTimecode === 'function') {
+    try {
+      const tc = await timeline.GetCurrentTimecode();
+      const frame = parseTimecodeFrames(tc, fps);
+      if (frame !== null) return frame;
+    } catch (_) {}
+  }
+  if (typeof timeline.GetStartFrame === 'function') {
+    try {
+      const start = Number(await timeline.GetStartFrame());
+      if (Number.isFinite(start) && start >= 0) return Math.round(start);
+    } catch (_) {}
+  }
+  return null;
+}
+
+async function mediaItemHasAudio(item) {
+  if (!item || typeof item.GetClipProperty !== 'function') return true;
+  try {
+    const channels = await item.GetClipProperty('Audio Ch');
+    if (channels !== undefined && channels !== null && String(channels).trim() !== '') {
+      const n = Number(channels);
+      if (Number.isFinite(n)) return n > 0;
+    }
+  } catch (_) {}
+  return true;
+}
+
+async function buildTimelineClipInfo(timelineItem, { trackIndex, mediaType, fps }) {
+  if (!timelineItem || typeof timelineItem.GetMediaPoolItem !== 'function') return null;
+  const item = await timelineItem.GetMediaPoolItem();
+  if (!item) return null;
+  const info = await clipInfo(item);
+  const startRaw = typeof timelineItem.GetStart === 'function' ? Number(await timelineItem.GetStart()) : Number.NaN;
+  const endRaw = typeof timelineItem.GetEnd === 'function' ? Number(await timelineItem.GetEnd()) : Number.NaN;
+  const leftRaw = typeof timelineItem.GetLeftOffset === 'function' ? Number(await timelineItem.GetLeftOffset()) : Number.NaN;
+  const durRaw = typeof timelineItem.GetDuration === 'function' ? Number(await timelineItem.GetDuration()) : Number.NaN;
+
+  const startFrame = Number.isFinite(startRaw) && startRaw >= 0 ? Math.round(startRaw) : 0;
+  const leftOffset = Number.isFinite(leftRaw) && leftRaw >= 0 ? Math.round(leftRaw) : 0;
+  let durationFrames = null;
+  if (Number.isFinite(durRaw) && durRaw > 0) {
+    durationFrames = Math.round(durRaw);
+  } else if (Number.isFinite(endRaw) && Number.isFinite(startRaw) && endRaw > startRaw) {
+    durationFrames = Math.round(endRaw - startRaw);
+  }
+
+  return {
+    ...info,
+    startFrame,
+    leftOffset,
+    ...(durationFrames !== null ? { durationFrames } : {}),
+    trackIndex,
+    mediaType,
+    fps,
+  };
+}
+
+async function findActiveAudioTimelineItem(timeline, playheadFrame) {
+  if (
+    !timeline ||
+    typeof timeline.GetTrackCount !== 'function' ||
+    typeof timeline.GetItemListInTrack !== 'function'
+  ) {
+    return null;
+  }
+
+  let audioTracks = 0;
+  try {
+    audioTracks = Number(await timeline.GetTrackCount('audio')) || 0;
+  } catch (_) {
+    return null;
+  }
+
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (let trackIdx = 1; trackIdx <= audioTracks; trackIdx += 1) {
+    let items = [];
+    try {
+      items = (await timeline.GetItemListInTrack('audio', trackIdx)) || [];
+    } catch (_) {
+      items = [];
+    }
+    for (const tItem of items) {
+      if (!tItem) continue;
+      let start = Number.NaN;
+      let end = Number.NaN;
+      try {
+        if (typeof tItem.GetStart === 'function') start = Number(await tItem.GetStart());
+        if (typeof tItem.GetEnd === 'function') end = Number(await tItem.GetEnd());
+        if (!Number.isFinite(end) && Number.isFinite(start) && typeof tItem.GetDuration === 'function') {
+          const dur = Number(await tItem.GetDuration());
+          if (Number.isFinite(dur) && dur >= 0) end = start + dur;
+        }
+      } catch (_) {
+        continue;
+      }
+
+      if (playheadFrame === null) {
+        return { item: tItem, trackIndex: trackIdx };
+      }
+
+      if (Number.isFinite(start)) {
+        const effectiveEnd = Number.isFinite(end) && end > start ? end : start + 1;
+        if (playheadFrame >= start && playheadFrame < effectiveEnd) {
+          return { item: tItem, trackIndex: trackIdx };
+        }
+        const distance = playheadFrame < start
+          ? start - playheadFrame
+          : playheadFrame - effectiveEnd;
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearest = { item: tItem, trackIndex: trackIdx };
+        }
+      } else if (!nearest) {
+        nearest = { item: tItem, trackIndex: trackIdx };
+      }
+    }
+  }
+
+  return nearest;
+}
+
+async function findTimelineMatchForMediaId(timeline, mediaId, playheadFrame) {
+  if (!timeline || !mediaId) return null;
+  for (const [trackType, mediaType] of [['audio', 'audio'], ['video', 'video']]) {
+    if (typeof timeline.GetTrackCount !== 'function' || typeof timeline.GetItemListInTrack !== 'function') continue;
+    let count = 0;
+    try {
+      count = Number(await timeline.GetTrackCount(trackType)) || 0;
+    } catch (_) {
+      continue;
+    }
+    let best = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let trackIdx = 1; trackIdx <= count; trackIdx += 1) {
+      let items = [];
+      try {
+        items = (await timeline.GetItemListInTrack(trackType, trackIdx)) || [];
+      } catch (_) {
+        continue;
+      }
+      for (const tItem of items) {
+        if (!tItem || typeof tItem.GetMediaPoolItem !== 'function') continue;
+        try {
+          const mp = await tItem.GetMediaPoolItem();
+          if (!mp || String((await mp.GetMediaId()) ?? '') !== mediaId) continue;
+          const start = typeof tItem.GetStart === 'function' ? Number(await tItem.GetStart()) : Number.NaN;
+          const end = typeof tItem.GetEnd === 'function' ? Number(await tItem.GetEnd()) : Number.NaN;
+          if (playheadFrame !== null && Number.isFinite(start)) {
+            const effectiveEnd = Number.isFinite(end) && end > start ? end : start + 1;
+            if (playheadFrame >= start && playheadFrame < effectiveEnd) {
+              return { item: tItem, trackIndex: trackIdx, mediaType };
+            }
+            const dist = playheadFrame < start ? start - playheadFrame : playheadFrame - effectiveEnd;
+            if (dist < bestDistance) {
+              bestDistance = dist;
+              best = { item: tItem, trackIndex: trackIdx, mediaType };
+            }
+          } else if (!best) {
+            best = { item: tItem, trackIndex: trackIdx, mediaType };
+          }
+        } catch (_) {}
+      }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+
 async function clipInfo(item) {
   const mediaId = String((await item.GetMediaId()) ?? '');
   const name = String((await item.GetName()) ?? '');
@@ -917,18 +1225,72 @@ async function findItemByMediaId(mediaId) {
   return null;
 }
 
-async function resolveGetSelectedClip() {
-  const mediaPool = await getMediaPool();
-  if (!mediaPool) return null;
-  const selected = (await mediaPool.GetSelectedClips()) || [];
-  if (selected.length > 0 && selected[0]) return clipInfo(selected[0]);
-  const project = await getProject();
-  const timeline = project ? await project.GetCurrentTimeline() : null;
+async function resolveGetSelectedClip(deps = {}) {
+  const getProjectFn = deps.getProject || getProject;
+  const getMediaPoolFn = deps.getMediaPool || getMediaPool;
+
+  const mediaPool = await getMediaPoolFn();
+  const project = await getProjectFn();
+  const timeline = project && typeof project.GetCurrentTimeline === 'function'
+    ? await project.GetCurrentTimeline()
+    : null;
+  const fps = await getTimelineFps(timeline);
+  const playheadFrame = await getTimelinePlayheadFrame(timeline, fps);
+
+  if (mediaPool && typeof mediaPool.GetSelectedClips === 'function') {
+    const selected = (await mediaPool.GetSelectedClips()) || [];
+    if (selected.length > 0 && selected[0]) {
+      const base = await clipInfo(selected[0]);
+      const tlMatch = await findTimelineMatchForMediaId(timeline, base.mediaId, playheadFrame);
+      if (tlMatch) {
+        const enriched = await buildTimelineClipInfo(tlMatch.item, {
+          trackIndex: tlMatch.trackIndex,
+          mediaType: tlMatch.mediaType,
+          fps,
+        });
+        if (enriched) return enriched;
+      }
+      return { ...base, fps };
+    }
+  }
+
   if (!timeline) return null;
-  const videoItem = await timeline.GetCurrentVideoItem();
-  if (!videoItem) return null;
-  const item = await videoItem.GetMediaPoolItem();
-  return item ? clipInfo(item) : null;
+
+  const videoItem = typeof timeline.GetCurrentVideoItem === 'function'
+    ? await timeline.GetCurrentVideoItem()
+    : null;
+  let videoFallbackInfo = null;
+  if (videoItem && typeof videoItem.GetMediaPoolItem === 'function') {
+    const mpItem = await videoItem.GetMediaPoolItem();
+    if (mpItem) {
+      const hasAudio = await mediaItemHasAudio(mpItem);
+      const videoTrackIdx = typeof videoItem.GetTrackIndex === 'function'
+        ? (Number(await videoItem.GetTrackIndex()) || 1)
+        : 1;
+      const built = await buildTimelineClipInfo(videoItem, {
+        trackIndex: videoTrackIdx,
+        mediaType: 'video',
+        fps,
+      });
+      if (built && hasAudio) {
+        return built;
+      }
+      videoFallbackInfo = built;
+    }
+  }
+
+  // Inspect audio timeline tracks near the playhead when there is no video item or the video clip has no audio.
+  const activeAudio = await findActiveAudioTimelineItem(timeline, playheadFrame);
+  if (activeAudio) {
+    const audioInfo = await buildTimelineClipInfo(activeAudio.item, {
+      trackIndex: activeAudio.trackIndex,
+      mediaType: 'audio',
+      fps,
+    });
+    if (audioInfo) return audioInfo;
+  }
+
+  return videoFallbackInfo;
 }
 
 async function resolveImportMedia(filePath) {
@@ -1024,9 +1386,9 @@ function escapeHtml(s) {
 }
 
 function errorPageHtml(title, detail) {
-  const cmd = engine.config ? engine.config.command.join(' ') : '(engine.json missing or invalid)';
+  const cmd = engine.config ? engine.config.command.join(' ') : '(HawaVoClean engine not configured)';
   const cwd = engine.config ? engine.config.cwd : '';
-  const tail = engine.stderrTail.length ? engine.stderrTail.join('\n') : '(no output on stderr)';
+  const tail = engine.stderrTail.length ? engine.stderrTail.join('\n') : '(no diagnostic output)';
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${escapeHtml(APP_TITLE)} — error</title>
 <style>
   html,body{margin:0;background:#0e1013;color:#e6e8eb;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
@@ -1043,17 +1405,17 @@ function errorPageHtml(title, detail) {
 <h1>${escapeHtml(title)}</h1>
 <p>${escapeHtml(detail)}</p>
 <dl>
-  <dt>Command</dt><dd><code>${escapeHtml(cmd)}</code></dd>
+  <dt>Engine</dt><dd><code>${escapeHtml(cmd)}</code></dd>
   <dt>Working dir</dt><dd><code>${escapeHtml(cwd)}</code></dd>
   <dt>Plugin dir</dt><dd><code>${escapeHtml(__dirname)}</code></dd>
 </dl>
-<h2>Engine output (stderr tail)</h2>
+<h2>Diagnostic log</h2>
 <pre>${escapeHtml(tail)}</pre>
-<h2>What to check</h2>
+<h2>How to fix this</h2>
 <ul>
-  <li>The bundled engine path in <code>engine.json</code> exists and is executable. Re-run the locked installer if the self-contained engine is missing or damaged.</li>
-  <li><code>ffmpeg</code> is on the PATH (Homebrew: <code>/opt/homebrew/bin</code>).</li>
-  <li>Close this window and relaunch the plugin from Resolve's <b>Workspace → Workflow Integrations → HawaVoClean</b> (or re-run <code>npm start</code>).</li>
+  <li>Launch <b>HawaVoClean Desktop</b> from <code>/Applications/HawaVoClean.app</code>, or reinstall HawaVoClean from the official installer package.</li>
+  <li>If the plugin files are missing or damaged, quit DaVinci Resolve Studio and re-run the HawaVoClean Resolve Plugin installer package (<code>.pkg</code>).</li>
+  <li>Close this window and reopen <b>Workspace → Workflow Integrations → HawaVoClean</b> in DaVinci Resolve Studio.</li>
 </ul>
 </main></body></html>`;
 }
@@ -1132,9 +1494,8 @@ function createWindow({ loadUi = true } = {}) {
       const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'"><title>${APP_TITLE}</title></head>
 <body style="margin:0;background:#0e1013;color:#e6e8eb;font:14px/1.5 -apple-system,Helvetica,Arial,sans-serif">
 <main style="max-width:760px;margin:0 auto;padding:48px 32px">
-<h1 style="font-size:20px;font-weight:600;margin:0 0 8px">UI bundle not found</h1>
-<p style="color:#b7bcc4">There is no <code>index.html</code> next to <code>main.js</code>. Build the UI and assemble the plugin with
-<code>resolve-plugin/install.sh</code> (or copy <code>ui/dist/*</code> into <code>${escapeHtml(__dirname)}</code>).</p>
+<h1 style="font-size:20px;font-weight:600;margin:0 0 8px">Plugin installation incomplete</h1>
+<p style="color:#b7bcc4">The HawaVoClean interface files could not be found in this plugin folder. Quit DaVinci Resolve Studio and reinstall HawaVoClean from the installer package, or launch HawaVoClean Desktop from <code>/Applications/HawaVoClean.app</code>.</p>
 <p style="color:#7d848f">Host: ${escapeHtml(host)}</p></main></body></html>`;
       mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html)).catch(() => {});
     }
@@ -1323,59 +1684,72 @@ async function shutdownAll() {
   cleanupResolve();
 }
 
-app.on('before-quit', (event) => {
-  if (quitState === 'done') return;
-  event.preventDefault();
-  if (quitState === 'pending') return;
-  quitState = 'pending';
-  const hardDeadline = setTimeout(() => {
-    log('shutdown deadline hit; exiting');
-    app.exit(0);
-  }, QUIT_HARD_DEADLINE_MS);
-  hardDeadline.unref();
-  shutdownAll().finally(() => {
-    clearTimeout(hardDeadline);
-    quitState = 'done';
+if (isElectronRuntime) {
+  app.on('before-quit', (event) => {
+    if (quitState === 'done') return;
+    event.preventDefault();
+    if (quitState === 'pending') return;
+    quitState = 'pending';
+    const hardDeadline = setTimeout(() => {
+      log('shutdown deadline hit; exiting');
+      app.exit(0);
+    }, QUIT_HARD_DEADLINE_MS);
+    hardDeadline.unref();
+    shutdownAll().finally(() => {
+      clearTimeout(hardDeadline);
+      quitState = 'done';
+      app.quit();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    // A plugin window that is closed should end the plugin process on every platform.
     app.quit();
   });
-});
 
-app.on('window-all-closed', () => {
-  // A plugin window that is closed should end the plugin process on every platform.
-  app.quit();
-});
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => {
+      log(`${sig} received; quitting`);
+      app.quit();
+    });
+  }
 
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-  process.on(sig, () => {
-    log(`${sig} received; quitting`);
-    app.quit();
+  process.on('uncaughtException', (err) => {
+    log(`uncaught exception: ${err && err.stack ? err.stack : err}`);
+  });
+
+  app.setName(APP_TITLE);
+
+  app.whenReady().then(async () => {
+    configureSessionSecurity();
+    log(`runtime evidence: ${JSON.stringify(RUNTIME_EVIDENCE)}; sandbox=true contextIsolation=true nodeIntegration=false`);
+    registerIpc();
+    startEngine();
+    // Decide the host before the first page loads: preload reads it synchronously.
+    host = (await initResolve()) ? 'resolve' : 'electron';
+    log(`host = ${host}`);
+    if (errorShown) return; // engine failed fast; the error page is already up.
+    createWindow();
+    if (SELFTEST) {
+      console.log('HAWA_SELFTEST_HOST ' + host);
+      mainWindow.webContents.once('did-finish-load', () => {
+        runSelfTest();
+      });
+    }
+  });
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0 && quitState === 'running') createWindow();
   });
 }
 
-process.on('uncaughtException', (err) => {
-  log(`uncaught exception: ${err && err.stack ? err.stack : err}`);
-});
-
-app.setName(APP_TITLE);
-
-app.whenReady().then(async () => {
-  configureSessionSecurity();
-  log(`runtime evidence: ${JSON.stringify(RUNTIME_EVIDENCE)}; sandbox=true contextIsolation=true nodeIntegration=false`);
-  registerIpc();
-  startEngine();
-  // Decide the host before the first page loads: preload reads it synchronously.
-  host = (await initResolve()) ? 'resolve' : 'electron';
-  log(`host = ${host}`);
-  if (errorShown) return; // engine failed fast; the error page is already up.
-  createWindow();
-  if (SELFTEST) {
-    console.log('HAWA_SELFTEST_HOST ' + host);
-    mainWindow.webContents.once('did-finish-load', () => {
-      runSelfTest();
-    });
-  }
-});
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0 && quitState === 'running') createWindow();
-});
+module.exports = {
+  loadWorkflowIntegration,
+  resolveDesktopEngineFallback,
+  resolveGetSelectedClip,
+  getTimelineFps,
+  parseTimecodeFrames,
+  findActiveAudioTimelineItem,
+  errorPageHtml,
+  getLastSdkPreflight: () => lastSdkPreflight,
+};

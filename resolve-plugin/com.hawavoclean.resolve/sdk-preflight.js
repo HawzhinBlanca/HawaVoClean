@@ -13,6 +13,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const DEFAULT_RESOLVE_APP = '/Applications/DaVinci Resolve/DaVinci Resolve.app';
 const DEFAULT_SDK_DIR = '/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Workflow Integrations';
@@ -298,11 +299,25 @@ function discoverWorkflowIntegrationSdk(options = {}) {
 }
 
 /**
- * Consented acquisition of WorkflowIntegration.node into the plugin stage.
+ * Computes the SHA-256 hex digest of a file.
  *
- * @param {string} targetDir Directory where WorkflowIntegration.node should be copied/linked
+ * @param {string} filePath
+ * @returns {string}
+ */
+function computeFileSha256(filePath) {
+  const hash = crypto.createHash('sha256');
+  hash.update(fs.readFileSync(filePath));
+  return hash.digest('hex');
+}
+
+/**
+ * Consented acquisition of WorkflowIntegration.node into the plugin stage,
+ * with SHA-256 checksum verification before atomic promotion.
+ *
+ * @param {string} targetDir Directory where WorkflowIntegration.node should be copied
  * @param {object} [options] Preflight discovery options
- * @returns {{ ok: boolean, installedPath?: string, error?: string, code?: string }}
+ * @param {string} [options.expectedSha256] Optional expected SHA-256 hex digest
+ * @returns {{ ok: boolean, installedPath?: string, sha256?: string, sourcePath?: string, error?: string, code?: string }}
  */
 function acquireWorkflowIntegrationNode(targetDir, options = {}) {
   const discovery = discoverWorkflowIntegrationSdk(options);
@@ -315,20 +330,50 @@ function acquireWorkflowIntegrationNode(targetDir, options = {}) {
   }
 
   const destPath = path.join(targetDir, 'WorkflowIntegration.node');
+  const tempDest = `${destPath}.tmp.${process.pid}.${Date.now()}`;
   try {
+    const sourceSha256 = computeFileSha256(discovery.path);
+    if (
+      typeof options.expectedSha256 === 'string' &&
+      options.expectedSha256.trim().length > 0 &&
+      sourceSha256 !== options.expectedSha256.trim().toLowerCase()
+    ) {
+      return {
+        ok: false,
+        code: 'ERR_CHECKSUM_MISMATCH',
+        error: `Source WorkflowIntegration.node checksum mismatch (expected ${options.expectedSha256}, got ${sourceSha256}).`,
+      };
+    }
+
     fs.mkdirSync(targetDir, { recursive: true });
-    // Copy the file atomically
-    const tempDest = `${destPath}.tmp.${Date.now()}`;
+    // Copy the file atomically and verify SHA-256 before moving into place
     fs.copyFileSync(discovery.path, tempDest);
+    const copiedSha256 = computeFileSha256(tempDest);
+    if (copiedSha256 !== sourceSha256) {
+      try {
+        fs.unlinkSync(tempDest);
+      } catch (_) {}
+      return {
+        ok: false,
+        code: 'ERR_CHECKSUM_MISMATCH',
+        error: `Copied WorkflowIntegration.node failed SHA-256 verification (${copiedSha256} !== ${sourceSha256}).`,
+      };
+    }
+
     fs.chmodSync(tempDest, 0o755);
     fs.renameSync(tempDest, destPath);
 
     return {
       ok: true,
       installedPath: destPath,
+      sourcePath: discovery.path,
+      sha256: copiedSha256,
       code: 'ACQUIRED_OK',
     };
   } catch (err) {
+    try {
+      if (fs.existsSync(tempDest)) fs.unlinkSync(tempDest);
+    } catch (_) {}
     return {
       ok: false,
       code: 'ERR_ACQUISITION_FAILED',
@@ -342,6 +387,7 @@ module.exports = {
   CPU_TYPE_X86_64,
   DEFAULT_RESOLVE_APP,
   DEFAULT_SDK_DIR,
+  computeFileSha256,
   inspectMachOBinary,
   discoverWorkflowIntegrationSdk,
   acquireWorkflowIntegrationNode,

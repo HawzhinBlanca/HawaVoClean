@@ -251,8 +251,8 @@ def apply_thread_budget(num_threads: int, cpu_count: int | None = None) -> int |
     return int(budget)
 
 
-def _windows_peak_rss_bytes() -> int:
-    """Peak working set from the native process counters on Windows."""
+def _windows_rss_bytes(*, current: bool = False) -> int:
+    """Working set (current or peak) from the native process counters on Windows."""
 
     import ctypes
 
@@ -283,7 +283,88 @@ def _windows_peak_rss_bytes() -> int:
     process = windll.kernel32.GetCurrentProcess()
     if not windll.psapi.GetProcessMemoryInfo(process, byref(counters), counters.cb):
         raise OSError("GetProcessMemoryInfo failed")
-    return int(counters.PeakWorkingSetSize)
+    return int(counters.WorkingSetSize if current else counters.PeakWorkingSetSize)
+
+
+def _windows_peak_rss_bytes() -> int:
+    """Peak working set from the native process counters on Windows."""
+    return _windows_rss_bytes(current=False)
+
+
+def _darwin_current_rss_bytes() -> int:
+    """Current resident set size on macOS via ``task_info(MACH_TASK_BASIC_INFO)``."""
+    import ctypes
+    import ctypes.util
+
+    class _TimeValueT(Structure):
+        _fields_ = [
+            ("seconds", ctypes.c_int32),
+            ("microseconds", ctypes.c_int32),
+        ]
+
+    class _MachTaskBasicInfo(Structure):
+        _fields_ = [
+            ("virtual_size", ctypes.c_uint64),
+            ("resident_size", ctypes.c_uint64),
+            ("resident_size_max", ctypes.c_uint64),
+            ("user_time", _TimeValueT),
+            ("system_time", _TimeValueT),
+            ("policy", ctypes.c_int32),
+            ("suspend_count", ctypes.c_int32),
+        ]
+
+    libc_path = ctypes.util.find_library("c") or "/usr/lib/libSystem.B.dylib"
+    libc = ctypes.CDLL(libc_path)
+    libc.mach_task_self.restype = ctypes.c_uint32
+    libc.task_info.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    libc.task_info.restype = ctypes.c_int
+
+    mach_task_basic_info = 20
+    info = _MachTaskBasicInfo()
+    count = ctypes.c_uint32(ctypes.sizeof(info) // ctypes.sizeof(ctypes.c_uint32))
+    kr = int(libc.task_info(libc.mach_task_self(), mach_task_basic_info, byref(info), byref(count)))
+    if kr != 0 or int(info.resident_size) <= 0:
+        raise OSError(f"task_info(MACH_TASK_BASIC_INFO) failed with kern_return={kr}")
+    return int(info.resident_size)
+
+
+def _linux_current_rss_bytes() -> int:
+    """Current resident set size on Linux via ``/proc/self/statm``."""
+    with open("/proc/self/statm", encoding="ascii") as handle:
+        raw = handle.read().strip().split()
+    if len(raw) < 2:
+        raise OSError("Malformed /proc/self/statm")
+    rss_pages = int(raw[1])
+    page_size = int(os.sysconf("SC_PAGESIZE")) if hasattr(os, "sysconf") else 4096
+    if rss_pages <= 0 or page_size <= 0:
+        raise OSError("Non-positive RSS from /proc/self/statm")
+    return rss_pages * page_size
+
+
+def process_current_rss_bytes() -> int:
+    """Instantaneous resident set size of *this* process, in bytes.
+
+    Unlike :func:`process_peak_rss_bytes` (which reads monotonic ``ru_maxrss``),
+    this drops after caches or buffers are freed, so long-lived LRU caches can
+    enforce memory caps without self-evicting forever after a single peak.
+    Falls back safely to :func:`process_peak_rss_bytes` if the platform probe
+    fails.
+    """
+    try:
+        if sys.platform == "darwin":
+            return _darwin_current_rss_bytes()
+        if sys.platform.startswith("linux"):
+            return _linux_current_rss_bytes()
+        if sys.platform == "win32":
+            return _windows_rss_bytes(current=True)
+    except Exception:
+        pass
+    return process_peak_rss_bytes()
 
 
 def process_peak_rss_bytes() -> int:

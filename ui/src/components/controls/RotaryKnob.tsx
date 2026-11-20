@@ -141,13 +141,20 @@ export function RotaryKnob({
       }
       return;
     }
-    const analyser = getPlayer().getAnalyser();
-    if (!analyser) return;
-    const buf = new Float32Array(Math.min(analyser.fftSize || 1024, 2048));
+    let analyser: AnalyserNode | null = getPlayer().getAnalyser();
+    let buf: Float32Array<ArrayBuffer> | null = analyser
+      ? new Float32Array(Math.min(analyser.fftSize || 1024, 2048))
+      : null;
     let raf = 0;
     let smoothRms = 0;
     const tick = (): void => {
-      if (typeof analyser.getFloatTimeDomainData === 'function') {
+      if (!analyser) {
+        analyser = getPlayer().getAnalyser();
+        if (analyser) {
+          buf = new Float32Array(Math.min(analyser.fftSize || 1024, 2048));
+        }
+      }
+      if (analyser && buf && typeof analyser.getFloatTimeDomainData === 'function') {
         analyser.getFloatTimeDomainData(buf);
         let sum = 0;
         for (let i = 0; i < buf.length; i++) {

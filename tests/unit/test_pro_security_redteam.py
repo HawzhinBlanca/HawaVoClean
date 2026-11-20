@@ -999,12 +999,12 @@ def test_override_fallback_metadata_only_and_error_states(work: Path) -> None:
 
             # Metadata-only fallback (no cached slices) for all 4 decisions
             for body, expected_dec in (
-                ({"unitIndex": 0, "decision": "force_enhanced"}, "enhanced"),
-                ({"unitIndex": 0, "decision": "force_original"}, "reverted"),
-                ({"unitIndex": 0, "decision": "custom_strength", "strength": 0.4}, "enhanced"),
-                ({"unitIndex": 0, "decision": "custom_strength", "strength": 0.0}, "reverted"),
-                ({"unitIndex": 0, "decision": "auto"}, "reverted"),
-                ({"unitIndex": 1, "decision": "auto"}, "enhanced"),
+                ({"unitIndex": 0, "decision": "force_enhanced"}, "ENHANCED"),
+                ({"unitIndex": 0, "decision": "force_original"}, "REVERTED"),
+                ({"unitIndex": 0, "decision": "custom_strength", "strength": 0.4}, "ENHANCED"),
+                ({"unitIndex": 0, "decision": "custom_strength", "strength": 0.0}, "REVERTED"),
+                ({"unitIndex": 0, "decision": "auto"}, "REVERTED"),
+                ({"unitIndex": 1, "decision": "auto"}, "ENHANCED"),
             ):
                 r = c.post(f"/api/v1/jobs/{jid}/override", headers=H, json=body)
                 assert r.status_code == 200, (body, r.text)

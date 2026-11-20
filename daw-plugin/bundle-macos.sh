@@ -7,6 +7,8 @@
 # Optional environment variables:
 #   CODESIGN_IDENTITY  Codesigning identity (default: "-" for ad-hoc local signing)
 #   CARGO_FEATURES     Extra Cargo features to pass when building (e.g. "onnx")
+#   ONNX_MODEL_PATH    Optional path to exported streaming mask model.onnx (default: daw-plugin/models/model.onnx if present)
+#   ONNX_DYLIB_PATH    Optional path to libonnxruntime.dylib (default: daw-plugin/models/ or daw-plugin/lib/ if present)
 #   SKIP_BUILD         Set to "1" to reuse an existing target/release/libhawavoclean_daw.dylib
 
 set -euo pipefail
@@ -46,6 +48,21 @@ fi
 
 mkdir -p "${OUT_DIR}"
 
+RESOLVED_MODEL_PATH="${ONNX_MODEL_PATH:-}"
+if [[ -z "${RESOLVED_MODEL_PATH}" && -f "${SCRIPT_DIR}/models/model.onnx" ]]; then
+  RESOLVED_MODEL_PATH="${SCRIPT_DIR}/models/model.onnx"
+fi
+
+RESOLVED_ORT_DYLIB="${ONNX_DYLIB_PATH:-}"
+if [[ -z "${RESOLVED_ORT_DYLIB}" ]]; then
+  for cand in "${SCRIPT_DIR}/models/libonnxruntime.dylib" "${SCRIPT_DIR}/lib/libonnxruntime.dylib"; do
+    if [[ -f "${cand}" ]]; then
+      RESOLVED_ORT_DYLIB="${cand}"
+      break
+    fi
+  done
+fi
+
 create_bundle() {
   local format="$1"
   local bundle_id="$2"
@@ -53,16 +70,29 @@ create_bundle() {
   local bundle_dir="${OUT_DIR}/${PLUGIN_NAME}.${format}"
   local contents_dir="${bundle_dir}/Contents"
   local macos_dir="${contents_dir}/MacOS"
+  local resources_dir="${contents_dir}/Resources"
   local bin_path="${macos_dir}/${PLUGIN_NAME}"
 
   rm -rf "${bundle_dir}"
-  mkdir -p "${macos_dir}"
+  mkdir -p "${macos_dir}" "${resources_dir}"
 
   cp -f "${DYLIB_PATH}" "${bin_path}"
   chmod 0755 "${bin_path}"
 
   # Rewrite LC_ID_DYLIB so no machine-specific target/release path leaks into the bundle.
   install_name_tool -id "@loader_path/${PLUGIN_NAME}" "${bin_path}"
+
+  # Bundle optional ONNX model and ONNX Runtime dynamic library into Contents/Resources/.
+  if [[ -n "${RESOLVED_MODEL_PATH}" && -f "${RESOLVED_MODEL_PATH}" ]]; then
+    cp -f "${RESOLVED_MODEL_PATH}" "${resources_dir}/model.onnx"
+    chmod 0644 "${resources_dir}/model.onnx"
+  fi
+  if [[ -n "${RESOLVED_ORT_DYLIB}" && -f "${RESOLVED_ORT_DYLIB}" ]]; then
+    cp -f "${RESOLVED_ORT_DYLIB}" "${resources_dir}/libonnxruntime.dylib"
+    chmod 0755 "${resources_dir}/libonnxruntime.dylib"
+    install_name_tool -id "@loader_path/libonnxruntime.dylib" "${resources_dir}/libonnxruntime.dylib" 2>/dev/null || true
+    codesign --force --sign "${CODESIGN_IDENTITY}" "${resources_dir}/libonnxruntime.dylib"
+  fi
 
   printf 'BNDL????' > "${contents_dir}/PkgInfo"
 

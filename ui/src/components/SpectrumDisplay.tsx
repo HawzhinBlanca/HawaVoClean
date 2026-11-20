@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { getPlayer } from '../audio/player';
-import { SpectrumRenderer } from '../render/spectrum';
+import { SPECTRUM_PLOT_INSETS, SpectrumRenderer } from '../render/spectrum';
 import '../render/spectrum.css';
 import { updateRackSettings } from '../state/actions';
 import { scheduleLivePreview } from '../state/liveAudition';
 import { HPF_MAX_HZ, HPF_MIN_HZ } from '../state/presets';
 import { useStore } from '../state/store';
+
+const FALLBACK_PLOT_INSETS = { left: 33, right: 9, top: 11, bottom: 17 } as const;
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'] as const;
 
@@ -94,6 +96,8 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   const [removedCoverage, setRemovedCoverage] = useState(0);
   const [draggingHpf, setDraggingHpf] = useState(false);
   const displayRef = useRef<HTMLDivElement | null>(null);
+  const plotOverlayRef = useRef<HTMLDivElement | null>(null);
+  const insets = SPECTRUM_PLOT_INSETS ?? FALLBACK_PLOT_INSETS;
 
   useEffect(() => {
     const canvas = canvasRef.current as SpectrumCanvas | null;
@@ -154,9 +158,9 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   const removedPct = Math.round(removedCoverage * 100);
   const hpfEnabled = rackSettings.hpfEnabled !== false;
   const hpfHz = rackSettings.hpfCutoffHz;
-  const hpfLeftPct = Math.min(48, Math.max(2, hzToNormX(hpfHz) * 100));
+  const hpfLeftPct = Math.min(100, Math.max(0, hzToNormX(hpfHz) * 100));
 
-  // Smooth FabFilter-style 24 dB/oct HPF roll-off curve in SVG 0..100 coordinates
+  // Smooth FabFilter-style 24 dB/oct HPF roll-off curve in SVG 0..100 plot coordinates
   const hpfCurvePath = `M 0 100 C ${(hpfLeftPct * 0.42).toFixed(2)} 100, ${(hpfLeftPct * 0.78).toFixed(2)} 42, ${hpfLeftPct.toFixed(2)} 38 L 100 38`;
   const hpfFillPath = `${hpfCurvePath} L 100 100 Z`;
 
@@ -172,9 +176,19 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   const activeNoise = (cleaned ?? original)?.noise_floor_db ?? null;
 
   const updateHpfFromPointer = (clientX: number): void => {
-    const rect = displayRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return;
-    const normX = (clientX - rect.left) / rect.width;
+    const plotRect = plotOverlayRef.current?.getBoundingClientRect();
+    let plotLeft = 0;
+    let plotWidth = 0;
+    if (plotRect && plotRect.width > 0) {
+      plotLeft = plotRect.left;
+      plotWidth = plotRect.width;
+    } else {
+      const dispRect = displayRef.current?.getBoundingClientRect();
+      if (!dispRect || dispRect.width <= insets.left + insets.right) return;
+      plotLeft = dispRect.left + insets.left;
+      plotWidth = dispRect.width - insets.left - insets.right;
+    }
+    const normX = (clientX - plotLeft) / plotWidth;
     const nextHz = normXToHpfHz(normX);
     if (nextHz !== rackSettings.hpfCutoffHz || !hpfEnabled) {
       updateRackSettings({ ...rackSettings, hpfEnabled: true, hpfCutoffHz: nextHz });
@@ -273,126 +287,146 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
                     : 'Long-term average spectrum: no signal yet'
             }
           />
-          {/* Active repair band overlays (FabFilter-style frequency zone shading) */}
-          {rackSettings.deplosive ? (
-            <div
-              className="spec-band-overlay band-deplosive"
-              aria-hidden="true"
-              style={{ left: '0%', width: `${deplosiveRightPct.toFixed(2)}%` }}
-            >
-              <span>De-Plosive</span>
-            </div>
-          ) : null}
-          {rackSettings.tonalRestoration ? (
-            <div
-              className="spec-band-overlay band-tonal"
-              aria-hidden="true"
-              style={{ left: `${tonalLeftPct.toFixed(2)}%`, width: `${tonalWidthPct.toFixed(2)}%` }}
-            >
-              <span>Tonal</span>
-            </div>
-          ) : null}
-          {rackSettings.deess ? (
-            <div
-              className="spec-band-overlay band-deess"
-              aria-hidden="true"
-              style={{ left: `${deessLeftPct.toFixed(2)}%`, width: `${deessWidthPct.toFixed(2)}%` }}
-            >
-              <span>De-Ess</span>
-            </div>
-          ) : null}
-
-          {/* Smooth 24 dB/oct Butterworth-style HPF roll-off SVG curve */}
-          {hpfEnabled ? (
-            <svg
-              className="spec-hpf-svg"
-              viewBox="0 0 100 100"
-              preserveAspectRatio="none"
-              aria-hidden="true"
-            >
-              <defs>
-                <linearGradient id="hawa-hpf-grad" x1="0" y1="0" x2="1" y2="0">
-                  <stop offset="0%" stopColor="rgba(44,212,255,0.22)" />
-                  <stop offset={`${hpfLeftPct.toFixed(1)}%`} stopColor="rgba(44,212,255,0.06)" />
-                  <stop offset="100%" stopColor="rgba(44,212,255,0)" />
-                </linearGradient>
-              </defs>
-              <path d={hpfFillPath} fill="url(#hawa-hpf-grad)" />
-              <path
-                d={hpfCurvePath}
-                fill="none"
-                stroke="rgba(156,236,255,0.85)"
-                strokeWidth="1.5"
-                vectorEffect="non-scaling-stroke"
-              />
-            </svg>
-          ) : null}
-          <button
-            type="button"
-            aria-label={`High-pass rumble filter node: ${hpfEnabled ? `${hpfHz} Hz (${hzToMusicalNote(hpfHz)})` : 'bypassed'}. Drag horizontally or press arrow keys to adjust.`}
-            title={
-              hpfEnabled
-                ? `HPF ${hpfHz} Hz (${hzToMusicalNote(hpfHz)}) — drag horizontally or double-click to bypass`
-                : 'HPF bypassed — double-click to enable'
-            }
-            onPointerDown={onHpfPointerDown}
-            onPointerMove={onHpfPointerMove}
-            onPointerUp={onHpfPointerUp}
-            onPointerCancel={onHpfPointerUp}
-            onDoubleClick={() => {
-              updateRackSettings({ ...rackSettings, hpfEnabled: !hpfEnabled });
-              scheduleLivePreview();
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
-                e.preventDefault();
-                updateRackSettings({
-                  ...rackSettings,
-                  hpfEnabled: true,
-                  hpfCutoffHz: Math.min(HPF_MAX_HZ, hpfHz + 5),
-                });
-                scheduleLivePreview();
-              } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
-                e.preventDefault();
-                updateRackSettings({
-                  ...rackSettings,
-                  hpfEnabled: true,
-                  hpfCutoffHz: Math.max(HPF_MIN_HZ, hpfHz - 5),
-                });
-                scheduleLivePreview();
-              }
-            }}
+          {/* Plot-exact inset overlay aligned 1:1 with SpectrumRenderer.plot */}
+          <div
+            ref={plotOverlayRef}
+            className="spec-plot-overlay"
             style={{
               position: 'absolute',
-              left: `${hpfLeftPct}%`,
-              top: '38%',
-              transform: 'translate(-50%, -50%)',
-              width: '24px',
-              height: '24px',
-              borderRadius: '50%',
-              border: hpfEnabled ? '2px solid var(--cyan-2)' : '1.5px dashed var(--fg-4)',
-              background: hpfEnabled ? 'rgba(44, 212, 255, 0.28)' : 'rgba(14, 18, 26, 0.72)',
-              boxShadow: hpfEnabled ? '0 0 14px var(--cyan-glow)' : 'none',
-              cursor: 'ew-resize',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              zIndex: 4,
+              left: `${insets.left}px`,
+              right: `${insets.right}px`,
+              top: `${insets.top}px`,
+              bottom: `${insets.bottom}px`,
+              pointerEvents: 'none',
+              zIndex: 2,
             }}
           >
-            <span
-              aria-hidden="true"
-              style={{
-                width: '6px',
-                height: '6px',
-                borderRadius: '50%',
-                background: hpfEnabled ? 'var(--cyan-2)' : 'var(--fg-4)',
+            {/* Active repair band overlays (FabFilter-style frequency zone shading) */}
+            {rackSettings.deplosive ? (
+              <div
+                className="spec-band-overlay band-deplosive"
+                aria-hidden="true"
+                style={{ left: '0%', width: `${deplosiveRightPct.toFixed(2)}%` }}
+              >
+                <span>De-Plosive</span>
+              </div>
+            ) : null}
+            {rackSettings.tonalRestoration ? (
+              <div
+                className="spec-band-overlay band-tonal"
+                aria-hidden="true"
+                style={{ left: `${tonalLeftPct.toFixed(2)}%`, width: `${tonalWidthPct.toFixed(2)}%` }}
+              >
+                <span>Tonal</span>
+              </div>
+            ) : null}
+            {rackSettings.deess ? (
+              <div
+                className="spec-band-overlay band-deess"
+                aria-hidden="true"
+                style={{ left: `${deessLeftPct.toFixed(2)}%`, width: `${deessWidthPct.toFixed(2)}%` }}
+              >
+                <span>De-Ess</span>
+              </div>
+            ) : null}
+
+            {/* Smooth 24 dB/oct Butterworth-style HPF roll-off SVG curve */}
+            {hpfEnabled ? (
+              <svg
+                className="spec-hpf-svg"
+                viewBox="0 0 100 100"
+                preserveAspectRatio="none"
+                aria-hidden="true"
+              >
+                <defs>
+                  <linearGradient id="hawa-hpf-grad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stopColor="rgba(44,212,255,0.22)" />
+                    <stop offset={`${hpfLeftPct.toFixed(1)}%`} stopColor="rgba(44,212,255,0.06)" />
+                    <stop offset="100%" stopColor="rgba(44,212,255,0)" />
+                  </linearGradient>
+                </defs>
+                <path d={hpfFillPath} fill="url(#hawa-hpf-grad)" />
+                <path
+                  d={hpfCurvePath}
+                  fill="none"
+                  stroke="rgba(156,236,255,0.85)"
+                  strokeWidth="1.5"
+                  vectorEffect="non-scaling-stroke"
+                />
+              </svg>
+            ) : null}
+            <button
+              type="button"
+              aria-label={`High-pass rumble filter node: ${hpfEnabled ? `${hpfHz} Hz (${hzToMusicalNote(hpfHz)})` : 'bypassed'}. Drag horizontally or press arrow keys to adjust.`}
+              title={
+                hpfEnabled
+                  ? `HPF ${hpfHz} Hz (${hzToMusicalNote(hpfHz)}) — drag horizontally or double-click to bypass`
+                  : 'HPF bypassed — double-click to enable'
+              }
+              onPointerDown={onHpfPointerDown}
+              onPointerMove={onHpfPointerMove}
+              onPointerUp={onHpfPointerUp}
+              onPointerCancel={onHpfPointerUp}
+              onDoubleClick={() => {
+                updateRackSettings({ ...rackSettings, hpfEnabled: !hpfEnabled });
+                scheduleLivePreview();
               }}
-            />
-          </button>
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  updateRackSettings({
+                    ...rackSettings,
+                    hpfEnabled: true,
+                    hpfCutoffHz: Math.min(HPF_MAX_HZ, hpfHz + 5),
+                  });
+                  scheduleLivePreview();
+                } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  updateRackSettings({
+                    ...rackSettings,
+                    hpfEnabled: true,
+                    hpfCutoffHz: Math.max(HPF_MIN_HZ, hpfHz - 5),
+                  });
+                  scheduleLivePreview();
+                }
+              }}
+              style={{
+                position: 'absolute',
+                left: `${hpfLeftPct}%`,
+                top: '38%',
+                transform: 'translate(-50%, -50%)',
+                width: '24px',
+                height: '24px',
+                borderRadius: '50%',
+                border: hpfEnabled ? '2px solid var(--cyan-2)' : '1.5px dashed var(--fg-4)',
+                background: hpfEnabled ? 'rgba(44, 212, 255, 0.28)' : 'rgba(14, 18, 26, 0.72)',
+                boxShadow: hpfEnabled ? '0 0 14px var(--cyan-glow)' : 'none',
+                cursor: 'ew-resize',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                pointerEvents: 'auto',
+                zIndex: 4,
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  width: '6px',
+                  height: '6px',
+                  borderRadius: '50%',
+                  background: hpfEnabled ? 'var(--cyan-2)' : 'var(--fg-4)',
+                }}
+              />
+            </button>
+          </div>
         </div>
         {wide ? (
-          <div className="spec-piano-ruler" aria-hidden="true">
+          <div
+            className="spec-piano-ruler"
+            aria-hidden="true"
+            style={{ marginLeft: `${insets.left}px`, marginRight: `${insets.right}px` }}
+          >
             {PIANO_OCTAVES.map((oct) => (
               <span
                 key={oct.label}

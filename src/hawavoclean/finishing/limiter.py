@@ -72,7 +72,11 @@ def _release_scalar(
     return current
 
 
-def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: float) -> None:
+def _release_smooth(
+    gain: np.ndarray[Any, np.dtype[np.float32]],
+    release_coeff: float,
+    current: float = 1.0,
+) -> float:
     """Asymmetric attack/release smoothing of the gain envelope, in place.
 
     Sample-exact equivalent of the scalar recurrence, state carried in float64::
@@ -80,7 +84,9 @@ def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: 
         g = t                          if t < g   (instant attack)
         g = t + release_coeff*(g - t)  otherwise  (one-pole release)
 
-    run over every sample. The state is only ever *rewritten* where it differs
+    run over every sample. Returns the final carried release state so chunked
+    streaming callers can carry state across chunk boundaries bit-identically.
+    The state is only ever *rewritten* where it differs
     from the target, and the targets come in long identical runs: an attack
     lands on the first sample of a run, and once the state equals the run's
     target it stays there exactly (``release_coeff * 0.0`` is ``0.0``). So the
@@ -98,18 +104,16 @@ def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: 
     """
     n = int(gain.shape[0])
     if n == 0:
-        return
+        return current
     bits = gain.view(np.uint32)
     changed = bits[1:] != bits[:-1]
     runs = int(np.count_nonzero(changed)) + 1
     if runs * MIN_RUN_LENGTH_FOR_RUN_WALK > n:
-        _release_scalar(gain, release_coeff, 0, n, 1.0)
-        return
+        return _release_scalar(gain, release_coeff, 0, n, current)
 
     starts = [0, *(np.flatnonzero(changed) + 1).tolist(), n]
     targets = gain[np.asarray(starts[:-1], dtype=np.intp)].tolist()
 
-    current = 1.0
     for k, target in enumerate(targets):
         lo = starts[k]
         hi = starts[k + 1]
@@ -129,6 +133,7 @@ def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: 
             ramp.append(current)
         if ramp:
             gain[lo : lo + len(ramp)] = ramp
+    return current
 
 
 def _slope_limited_min_envelope(
@@ -357,11 +362,9 @@ def apply_lookahead_limiter_to_memmap(
                 ceiling_linear=ceiling_linear,
                 lookahead_samples=lookahead_samples,
             )
-            release_state = _release_scalar(
+            release_state = _release_smooth(
                 smooth,
                 release_coeff,
-                0,
-                len(smooth),
                 release_state,
             )
             if smooth.size:

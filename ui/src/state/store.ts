@@ -371,7 +371,8 @@ export interface AppState {
   activeTakeId: string | null;
   unitOverrides: UnitOverrideMap;
   overrideUndo: UndoStack<UnitOverrideMap>;
-  lastUndoDomain: 'override' | 'rack' | null;
+  spectralUndo: UndoStack<string | null>;
+  lastUndoDomain: 'override' | 'rack' | 'spectral' | null;
   spectralSelection: SpectralSelectionBox | null;
   videoPreviewCollapsed: boolean;
   batchNamingTemplate: string;
@@ -380,6 +381,7 @@ export interface AppState {
   workspaceMode: WorkspaceMode;
   livePreviewEnabled: boolean;
   assistantDrawerOpen: boolean;
+  batchDrawerOpen: boolean;
   activeGoalId: string | null;
   stageBlend: number;
   toasts: ToastItem[];
@@ -438,13 +440,15 @@ export interface AppState {
   setTakes(takes: TakeSnapshot[], activeTakeId?: string | null): void;
   setActiveTakeId(id: string | null): void;
   setUnitOverrides(overrides: UnitOverrideMap, undo?: UndoStack<UnitOverrideMap>): void;
-  setLastUndoDomain(domain: 'override' | 'rack' | null): void;
+  setSpectralUndo(undo: UndoStack<string | null>): void;
+  setLastUndoDomain(domain: 'override' | 'rack' | 'spectral' | null): void;
   setSpectralSelection(sel: SpectralSelectionBox | null): void;
   setVideoPreviewCollapsed(collapsed: boolean): void;
   setBatchNamingTemplate(template: string): void;
   setWorkspaceMode(mode: WorkspaceMode): void;
   setLivePreviewEnabled(enabled: boolean): void;
   setAssistantDrawerOpen(open: boolean): void;
+  setBatchDrawerOpen(open: boolean): void;
   setActiveGoalId(goalId: string | null): void;
   setStageBlend(blend: number): void;
   pushToast(text: string, kind?: ToastItem['kind'], durationMs?: number): void;
@@ -522,6 +526,7 @@ export const useStore = create<AppState>((set) => ({
   activeTakeId: null,
   unitOverrides: {},
   overrideUndo: createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }),
+  spectralUndo: createUndoStack<string | null>(null),
   lastUndoDomain: null,
   spectralSelection: null,
   videoPreviewCollapsed: false,
@@ -530,7 +535,8 @@ export const useStore = create<AppState>((set) => ({
   workspaceMode: loadWorkspaceMode(),
   livePreviewEnabled: loadLivePreview(),
   assistantDrawerOpen: false,
-  activeGoalId: 'auto_smart',
+  batchDrawerOpen: false,
+  activeGoalId: null,
   stageBlend: 0,
   toasts: [],
 
@@ -690,6 +696,7 @@ export const useStore = create<AppState>((set) => ({
       unitOverrides,
       ...(overrideUndo !== undefined ? { overrideUndo } : {}),
     })),
+  setSpectralUndo: (spectralUndo) => set({ spectralUndo }),
   setLastUndoDomain: (lastUndoDomain) => set({ lastUndoDomain }),
   setSpectralSelection: (spectralSelection) => set({ spectralSelection }),
   setVideoPreviewCollapsed: (videoPreviewCollapsed) => set({ videoPreviewCollapsed }),
@@ -717,6 +724,7 @@ export const useStore = create<AppState>((set) => ({
     set({ livePreviewEnabled });
   },
   setAssistantDrawerOpen: (assistantDrawerOpen) => set({ assistantDrawerOpen }),
+  setBatchDrawerOpen: (batchDrawerOpen) => set({ batchDrawerOpen }),
   setActiveGoalId: (activeGoalId) => set({ activeGoalId }),
   setStageBlend: (blend) => set({ stageBlend: Math.min(1, Math.max(0, Number.isFinite(blend) ? blend : 0)) }),
   pushToast: (text, kind = 'info', durationMs = 4200) => {
@@ -761,6 +769,7 @@ export const useStore = create<AppState>((set) => ({
       activeTakeId: null,
       unitOverrides: {},
       overrideUndo: createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }),
+      spectralUndo: createUndoStack<string | null>(null),
       lastUndoDomain: null,
       spectralSelection: null,
       error: null,

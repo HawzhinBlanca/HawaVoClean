@@ -40,10 +40,11 @@ import {
   type SpectrogramViewMode,
   type StftTile,
 } from '../render/stftSpectrogram';
+import { getPlayer } from '../audio/player';
 import { formatTime } from '../render/ticks';
 import { waveView } from '../render/viewWindow';
 import '../render/spectrogram.css';
-import { applySpectralBoxRepair } from '../state/actions';
+import { applySpectralBoxRepair, seekTo } from '../state/actions';
 import { jobInFlight, useStore } from '../state/store';
 
 const SPEC_HEIGHT = 160;
@@ -77,6 +78,10 @@ export interface SpectrogramDisplayProps {
   cleanedPcm?: Float32Array | null;
   /** Optional listener invoked whenever the 2D time x frequency box selection changes. */
   onSpectralSelectionChange?: (selection: SpectralSelection | null) => void;
+  /** True when hosted inside AudioStage's unified alpha-blended viewport (full height, external popover). */
+  embedded?: boolean;
+  /** Called when the user clicks HIDE while embedded inside AudioStage so the stage resets cleanly to Waveform. */
+  onRequestHide?: () => void;
 }
 
 interface DragRect {
@@ -113,9 +118,12 @@ export function SpectrogramDisplay({
   originalPcm = null,
   cleanedPcm = null,
   onSpectralSelectionChange,
+  embedded = false,
+  onRequestHide,
 }: SpectrogramDisplayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const playheadRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<StftCanvasRenderer | null>(null);
   const redrawTimer = useRef<number | null>(null);
   const fetchTimerRef = useRef<number | null>(null);
@@ -144,11 +152,13 @@ export function SpectrogramDisplay({
   const setSpectralSelection = useStore((s) => s.setSpectralSelection);
   const stageBlend = useStore((s) => s.stageBlend);
 
-  const [visible, setVisible] = useState(false);
+  const [localVisible, setLocalVisible] = useState(false);
 
   useEffect(() => {
-    if (stageBlend > 0) setVisible(true);
-  }, [stageBlend]);
+    if (!embedded && stageBlend > 0) setLocalVisible(true);
+  }, [embedded, stageBlend]);
+
+  const visible = embedded ? stageBlend > 0 : localVisible;
   const [viewMode, setViewMode] = useState<SpectrogramViewMode>(abMode);
   const [scale, setScale] = useState<FrequencyScale>('log');
   const [selection, setSelection] = useState<SpectralSelection | null>(null);
@@ -526,6 +536,33 @@ export function SpectrogramDisplay({
     };
   }, [visible, hasData]);
 
+  // Live playhead tracking via direct DOM ref updates (zero React re-renders per frame).
+  useEffect(() => {
+    if (!visible || !hasData) return;
+    let lastTime = getPlayer().time;
+    const paintPlayhead = (t: number): void => {
+      lastTime = t;
+      const el = playheadRef.current;
+      if (!el) return;
+      const v = getEffectiveView();
+      const span = v.end - v.start;
+      if (!(span > 0) || t < v.start || t > v.end) {
+        el.style.display = 'none';
+        return;
+      }
+      const pct = ((t - v.start) / span) * 100;
+      el.style.display = '';
+      el.style.left = `${pct.toFixed(3)}%`;
+    };
+    const unsubPlayer = getPlayer().subscribe((snap) => paintPlayhead(snap.time));
+    const unsubView = waveView.subscribe(() => paintPlayhead(lastTime));
+    paintPlayhead(lastTime);
+    return () => {
+      unsubPlayer();
+      unsubView();
+    };
+  }, [visible, hasData, getEffectiveView]);
+
   // Redraw when active tile, view mode, or frequency scale changes.
   useEffect(() => {
     if (!visible) return;
@@ -612,11 +649,16 @@ export function SpectrogramDisplay({
     const dyPx = Math.abs(e.clientY - dragRect.startPxY);
     setDragRect(null);
 
-    if (dxPx < MIN_DRAG_PX && dyPx < MIN_DRAG_PX) return;
-
     const v = getEffectiveView();
     const span = v.end - v.start;
     if (!(span > 0)) return;
+
+    // A short click without dragging seeks directly to the clicked timestamp.
+    if (dxPx < MIN_DRAG_PX && dyPx < MIN_DRAG_PX) {
+      const clickTime = Math.max(v.start, Math.min(v.end, v.start + x1 * span));
+      seekTo(clickTime);
+      return;
+    }
 
     const xLo = Math.min(1 - 0.002, Math.min(dragRect.x0, x1));
     const xHi = Math.min(1, Math.max(Math.max(dragRect.x0, x1), xLo + 0.002));
@@ -684,7 +726,7 @@ export function SpectrogramDisplay({
   const dbCeil = activeTile?.dbCeil ?? DEFAULT_DB_CEIL;
 
   return (
-    <section className="panel spectrogram-panel" aria-label="STFT Spectrogram">
+    <section className={`panel spectrogram-panel${embedded ? ' embedded' : ''}`} aria-label="STFT Spectrogram">
       <div className="panel-head">
         <h2 className="panel-title">
           <span>Spectrogram</span>
@@ -740,7 +782,13 @@ export function SpectrogramDisplay({
             type="button"
             className="wave-fit"
             aria-expanded={visible}
-            onClick={() => setVisible((v) => !v)}
+            onClick={() => {
+              if (embedded) {
+                onRequestHide?.();
+              } else {
+                setLocalVisible((v) => !v);
+              }
+            }}
             title={visible ? 'Hide STFT spectrogram' : 'Show STFT spectrogram'}
           >
             {visible ? 'HIDE' : 'SHOW'}
@@ -750,7 +798,10 @@ export function SpectrogramDisplay({
 
       {visible && (
         <div className="spectrogram-body">
-          <div className="spectrogram-plot-wrap" style={{ height: `${SPEC_HEIGHT}px` }}>
+          <div
+            className="spectrogram-plot-wrap"
+            style={embedded ? undefined : { height: `${SPEC_HEIGHT}px` }}
+          >
             <div className="spectrogram-axis" aria-hidden="true">
               {ticks.map((tick) => (
                 <span
@@ -768,7 +819,7 @@ export function SpectrogramDisplay({
               className="spectrogram-stage"
               tabIndex={0}
               role="region"
-              aria-label={`Interactive 2D ${scale} spectrogram of ${modeLabel(effectiveMode)} signal. Drag to select a time and frequency region, press Escape to clear.`}
+              aria-label={`Interactive 2D ${scale} spectrogram of ${modeLabel(effectiveMode)} signal. Click to seek, drag to select a time and frequency region, press Escape to clear.`}
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={commitDrag}
@@ -780,7 +831,7 @@ export function SpectrogramDisplay({
                 className="spectrogram-canvas"
                 role="img"
                 aria-label={`2D STFT spectrogram of ${modeLabel(effectiveMode)} signal (${scale} scale)`}
-                style={{ width: '100%', height: `${SPEC_HEIGHT}px` }}
+                style={embedded ? { width: '100%', height: '100%' } : { width: '100%', height: `${SPEC_HEIGHT}px` }}
               />
               {ticks.map((tick) => (
                 <div
@@ -790,6 +841,12 @@ export function SpectrogramDisplay({
                   style={{ top: `${tick.normY * 100}%` }}
                 />
               ))}
+              <div
+                ref={playheadRef}
+                className="spectrogram-playhead"
+                aria-hidden="true"
+                style={{ display: 'none' }}
+              />
               {overlayStyle && (
                 <div
                   className="spectrogram-selection-box"
@@ -807,7 +864,7 @@ export function SpectrogramDisplay({
               <span className="hi">{dbCeil} dB</span>
             </div>
 
-            {selection && (
+            {!embedded && selection && (
               <div className="spectrogram-selection-chip" role="status" aria-live="polite">
                 <span>
                   {formatTimecodeShort(selection.startS)} – {formatTimecodeShort(selection.endS)} ·{' '}

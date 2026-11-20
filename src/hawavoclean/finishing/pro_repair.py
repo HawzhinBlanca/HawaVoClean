@@ -126,8 +126,20 @@ def _deplosive_channel(
     env_rms = np.sqrt(np.maximum(energy, 0.0) + 1e-12)
     env_db = 20.0 * np.log10(env_rms)
 
+    # Adapt threshold relative to active >160 Hz voice RMS so quiet recordings
+    # (e.g. -34 LUFS voice memos) still attenuate plosive bursts cleanly while
+    # silence and clean voice stay untouched.
+    eff_threshold_db = float(threshold_db)
+    res_energy = scipy.ndimage.uniform_filter1d(
+        residual * residual, size=max(16, int(round(sample_rate * 0.020))), mode="nearest"
+    )
+    res_rms_db = 20.0 * np.log10(np.sqrt(np.maximum(res_energy, 0.0) + 1e-12))
+    speech_p85_db = float(np.percentile(res_rms_db, 85.0))
+    if -60.0 <= speech_p85_db < eff_threshold_db:
+        eff_threshold_db = min(eff_threshold_db, max(-58.0, speech_p85_db + 1.0))
+
     eff_max_reduction = min(max_reduction_db, 300.0)
-    excess_db = np.maximum(0.0, env_db - threshold_db)
+    excess_db = np.maximum(0.0, env_db - eff_threshold_db)
     raw_gr_db = np.minimum(eff_max_reduction, excess_db * 0.85)
     if float(np.max(raw_gr_db)) <= 0.1:
         return channel.copy(), 0
@@ -327,9 +339,15 @@ def _declick_channel(
     local_frame_base = scipy.ndimage.median_filter(frame_scale, size=med_frames, mode="nearest")
     local_base = np.repeat(local_frame_base, frame_len)[:n]
 
-    # Higher sensitivity -> lower threshold multiplier.
+    # Higher sensitivity -> lower threshold multiplier. Scale the absolute floor
+    # relative to active speech RMS so quiet -34 LUFS recordings detect mouth
+    # clicks just as reliably as normalized speech without triggering on noise.
     sigma_mult = 12.0 - 7.0 * sensitivity
-    abs_floor = 0.022 * (1.4 - sensitivity)
+    rms_win = max(16, int(round(sample_rate * 0.020)))
+    sig_energy = scipy.ndimage.uniform_filter1d(x64 * x64, size=rms_win, mode="nearest")
+    active_rms = float(np.sqrt(max(0.0, float(np.percentile(sig_energy, 90.0)))))
+    scaled_floor = min(0.022, max(1e-4, 0.15 * active_rms)) if active_rms > 1e-4 else 0.022
+    abs_floor = scaled_floor * (1.4 - sensitivity)
     threshold = np.maximum(local_base * sigma_mult, abs_floor)
 
     anomalous = abs_res > threshold

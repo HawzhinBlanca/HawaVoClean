@@ -84,6 +84,7 @@ export function handleKeyDown(e: KeyboardEvent): void {
       // Esc means "stop the thing that is happening", innermost first:
       // an upload in flight, then an analysis, then a running job, then the selection.
       if (st.assistantDrawerOpen) st.setAssistantDrawerOpen(false);
+      else if (st.batchDrawerOpen) st.setBatchDrawerOpen(false);
       else if (st.upload) cancelUpload();
       else if (isAnalyzing()) cancelAnalysis();
       else if (running) void cancelJob();
@@ -160,7 +161,7 @@ export function handleKeyDown(e: KeyboardEvent): void {
       if (canAct) {
         e.preventDefault();
         if (e.shiftKey) void startJob();
-        else void previewRegion();
+        else void previewRegion({ autoPlay: true });
       }
       break;
     }

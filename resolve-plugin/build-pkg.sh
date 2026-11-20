@@ -8,6 +8,7 @@
 set -euo pipefail
 export COPYFILE_DISABLE=1
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE=""
 OUTPUT=""
 SIGN_IDENTITY=""
@@ -55,6 +56,14 @@ trap 'rm -rf "$PKG_ROOT" "$PKG_SCRIPTS"' EXIT
 # Payload: the plugin directory itself
 mkdir -p "$PKG_ROOT/$PLUGIN_ID"
 cp -R "$STAGE/." "$PKG_ROOT/$PLUGIN_ID/"
+# Ensure sdk-preflight.js is always packaged so postinstall & runtime can acquire
+# Blackmagic's local WorkflowIntegration.node with Mach-O + SHA-256 verification.
+if [ ! -f "$PKG_ROOT/$PLUGIN_ID/sdk-preflight.js" ] && [ -f "$SCRIPT_DIR/$PLUGIN_ID/sdk-preflight.js" ]; then
+  cp "$SCRIPT_DIR/$PLUGIN_ID/sdk-preflight.js" "$PKG_ROOT/$PLUGIN_ID/sdk-preflight.js"
+  if [ -f "$PKG_ROOT/$PLUGIN_ID/SHA256SUMS" ]; then
+    (cd "$PKG_ROOT/$PLUGIN_ID" && shasum -a 256 ./sdk-preflight.js >> SHA256SUMS)
+  fi
+fi
 if command -v xattr >/dev/null 2>&1; then
   xattr -cr "$PKG_ROOT/$PLUGIN_ID" 2>/dev/null || true
 fi
@@ -113,9 +122,52 @@ rollback() {
 chmod -R a+rX "$TARGET"
 [ -f "$TARGET/main.js" ] || rollback
 
-# If SHA256SUMS is present, verify integrity
+# If SHA256SUMS is present, verify integrity BEFORE acquiring local Resolve SDK bridge
 if [ -f "$TARGET/SHA256SUMS" ]; then
   (cd "$TARGET" && shasum -a 256 --strict --status -c SHA256SUMS) || rollback
+fi
+
+# Legally acquire Blackmagic's local WorkflowIntegration.node from the user's
+# DaVinci Resolve Studio installation with Mach-O + SHA-256 checksum verification.
+if [ ! -f "$TARGET/WorkflowIntegration.node" ]; then
+  ACQUIRED_SDK=0
+  if command -v node >/dev/null 2>&1 && [ -f "$TARGET/sdk-preflight.js" ]; then
+    if node -e '
+      const { acquireWorkflowIntegrationNode } = require(process.argv[1]);
+      const res = acquireWorkflowIntegrationNode(process.argv[2]);
+      if (!res.ok) {
+        console.error("HawaVoClean SDK preflight:", res.code || "ERR", res.error || "unavailable");
+        process.exit(1);
+      }
+      console.log("Acquired WorkflowIntegration.node (sha256=" + res.sha256 + ")");
+    ' "$TARGET/sdk-preflight.js" "$TARGET"; then
+      ACQUIRED_SDK=1
+    fi
+  fi
+  if [ "$ACQUIRED_SDK" -eq 0 ]; then
+    SDK_BASE="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Workflow Integrations"
+    for REL in "Examples/SamplePlugin/WorkflowIntegration.node" "Examples/SamplePromisePlugin/WorkflowIntegration.node"; do
+      SRC_NODE="$SDK_BASE/$REL"
+      if [ -f "$SRC_NODE" ]; then
+        TMP_NODE="$TARGET/WorkflowIntegration.node.tmp.$$"
+        SRC_SHA="$(shasum -a 256 "$SRC_NODE" | awk '{print $1}')"
+        cp "$SRC_NODE" "$TMP_NODE"
+        DST_SHA="$(shasum -a 256 "$TMP_NODE" | awk '{print $1}')"
+        if [ "$SRC_SHA" = "$DST_SHA" ] && [ -n "$SRC_SHA" ]; then
+          chmod 0755 "$TMP_NODE"
+          mv "$TMP_NODE" "$TARGET/WorkflowIntegration.node"
+          echo "Acquired local WorkflowIntegration.node (sha256=$DST_SHA)"
+          ACQUIRED_SDK=1
+          break
+        else
+          rm -f "$TMP_NODE"
+        fi
+      fi
+    done
+  fi
+  if [ "$ACQUIRED_SDK" -eq 0 ]; then
+    echo "Notice: DaVinci Resolve Studio WorkflowIntegration.node was not found locally yet; runtime preflight will retry when Resolve Studio is installed." >&2
+  fi
 fi
 
 # Clean up backup on success

@@ -28,19 +28,40 @@ from typing import Any
 
 import numpy as np
 
+from hawavoclean.alignment.delay import estimate_gcc_phat_delay
 from hawavoclean.audio.decode import decode_audio_window
+from hawavoclean.audio.delivery import DELIVERY_PRESETS, DeliveryPreset, apply_delivery_loudness
 from hawavoclean.audio.encode import encode_audio
+from hawavoclean.audio.multitrack import decode_mid_side, denoise_side_channel, encode_mid_side
 from hawavoclean.audio.resample import resample_audio
 from hawavoclean.audio.types import AudioBuffer
 from hawavoclean.config import load_config
 from hawavoclean.enhancement.factory import CORE_REGISTRY, resolve_core
 from hawavoclean.enhancement.protocol import Enhancer
+from hawavoclean.finishing.deess import apply_split_band_deesser
+from hawavoclean.finishing.detect import (
+    TILT_MAX_BRILLIANCE_LIFT_DB,
+    TILT_MAX_LOW_CUT_DB,
+    TILT_MAX_LOW_LIFT_DB,
+    TILT_MAX_PRESENCE_LIFT_DB,
+    aggregate_speech_tilt,
+    measure_speech_tilt,
+)
+from hawavoclean.finishing.dynamics import apply_dialogue_leveler
+from hawavoclean.finishing.eq import apply_tonal_restoration, solve_tonal_gains
+from hawavoclean.finishing.limiter import apply_lookahead_limiter
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks
-from hawavoclean.finishing.pro_repair import apply_room_tone_floor
+from hawavoclean.finishing.pro_repair import (
+    apply_declip,
+    apply_dynamic_deplosive,
+    apply_mouth_declick,
+    apply_room_tone_floor,
+)
+from hawavoclean.finishing.repair import remove_dc_subsonic
 from hawavoclean.guard.perceptual_mos import PerceptualQualityScorer
 from hawavoclean.paths import config_dir, profile_config_path, work_root
 from hawavoclean.platform_fs import is_reparse_or_symlink
-from hawavoclean.runtime import memory_budget_mb, process_peak_rss_bytes
+from hawavoclean.runtime import memory_budget_mb, process_current_rss_bytes
 from hawavoclean.server.analysis import FLOOR_DB, cached_probe
 
 MAX_PREVIEW_DURATION_S = 15.0
@@ -98,7 +119,7 @@ class WarmCoreCache:
         self._memory_limit_mb = int(memory_limit_mb) if memory_limit_mb is not None else None
         self._core_factory = core_factory or _default_core_factory
         self._clock = clock or time.monotonic
-        self._rss_bytes_fn = rss_bytes_fn or process_peak_rss_bytes
+        self._rss_bytes_fn = rss_bytes_fn or process_current_rss_bytes
 
         self._lock = threading.RLock()
         self._entries: OrderedDict[str, _CachedCore] = OrderedDict()
@@ -324,6 +345,11 @@ class RegionPreviewRequest:
     ambience_floor_db: float | None = None
     include_perceptual_mos: bool = False
     output_dir: Path | None = None
+    hpf_enabled: bool | None = None
+    hpf_cutoff_hz: float | None = None
+    pro_repair: dict[str, bool] | None = None
+    stereo_mode: str | None = None
+    delivery_preset: DeliveryPreset | None = None
 
 
 @dataclass(frozen=True)
@@ -519,6 +545,23 @@ def render_region_preview(
         )
     if not math.isfinite(request.strength) or not 0.0 <= request.strength <= 1.0:
         raise ValueError(f"strength must be finite and in [0.0, 1.0], got {request.strength}")
+    if request.hpf_cutoff_hz is not None and (
+        isinstance(request.hpf_cutoff_hz, bool)
+        or not math.isfinite(request.hpf_cutoff_hz)
+        or not 20.0 <= float(request.hpf_cutoff_hz) <= 250.0
+    ):
+        raise ValueError(
+            f"hpf_cutoff_hz must be finite and in [20.0, 250.0], got {request.hpf_cutoff_hz}"
+        )
+    if request.stereo_mode is not None and request.stereo_mode not in (
+        "auto",
+        "dual_mono_same",
+        "split_speakers",
+        "true_stereo_ms",
+    ):
+        raise ValueError(f"Unsupported stereo_mode: {request.stereo_mode!r}")
+    if request.delivery_preset is not None and request.delivery_preset not in DELIVERY_PRESETS:
+        raise ValueError(f"Unsupported delivery_preset: {request.delivery_preset!r}")
 
     source_path = Path(request.source_path).resolve()
     probe = cached_probe(source_path)
@@ -545,32 +588,128 @@ def render_region_preview(
         else np.ascontiguousarray(window_buf.data, dtype=np.float32)
     )
     channels, n_samples = orig_data.shape
+    before_lufs_m = measure_loudness_and_peaks(orig_data, target_sr)
+
+    # 1. Pre-enhancement surgical de-clip (must run before HPF/STFT alters flat-top plateaus)
+    pro_repair = request.pro_repair or {}
+    work_data = orig_data.copy()
+    if pro_repair.get("declip"):
+        work_data, _ = apply_declip(work_data, target_sr)
+
+    # 2. Optional user HPF (default None preserves unmodified signal)
+    if request.hpf_enabled is not False and (
+        request.hpf_cutoff_hz is not None or request.hpf_enabled is True
+    ):
+        eff_hpf_hz = float(request.hpf_cutoff_hz) if request.hpf_cutoff_hz is not None else 80.0
+        work_data = np.ascontiguousarray(
+            np.vstack(
+                [remove_dc_subsonic(work_data[ch], target_sr, eff_hpf_hz) for ch in range(channels)]
+            ),
+            dtype=np.float32,
+        )
 
     active_cache = cache if cache is not None else get_default_warm_cache()
     enhancer, warm_hit = active_cache.get_or_load(core_id, sample_rate=target_sr)
 
-    strength = float(request.strength)
-    out_channels: list[np.ndarray[Any, np.dtype[np.float32]]] = []
-    if strength == 0.0:
-        for ch_idx in range(channels):
-            out_channels.append(orig_data[ch_idx].copy())
-    else:
-        for ch_idx in range(channels):
-            if ch_idx > 0 and np.array_equal(orig_data[ch_idx], orig_data[0]):
-                out_channels.append(out_channels[0].copy())
-                continue
-            ch_orig = np.ascontiguousarray(orig_data[ch_idx], dtype=np.float32)
-            enh_res = enhancer.enhance(ch_orig, target_sr)
-            ch_enh = _fit_length(enh_res.waveform, n_samples)
-            if abs(strength - 1.0) < 1e-6:
-                blended = ch_enh
-            else:
-                blended = np.ascontiguousarray(
-                    ch_orig + strength * (ch_enh - ch_orig), dtype=np.float32
-                )
-            out_channels.append(blended)
+    def _gcc_aligned_blend(
+        dry: np.ndarray[Any, np.dtype[np.float32]],
+        wet: np.ndarray[Any, np.dtype[np.float32]],
+        mix: float,
+    ) -> np.ndarray[Any, np.dtype[np.float32]]:
+        if abs(mix - 1.0) < 1e-6:
+            return wet
+        aligned = estimate_gcc_phat_delay(dry, wet, target_sr, max_delay_ms=50.0).aligned_candidate
+        aligned_fit = _fit_length(aligned, len(dry))
+        return np.ascontiguousarray(dry + mix * (aligned_fit - dry), dtype=np.float32)
 
-    after_data = np.ascontiguousarray(np.vstack(out_channels), dtype=np.float32)
+    strength = float(request.strength)
+    if strength == 0.0:
+        after_data = work_data.copy()
+    elif request.stereo_mode == "true_stereo_ms" and channels == 2:
+        mid_orig, side_orig = encode_mid_side(work_data[0], work_data[1])
+        mid_enh_res = enhancer.enhance(mid_orig, target_sr)
+        mid_enh = _fit_length(mid_enh_res.waveform, n_samples)
+        side_enh = _fit_length(denoise_side_channel(side_orig, target_sr), n_samples)
+        mid_out = _gcc_aligned_blend(mid_orig, mid_enh, strength)
+        side_out = (
+            side_enh
+            if abs(strength - 1.0) < 1e-6
+            else np.ascontiguousarray(
+                side_orig + strength * (side_enh - side_orig), dtype=np.float32
+            )
+        )
+        left_out, right_out = decode_mid_side(mid_out, side_out)
+        after_data = np.ascontiguousarray(np.vstack((left_out, right_out)), dtype=np.float32)
+    else:
+        out_channels: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+        if request.stereo_mode == "dual_mono_same" and channels == 2:
+            mono_in = np.ascontiguousarray(0.5 * (work_data[0] + work_data[1]), dtype=np.float32)
+            enh_res = enhancer.enhance(mono_in, target_sr)
+            ch_enh = _fit_length(enh_res.waveform, n_samples)
+            blended = _gcc_aligned_blend(mono_in, ch_enh, strength)
+            out_channels = [blended, blended.copy()]
+        else:
+            for ch_idx in range(channels):
+                if ch_idx > 0 and np.array_equal(work_data[ch_idx], work_data[0]):
+                    out_channels.append(out_channels[0].copy())
+                    continue
+                ch_orig = np.ascontiguousarray(work_data[ch_idx], dtype=np.float32)
+                enh_res = enhancer.enhance(ch_orig, target_sr)
+                ch_enh = _fit_length(enh_res.waveform, n_samples)
+                out_channels.append(_gcc_aligned_blend(ch_orig, ch_enh, strength))
+        after_data = np.ascontiguousarray(np.vstack(out_channels), dtype=np.float32)
+
+    # 3. Post-enhancement surgical & finishing pro_repair flags
+    if pro_repair.get("deplosive"):
+        after_data, _ = apply_dynamic_deplosive(after_data, target_sr)
+    if (
+        pro_repair.get("declick")
+        or pro_repair.get("mouth_declick")
+        or pro_repair.get("mouthDeclick")
+    ):
+        after_data, _ = apply_mouth_declick(after_data, target_sr)
+    if pro_repair.get("tonal_restoration") or pro_repair.get("tonalRestoration"):
+        tilts = [measure_speech_tilt(after_data[ch], target_sr) for ch in range(channels)]
+        agg_tilt = aggregate_speech_tilt(tilts)
+        if agg_tilt.measured and agg_tilt.is_correction:
+            cap = 12.0
+            low_g, pres_g, bril_g = solve_tonal_gains(
+                target_sr,
+                agg_tilt.low_shelf_db,
+                agg_tilt.presence_db,
+                agg_tilt.brilliance_db,
+                max_low_cut_db=min(TILT_MAX_LOW_CUT_DB, cap),
+                max_low_lift_db=min(TILT_MAX_LOW_LIFT_DB, cap),
+                max_presence_db=min(TILT_MAX_PRESENCE_LIFT_DB, cap),
+                max_brilliance_db=min(TILT_MAX_BRILLIANCE_LIFT_DB, cap),
+            )
+            after_data = np.ascontiguousarray(
+                np.vstack(
+                    [
+                        apply_tonal_restoration(
+                            after_data[ch], target_sr, low_g, pres_g, bril_g, max_abs_gain_db=cap
+                        )
+                        for ch in range(channels)
+                    ]
+                ),
+                dtype=np.float32,
+            )
+    if pro_repair.get("deess"):
+        after_data = np.ascontiguousarray(
+            np.vstack(
+                [apply_split_band_deesser(after_data[ch], target_sr)[0] for ch in range(channels)]
+            ),
+            dtype=np.float32,
+        )
+    if pro_repair.get("level_rider") or pro_repair.get("levelRider"):
+        after_data = np.ascontiguousarray(
+            np.vstack(
+                [apply_dialogue_leveler(after_data[ch], target_sr)[0] for ch in range(channels)]
+            ),
+            dtype=np.float32,
+        )
+
+    # 4. Room-tone ambience floor
     if request.ambience_floor_db is not None:
         after_data = apply_room_tone_floor(
             orig_data,
@@ -579,7 +718,24 @@ def render_region_preview(
             target_floor_db=float(request.ambience_floor_db),
         )
 
-    before_lufs_m = measure_loudness_and_peaks(orig_data, target_sr)
+    # 5. Delivery preset loudness or transparent -1.0 dBTP lookahead limiter
+    if request.delivery_preset is not None:
+        after_data, _ = apply_delivery_loudness(
+            after_data,
+            target_sr,
+            request.delivery_preset,
+            input_lufs=before_lufs_m.integrated_lufs,
+        )
+    elif (
+        strength > 0.0
+        or any(pro_repair.values())
+        or request.hpf_cutoff_hz is not None
+        or request.hpf_enabled is True
+    ):
+        after_data = apply_lookahead_limiter(
+            after_data, target_sr, ceiling_dbtp=-1.0
+        ).limited_waveform
+
     after_lufs_m = measure_loudness_and_peaks(after_data, target_sr)
     before_lufs = round(float(before_lufs_m.integrated_lufs), 2)
     after_lufs = round(float(after_lufs_m.integrated_lufs), 2)

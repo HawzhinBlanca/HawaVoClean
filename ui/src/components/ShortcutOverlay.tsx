@@ -25,6 +25,7 @@ const GROUPS: Group[] = [
       { keys: [['Space']], what: 'Play / pause' },
       { keys: [['A']], what: 'Listen to the ORIGINAL deck' },
       { keys: [['B']], what: 'Listen to the CLEANED deck', when: 'after a run' },
+      { keys: [['Hold']], what: 'Hold for Original button — briefly audition Original', when: 'after a run' },
       { keys: [['D']], what: 'Toggle Removed (Δ) audition', when: 'after a run' },
       { keys: [['L']], what: 'Toggle region / clip loop' },
       { keys: [['←'], ['→']], what: 'Seek ∓ 5 seconds' },
@@ -67,10 +68,11 @@ const GROUPS: Group[] = [
     ],
   },
   {
-    title: 'Help',
+    title: 'Help & Assistant',
     rows: [
+      { keys: [['⌘', 'K'], ['Ctrl', 'K']], what: 'Open / close AI Audio Assistant' },
       { keys: [['?']], what: 'Open this panel' },
-      { keys: [['Esc']], what: 'Close this panel' },
+      { keys: [['Esc']], what: 'Close this panel or active drawer' },
     ],
   },
   {
@@ -108,8 +110,11 @@ const GROUPS: Group[] = [
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 export function ShortcutOverlay() {
+  const host = useStore((s) => s.host);
   const open = useStore((s) => s.shortcutsOpen);
   const setOpen = useStore((s) => s.setShortcutsOpen);
+  const hostModeLabel =
+    host === 'electron' ? 'desktop mode' : host === 'resolve' ? 'resolve mode' : 'web mode';
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
@@ -177,7 +182,7 @@ export function ShortcutOverlay() {
               reset to inherit its type, so nothing about the drawing moves. */}
           <h2 className="panel-title" id="sc-title">
             <span>Keyboard shortcuts</span>
-            <span className="sub">· web mode</span>
+            <span className="sub">· {hostModeLabel}</span>
           </h2>
           <button
             type="button"

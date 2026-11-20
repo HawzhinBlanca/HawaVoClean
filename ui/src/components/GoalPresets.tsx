@@ -1,11 +1,14 @@
 import type { JobMode, Profile } from '../api/types';
 import { updateRackSettings } from '../state/actions';
+import { useI18n, type TranslationCatalog } from '../state/i18n';
 import { scheduleLivePreview } from '../state/liveAudition';
 import { DEFAULT_STUDIO_RACK_SETTINGS, type StudioRackSettings } from '../state/presets';
 import { isProfileUnavailable, jobInFlight, useStore } from '../state/store';
 
 export interface SimpleGoal {
   id: string;
+  titleKey: keyof TranslationCatalog;
+  descKey: keyof TranslationCatalog;
   title: string;
   desc: string;
   mode: JobMode;
@@ -17,6 +20,8 @@ export interface SimpleGoal {
 export const SIMPLE_GOALS: readonly SimpleGoal[] = [
   {
     id: 'auto_smart',
+    titleKey: 'goalAutoSmartTitle',
+    descKey: 'goalAutoSmartDesc',
     title: 'Auto Smart Clean',
     desc: 'Picks the safest engine automatically',
     mode: 'smart_safe',
@@ -35,6 +40,8 @@ export const SIMPLE_GOALS: readonly SimpleGoal[] = [
   },
   {
     id: 'voice_memo',
+    titleKey: 'goalVoiceMemoTitle',
+    descKey: 'goalVoiceMemoDesc',
     title: 'Voice Memo Rescue',
     desc: 'Phone recordings & noisy rooms',
     mode: 'natural',
@@ -54,6 +61,8 @@ export const SIMPLE_GOALS: readonly SimpleGoal[] = [
   },
   {
     id: 'podcast',
+    titleKey: 'goalPodcastTitle',
+    descKey: 'goalPodcastDesc',
     title: 'Podcast & YouTube',
     desc: 'Rich, consistent loudness (-16 LUFS)',
     mode: 'natural',
@@ -72,6 +81,8 @@ export const SIMPLE_GOALS: readonly SimpleGoal[] = [
   },
   {
     id: 'remove_echo',
+    titleKey: 'goalRemoveEchoTitle',
+    descKey: 'goalRemoveEchoDesc',
     title: 'Remove Room Echo',
     desc: 'Tightens hollow rooms & reverb',
     mode: 'natural',
@@ -91,6 +102,8 @@ export const SIMPLE_GOALS: readonly SimpleGoal[] = [
   },
   {
     id: 'film_interview',
+    titleKey: 'goalFilmTitle',
+    descKey: 'goalFilmDesc',
     title: 'Film & Interview',
     desc: 'Natural ambience + broadcast target',
     mode: 'natural',
@@ -110,6 +123,7 @@ export const SIMPLE_GOALS: readonly SimpleGoal[] = [
 ];
 
 export function GoalPresets() {
+  const { t } = useI18n();
   const activeGoalId = useStore((s) => s.activeGoalId);
   const setActiveGoalId = useStore((s) => s.setActiveGoalId);
   const setMode = useStore((s) => s.setMode);
@@ -133,12 +147,12 @@ export function GoalPresets() {
       ...rackSettings,
       ...goal.settings,
     });
-    pushToast(`Preset applied: ${goal.title}`, 'info', 2600);
+    pushToast(`${t.presetAppliedPrefix} ${t[goal.titleKey]}`, 'info', 2600);
     scheduleLivePreview(220);
   };
 
   return (
-    <div className="goal-presets" role="group" aria-label="Cleaning goals">
+    <div className="goal-presets" role="group" aria-label={t.goalsAriaLabel}>
       {SIMPLE_GOALS.map((goal) => (
         <button
           key={goal.id}
@@ -148,8 +162,8 @@ export function GoalPresets() {
           disabled={busy}
           onClick={() => applyGoal(goal)}
         >
-          <span className="goal-card-title">{goal.title}</span>
-          <span className="goal-card-desc">{goal.desc}</span>
+          <span className="goal-card-title">{t[goal.titleKey]}</span>
+          <span className="goal-card-desc">{t[goal.descKey]}</span>
         </button>
       ))}
     </div>

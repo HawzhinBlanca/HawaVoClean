@@ -1009,6 +1009,32 @@ export function WaveformDisplay() {
             </span>
             <button
               type="button"
+              className="wave-fit wave-zoom-btn"
+              onClick={() => {
+                if (!(waveView.duration > 0)) return;
+                waveView.zoomAt(waveView.start_s + waveView.span / 2, 1 / 1.6);
+              }}
+              disabled={!hasData}
+              aria-label="Zoom out"
+              title="Zoom out (−)"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="wave-fit wave-zoom-btn"
+              onClick={() => {
+                if (!(waveView.duration > 0)) return;
+                waveView.zoomAt(waveView.start_s + waveView.span / 2, 1.6);
+              }}
+              disabled={!hasData}
+              aria-label="Zoom in"
+              title="Zoom in (+)"
+            >
+              +
+            </button>
+            <button
+              type="button"
               className="wave-fit"
               onClick={resetView}
               disabled={!hasData}

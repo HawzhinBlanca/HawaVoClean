@@ -221,15 +221,30 @@ def decode_audio_window(
     ffmpeg_bin = ffmpeg_bin_path()
 
     if ffmpeg_bin:
-        seek_args = ["-ss", f"{start_s:.9f}"] if start_s > 0 else []
+        # Fast hybrid input-seek: jump to ``max(0, start - WINDOW_PREROLL_S)``
+        # BEFORE ``-i`` so seeking deep into multi-hour files takes <30 ms
+        # instead of decoding the entire prefix, then trim the exact pre-roll
+        # after ``-i`` so lossy containers (AAC/MP3) warm up their MDCT overlap
+        # and still match a full decode sample-for-sample.
+        preroll_samples = min(start, int(round(WINDOW_PREROLL_S * probe.sample_rate)))
+        preroll_start_samples = start - preroll_samples
+        pre_seek_args = (
+            ["-ss", f"{preroll_start_samples / probe.sample_rate:.9f}"]
+            if preroll_start_samples > 0
+            else []
+        )
+        post_seek_args = (
+            ["-ss", f"{preroll_samples / probe.sample_rate:.9f}"] if preroll_samples > 0 else []
+        )
         cmd = [
             ffmpeg_bin,
             "-nostdin",  # never read the terminal: a stray 'q' aborted decodes silently
             "-v",
             "error",
+            *pre_seek_args,
             "-i",
             str(file_path),
-            *seek_args,
+            *post_seek_args,
             "-t",
             f"{want_samples / probe.sample_rate:.9f}",
             "-map",
@@ -649,12 +664,17 @@ def decode_audio_to_memmap(
         handle_stack.close()
         handles.clear()
 
-        with open(destination, "xb") as planar:
-            for path in channel_paths:
-                with open(path, "rb") as source:
-                    shutil.copyfileobj(source, planar, length=1024 * 1024)
-            planar.flush()
-            os.fsync(planar.fileno())
+        if probe.channels == 1:
+            # Mono planar layout is already identical to channel 0's file:
+            # O(1) atomic rename instead of copying the full PCM stream twice.
+            os.replace(channel_paths[0], destination)
+        else:
+            with open(destination, "xb") as planar:
+                for path in channel_paths:
+                    with open(path, "rb") as source:
+                        shutil.copyfileobj(source, planar, length=1024 * 1024)
+                planar.flush()
+                os.fsync(planar.fileno())
 
         expected_bytes = total_samples * probe.channels * np.dtype(np.float32).itemsize
         if total_samples <= 0 or destination.stat().st_size != expected_bytes:

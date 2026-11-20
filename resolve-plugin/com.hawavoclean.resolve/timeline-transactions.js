@@ -74,6 +74,123 @@ function parseFiniteNumber(value) {
 }
 
 /**
+ * Resolves the active timeline's frame rate via `timeline.GetSetting('timelineFrameRate')`
+ * when no explicit FPS was provided, falling back to 24 fps only when unavailable.
+ *
+ * @param {any} timeline
+ * @param {unknown} [explicitFps]
+ * @returns {Promise<number>}
+ */
+async function resolveTimelineFps(timeline, explicitFps) {
+  if (explicitFps !== undefined) {
+    const parsed = parseFiniteNumber(explicitFps);
+    if (parsed !== null && parsed > 0 && parsed <= MAX_FPS) {
+      return parsed;
+    }
+  }
+  if (timeline && typeof timeline.GetSetting === 'function') {
+    try {
+      const raw = await timeline.GetSetting('timelineFrameRate');
+      const parsed = parseFiniteNumber(raw);
+      if (parsed !== null && parsed > 0 && parsed <= MAX_FPS) {
+        return parsed;
+      }
+    } catch (_) {
+      /* fall through to default */
+    }
+  }
+  return 24;
+}
+
+/**
+ * Normalizes a clip mediaType value into DaVinci Resolve's numeric AppendToTimeline mediaType
+ * (`1` = video only, `2` = audio only) when supplied as a number or `'video'`/`'audio'`.
+ *
+ * @param {unknown} value
+ * @returns {number | undefined}
+ */
+function normalizeResolveMediaType(value) {
+  if (typeof value === 'string') {
+    const lower = value.trim().toLowerCase();
+    if (lower === 'audio') return 2;
+    if (lower === 'video') return 1;
+  }
+  const parsed = parseFiniteNumber(value);
+  return parsed !== null ? parsed : undefined;
+}
+
+/**
+ * Searches audio and video tracks on a timeline to find a timeline item matching `mediaId`
+ * so single-clip operations can recover exact `startFrame`, `leftOffset`, and `durationFrames`.
+ *
+ * @param {any} timeline
+ * @param {string} mediaId
+ * @returns {Promise<{ startFrame: number, leftOffset: number | null, durationFrames: number | null, trackIndex: number, mediaType: number } | null>}
+ */
+async function findTimelineClipTiming(timeline, mediaId) {
+  if (!timeline || typeof mediaId !== 'string' || !mediaId) return null;
+
+  const inspectItem = async (tItem, trackIndex, mediaType) => {
+    if (!tItem || typeof tItem.GetMediaPoolItem !== 'function') return null;
+    try {
+      const mpItem = await tItem.GetMediaPoolItem();
+      if (!mpItem || typeof mpItem.GetMediaId !== 'function') return null;
+      const itemId = String((await mpItem.GetMediaId()) ?? '');
+      if (itemId !== mediaId) return null;
+      const startParsed = typeof tItem.GetStart === 'function' ? parseFiniteNumber(await tItem.GetStart()) : null;
+      if (startParsed === null || startParsed < 0) return null;
+      const endParsed = typeof tItem.GetEnd === 'function' ? parseFiniteNumber(await tItem.GetEnd()) : null;
+      const durParsed = typeof tItem.GetDuration === 'function' ? parseFiniteNumber(await tItem.GetDuration()) : null;
+      const leftParsed = typeof tItem.GetLeftOffset === 'function' ? parseFiniteNumber(await tItem.GetLeftOffset()) : null;
+      const durationFrames = durParsed !== null && durParsed > 0
+        ? Math.round(durParsed)
+        : (endParsed !== null && endParsed > startParsed ? Math.round(endParsed - startParsed) : null);
+      return {
+        startFrame: Math.round(startParsed),
+        leftOffset: leftParsed !== null && leftParsed >= 0 ? Math.round(leftParsed) : null,
+        durationFrames,
+        trackIndex,
+        mediaType,
+      };
+    } catch (_) {
+      return null;
+    }
+  };
+
+  for (const [trackType, mediaType] of [['audio', 2], ['video', 1]]) {
+    if (typeof timeline.GetTrackCount !== 'function' || typeof timeline.GetItemListInTrack !== 'function') continue;
+    let trackCount = 0;
+    try {
+      trackCount = Number(await timeline.GetTrackCount(trackType)) || 0;
+    } catch (_) {
+      trackCount = 0;
+    }
+    for (let trackIdx = 1; trackIdx <= trackCount; trackIdx += 1) {
+      let items = [];
+      try {
+        items = (await timeline.GetItemListInTrack(trackType, trackIdx)) || [];
+      } catch (_) {
+        items = [];
+      }
+      for (const tItem of items) {
+        const matched = await inspectItem(tItem, trackIdx, mediaType);
+        if (matched) return matched;
+      }
+    }
+  }
+
+  if (typeof timeline.GetCurrentVideoItem === 'function') {
+    try {
+      const cur = await timeline.GetCurrentVideoItem();
+      const matched = await inspectItem(cur, 1, 1);
+      if (matched) return matched;
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+/**
  * Strips NUL bytes and caps string length deterministically so oversized text cannot
  * wedge DaVinci Resolve's IPC or marker database.
  *
@@ -966,8 +1083,19 @@ class TimelineTransactionManager {
    * @param {string} filePath Cleaned audio file path (48 kHz)
    * @param {object} [options]
    * @param {string} [options.trackName] Desired track name (defaults to 'HawaVoClean Cleaned')
+   * @param {number} [options.startFrame] Target timeline record frame (aliases: `recordFrame`)
+   * @param {number} [options.recordFrame] Target timeline record frame
+   * @param {number} [options.leftOffset] Source clip in-point frame offset (aliases: `sourceStartFrame`, `startFrameInSource`)
+   * @param {number} [options.sourceStartFrame] Source clip in-point frame offset
+   * @param {number} [options.sourceEndFrame] Source clip out-point frame offset
+   * @param {number} [options.durationFrames] Clip duration in frames
+   * @param {number | string} [options.mediaType] Optional Resolve mediaType (`2`/'audio' or `1`/'video')
+   * @param {number} [options.fps] Optional explicit timeline fps (defaults to timeline's `timelineFrameRate`)
+   * @param {object} [options.report] Optional `.hawavoclean.json` report for Guard markers
+   * @param {string} [options.reportPath] Optional path to `.hawavoclean.json` report
+   * @param {boolean} [options.addGuardMarkers] Whether to place Guard markers when a report is provided
    * @param {string} [options.failPoint] Injected failure point for tests
-   * @returns {Promise<{ success: boolean, trackIndex: number, trackName: string }>}
+   * @returns {Promise<{ success: boolean, trackIndex: number, trackName: string, recordFrame: number, fps: number, markersAdded?: number }>}
    */
   async transactionalNewTrack(mediaId, filePath, options = {}) {
     if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
@@ -990,11 +1118,65 @@ class TimelineTransactionManager {
 
     const trackSubtype = audioCheck.channels === 1 ? 'mono' : 'stereo';
     const desiredTrackName = options.trackName || 'HawaVoClean Cleaned';
+    const resolvedFps = await resolveTimelineFps(timeline, options.fps);
 
-    const txId = this.journal.begin('new-track', { mediaId, filePath, trackSubtype, desiredTrackName });
+    // Resolve exact timeline placement frame (honoring caller startFrame/recordFrame,
+    // then matching source clip on audio/video timeline tracks, then timeline start frame, else 0).
+    let resolvedRecordFrame = parseFiniteNumber(options.startFrame ?? options.recordFrame);
+    let resolvedHandleStart = parseFiniteNumber(
+      options.sourceStartFrame ?? options.startFrameInSource ?? options.leftOffset
+    );
+    let resolvedDuration = parseFiniteNumber(options.durationFrames);
+    const resolvedHandleEndExplicit = parseFiniteNumber(options.sourceEndFrame ?? options.endFrameInSource);
+
+    if (resolvedRecordFrame === null || (resolvedHandleStart === null && resolvedDuration === null)) {
+      const detectedTiming = await findTimelineClipTiming(timeline, mediaId);
+      if (detectedTiming) {
+        if (resolvedRecordFrame === null) resolvedRecordFrame = detectedTiming.startFrame;
+        if (resolvedHandleStart === null && detectedTiming.leftOffset !== null) {
+          resolvedHandleStart = detectedTiming.leftOffset;
+        }
+        if (resolvedDuration === null && detectedTiming.durationFrames !== null) {
+          resolvedDuration = detectedTiming.durationFrames;
+        }
+      }
+    }
+    if (resolvedRecordFrame === null && typeof timeline.GetStartFrame === 'function') {
+      try {
+        const tlStart = parseFiniteNumber(await timeline.GetStartFrame());
+        if (tlStart !== null && tlStart >= 0) resolvedRecordFrame = tlStart;
+      } catch (_) {}
+    }
+    const recordFrame = resolvedRecordFrame !== null && resolvedRecordFrame >= 0
+      ? Math.round(resolvedRecordFrame)
+      : 0;
+
+    const handleStartFrame = resolvedHandleStart !== null && resolvedHandleStart >= 0
+      ? Math.round(resolvedHandleStart)
+      : null;
+    let handleEndFrame = null;
+    if (resolvedHandleEndExplicit !== null && resolvedHandleEndExplicit >= 0) {
+      handleEndFrame = Math.round(resolvedHandleEndExplicit);
+    } else if (handleStartFrame !== null && resolvedDuration !== null && resolvedDuration > 0) {
+      handleEndFrame = handleStartFrame + Math.round(resolvedDuration);
+    }
+    const normalizedMediaType = normalizeResolveMediaType(options.mediaType);
+
+    const txId = this.journal.begin('new-track', {
+      mediaId,
+      filePath,
+      trackSubtype,
+      desiredTrackName,
+      recordFrame,
+      fps: resolvedFps,
+    });
     let createdTrackIndex = null;
     let importedItem = null;
     let appendedItem = null;
+    /** @type {Array<number>} */
+    const addedMarkerFrames = [];
+    /** @type {Set<string>} */
+    const addedMarkerColors = new Set();
 
     try {
       if (options.failPoint === 'before_track_creation') {
@@ -1037,15 +1219,22 @@ class TimelineTransactionManager {
         throw new Error('Injected failure after import');
       }
 
-      // 3. Append / Insert into the newly created track
-      // If AppendToTimeline supports specifying track or if we use track destination
+      // 3. Append / Insert into the newly created track at the exact recordFrame
       let inserted = false;
       if (typeof mediaPool.AppendToTimeline === 'function') {
-        const result = await mediaPool.AppendToTimeline([{
+        /** @type {Record<string, any>} */
+        const clipSpec = {
           mediaPoolItem: importedItem,
           trackIndex: createdTrackIndex,
-          recordFrame: 0,
-        }]);
+          recordFrame,
+        };
+        if (handleStartFrame !== null) clipSpec.startFrame = handleStartFrame;
+        if (handleEndFrame !== null && (handleStartFrame === null || handleEndFrame > handleStartFrame)) {
+          clipSpec.endFrame = handleEndFrame;
+        }
+        if (normalizedMediaType !== undefined) clipSpec.mediaType = normalizedMediaType;
+
+        const result = await mediaPool.AppendToTimeline([clipSpec]);
         inserted = Array.isArray(result) ? result.length > 0 : Boolean(result);
         if (Array.isArray(result) && result[0]) appendedItem = result[0];
       }
@@ -1061,6 +1250,32 @@ class TimelineTransactionManager {
         throw new Error('Failed to insert audio clip onto timeline');
       }
 
+      // 4. Optional Guard markers placed with exact recordFrame and timeline fps
+      let markersAdded = 0;
+      if (
+        options.addGuardMarkers !== false &&
+        (options.report || options.reportPath) &&
+        typeof timeline.AddMarker === 'function'
+      ) {
+        const parsedReport = resolveClipReport({ report: options.report, reportPath: options.reportPath }, filePath);
+        const sourceOffsetS = handleStartFrame !== null ? handleStartFrame / resolvedFps : 0;
+        const markers = extractGuardMarkersFromReport(parsedReport, recordFrame, resolvedFps, { sourceOffsetS });
+        for (const marker of markers) {
+          const added = await timeline.AddMarker(
+            marker.frameOffset,
+            marker.color,
+            marker.name,
+            marker.note,
+            marker.durationFrames
+          );
+          if (added !== false) {
+            addedMarkerFrames.push(marker.frameOffset);
+            addedMarkerColors.add(marker.color);
+            markersAdded += 1;
+          }
+        }
+      }
+
       if (options.failPoint === 'after_insertion') {
         throw new Error('Injected failure after insertion');
       }
@@ -1070,10 +1285,30 @@ class TimelineTransactionManager {
         success: true,
         trackIndex: createdTrackIndex,
         trackName: desiredTrackName,
+        recordFrame,
+        fps: resolvedFps,
+        markersAdded,
       };
     } catch (err) {
       this.log(`transactionalNewTrack failed: ${err.message}. Initiating compensating rollback...`);
       this.journal.update(txId, 'ROLLING_BACK');
+
+      // Compensating action 0: delete markers added during this transaction
+      if (addedMarkerFrames.length > 0) {
+        if (typeof timeline.DeleteMarkerAtFrame === 'function') {
+          for (const frameId of [...addedMarkerFrames].reverse()) {
+            try {
+              await timeline.DeleteMarkerAtFrame(frameId);
+            } catch (_) {}
+          }
+        } else if (typeof timeline.DeleteMarkersByColor === 'function') {
+          for (const color of addedMarkerColors) {
+            try {
+              await timeline.DeleteMarkersByColor(color);
+            } catch (_) {}
+          }
+        }
+      }
 
       // Compensating action 1: delete timeline item if created
       if (appendedItem && typeof timeline.DeleteItem === 'function') {
@@ -1133,7 +1368,7 @@ class TimelineTransactionManager {
     clips,
     cleanedByClipId,
     targetTrackName = 'HawaVoClean Cleaned',
-    fps = 24,
+    fps,
     addGuardMarkers = true,
     failPoint,
   } = {}) {
@@ -1147,9 +1382,12 @@ class TimelineTransactionManager {
     if (!mapIsMap && !isPlainObject(cleanedByClipId)) {
       throw new Error('batchTrackClean: cleanedByClipId map is required.');
     }
-    const rate = parseFiniteNumber(fps);
-    if (rate === null || rate <= 0 || rate > MAX_FPS) {
-      throw new Error(`batchTrackClean: invalid fps (${fps}).`);
+    let explicitRate = null;
+    if (fps !== undefined) {
+      explicitRate = parseFiniteNumber(fps);
+      if (explicitRate === null || explicitRate <= 0 || explicitRate > MAX_FPS) {
+        throw new Error(`batchTrackClean: invalid fps (${fps}).`);
+      }
     }
     if (
       typeof targetTrackName !== 'string' ||
@@ -1230,12 +1468,8 @@ class TimelineTransactionManager {
       }
 
       const offsetParsed = parseFiniteNumber(clip.sourceOffsetS);
-      const sourceOffsetS = offsetParsed !== null && offsetParsed > 0
-        ? offsetParsed
-        : (handleStartFrame !== null ? handleStartFrame / rate : 0);
-
       const report = addGuardMarkers ? resolveClipReport(cleanedEntry, filePath) : null;
-      const mediaTypeParsed = parseFiniteNumber(clip.mediaType);
+      const normalizedMediaType = normalizeResolveMediaType(clip.mediaType);
 
       prepared.push({
         clipId,
@@ -1243,8 +1477,9 @@ class TimelineTransactionManager {
         startFrame: Math.round(startFrame),
         handleStartFrame,
         handleEndFrame,
-        sourceOffsetS,
-        mediaType: mediaTypeParsed !== null ? mediaTypeParsed : undefined,
+        explicitSourceOffsetS: offsetParsed !== null && offsetParsed > 0 ? offsetParsed : null,
+        sourceOffsetS: 0,
+        mediaType: normalizedMediaType,
         report,
       });
     }
@@ -1257,6 +1492,15 @@ class TimelineTransactionManager {
     }
     if (!activeTimeline) {
       throw new Error('No active timeline in DaVinci Resolve.');
+    }
+
+    const rate = explicitRate !== null
+      ? explicitRate
+      : await resolveTimelineFps(activeTimeline);
+    for (const entry of prepared) {
+      entry.sourceOffsetS = entry.explicitSourceOffsetS !== null
+        ? entry.explicitSourceOffsetS
+        : (entry.handleStartFrame !== null ? entry.handleStartFrame / rate : 0);
     }
 
     const mediaPool = await this.getMediaPool();
@@ -1432,6 +1676,7 @@ class TimelineTransactionManager {
         trackIndex: targetTrackIndex,
         trackName: targetTrackName,
         reusedTrack,
+        fps: rate,
         clipsPlaced: prepared.length,
         markersAdded: placedMarkers.length,
         markers: placedMarkers,
@@ -1552,10 +1797,20 @@ class TimelineTransactionManager {
     report = null,
     reportPath,
     clipStartFrame = 0,
-    fps = 24,
+    fps,
     sourceOffsetS = 0,
     markers,
   } = {}) {
+    let activeTimeline = timeline || null;
+    if (!activeTimeline) {
+      const project = await this.getProject();
+      if (!project) throw new Error('No project is open in DaVinci Resolve.');
+      activeTimeline = await project.GetCurrentTimeline();
+    }
+    if (!activeTimeline) {
+      throw new Error('No active timeline in DaVinci Resolve.');
+    }
+
     let resolvedMarkers = [];
     if (markers !== undefined) {
       if (!Array.isArray(markers)) {
@@ -1591,18 +1846,9 @@ class TimelineTransactionManager {
         };
       });
     } else {
+      const effectiveFps = await resolveTimelineFps(activeTimeline, fps);
       const parsedReport = resolveClipReport({ report, reportPath }, '');
-      resolvedMarkers = extractGuardMarkersFromReport(parsedReport, clipStartFrame, fps, { sourceOffsetS });
-    }
-
-    let activeTimeline = timeline || null;
-    if (!activeTimeline) {
-      const project = await this.getProject();
-      if (!project) throw new Error('No project is open in DaVinci Resolve.');
-      activeTimeline = await project.GetCurrentTimeline();
-    }
-    if (!activeTimeline) {
-      throw new Error('No active timeline in DaVinci Resolve.');
+      resolvedMarkers = extractGuardMarkersFromReport(parsedReport, clipStartFrame, effectiveFps, { sourceOffsetS });
     }
 
     if (resolvedMarkers.length === 0 || typeof activeTimeline.AddMarker !== 'function') {
@@ -1664,6 +1910,8 @@ module.exports = {
   MAX_GUARD_MARKERS,
   MAX_GUARD_REPORT_UNITS,
   validateAudioFormat,
+  resolveTimelineFps,
+  normalizeResolveMediaType,
   extractGuardMarkersFromReport,
   validateBatchCleanTrackPayload,
   validateApplyGuardMarkersPayload,

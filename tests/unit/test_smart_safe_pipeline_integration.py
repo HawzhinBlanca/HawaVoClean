@@ -102,7 +102,7 @@ def test_smart_safe_pipeline_mono_end_to_end(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_smart_safe_pipeline_stereo_and_resampling(tmp_path: Path) -> None:
-    """Stereo inputs preserve channel count and 44.1 kHz inputs are resampled to 48 kHz."""
+    """Stereo inputs preserve channel count; clean preserve route keeps native 44.1 kHz."""
     in_wav = _create_synthetic_wav(
         tmp_path / "input_stereo_44k.wav",
         duration_s=1.0,
@@ -121,11 +121,13 @@ def test_smart_safe_pipeline_stereo_and_resampling(tmp_path: Path) -> None:
 
     assert out_wav.exists()
     assert report.output.channels == 2
-    assert report.output.sample_rate == 48000
+    selected_route = (report.restoration or {}).get("selected_route")
+    expected_sr = 44100 if selected_route == "preserve" else 48000
+    assert report.output.sample_rate == expected_sr
 
     info = sf.info(str(out_wav))
     assert info.channels == 2
-    assert info.samplerate == 48000
+    assert info.samplerate == expected_sr
 
 
 @pytest.mark.unit
