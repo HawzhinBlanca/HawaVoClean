@@ -69,12 +69,24 @@ def _is_system_drive(candidate: Path, system_drive: str) -> bool:
     return bool(drive) and drive == system_drive
 
 
-def windows_local_drives(*, include_system_drive: bool = False) -> list[Path]:
-    """Return accessible local fixed/removable drive roots on Windows.
+def _is_bare_system_drive_root(candidate: Path, system_drive: str) -> bool:
+    drive = candidate.drive.rstrip("\\/").upper()
+    return bool(drive) and drive == system_drive and len(candidate.parts) <= 1
 
-    By default, excludes the OS system drive (e.g. ``C:\\``) so system-drive
-    access remains scoped to the user's home directory and work directory
-    while secondary media/data drives (e.g. ``D:\\``, ``E:\\``) are allowed.
+
+def windows_local_drives(
+    *,
+    include_system_drive: bool = False,
+    include_fixed_drives: bool = False,
+) -> list[Path]:
+    """Return accessible local drive roots on Windows.
+
+    By default, mirrors macOS ``/Volumes`` by returning removable media drives
+    (USB recorders, SD cards) while excluding the OS system drive (``C:\\``)
+    and fixed internal drives. Pass ``include_fixed_drives=True`` (or set
+    ``HAWAVOCLEAN_ALLOW_WINDOWS_DRIVES=1``) to also include secondary fixed
+    data drives (e.g. ``D:\\``, ``E:\\``) while still excluding the OS system
+    drive.
     """
     if sys.platform != "win32":
         return []
@@ -86,6 +98,11 @@ def windows_local_drives(*, include_system_drive: bool = False) -> list[Path]:
     kernel32 = windll.kernel32
     bitmask = int(kernel32.GetLogicalDrives())
     system_drive = _windows_system_drive()
+    allowed_types = (
+        (_WINDOWS_DRIVE_REMOVABLE, _WINDOWS_DRIVE_FIXED)
+        if include_fixed_drives
+        else (_WINDOWS_DRIVE_REMOVABLE,)
+    )
     drives: list[Path] = []
     for idx in range(26):
         if not (bitmask & (1 << idx)):
@@ -93,7 +110,7 @@ def windows_local_drives(*, include_system_drive: bool = False) -> list[Path]:
         letter = chr(ord("A") + idx)
         root_str = f"{letter}:\\"
         drive_type = int(kernel32.GetDriveTypeW(root_str))
-        if drive_type not in (_WINDOWS_DRIVE_REMOVABLE, _WINDOWS_DRIVE_FIXED):
+        if drive_type not in allowed_types:
             continue
         root = Path(root_str)
         if not include_system_drive and _is_system_drive(root, system_drive):
@@ -110,14 +127,21 @@ def _resolve_windows_secondary_drives(
     if _active_platform(platform) != "win32":
         return []
     system_drive = _windows_system_drive()
+    explicit = windows_drives is not None
     raw_drives = (
         list(windows_drives)
         if windows_drives is not None
-        else windows_local_drives(include_system_drive=False)
+        else windows_local_drives(
+            include_system_drive=False,
+            include_fixed_drives=os.environ.get("HAWAVOCLEAN_ALLOW_WINDOWS_DRIVES") == "1",
+        )
     )
     resolved_drives: list[Path] = []
     for candidate in raw_drives:
-        if _is_system_drive(candidate, system_drive):
+        if explicit:
+            if _is_bare_system_drive_root(candidate, system_drive):
+                continue
+        elif _is_system_drive(candidate, system_drive):
             continue
         try:
             resolved = candidate.resolve()

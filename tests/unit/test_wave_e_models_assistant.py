@@ -719,11 +719,15 @@ def test_model_manager_stream_variants_ast_fallback_and_already_installed(
     monkeypatch.setattr(
         ctypes, "windll", types.SimpleNamespace(kernel32=fake_kernel32), raising=False
     )
-    drives = policy_mod.windows_local_drives(include_system_drive=False)
+    removable_only = policy_mod.windows_local_drives(include_system_drive=False)
+    assert [str(d) for d in removable_only] == ["E:\\"]
+    drives = policy_mod.windows_local_drives(include_system_drive=False, include_fixed_drives=True)
     drive_strs = [str(d) for d in drives]
     assert "D:\\" in drive_strs and "E:\\" in drive_strs
     assert "Z:\\" not in drive_strs
-    all_drives = policy_mod.windows_local_drives(include_system_drive=True)
+    all_drives = policy_mod.windows_local_drives(
+        include_system_drive=True, include_fixed_drives=True
+    )
     assert any("C:" in str(d) for d in all_drives)
 
     fake_sysroot = tmp_path / "WinSysRoot"

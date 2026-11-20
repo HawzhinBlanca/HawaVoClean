@@ -241,6 +241,7 @@ def is_non_system_dylib(dep: str) -> bool:
         or dep.startswith("@loader_path/")
         or dep.startswith("@executable_path/")
         or dep.startswith("/")
+        or Path(dep).is_absolute()
     )
 
 
@@ -252,7 +253,7 @@ def _resolve_dylib_path(
     extra_search_dirs: tuple[Path, ...] = (),
 ) -> Path | None:
     """Locate the real on-disk file for a non-system Mach-O dependency."""
-    if dep.startswith("/"):
+    if dep.startswith("/") or Path(dep).is_absolute():
         candidate = Path(dep)
         return candidate if candidate.is_file() else None
 
@@ -312,7 +313,7 @@ def verify_macho_no_forbidden_dylibs(
                 violations.append(f"{macho.name} -> {dep} (forbidden non-portable host path)")
             elif dep.startswith("@rpath/"):
                 violations.append(f"{macho.name} -> {dep} (unresolved @rpath reference)")
-            elif dep.startswith("/"):
+            elif dep.startswith("/") or Path(dep).is_absolute():
                 violations.append(f"{macho.name} -> {dep} (non-system absolute dylib path)")
             elif dep.startswith("@loader_path/"):
                 rel = dep.removeprefix("@loader_path/")
