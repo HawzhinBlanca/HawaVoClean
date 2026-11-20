@@ -104,7 +104,7 @@ describe('UnitInspector Detail action bar', () => {
     expect(loopBtn).not.toBeNull();
     expect(host.querySelector('button[aria-label="Keep original audio for unit 0"]')).not.toBeNull();
     expect(host.querySelector('button[aria-label="Force cleaned audio for unit 0"]')).not.toBeNull();
-    expect(host.querySelector('button[aria-label="Reset unit 0 to automatic guard decision"]')).not.toBeNull();
+    expect(host.querySelector('button[aria-label="Reset auto — unit 0 automatic guard decision"]')).not.toBeNull();
     // Undo/Redo hidden until history exists
     expect(host.querySelector('button[aria-label="Undo last override or rack edit"]')).toBeNull();
 

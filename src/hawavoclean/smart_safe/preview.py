@@ -953,6 +953,7 @@ def verify_post_master_invariants(
     speaker_profile: SpeakerProfile | None = None,
     max_peak: float = 1.05,
     phonetic_guard: PhoneticStabilityGuard | None = None,
+    perceptual_scorer: PerceptualQualityScorer | None = None,
 ) -> tuple[bool, str]:
     """Verify that full rendered/mastered audio satisfies all hard guards.
 
@@ -997,6 +998,25 @@ def verify_post_master_invariants(
             reference_audio, master_audio, sample_rate, cutoff_hz, hf_res
         )
     )
+    if (
+        not hf_ok
+        and route not in RESTORE_ROUTES
+        and hf_res.speech_window_leakage <= 0.25
+        and hf_res.spurious_burst_count == 0
+        and hf_res.hf_envelope_divergence <= 0.35
+    ):
+        scorer = perceptual_scorer if perceptual_scorer is not None else _DEFAULT_PERCEPTUAL_SCORER
+        ref_score = scorer.score(reference_audio, sample_rate)
+        cand_score = scorer.score(master_audio, sample_rate)
+        hf_ok = _enhancement_hf_artifact_ok(
+            reference_audio,
+            master_audio,
+            sample_rate,
+            cutoff_hz,
+            hf_res,
+            ref_score=ref_score,
+            cand_score=cand_score,
+        ) and passes_perceptual_artifact_check(ref_score, cand_score)
     if not hf_ok:
         return False, "post-master artifact guard failed: spurious bursts or envelope divergence"
 

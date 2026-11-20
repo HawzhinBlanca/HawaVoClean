@@ -158,7 +158,7 @@ export function Transport() {
         >
           <span className="lm-label">Level Match</span>
           {masterServed && Number.isFinite(gainOffsetDb) && Math.abs(gainOffsetDb) > 0.05 ? (
-            <span className="lm-badge mono">
+            <span className="lm-badge mono" aria-hidden="true">
               {gainOffsetDb > 0 ? `+${gainOffsetDb.toFixed(1)}` : gainOffsetDb.toFixed(1)} dB
             </span>
           ) : null}
@@ -169,7 +169,7 @@ export function Transport() {
           disabled={!hasAudio || !masterServed}
           onClick={() => getPlayer().toggleDeltaMode()}
           aria-pressed={deltaMode && masterServed}
-          aria-label="Listen to removed audio only"
+          aria-label="Removed — listen to removed audio only"
           title="Listen to removed audio only (D)"
           style={{ minHeight: '28px', height: '28px', padding: '0 8px' }}
         >

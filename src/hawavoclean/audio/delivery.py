@@ -1441,6 +1441,18 @@ def export_delivery_artifact(
                 raise PreflightError(
                     "FFmpeg binary is required for video mux-back but was not found."
                 )
+            from hawavoclean.audio.probe import probe_audio
+            from hawavoclean.errors import MediaPreflightError
+
+            try:
+                source_probe = probe_audio(source_resolved, max_sample_rate=384000)
+            except MediaPreflightError:
+                source_probe = None
+            if source_probe is not None and not source_probe.has_video:
+                raise ValueError(
+                    "Source media has no video stream for video_mux export; "
+                    "choose WAV, FLAC, or AAC instead."
+                )
             ext = tmp_suffix.lower()
             cmd = [
                 ffmpeg_bin,

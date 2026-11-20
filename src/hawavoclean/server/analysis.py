@@ -619,6 +619,7 @@ def analyze_audio(path: Path, buckets: int = DEFAULT_BUCKETS) -> dict[str, Any]:
             "true_peak_dbtp": round(float(loudness.true_peak_dbtp), 2),
         },
         "noise_floor_db": round(noise_floor_db, 2),
+        "has_video": bool(probe.has_video),
     }
 
 

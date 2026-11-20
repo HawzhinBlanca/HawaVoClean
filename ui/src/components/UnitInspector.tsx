@@ -328,7 +328,7 @@ function Detail({
           type="button"
           className={`insp-action-btn${activeOverride === 'auto' ? ' on' : ''}`}
           aria-pressed={activeOverride === 'auto'}
-          aria-label={`Reset unit ${unit.unit_id} to automatic guard decision`}
+          aria-label={`Reset auto — unit ${unit.unit_id} automatic guard decision`}
           title="Restore automatic guard decision for this unit"
           onClick={() => void applyUnitOverride(unit.unit_id, 'auto')}
         >

@@ -37,6 +37,7 @@ from hawavoclean.config import HawaVoCleanConfig
 from hawavoclean.enhancement.factory import resolve_core
 from hawavoclean.enhancement.validate import validate_enhancer_output
 from hawavoclean.enhancement.worker import (
+    POOL_SIZE_ENV,
     EnhancementRun,
     EnhancementWorkerPool,
     IsolatedEnhancementWorker,
@@ -128,6 +129,7 @@ from hawavoclean.restoration import (
     SegmentRestorationDecision,
     load_speaker_profile,
 )
+from hawavoclean.runtime import active_device
 from hawavoclean.segmentation.types import SpeechUnit
 from hawavoclean.segmentation.utterances import build_speech_units
 from hawavoclean.source_pin import PinnedSource
@@ -151,9 +153,18 @@ NATURAL_STREAMING_WORKER_BATCH_UNITS = 8
 NATURAL_STREAMING_MAX_WORKERS = 2
 
 
-def _natural_worker_limit(requested: int, *, streaming: bool) -> int:
-    """Cap long-job model concurrency independently of machine RAM/CPU."""
-    return min(requested, NATURAL_STREAMING_MAX_WORKERS) if streaming else requested
+def _natural_worker_limit(
+    requested: int,
+    *,
+    streaming: bool,
+    device: str = "cpu",
+    explicit_override: bool = False,
+) -> int:
+    """Cap model concurrency for long streaming jobs and single-GPU neural cores."""
+    limit = min(requested, NATURAL_STREAMING_MAX_WORKERS) if streaming else requested
+    if device in {"mps", "cuda"} and not explicit_override:
+        return 1
+    return limit
 
 
 def _create_audio_memmap(
@@ -832,6 +843,11 @@ def _run_after_preflight(
             max_size=_natural_worker_limit(
                 configured_worker_hint(config.runtime.num_threads),
                 streaming=streaming_natural,
+                device=active_device() if core_registration.device_aware else "cpu",
+                explicit_override=(
+                    bool(os.environ.get(POOL_SIZE_ENV, "").strip())
+                    or config.runtime.num_threads > 1
+                ),
             ),
             prewarm=len(context_items),
             worker_factory=IsolatedEnhancementWorker,
@@ -1917,9 +1933,19 @@ def _run_smart_safe(
     check_mono = (
         np.mean(master_audio, axis=0).astype(np.float32) if master_audio.ndim == 2 else master_audio
     )
-    passed, _ = verify_post_master_invariants(check_mono, mono_raw, selected_route, sr)
+    verify_kwargs: dict[str, Any] = {}
+    if speaker_profile is not None:
+        verify_kwargs["speaker_profile"] = speaker_profile
+    passed, post_master_reason = verify_post_master_invariants(
+        check_mono,
+        mono_raw,
+        selected_route,
+        sr,
+        **verify_kwargs,
+    )
+    post_master_abstained = (not passed) or (render_err is not None)
 
-    if not passed or render_err is not None:
+    if post_master_abstained:
         selected_route = abstain_to_least_intervention(previews, failed_route=selected_route)
         master_audio, _ = engine.render_route_audio(
             selected_route,
@@ -1956,7 +1982,13 @@ def _run_smart_safe(
     decision_summary = {
         "strategy": "smart_safe",
         "selected_route": selected_route,
-        "abstained": decision.abstained,
+        "abstained": bool(decision.abstained or post_master_abstained),
+        "post_master_verified": bool(not post_master_abstained),
+        **(
+            {"post_master_failure_reason": render_err or post_master_reason}
+            if post_master_abstained
+            else {}
+        ),
         "confidence": decision.confidence,
         "perceptual_backend": engine.perceptual_backend,
         "decision_sha256": decision.decision_sha256,

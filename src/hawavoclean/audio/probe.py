@@ -322,7 +322,7 @@ def probe_audio(
             "-v",
             "error",
             "-show_entries",
-            "format=format_name,duration,bit_rate:stream=index,codec_type,codec_name,sample_rate,channels,bits_per_raw_sample,duration,nb_samples",
+            "format=format_name,duration,bit_rate:stream=index,codec_type,codec_name,sample_rate,channels,bits_per_raw_sample,duration,nb_samples:stream_disposition=attached_pic",
             "-of",
             "json",
             str(file_path),
@@ -375,6 +375,15 @@ def probe_audio(
         # First AUDIO stream — containers frequently list video first.
         audio_stream = audio_streams[0]
         audio_stream_index = _metadata_int(audio_stream.get("index", 0), "stream.index")
+        # Real video streams only — exclude embedded album art (`attached_pic`).
+        has_video = any(
+            st.get("codec_type") == "video"
+            and not (
+                isinstance(st.get("disposition"), dict)
+                and bool(st["disposition"].get("attached_pic"))
+            )
+            for st in streams
+        )
         fmt = data.get("format", {})
         if not isinstance(fmt, dict):
             raise MediaPreflightError(
@@ -411,6 +420,7 @@ def probe_audio(
     else:
         # Fallback to soundfile info
         audio_stream_index = 0
+        has_video = False
         try:
             info = sf.info(str(file_path))
             sample_rate = info.samplerate
@@ -525,4 +535,5 @@ def probe_audio(
         bit_depth=bit_depth,
         sha256=file_sha256,
         audio_stream_index=audio_stream_index,
+        has_video=has_video,
     )

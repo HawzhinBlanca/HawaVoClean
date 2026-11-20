@@ -33,6 +33,7 @@ class AudioProbeResult:
     bit_depth: int | None
     sha256: str
     audio_stream_index: int = 0
+    has_video: bool = False
 
 
 @dataclass

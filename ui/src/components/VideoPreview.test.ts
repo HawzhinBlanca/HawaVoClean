@@ -6,6 +6,7 @@ import {
   VIDEO_SYNC_DRIFT_THRESHOLD_S,
   VideoPreview,
   isVideoFilePath,
+  sourceHasVideo,
 } from './VideoPreview';
 
 declare global {
@@ -52,6 +53,13 @@ describe('VideoPreview', () => {
     expect(isVideoFilePath('/clips/voice.flac')).toBe(false);
     expect(isVideoFilePath(null)).toBe(false);
     expect(isVideoFilePath('')).toBe(false);
+  });
+
+  it('trusts probed has_video over filename extension so audio-only .mp4 is not misclassified', () => {
+    expect(sourceHasVideo('/Users/me/Flute 09.m4a.mp4', { has_video: false })).toBe(false);
+    expect(sourceHasVideo('/Users/me/interview.mp4', { has_video: true })).toBe(true);
+    expect(sourceHasVideo('/Users/me/interview.mp4', null)).toBe(true);
+    expect(sourceHasVideo('/Users/me/voice.wav', { has_video: false })).toBe(false);
   });
 
   it('degrades cleanly to null when audio-only (videoUrl is null or empty)', async () => {

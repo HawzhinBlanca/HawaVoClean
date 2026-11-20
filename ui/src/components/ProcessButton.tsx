@@ -482,7 +482,7 @@ export function ProcessButton() {
           re-acquired, and the whole transition survives `animation: none`
           under reduced motion (it degrades to an instant, legible swap).
         */}
-        <span className="center">
+        <span className="center" aria-hidden="true">
           <span className="glyph g-idle">
             <IconBolt className="icon" style={{ color: 'var(--amber)' }} />
           </span>

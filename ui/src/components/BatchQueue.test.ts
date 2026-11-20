@@ -314,7 +314,7 @@ describe('BatchQueue component', () => {
     expect(host.querySelector('.batch-delivery-badge')?.textContent).toContain('EBU R128');
     expect(host.querySelectorAll('.batch-item-row')).toHaveLength(3);
 
-    const flagBtn = host.querySelector<HTMLButtonElement>('button[aria-label="Filter flagged items only"]');
+    const flagBtn = host.querySelector<HTMLButtonElement>('button[aria-label="Flagged only — filter flagged items"]');
     expect(flagBtn).not.toBeNull();
     expect(flagBtn?.getAttribute('aria-pressed')).toBe('false');
     expect(flagBtn?.textContent).toContain('1');

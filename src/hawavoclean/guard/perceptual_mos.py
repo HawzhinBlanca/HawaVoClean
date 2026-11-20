@@ -323,11 +323,11 @@ class PerceptualQualityScorer:
             return "dnsmos"
         return "acoustic_proxy"
 
-    def _score_nisqa(
+    def _score_nisqa_single(
         self,
         norm_audio: np.ndarray[Any, np.dtype[np.float32]],
         sample_rate: int,
-    ) -> PerceptualQualityScore:
+    ) -> list[float]:
         if _is_native_nisqa_available():
             nisqa_arch = importlib.import_module("hawavoclean.guard.nisqa_arch")
             vals = [float(v) for v in nisqa_arch.score_nisqa_v2(norm_audio, int(sample_rate))]
@@ -341,9 +341,47 @@ class PerceptualQualityScorer:
             vals = [float(v) for v in out.detach().cpu().tolist()]
         if len(vals) != 5 or not all(math.isfinite(v) for v in vals):
             raise RuntimeError(f"unexpected NISQA output: {vals!r}")
+        return vals
+
+    def _score_nisqa(
+        self,
+        norm_audio: np.ndarray[Any, np.dtype[np.float32]],
+        sample_rate: int,
+    ) -> PerceptualQualityScore:
+        # NISQA v2 has a fixed maximum mel-spectrogram segment window (~25-30 s).
+        # Score short clips directly for bit-identity, and automatically window
+        # longer recordings into up to 8 evenly-spaced speech-active 12 s slices
+        # so long files never silently fall back to uncalibrated acoustic_proxy.
+        dur_s = len(norm_audio) / float(sample_rate)
+        if dur_s <= 18.0:
+            vals = self._score_nisqa_single(norm_audio, sample_rate)
+        else:
+            win_samples = int(12.0 * sample_rate)
+            min_samples = max(int(1.5 * sample_rate), 1)
+            raw_windows: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+            for start in range(0, len(norm_audio), win_samples):
+                seg = norm_audio[start : start + win_samples]
+                if len(seg) >= min_samples:
+                    raw_windows.append(seg)
+            active_windows = [
+                seg
+                for seg in raw_windows
+                if float(np.sqrt(np.mean(np.square(seg, dtype=np.float64)))) >= 1e-3
+            ]
+            chosen = active_windows if active_windows else raw_windows
+            max_windows = 8
+            if len(chosen) > max_windows:
+                idx = np.linspace(0, len(chosen) - 1, max_windows, dtype=int)
+                chosen = [chosen[int(i)] for i in idx]
+            per_window_vals = [
+                self._score_nisqa_single(_normalize_rms(seg, self._target_rms), sample_rate)
+                for seg in chosen
+            ]
+            vals = [
+                float(v) for v in np.mean(np.asarray(per_window_vals, dtype=np.float64), axis=0)
+            ]
 
         clipped = [_clip_mos(v) for v in vals]
-        dur_s = len(norm_audio) / float(sample_rate)
         dur_factor = min(1.0, max(0.35, dur_s / 3.0))
         spread = max(clipped) - min(clipped)
         spread_penalty = max(0.0, (spread - 2.0) * 0.05)

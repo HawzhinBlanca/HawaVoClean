@@ -17,7 +17,7 @@ import {
 import type { ExportFormatId } from '../state/presets';
 import { useStore } from '../state/store';
 import { IconCheck, IconImport, IconReplace, IconReveal } from './Icons';
-import { isVideoFilePath } from './VideoPreview';
+import { sourceHasVideo } from './VideoPreview';
 
 const EXPORT_FORMAT_LABEL: Record<ExportFormatId, string> = {
   wav24: 'WAV 24-bit',
@@ -117,15 +117,18 @@ function ExportDeliveryButton({
   engineReady: boolean;
 }) {
   const source = useStore((s) => s.source);
+  const original = useStore((s) => s.original);
   const rackSettings = useStore((s) => s.rackSettings);
   const [exporting, setExporting] = useState(false);
 
-  const isVideo = isVideoFilePath(source?.path);
+  const isVideo = sourceHasVideo(source?.path, original);
   const targetFormat: ExportFormatId = isVideo
     ? rackSettings.exportFormat === 'wav24'
       ? 'video_mux'
       : rackSettings.exportFormat
-    : rackSettings.exportFormat;
+    : rackSettings.exportFormat === 'video_mux'
+      ? 'wav24'
+      : rackSettings.exportFormat;
   const label =
     targetFormat === 'video_mux'
       ? 'Mux Video'

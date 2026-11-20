@@ -37,6 +37,8 @@ export interface AudioAnalysis {
   spectrum: { freqs_hz: number[]; db: number[] };
   loudness: { integrated_lufs: number | null; true_peak_dbtp: number | null };
   noise_floor_db: number | null;
+  /** True only when ffprobe detected a real video track (excludes audio-only .mp4 / cover art). */
+  has_video?: boolean;
 }
 
 /**

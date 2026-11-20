@@ -224,7 +224,7 @@ export function BatchQueue() {
             type="button"
             className={`batch-btn subtle batch-flag-toggle${flaggedOnly ? ' on' : ''}`}
             aria-pressed={flaggedOnly}
-            aria-label="Filter flagged items only"
+            aria-label="Flagged only — filter flagged items"
             title="Show only items with errors or reverted speech units"
             onClick={() => setFlaggedOnly((v) => !v)}
           >

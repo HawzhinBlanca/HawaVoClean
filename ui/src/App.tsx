@@ -18,7 +18,7 @@ import { TakeSwitcher } from './components/TakeSwitcher';
 import { BatchQueue } from './components/BatchQueue';
 import { Transport } from './components/Transport';
 import { UnitInspector } from './components/UnitInspector';
-import { VideoPreview, isVideoFilePath } from './components/VideoPreview';
+import { VideoPreview, sourceHasVideo } from './components/VideoPreview';
 import { WaveformDisplay } from './components/WaveformDisplay';
 import {
   installRendererProofResponder,
@@ -94,6 +94,7 @@ function useDragWatch(): boolean {
 
 function SyncedVideoPreview() {
   const source = useStore((s) => s.source);
+  const original = useStore((s) => s.original);
   const client = useStore((s) => s.client);
   const duration = useStore((s) => s.duration);
   const collapsed = useStore((s) => s.videoPreviewCollapsed);
@@ -103,7 +104,7 @@ function SyncedVideoPreview() {
     return { time: p.time, playing: p.playing, duration: p.duration };
   });
 
-  const isVideo = Boolean(source && isVideoFilePath(source.path));
+  const isVideo = Boolean(source && sourceHasVideo(source.path, original));
   const videoUrl = isVideo && source && client ? client.fileUrl(source.path) : null;
 
   useEffect(() => {

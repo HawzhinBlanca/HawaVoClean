@@ -329,7 +329,7 @@ def _declick_channel(
 
     # Higher sensitivity -> lower threshold multiplier.
     sigma_mult = 12.0 - 7.0 * sensitivity
-    abs_floor = 0.004 * (1.4 - sensitivity)
+    abs_floor = 0.022 * (1.4 - sensitivity)
     threshold = np.maximum(local_base * sigma_mult, abs_floor)
 
     anomalous = abs_res > threshold
@@ -342,6 +342,8 @@ def _declick_channel(
 
     max_click_samples = max(2, int(round(sample_rate * max_click_ms_capped / 1000.0)))
     pad_samples = min(max(1, int(round(sample_rate * 0.0005))), max(1, max_click_samples // 6))
+    flank_samples = max(16, int(round(sample_rate * 0.012)))
+    bilateral_ratio = max(2.5, (7.0 - 4.0 * sensitivity))
 
     repaired = x64.copy()
     repaired_count = 0
@@ -349,6 +351,23 @@ def _declick_channel(
         span_len = end - start
         if span_len > max_click_samples:
             # Sustained high-frequency energy (e.g. sibilant fricative): leave untouched.
+            continue
+        # Bilateral isolation check: a true mouth/lip click stands out sharply
+        # against the upper envelope (95th percentile) of BOTH flanking windows,
+        # whereas normal consonant bursts are flanked by speech energy on one side.
+        span_peak = float(np.max(abs_res[start:end]))
+        left_lo = max(0, start - pad_samples - flank_samples)
+        left_hi = max(left_lo, start - pad_samples)
+        right_lo = min(n, end + pad_samples)
+        right_hi = min(n, right_lo + flank_samples)
+        left_scale = (
+            float(np.percentile(abs_res[left_lo:left_hi], 95)) if left_hi > left_lo else 0.0
+        )
+        right_scale = (
+            float(np.percentile(abs_res[right_lo:right_hi], 95)) if right_hi > right_lo else 0.0
+        )
+        flank_scale = max(left_scale, right_scale)
+        if span_peak <= max(flank_scale * bilateral_ratio, abs_floor):
             continue
         rep_start = max(2, start - pad_samples)
         rep_end = min(n - 2, end + pad_samples)

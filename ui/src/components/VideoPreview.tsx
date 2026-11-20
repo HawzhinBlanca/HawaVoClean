@@ -12,6 +12,22 @@ export function isVideoFilePath(pathOrUrl: string | null | undefined): boolean {
   return VIDEO_EXTENSION_RE.test(pathOrUrl.trim());
 }
 
+/**
+ * Ground-truth video check: trusts `analysis.has_video` from ffprobe when
+ * present so audio-only `.mp4` voice memos (e.g. `Flute 09.m4a.mp4`) are never
+ * misclassified as video, falling back to extension matching only when probe
+ * metadata has not arrived yet.
+ */
+export function sourceHasVideo(
+  pathOrUrl: string | null | undefined,
+  analysis?: { has_video?: boolean } | null,
+): boolean {
+  if (analysis && typeof analysis.has_video === 'boolean') {
+    return analysis.has_video;
+  }
+  return isVideoFilePath(pathOrUrl);
+}
+
 export interface VideoPreviewProps {
   /** URL of the video source, or null/undefined/empty when audio-only. */
   videoUrl: string | null | undefined;

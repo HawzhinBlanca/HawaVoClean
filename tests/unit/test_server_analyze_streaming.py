@@ -352,7 +352,10 @@ def test_the_response_shape_is_unchanged(client: TestClient, fixtures: dict[str,
         "spectrum",
         "loudness",
         "noise_floor_db",
+        "has_video",
     }
+    assert isinstance(body["has_video"], bool)
+    assert body["has_video"] is False
     assert set(body["peaks"]) == {"min", "max"}
     assert set(body["spectrum"]) == {"freqs_hz", "db"}
     assert set(body["loudness"]) == {"integrated_lufs", "true_peak_dbtp"}

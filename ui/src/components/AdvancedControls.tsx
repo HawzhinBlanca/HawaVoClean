@@ -4,7 +4,7 @@ import { previewRegion, toggleAdvancedOpen, updateRackSettings } from '../state/
 import { ProfileControl } from './ProfileControl';
 import { RestoreControl } from './RestoreControl';
 import { StudioRack } from './StudioRack';
-import { isVideoFilePath } from './VideoPreview';
+import { sourceHasVideo } from './VideoPreview';
 
 const PROFILE_LABEL: Record<Profile, string> = {
   studio_pro: 'Studio Pro',
@@ -59,7 +59,7 @@ export function AdvancedControls() {
           <StudioRack
             settings={rackSettings}
             onChange={updateRackSettings}
-            isVideoSource={isVideoFilePath(source?.path)}
+            isVideoSource={sourceHasVideo(source?.path, original)}
             disabled={running}
             canPreview={canPreview}
             onPreviewRegion={previewRegion}

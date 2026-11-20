@@ -1,5 +1,6 @@
 import { useStore } from '../state/store';
 import { IconBolt, IconCheck, IconClip } from './Icons';
+import { sourceHasVideo } from './VideoPreview';
 
 export function SmartExplanation() {
   const source = useStore((s) => s.source);
@@ -10,7 +11,9 @@ export function SmartExplanation() {
   const profile = useStore((s) => s.profile);
   const loudnessMatch = useStore((s) => s.loudnessMatch);
   const gainOffsetDb = useStore((s) => s.gainOffsetDb);
-  const isMp4 = Boolean(source && source.name.toLowerCase().endsWith('.mp4'));
+  const isMp4 = Boolean(
+    source && sourceHasVideo(source.path, original) && source.name.toLowerCase().endsWith('.mp4'),
+  );
 
   if (!source) {
     return (
