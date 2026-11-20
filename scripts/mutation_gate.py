@@ -728,6 +728,278 @@ _TORCH_BACKED: dict[str, str] = {
             "tests/unit/test_server_retention.py::test_a_terminal_callback_may_ask_the_manager_a_question",
         ),
     ),
+    Mutation(
+        "M44",
+        "spectral box repair corrupts exterior samples outside the crossfade window",
+        "src/hawavoclean/finishing/pro_repair.py",
+        """    blended = orig_seg * (1.0 - blend) + rep_seg * blend
+    out[splice_start:splice_end] = _to_finite_float32(blended)
+    return out""",
+        """    blended = orig_seg * (1.0 - blend) + rep_seg * blend
+    out[splice_start:splice_end] = _to_finite_float32(blended)
+    out[:splice_start] += np.float32(1e-4)
+    out[splice_end:] += np.float32(1e-4)
+    return out""",
+        # Owner: spectral box repair promises bit-identical exterior samples
+        # outside the crossfaded [start_s, end_s] repair box.
+        owners=(
+            "tests/unit/test_pro_repair.py::test_spectral_box_repair_attenuates_target_preserves_speech_and_exterior",
+        ),
+    ),
+    Mutation(
+        "M45",
+        "dynamic de-plosive attenuation disabled",
+        "src/hawavoclean/finishing/pro_repair.py",
+        """    gain = np.power(10.0, -smooth_gr_db / 20.0)
+    repaired = residual + plosive_band * gain""",
+        """    gain = np.ones_like(smooth_gr_db)
+    repaired = residual + plosive_band * gain""",
+        # Owner: event_count still increments, so only a test measuring actual
+        # 20-160 Hz attenuation catches a no-op gain curve.
+        owners=(
+            "tests/unit/test_pro_repair.py::test_dynamic_deplosive_attenuates_plosive_preserves_voice",
+        ),
+    ),
+    Mutation(
+        "M46",
+        "de-clip plateau reconstruction disabled",
+        "src/hawavoclean/finishing/pro_repair.py",
+        """    if not pos_runs and not neg_runs:
+        return x, 0""",
+        """    if True or (not pos_runs and not neg_runs):
+        return x, 0""",
+        # Owner: clipped plateaus (>=3 consecutive samples) must be reconstructed
+        # via Hermite splines with headroom scaling instead of passing through raw.
+        owners=(
+            "tests/unit/test_pro_repair.py::test_declip_reconstructs_plateaus_and_enforces_headroom",
+        ),
+    ),
+    Mutation(
+        "M47",
+        "room-tone floor pause ambience blending disabled",
+        "src/hawavoclean/finishing/pro_repair.py",
+        """        bed = _synthesize_room_tone(mag_profile, samples, fill_rms, seed_keys[ch])
+        out[ch] += bed""",
+        """        bed = _synthesize_room_tone(mag_profile, samples, fill_rms, seed_keys[ch])
+        _ = bed""",
+        # Owners: explicit target_floor_db and proportional blend_ratio modes
+        # must actually raise vacuum pauses to the requested ambience floor.
+        owners=(
+            "tests/unit/test_pro_repair.py::test_room_tone_floor_explicit_and_proportional_modes",
+            "tests/unit/test_pro_repair.py::test_dual_channel_and_pro_repair_chain",
+        ),
+    ),
+    Mutation(
+        "M48",
+        "4 MiB RIFF metadata chunk DoS cap disabled",
+        "src/hawavoclean/audio/delivery.py",
+        "                if rec.payload_size > MAX_METADATA_CHUNK_BYTES:",
+        "                if False and rec.payload_size > MAX_METADATA_CHUNK_BYTES:",
+        # Owner: hostile WAV files declaring >4 MiB BWF/iXML chunks must be
+        # rejected before allocating unbounded memory.
+        owners=(
+            "tests/unit/test_pro_dsp_adversarial.py::test_delivery_riff_rf64_hostile_binary_parser",
+        ),
+    ),
+    Mutation(
+        "M49",
+        "delivery export symlink destination rejection disabled",
+        "src/hawavoclean/audio/delivery.py",
+        """    if is_reparse_or_symlink(dest_raw):
+        raise ValueError(f"Destination path must not be a symlink or reparse point: {dest_raw}")
+    for ancestor in dest_raw.parents:
+        if ancestor == ancestor.parent or _is_system_prefix(ancestor):
+            continue
+        if is_reparse_or_symlink(ancestor):
+            raise ValueError(
+                f"Destination path ancestor must not be a symlink or reparse point: {ancestor}"
+            )
+    parent = dest_raw.parent.resolve()
+    dest_no_follow = parent / dest_raw.name
+    if is_reparse_or_symlink(dest_no_follow):
+        raise ValueError(
+            f"Destination path must not be a symlink or reparse point: {dest_no_follow}"
+        )
+    for ancestor in dest_no_follow.parents:
+        if ancestor == ancestor.parent:
+            continue
+        if is_reparse_or_symlink(ancestor):
+            raise ValueError(
+                f"Destination path ancestor must not be a symlink or reparse point: {ancestor}"
+            )""",
+        """    parent = dest_raw.parent.resolve()
+    dest_no_follow = parent / dest_raw.name""",
+        # Owner: final-component and ancestor symlinks must be rejected so an
+        # export can never follow a symlink to overwrite files outside exports/.
+        owners=(
+            "tests/unit/test_delivery_export.py::test_export_delivery_artifact_rejects_symlink_escape_and_bad_extension",
+        ),
+    ),
+    Mutation(
+        "M50",
+        "bext/iXML chunk writing disabled in inject_wav_metadata_chunks",
+        "src/hawavoclean/audio/delivery.py",
+        """            inject_before: list[tuple[bytes, bytes]] = []
+            inject_after: list[tuple[bytes, bytes]] = []
+            if b"bext" in chunks and (len(chunks[b"bext"]) & 1) == 0:
+                inject_before.append((b"bext", chunks[b"bext"]))
+            for preferred in (b"bext", b"iXML"):
+                if preferred in chunks and not (
+                    preferred == b"bext" and (len(chunks[b"bext"]) & 1) == 0
+                ):
+                    inject_after.append((preferred, chunks[preferred]))""",
+        """            inject_before: list[tuple[bytes, bytes]] = []
+            inject_after: list[tuple[bytes, bytes]] = []""",
+        # Owners: broadcast WAV exports must preserve BWF bext and iXML chunks
+        # losslessly across RIFF and RF64 containers.
+        owners=(
+            "tests/unit/test_delivery_export.py::test_wav_metadata_chunks_round_trip_riff_and_rf64",
+            "tests/unit/test_delivery_export.py::test_export_delivery_artifact_audio_formats_and_metadata",
+        ),
+    ),
+    Mutation(
+        "M51",
+        "iXML DOCTYPE/ENTITY XXE and XML-bomb rejection disabled",
+        "src/hawavoclean/audio/multitrack.py",
+        "    if not stripped or _FORBIDDEN_XML_RE.search(stripped) is not None:",
+        "    if not stripped:",
+        # Owner: hostile iXML chunks containing <!DOCTYPE or <!ENTITY must be
+        # rejected before ElementTree parses or expands them.
+        owners=(
+            "tests/unit/test_pro_dsp_adversarial.py::test_multitrack_ixml_hostile_xml_and_binary_torture",
+        ),
+    ),
+    Mutation(
+        "M52",
+        "decode_mid_side right channel sign flipped",
+        "src/hawavoclean/audio/multitrack.py",
+        "    right = np.ascontiguousarray(np.clip(m_arr - s_arr, -_F32_MAX, _F32_MAX), dtype=np.float32)",
+        "    right = np.ascontiguousarray(np.clip(m_arr + s_arr, -_F32_MAX, _F32_MAX), dtype=np.float32)",
+        # Owners: Mid/Side reconstruction must decode R = M - S so stereo
+        # round-trips losslessly and preserves true L/R imaging.
+        owners=(
+            "tests/unit/test_multitrack.py::test_mid_side_exact_float32_roundtrip",
+            "tests/unit/test_multitrack.py::test_enhance_true_stereo_ms_preserves_imaging_and_controls_side",
+        ),
+    ),
+    Mutation(
+        "M53",
+        "spectrogram 300s OOM window cap raised to 24h",
+        "src/hawavoclean/server/spectrogram.py",
+        "MAX_SPECTROGRAM_WINDOW_S = 300.0",
+        "MAX_SPECTROGRAM_WINDOW_S = 86400.0",
+        # Owner: spectrogram tile generation must reject windows >300s before
+        # decoding multi-hour PCM buffers into RAM.
+        owners=(
+            "tests/unit/test_spectrogram_api.py::test_spectrogram_rejects_unbounded_window_duration",
+        ),
+    ),
+    Mutation(
+        "M54",
+        "preview profile allowlist and config_dir traversal guard disabled",
+        "src/hawavoclean/server/warm_worker.py",
+        """    if profile not in ALLOWED_PREVIEW_PROFILES:
+        raise ValueError(
+            f"Unknown preview profile {profile!r}; expected a built-in profile or registered core_id"
+        )
+
+    expected_dir = config_dir().resolve()
+    cfg_path = profile_config_path(profile)
+    resolved_cfg = cfg_path.resolve()
+    if resolved_cfg.parent != expected_dir or not resolved_cfg.is_file():""",
+        """    if False and profile not in ALLOWED_PREVIEW_PROFILES:
+        raise ValueError(
+            f"Unknown preview profile {profile!r}; expected a built-in profile or registered core_id"
+        )
+
+    expected_dir = config_dir().resolve()
+    cfg_path = profile_config_path(profile)
+    resolved_cfg = cfg_path.resolve()
+    if not resolved_cfg.is_file():""",
+        # Owner: resolve_preview_core_id must refuse arbitrary profile names,
+        # '../' traversal, and symlinks escaping config_dir.
+        owners=(
+            "tests/unit/test_warm_worker.py::test_preview_profile_path_traversal_and_arbitrary_toml_rejected",
+        ),
+    ),
+    Mutation(
+        "M55",
+        "cleanup_preview_dir disk-DoS pruning disabled",
+        "src/hawavoclean/server/warm_worker.py",
+        """    \"\"\"Prune old or excess managed preview/spectral WAV files safely inside ``preview_dir``.\"\"\"
+    if not preview_dir.is_dir():
+        return 0""",
+        """    \"\"\"Prune old or excess managed preview/spectral WAV files safely inside ``preview_dir``.\"\"\"
+    return 0""",
+        # Owners: repeated preview/spectral-repair calls must bound disk usage
+        # by pruning expired and excess managed WAV files.
+        owners=(
+            "tests/unit/test_warm_worker.py::test_render_region_preview_validation_and_cleanup",
+            "tests/unit/test_pro_security_redteam.py::test_redteam_disk_dos_pruning_previews_spectral_and_extracted_tracks",
+        ),
+    ),
+    Mutation(
+        "M56",
+        "symlinked .npz rejection disabled in load_unit_slice",
+        "src/hawavoclean/server/unit_restitch.py",
+        """    if is_reparse_or_symlink(target_path):
+        raise ValueError(f"Refusing symlinked cached slice for unit {unit_id} channel {channel}")""",
+        """    if False and is_reparse_or_symlink(target_path):
+        raise ValueError(f"Refusing symlinked cached slice for unit {unit_id} channel {channel}")""",
+        # Owner: cached unit slices must never follow a symlink to an arbitrary
+        # .npz file outside the job slice directory.
+        owners=(
+            "tests/unit/test_unit_restitch.py::test_unit_restitch_corruption_error_cleanup_and_branch_coverage",
+        ),
+    ),
+    Mutation(
+        "M57",
+        "SpectrogramRequestV1 300s window cap validator disabled",
+        "src/hawavoclean/server/contracts.py",
+        "        if self.end_s - self.start_s > MAX_SPECTROGRAM_WINDOW_S:",
+        "        if False and self.end_s - self.start_s > MAX_SPECTROGRAM_WINDOW_S:",
+        # Owner: the v1 API contract must reject >300s spectrogram requests at
+        # schema validation before they reach the decoder.
+        owners=(
+            "tests/unit/test_spectrogram_api.py::test_spectrogram_rejects_unbounded_window_duration",
+        ),
+    ),
+    Mutation(
+        "M58",
+        "sealed record_bundle 409 refusal disabled on unit override",
+        "src/hawavoclean/server/app.py",
+        """            if bool(snapshot.get("record_bundle", False)):
+                raise ApiError(
+                    409,
+                    "sealed_record_bundle",""",
+        """            if False and bool(snapshot.get("record_bundle", False)):
+                raise ApiError(
+                    409,
+                    "sealed_record_bundle",""",
+        # Owner: sealed processing records must fail closed with 409 so
+        # verifiable record bundles can never be mutated in-place.
+        owners=(
+            "tests/unit/test_pro_api_wiring.py::test_audit_override_concurrent_serialization_and_record_bundle_409",
+        ),
+    ),
+    Mutation(
+        "M59",
+        "1 MiB JSON body cap 413 middleware disabled",
+        "src/hawavoclean/server/app.py",
+        """        if req_path != self.path:
+            if not req_path.startswith("/api/"):
+                await self.app(scope, receive, send)
+                return""",
+        """        if req_path != self.path:
+            if True or not req_path.startswith("/api/"):
+                await self.app(scope, receive, send)
+                return""",
+        # Owner: oversized (>1 MiB) JSON POST bodies to /api/* must be rejected
+        # with 413 payload_too_large before buffering unbounded payloads.
+        owners=(
+            "tests/unit/test_pro_security_redteam.py::test_redteam_malformed_oversized_nan_inf_bool_and_extra_json",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
