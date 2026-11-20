@@ -2219,6 +2219,13 @@ def create_app(
     upload_store.scavenge(manager.active_input_paths())
 
     def _cleanup_terminal_input(record: JobRecord) -> None:
+        # Interactive V1 studio sessions retain uploaded sources under
+        # UploadStore's bounded TTL/quota/scavenge lifecycle so post-Process
+        # Preview (P), Spectrogram, Multi-Take, A/B Original playback, and
+        # Video Mux stay alive for the session. Legacy /api/jobs retains
+        # immediate post-terminal upload cleanup.
+        if record.retain_input_on_terminal:
+            return
         # One upload can back several jobs — the same file processed under two
         # profiles, or in natural and restore mode. Deleting it the moment the
         # FIRST of them finishes destroys the input the others are still going
@@ -3357,6 +3364,7 @@ def create_app(
                             conflict_policy=req.conflict_policy,
                             request_context_hash=batch_hash,
                             record_bundle=req.record_bundle,
+                            retain_input_on_terminal=True,
                             batch_id=batch_id,
                         )
                         if str(snap["job_id"]) not in existing_job_ids:

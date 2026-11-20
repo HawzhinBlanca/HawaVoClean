@@ -179,6 +179,7 @@ class JobRecord:
     speaker_id: str | None = None
     cutoff_hz: float | None = None
     record_bundle: bool = False
+    retain_input_on_terminal: bool = False
     bundle_path: Path | None = None
     bundle: dict[str, Any] | None = None
     batch_id: str | None = None
@@ -966,6 +967,7 @@ class JobManager:
         conflict_policy: ConflictPolicy | None = None,
         request_context_hash: str | None = None,
         record_bundle: bool = False,
+        retain_input_on_terminal: bool = False,
         batch_id: str | None = None,
     ) -> dict[str, Any]:
         """Queue a job or return its prior snapshot for an idempotent retry."""
@@ -1104,6 +1106,7 @@ class JobManager:
                 speaker_id=speaker_id,
                 cutoff_hz=cutoff_hz,
                 record_bundle=record_bundle,
+                retain_input_on_terminal=retain_input_on_terminal,
                 bundle_path=bundle_path,
                 batch_id=batch_id,
                 source_snapshot_path=pinned.path if pinned is not None else None,
@@ -1128,6 +1131,7 @@ class JobManager:
                         conflict_policy=policy,
                     )
                     record = JobRecord.from_storage(reservation.record)
+                    record.retain_input_on_terminal = retain_input_on_terminal
                     if reservation.reused:
                         if pinned is not None:
                             pinned.cleanup_unadopted()

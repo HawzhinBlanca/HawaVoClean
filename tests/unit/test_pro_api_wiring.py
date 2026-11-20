@@ -1308,3 +1308,90 @@ def test_audit_override_concurrent_serialization_and_record_bundle_409(
     assert (
         hashlib.sha256(final_art.content).hexdigest() == final_status["report"]["output"]["sha256"]
     )
+
+
+def test_v1_uploaded_source_retained_after_terminal_for_preview_spectrogram_and_second_take(
+    real_client: TestClient, work: Path
+) -> None:
+    """Interactive V1 sessions keep uploaded sources alive across post-Process tools."""
+    src = _speech_like_wav(work / "v1_retain_src.wav", seconds=1.6, noise_level=0.02)
+    sess_h = _session_headers(real_client)
+    up = real_client.post(
+        "/api/upload",
+        headers=sess_h,
+        files={"file": ("v1_retain.wav", src.read_bytes(), "audio/wav")},
+    )
+    assert up.status_code == 200, up.text
+    uploaded_path = up.json()["path"]
+    source_id = up.json()["source_id"]
+
+    # Take 1 completes via /api/v1/jobs
+    sub1 = real_client.post(
+        "/api/v1/jobs",
+        headers=sess_h,
+        json={
+            "schemaVersion": 1,
+            "sourceIds": [source_id],
+            "strategy": {
+                "kind": "manual",
+                "route": "production",
+                "allowGenerativeReconstruction": False,
+            },
+            "executionPolicy": "offline_only",
+            "conflictPolicy": "unique",
+            "recordBundle": False,
+            "idempotencyKey": "v1-retain-take-1",
+        },
+    )
+    assert sub1.status_code == 202, sub1.text
+    done1 = _wait_done(real_client, sub1.json()["jobs"][0]["jobId"])
+    assert done1["state"] == "done", done1
+
+    # Give any async terminal callbacks a moment to run
+    time.sleep(0.15)
+    assert Path(uploaded_path).is_file()
+
+    # Post-Process Preview, Delta Spectrogram, and 2nd Take all succeed
+    r_prev = real_client.post(
+        "/api/v1/preview",
+        headers=sess_h,
+        json={"path": uploaded_path, "startS": 0.1, "endS": 1.1, "profile": "production"},
+    )
+    assert r_prev.status_code == 200, r_prev.text
+
+    r_spec = real_client.post(
+        "/api/v1/spectrogram",
+        headers=sess_h,
+        json={
+            "path": uploaded_path,
+            "cleanedPath": done1["output_path"],
+            "mode": "delta",
+            "startS": 0.0,
+            "endS": 1.5,
+            "widthCols": 32,
+            "nBins": 32,
+        },
+    )
+    assert r_spec.status_code == 200, r_spec.text
+
+    sub2 = real_client.post(
+        "/api/v1/jobs",
+        headers=sess_h,
+        json={
+            "schemaVersion": 1,
+            "sourceIds": [source_id],
+            "strategy": {
+                "kind": "manual",
+                "route": "production",
+                "strength": 0.5,
+                "allowGenerativeReconstruction": False,
+            },
+            "executionPolicy": "offline_only",
+            "conflictPolicy": "unique",
+            "recordBundle": False,
+            "idempotencyKey": "v1-retain-take-2",
+        },
+    )
+    assert sub2.status_code == 202, sub2.text
+    done2 = _wait_done(real_client, sub2.json()["jobs"][0]["jobId"])
+    assert done2["state"] == "done", done2
