@@ -2556,7 +2556,7 @@ def create_app(
         return {
             "ok": True,
             "version": __version__,
-            "deployment_mode": "web_public" if is_web_public else "local",
+            **({"deployment_mode": "web_public"} if is_web_public else {}),
             "profiles": list(PROFILES),
             "speakers": speakers,
             # Loose profile.json files prove only that research identities are

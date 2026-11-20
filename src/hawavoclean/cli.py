@@ -2675,19 +2675,22 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if token is None or not token or len(token) > 256:
         raise InvalidUserInputError("server token must contain 1-256 characters")
     ui_dir = Path(args.ui_dir).resolve() if args.ui_dir else None
+    web_public = bool(getattr(args, "web_public", False))
     cors_origins = (
         tuple(part.strip() for part in str(args.cors_origins).split(",") if part.strip())
         if getattr(args, "cors_origins", None)
         else None
     )
-    return run_server(
-        host=args.host,
-        port=int(args.port),
-        token=token,
-        ui_dir=ui_dir,
-        web_public=bool(getattr(args, "web_public", False)),
-        cors_origins=cors_origins,
-    )
+    if web_public or cors_origins:
+        return run_server(
+            host=args.host,
+            port=int(args.port),
+            token=token,
+            ui_dir=ui_dir,
+            web_public=web_public,
+            cors_origins=cors_origins,
+        )
+    return run_server(host=args.host, port=int(args.port), token=token, ui_dir=ui_dir)
 
 
 def _install_signal_handlers() -> None:
