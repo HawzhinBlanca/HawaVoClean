@@ -107,6 +107,16 @@ class WarmCoreCache:
         self._evictions = 0
         self._ttl_evictions = 0
         self._memory_evictions = 0
+        self._last_gc_at = 0.0
+
+    def _maybe_gc(self, *, force: bool = False) -> None:
+        """Throttle full-heap GC under eviction bursts to avoid GIL stop-the-world stalls."""
+        now_mono = time.monotonic()
+        with self._lock:
+            if not force and (now_mono - self._last_gc_at) < 1.0:
+                return
+            self._last_gc_at = now_mono
+        gc.collect()
 
     def _effective_memory_limit_mb(self) -> int | None:
         if self._memory_limit_mb is not None:
@@ -163,6 +173,7 @@ class WarmCoreCache:
             raise ValueError(f"sample_rate must be positive, got {sample_rate!r}")
 
         evicted_before_load = False
+        memory_evicted_before = False
         with self._lock:
             now = self._clock()
             if self._evict_expired_locked(now):
@@ -184,6 +195,7 @@ class WarmCoreCache:
 
             if self._evict_for_memory_cap_locked():
                 evicted_before_load = True
+                memory_evicted_before = True
 
             while len(self._entries) >= self._max_cores:
                 self._entries.popitem(last=False)
@@ -191,12 +203,13 @@ class WarmCoreCache:
                 evicted_before_load = True
 
         if evicted_before_load:
-            gc.collect()
+            self._maybe_gc(force=memory_evicted_before)
 
         # Construct and warm up outside the lock.
         enhancer = self._core_factory(core_id, sample_rate)
 
         evicted_after_load = False
+        memory_evicted_after = False
         with self._lock:
             now = self._clock()
             if self._evict_expired_locked(now):
@@ -229,10 +242,11 @@ class WarmCoreCache:
             self._entries.move_to_end(core_id)
             if self._evict_for_memory_cap_locked(keep_key=core_id):
                 evicted_after_load = True
+                memory_evicted_after = True
             self._misses += 1
 
         if evicted_after_load:
-            gc.collect()
+            self._maybe_gc(force=memory_evicted_after)
         return enhancer, False
 
     def evict_expired(self) -> list[str]:
@@ -240,9 +254,10 @@ class WarmCoreCache:
         with self._lock:
             now = self._clock()
             evicted = self._evict_expired_locked(now)
-            evicted.extend(self._evict_for_memory_cap_locked())
+            mem_evicted = self._evict_for_memory_cap_locked()
+            evicted.extend(mem_evicted)
         if evicted:
-            gc.collect()
+            self._maybe_gc(force=bool(mem_evicted))
         return evicted
 
     def clear(self) -> int:
@@ -252,7 +267,7 @@ class WarmCoreCache:
             self._entries.clear()
             self._evictions += count
         if count:
-            gc.collect()
+            self._maybe_gc()
         return count
 
     def stats(self) -> dict[str, Any]:

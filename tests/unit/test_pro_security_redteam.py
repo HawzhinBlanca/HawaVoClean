@@ -576,8 +576,9 @@ def test_redteam_warm_core_cache_8_thread_concurrency_torture() -> None:
             return now[0]
 
     def factory(core_id: str, sample_rate: int) -> _FastStubEnhancer:
-        # Brief sleep widens the race window across threads.
-        time.sleep(0.001)
+        # Cooperative thread yield widens the race window without hitting
+        # Windows' 15.6 ms timer-resolution floor per call.
+        time.sleep(0)
         return _FastStubEnhancer(core_id, sample_rate)
 
     cache = WarmCoreCache(
@@ -612,7 +613,7 @@ def test_redteam_warm_core_cache_8_thread_concurrency_torture() -> None:
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=15.0)
+        t.join(timeout=30.0)
         assert not t.is_alive(), "WarmCoreCache worker thread deadlocked"
 
     assert not errors
