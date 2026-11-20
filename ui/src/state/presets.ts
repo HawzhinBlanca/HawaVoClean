@@ -5,6 +5,7 @@ export type DeliveryPresetId =
   | 'match_input'
   | 'ebu_r128'
   | 'atsc_a85'
+  | 'dialogue_gated'
   | 'podcast'
   | 'streaming';
 

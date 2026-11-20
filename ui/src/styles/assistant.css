@@ -3,9 +3,38 @@
   padding-bottom: var(--pad-5);
   border-bottom: 1px solid var(--hair-strong);
 }
-.aa-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--pad-2); justify-content: space-between; }
+.aa-heading { display: flex; align-items: center; flex-wrap: wrap; gap: var(--pad-2); justify-content: space-between; }
 .aa-heading h3 { margin: 0; font-size: var(--fs-md); font-weight: var(--fw-medium); color: var(--fg); }
+.aa-heading-meta { display: inline-flex; align-items: center; gap: 8px; }
 .aa-provider { color: var(--cyan-2); font-size: var(--fs-label); }
+.aa-autorun-btn {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--hair-strong);
+  background: var(--panel);
+  color: var(--fg-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+.aa-autorun-btn.on {
+  border-color: var(--cyan-dim);
+  background: color-mix(in oklab, var(--cyan) 14%, transparent);
+  color: var(--cyan-2);
+}
+.aa-plan-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: var(--pad-3);
+}
+.aa-plan-chip {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--hair-strong);
+  background: var(--panel);
+  color: var(--cyan-2);
+  font-size: 11px;
+}
 .aa-intro { margin: var(--pad-1) 0 var(--pad-4); color: var(--fg-2); font-size: var(--fs-sm); }
 .aa-examples { display: flex; flex-wrap: wrap; gap: var(--pad-2); margin-bottom: var(--pad-4); }
 .aa-examples button { text-align: left; color: var(--fg-2); border: 1px solid var(--hair-strong); border-radius: var(--r-sm); background: var(--panel); padding: var(--pad-2) var(--pad-3); font-size: var(--fs-sm); line-height: 1.4; }

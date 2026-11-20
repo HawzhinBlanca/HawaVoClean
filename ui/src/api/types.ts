@@ -6,6 +6,7 @@ export type DeliveryPresetId =
   | 'match_input'
   | 'ebu_r128'
   | 'atsc_a85'
+  | 'dialogue_gated'
   | 'podcast'
   | 'streaming';
 
@@ -203,14 +204,74 @@ export interface AudioPlanRequest {
   acoustic_context?: AcousticContext | null | undefined;
 }
 
+export interface AudioProRepairPlan {
+  deplosive?: boolean | null | undefined;
+  declick?: boolean | null | undefined;
+  declip?: boolean | null | undefined;
+  deess?: boolean | null | undefined;
+  tonal_restoration?: boolean | null | undefined;
+  level_rider?: boolean | null | undefined;
+}
+
+export interface AudioSpectralRepairPlan {
+  start_s: number;
+  end_s: number;
+  f_low_hz: number;
+  f_high_hz: number;
+  attenuation_db: number;
+}
+
+export interface AudioUnitOverridePlan {
+  unit_id: number;
+  action: 'force_original' | 'force_enhanced' | 'blend';
+  strength?: number | null | undefined;
+}
+
 export interface AudioPlan {
-  operation: 'clean' | 'restore' | 'extract' | 'remove' | 'clarify';
+  operation:
+    | 'clean'
+    | 'smart_safe'
+    | 'restore'
+    | 'extract'
+    | 'remove'
+    | 'spectral_repair'
+    | 'preview'
+    | 'playback'
+    | 'export'
+    | 'undo'
+    | 'redo'
+    | 'unit_override'
+    | 'reset'
+    | 'clarify';
   target: string | null;
   cleanup_profile: CleanupProfile | null;
   model_size: 'small' | 'base' | 'large';
   quality: 'high';
   strength?: number | undefined;
   time_range?: AudioTimeRange | null | undefined;
+  hpf_enabled?: boolean | null | undefined;
+  hpf_cutoff_hz?: number | null | undefined;
+  pro_repair?: AudioProRepairPlan | null | undefined;
+  ambience_floor_db?: number | null | undefined;
+  delivery_preset?: DeliveryPresetId | 'dialogue_gated' | null | undefined;
+  stereo_mode?: 'auto' | 'true_stereo_ms' | 'dual_mono_same' | 'split_speakers' | null | undefined;
+  spectral_repair?: AudioSpectralRepairPlan | null | undefined;
+  playback_action?:
+    | 'play'
+    | 'pause'
+    | 'play_original'
+    | 'play_cleaned'
+    | 'hear_removed'
+    | 'loop_on'
+    | 'loop_off'
+    | 'seek'
+    | 'set_mix'
+    | null
+    | undefined;
+  seek_s?: number | null | undefined;
+  wet_dry_mix?: number | null | undefined;
+  export_format?: ExportFormatId | null | undefined;
+  unit_override?: AudioUnitOverridePlan | null | undefined;
   explanation: string;
   provider: 'rules' | 'ollama' | 'openai';
   needs_clarification: boolean;

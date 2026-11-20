@@ -543,4 +543,76 @@ describe('AudioAssistant', () => {
     expect(getState().spectralSelection).toBeNull();
     expect(host.querySelector('.aa-band-pill')).toBeNull();
   });
+
+  it('forwards compound studio modifiers, executes Auto-Run immediately when toggled ON, and runs playback controls without Apply', async () => {
+    armed(90);
+    useStore.setState({
+      capabilities: [
+        ...(getState().capabilities ?? []),
+        { capability_id: 'dereverb', available: true, maturity: 'qualified' },
+      ],
+    });
+    const compoundPlan: AudioPlan = {
+      operation: 'clean',
+      target: null,
+      cleanup_profile: 'dereverb',
+      model_size: 'large',
+      quality: 'high',
+      strength: 0.85,
+      hpf_enabled: true,
+      hpf_cutoff_hz: 90,
+      pro_repair: { deess: true, declick: true },
+      ambience_floor_db: -48,
+      delivery_preset: 'podcast',
+      stereo_mode: 'true_stereo_ms',
+      explanation: 'Clean with dereverb, HPF 90 Hz, De-Ess, De-Click, and Podcast loudness.',
+      provider: 'rules',
+      needs_clarification: false,
+    };
+    planAudio.mockResolvedValueOnce(compoundPlan);
+    await render();
+
+    // Toggle Auto-Run ON
+    const autoBtn = host.querySelector<HTMLButtonElement>('.aa-autorun-btn');
+    expect(autoBtn?.getAttribute('aria-pressed')).toBe('false');
+    await act(async () => autoBtn?.click());
+    expect(autoBtn?.getAttribute('aria-pressed')).toBe('true');
+
+    await type('Remove room echo, fix harsh S, HPF 90 Hz, Podcast');
+    await send();
+
+    // Auto-Run executes immediately with full Studio 4.0 modifiers forwarded
+    expect(startJob).toHaveBeenCalledWith({
+      kind: 'manual',
+      route: 'dereverb',
+      allow_generative_reconstruction: false,
+      strength: 0.85,
+      hpf_enabled: true,
+      hpf_cutoff_hz: 90,
+      pro_repair: { deess: true, declick: true },
+      ambience_floor_db: -48,
+      delivery_preset: 'podcast',
+      stereo_mode: 'true_stereo_ms',
+    });
+
+    // Simulate job finished, then send immediate playback command without Apply
+    await act(async () => {
+      useStore.setState({ job: null });
+    });
+    planAudio.mockResolvedValueOnce({
+      operation: 'playback',
+      target: null,
+      cleanup_profile: null,
+      model_size: 'large',
+      quality: 'high',
+      playback_action: 'hear_removed',
+      explanation: 'Playing Removed (Δ).',
+      provider: 'rules',
+      needs_clarification: false,
+    });
+    await type('Hear what was removed');
+    await send();
+    expect(host.textContent).toContain('Playing Removed (Δ).');
+    expect(host.querySelector('.aa-apply')).toBeNull();
+  });
 });

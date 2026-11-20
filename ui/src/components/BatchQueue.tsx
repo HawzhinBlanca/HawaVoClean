@@ -29,6 +29,7 @@ const DELIVERY_BADGE_LABEL: Record<DeliveryPresetId, string> = {
   match_input: 'Match Input',
   ebu_r128: 'EBU R128 (-23 LUFS)',
   atsc_a85: 'ATSC A/85 (-24 LUFS)',
+  dialogue_gated: 'Dialogue (-27 LKFS)',
   podcast: 'Podcast (-16 LUFS)',
   streaming: 'Streaming (-14 LUFS)',
 };

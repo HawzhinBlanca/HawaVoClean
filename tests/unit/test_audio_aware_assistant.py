@@ -116,7 +116,22 @@ def test_generation_schema_covers_all_five_operations_without_dangling_refs() ->
     rendered = json.dumps(schema)
     assert "$ref" not in rendered
     by_op = {b["properties"]["operation"]["const"]: b for b in schema["anyOf"]}
-    assert set(by_op) == {"clean", "restore", "extract", "remove", "clarify"}
+    assert set(by_op) == {
+        "clean",
+        "smart_safe",
+        "restore",
+        "extract",
+        "remove",
+        "spectral_repair",
+        "preview",
+        "playback",
+        "export",
+        "undo",
+        "redo",
+        "unit_override",
+        "reset",
+        "clarify",
+    }
     assert "studio_pro" in by_op["clean"]["properties"]["cleanup_profile"]["enum"]
     assert by_op["restore"]["properties"]["cleanup_profile"] == {"type": "null"}
     assert by_op["clarify"]["properties"]["time_range"] == {"type": "null"}
@@ -742,3 +757,132 @@ def test_assistant_handles_out_of_range_timestamps_and_rejects_control_chars(
     multiline = plan_audio(AudioPlanRequest(message="Remove dog\nbarking"))
     assert multiline.operation == "remove"
     assert multiline.target == "dog barking"
+
+
+def test_universal_chat_controls_all_studio_operations_and_modifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HAWAVOCLEAN_CHAT_PROVIDER", "rules")
+    ctx = AcousticContext(
+        duration_s=120.0,
+        sample_rate=48000,
+        channels=2,
+        available_profiles=["production", "studio", "studio_pro", "dereverb", "lowband"],
+        separation_available=True,
+    )
+
+    # 1. Compound full-chain DSP command in one sentence
+    compound = plan_audio(
+        AudioPlanRequest(
+            message=(
+                "Remove room echo, fix harsh S sounds, mouth clicks, clipping, plosives, "
+                "warm up voice, leveler, cut rumble below 90 Hz, room tone at -48 dB, "
+                "preserve stereo M/S, and master for Podcast"
+            ),
+            acoustic_context=ctx,
+        )
+    )
+    assert compound.operation == "clean"
+    assert compound.cleanup_profile == "dereverb"
+    assert compound.hpf_enabled is True and compound.hpf_cutoff_hz == 90.0
+    assert compound.pro_repair is not None
+    assert compound.pro_repair.deess is True
+    assert compound.pro_repair.declick is True
+    assert compound.pro_repair.declip is True
+    assert compound.pro_repair.deplosive is True
+    assert compound.pro_repair.tonal_restoration is True
+    assert compound.pro_repair.level_rider is True
+    assert compound.ambience_floor_db == -48.0
+    assert compound.stereo_mode == "true_stereo_ms"
+    assert compound.delivery_preset == "podcast"
+
+    # 2. HPF disable, delivery presets & stereo modes
+    hpf_off = plan_audio(AudioPlanRequest(message="Clean voice, disable HPF, YouTube -14 LUFS"))
+    assert hpf_off.hpf_enabled is False and hpf_off.delivery_preset == "streaming"
+    netflix = plan_audio(AudioPlanRequest(message="Master voice for Netflix dialogue gated"))
+    assert netflix.delivery_preset == "dialogue_gated"
+    ebu = plan_audio(AudioPlanRequest(message="Broadcast EBU R128 and split speakers"))
+    assert ebu.delivery_preset == "ebu_r128" and ebu.stereo_mode == "split_speakers"
+
+    # 3. 2D Spectral box repair from UI [Band: ...] chip AND explicit Hz + time range
+    band = plan_audio(
+        AudioPlanRequest(
+            message="Attenuate this hum by 18 dB [Band: 140–220 Hz · 0:04.2–0:06.1]",
+            acoustic_context=ctx,
+        )
+    )
+    assert band.operation == "spectral_repair" and band.spectral_repair is not None
+    assert band.spectral_repair.f_low_hz == 140.0 and band.spectral_repair.f_high_hz == 220.0
+    assert band.spectral_repair.attenuation_db == 18.0
+
+    explicit_spec = plan_audio(
+        AudioPlanRequest(
+            message="Notch 2.5 to 4 kHz from 0:10 to 0:15 by 24 dB",
+            acoustic_context=ctx,
+        )
+    )
+    assert (
+        explicit_spec.operation == "spectral_repair" and explicit_spec.spectral_repair is not None
+    )
+    assert explicit_spec.spectral_repair.f_low_hz == 2500.0
+    assert explicit_spec.spectral_repair.f_high_hz == 4000.0
+
+    # 4. Warm preview & Smart Safe
+    prev = plan_audio(
+        AudioPlanRequest(message="Preview 0:10 to 0:18 with studio pro", acoustic_context=ctx)
+    )
+    assert prev.operation == "preview" and prev.cleanup_profile == "studio_pro"
+    assert prev.time_range is not None and prev.time_range.start_s == 10.0
+
+    ss = plan_audio(AudioPlanRequest(message="Auto Smart Safe with Podcast loudness"))
+    assert ss.operation == "smart_safe" and ss.delivery_preset == "podcast"
+
+    # 5. Playback, A/B, Delta, Seek, Loop, Mix
+    assert (
+        plan_audio(AudioPlanRequest(message="Hear what was removed")).playback_action
+        == "hear_removed"
+    )
+    assert plan_audio(AudioPlanRequest(message="Play original")).playback_action == "play_original"
+    assert plan_audio(AudioPlanRequest(message="Play cleaned")).playback_action == "play_cleaned"
+    assert plan_audio(AudioPlanRequest(message="Pause")).playback_action == "pause"
+    assert plan_audio(AudioPlanRequest(message="Play")).playback_action == "play"
+    assert plan_audio(AudioPlanRequest(message="Loop on")).playback_action == "loop_on"
+    assert plan_audio(AudioPlanRequest(message="Loop off")).playback_action == "loop_off"
+    seek_p = plan_audio(AudioPlanRequest(message="Seek to 0:45"))
+    assert (
+        seek_p.operation == "playback"
+        and seek_p.playback_action == "seek"
+        and seek_p.seek_s == 45.0
+    )
+    mix_p = plan_audio(AudioPlanRequest(message="Set mix to 65%"))
+    assert (
+        mix_p.operation == "playback"
+        and mix_p.playback_action == "set_mix"
+        and mix_p.wet_dry_mix == 0.65
+    )
+
+    # 6. Undo / Redo / Reset / Unit Override / Export
+    assert plan_audio(AudioPlanRequest(message="Undo")).operation == "undo"
+    assert plan_audio(AudioPlanRequest(message="Redo")).operation == "redo"
+    assert plan_audio(AudioPlanRequest(message="Reset all settings")).operation == "reset"
+    uo = plan_audio(AudioPlanRequest(message="Revert unit 3"))
+    assert uo.operation == "unit_override" and uo.unit_override is not None
+    assert uo.unit_override.unit_id == 3 and uo.unit_override.action == "force_original"
+    exp = plan_audio(AudioPlanRequest(message="Export as FLAC for Podcast"))
+    assert (
+        exp.operation == "export"
+        and exp.export_format == "flac"
+        and exp.delivery_preset == "podcast"
+    )
+
+    # 7. Sorani Kurdish commands
+    ckb_derev = plan_audio(AudioPlanRequest(message="دەنگدانەوەی ژوور لاببە", acoustic_context=ctx))
+    assert ckb_derev.operation == "clean" and ckb_derev.cleanup_profile == "dereverb"
+    ckb_music = plan_audio(AudioPlanRequest(message="مۆسیقا لاببە"))
+    assert ckb_music.operation == "remove" and ckb_music.target == "background music"
+    ckb_clean = plan_audio(AudioPlanRequest(message="ژاوەژاو لاببە"))
+    assert ckb_clean.operation == "clean"
+    ckb_delta = plan_audio(AudioPlanRequest(message="بیستنی لابراوەکان"))
+    assert ckb_delta.operation == "playback" and ckb_delta.playback_action == "hear_removed"
+    ckb_undo = plan_audio(AudioPlanRequest(message="گەڕانەوە"))
+    assert ckb_undo.operation == "undo"
