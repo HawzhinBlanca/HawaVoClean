@@ -2675,7 +2675,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if token is None or not token or len(token) > 256:
         raise InvalidUserInputError("server token must contain 1-256 characters")
     ui_dir = Path(args.ui_dir).resolve() if args.ui_dir else None
-    return run_server(host=args.host, port=int(args.port), token=token, ui_dir=ui_dir)
+    cors_origins = (
+        tuple(part.strip() for part in str(args.cors_origins).split(",") if part.strip())
+        if getattr(args, "cors_origins", None)
+        else None
+    )
+    return run_server(
+        host=args.host,
+        port=int(args.port),
+        token=token,
+        ui_dir=ui_dir,
+        web_public=bool(getattr(args, "web_public", False)),
+        cors_origins=cors_origins,
+    )
 
 
 def _install_signal_handlers() -> None:
@@ -3028,6 +3040,16 @@ def _main() -> None:
         help="Read the shared secret once from standard input",
     )
     p_serve.add_argument("--ui-dir", help="Directory with index.html + assets/ to serve at /")
+    p_serve.add_argument(
+        "--web-public",
+        action="store_true",
+        help="Lock server to upload-only web mode (forbids host filesystem paths and model installs)",
+    )
+    p_serve.add_argument(
+        "--cors-origins",
+        default=None,
+        help="Comma-separated explicit HTTPS browser origins allowed in web-public mode",
+    )
     p_serve.set_defaults(func=cmd_serve)
 
     # verify

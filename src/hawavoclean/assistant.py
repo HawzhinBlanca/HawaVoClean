@@ -41,7 +41,16 @@ Operation = Literal[
     "redo",
     "unit_override",
     "reset",
+    "ui_action",
     "clarify",
+]
+UiActionPlan = Literal[
+    "switch_pro",
+    "switch_simple",
+    "switch_kurdish",
+    "switch_english",
+    "open_models",
+    "diagnose",
 ]
 CleanupProfile = Literal["production", "studio", "studio_pro", "dereverb", "lowband"]
 DeliveryPresetPlan = Literal[
@@ -243,6 +252,7 @@ class PlanPayload(_ClosedModel):
     wet_dry_mix: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
     export_format: ExportFormatPlan | None = None
     unit_override: UnitOverridePlan | None = None
+    ui_action: UiActionPlan | None = None
     explanation: str = Field(min_length=1, max_length=700)
 
     @field_validator(
@@ -279,6 +289,8 @@ class PlanPayload(_ClosedModel):
             raise ValueError("Export requires an explicit export_format")
         if self.operation == "unit_override" and self.unit_override is None:
             raise ValueError("Unit override requires an explicit unit_override target")
+        if self.operation == "ui_action" and self.ui_action is None:
+            raise ValueError("UI action requires an explicit ui_action target")
         if self.operation == "clarify" and (
             self.cleanup_profile is not None or self.time_range is not None
         ):
@@ -429,6 +441,8 @@ You can control EVERY feature of HawaVoClean from chat. Choose exactly one opera
 - export: save/export the cleaned master. Set export_format to wav24, wav32f, flac, aac, or video_mux (and optional delivery_preset).
 - undo / redo / reset: undo last edit, redo last edit, or reset all studio settings to defaults.
 - unit_override: override one guard decision unit. Set unit_override={unit_id, action ("force_original"|"force_enhanced"|"blend"), strength}.
+- ui_action: control workspace UI or diagnose the loaded recording. Set ui_action to one of:
+  switch_pro, switch_simple, switch_kurdish, switch_english, open_models, diagnose (report measured acoustic health honestly).
 - clarify: ask one concise question when the request is ambiguous, contradictory, or unsupported
   (transcription, translation, voice cloning, multi-stem output, music creation).
 
@@ -604,8 +618,17 @@ def _schema() -> dict[str, Any]:
         "redo",
         "unit_override",
         "reset",
+        "ui_action",
         "clarify",
     )
+    ui_action_enum = [
+        "switch_pro",
+        "switch_simple",
+        "switch_kurdish",
+        "switch_english",
+        "open_models",
+        "diagnose",
+    ]
     branches = []
     for operation in all_ops:
         properties: dict[str, Any] = {
@@ -643,6 +666,11 @@ def _schema() -> dict[str, Any]:
             ),
             "unit_override": (
                 unit_override_obj if operation == "unit_override" else {"type": "null"}
+            ),
+            "ui_action": (
+                {"type": "string", "enum": ui_action_enum}
+                if operation == "ui_action"
+                else {"type": "null"}
             ),
             "explanation": {"type": "string", "minLength": 1, "maxLength": 700},
         }
@@ -1412,11 +1440,61 @@ def _extract_studio_modifiers(raw_text: str) -> tuple[dict[str, Any], list[str]]
     return mods, notes
 
 
+def _build_acoustic_diagnosis(ctx: AcousticContext | None, *, kurdish: bool = False) -> str:
+    """Summarize measured acoustic telemetry honestly without inventing measurements."""
+    if ctx is None:
+        return (
+            "تۆمارێک بار بکە تا پشکنینی دەنگی بۆ بکەم."
+            if kurdish
+            else "Load an audio or video clip first so I can inspect its loudness, noise floor, and risks."
+        )
+    parts: list[str] = []
+    if ctx.duration_s is not None:
+        parts.append(f"{ctx.duration_s:.1f}s")
+    if ctx.sample_rate is not None:
+        parts.append(f"{ctx.sample_rate / 1000.0:g} kHz")
+    if ctx.channels is not None:
+        parts.append("mono" if ctx.channels == 1 else f"{ctx.channels}ch")
+    if ctx.integrated_lufs is not None:
+        parts.append(f"loudness {ctx.integrated_lufs:.1f} LUFS")
+    if ctx.noise_floor_db is not None:
+        parts.append(f"noise floor {ctx.noise_floor_db:.1f} dB")
+    flags: list[str] = []
+    if ctx.noise_risk is not None and ctx.noise_risk > 0.4:
+        flags.append(f"elevated noise ({ctx.noise_risk:.0%})")
+    elif ctx.noise_floor_db is not None and ctx.noise_floor_db > -55.0:
+        flags.append("noticeable background noise")
+    if ctx.reverberation_risk is not None and ctx.reverberation_risk >= 0.45:
+        flags.append(f"room reverb ({ctx.reverberation_risk:.0%})")
+    if ctx.music_risk is not None and ctx.music_risk > 0.5:
+        flags.append(f"background music ({ctx.music_risk:.0%})")
+    if ctx.clipping_risk is not None and ctx.clipping_risk > 0.01:
+        flags.append(f"clipping ({ctx.clipping_risk:.1%})")
+    if ctx.rumble_confidence is not None and ctx.rumble_confidence > 0.5:
+        flags.append("low-frequency rumble")
+    if ctx.bandwidth_shape == "steep_lowpass":
+        flags.append("narrowband high-frequency rolloff")
+
+    summary = ", ".join(parts) if parts else "loaded clip"
+    if kurdish:
+        issues = f" کێشە دۆزراوەکان: {', '.join(flags)}." if flags else " تۆمارەکە پاکە."
+        return f"پشکنینی تۆمار ({summary}).{issues} بڵێ 'پاککردنەوە' یان 'پۆدکاست' بۆ جێبەجێکردن."
+    if flags:
+        return (
+            f"Measured clip ({summary}): detected {', '.join(flags)}. "
+            "Say 'clean this' or 'Auto Smart Safe' to fix automatically."
+        )
+    return (
+        f"Measured clip ({summary}): signal looks clean with low noise risk. "
+        "Say 'master for Podcast' or 'gentle finishing' if you want broadcast polish."
+    )
+
+
 def _rules_plan(request: AudioPlanRequest) -> PlanPayload:
     raw_lower = re.sub(r"\s+", " ", request.message.lower()).strip(" .!?")
     ctx = request.acoustic_context
 
-    # 0. Explicit Undo / Redo / Reset studio actions (never confused with negated edits)
+    # 0. Explicit Undo / Redo / Reset / UI workspace & diagnosis actions
     if re.fullmatch(
         r"(?:please\s+)?(?:undo(?:\s+(?:last|that|the\s+last)\s+(?:edit|change|action))?|گەڕانەوە)",
         raw_lower,
@@ -1433,6 +1511,56 @@ def _rules_plan(request: AudioPlanRequest) -> PlanPayload:
     ):
         return PlanPayload(
             operation="reset", explanation="Resetting all Studio controls to their defaults."
+        )
+    if re.search(
+        r"\b(switch\s+to\s+pro(?:\s+studio)?|open\s+pro(?:\s+studio)?|pro\s+mode|ستۆدیۆی\s+پرۆ)\b",
+        raw_lower,
+    ):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="switch_pro",
+            explanation="Switched workspace to Pro Studio.",
+        )
+    if re.search(
+        r"\b(switch\s+to\s+simple(?:\s+studio)?|simple\s+mode|شێوازی\s+سادە)\b", raw_lower
+    ):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="switch_simple",
+            explanation="Switched workspace to Simple Studio.",
+        )
+    if re.search(
+        r"\b(switch\s+to\s+kurdish|kurdish\s+mode|sorani|بگۆڕە\s+بۆ\s+کوردی)\b", raw_lower
+    ):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="switch_kurdish",
+            explanation="زمان گۆڕدرا بۆ کوردی (سۆرانی).",
+        )
+    if re.search(r"\b(switch\s+to\s+english|english\s+mode|بگۆڕە\s+بۆ\s+ئینگلیزی)\b", raw_lower):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="switch_english",
+            explanation="Switched interface language to English.",
+        )
+    if re.search(
+        r"\b(open\s+models?|manage\s+models?|show\s+models?|download\s+models?|مۆدێلەکان\s+بکەوە)\b",
+        raw_lower,
+    ):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="open_models",
+            explanation="Opening the local Neural Model Manager.",
+        )
+    if re.search(
+        r"(what(?:'s|\s+is)\s+wrong|diagnos\w*|how\s+loud|check\s+(?:the\s+)?(?:audio|noise|reverb|clipping|levels?)|analyze\s+this|کێشەی\s+(?:ئەم\s+)?دەنگە)",
+        raw_lower,
+    ):
+        is_ckb = bool(re.search(r"[\u0600-\u06FF]", raw_lower))
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="diagnose",
+            explanation=_build_acoustic_diagnosis(ctx, kurdish=is_ckb),
         )
 
     # Negated edits and multi-stem instructions cannot safely be lowered
@@ -1690,6 +1818,154 @@ def _rules_plan(request: AudioPlanRequest) -> PlanPayload:
                 f"Running Auto Smart Safe to benchmark routes and pick the safest winner"
                 f"{span_note}{strength_note}{mod_suffix}."
             ),
+        )
+
+    # 6b. Relative conversational refinements & natural studio style presets
+    if re.search(
+        r"\b(dial\s+it\s+back|less\s+aggressive|too\s+processed|sounds?\s+robotic|more\s+gentle|tone\s+it\s+down)\b",
+        text,
+    ):
+        refined_mods = {"ambience_floor_db": -48.0, **studio_mods}
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile="studio",
+            strength=0.55,
+            time_range=time_range,
+            **refined_mods,
+            explanation=(
+                "Dialing back intensity to 55% with subtle room tone (-48 dB) so the voice stays natural."
+            ),
+        )
+    if re.search(
+        r"\b(make\s+it\s+stronger|clean\s+harder|more\s+cleaning|stronger\s+cleanup)\b", text
+    ):
+        stronger_profile = _best_neural_profile(ctx)
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile=stronger_profile,
+            strength=1.0,
+            time_range=time_range,
+            **studio_mods,
+            explanation=f"Increasing cleanup to 100% strength with {stronger_profile}{mod_suffix}.",
+        )
+    if re.search(r"\b(more\s+natural|keep\s+more\s+room)\b", text):
+        nat_mods = {"ambience_floor_db": -45.0, **studio_mods}
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile="studio",
+            strength=0.65,
+            time_range=time_range,
+            **nat_mods,
+            explanation="Keeping more natural room ambience (-45 dB) at 65% strength.",
+        )
+    if re.search(r"\b(less\s+harsh|softer\s+s\b|too\s+bright)\b", text):
+        pr_base = studio_mods.get("pro_repair")
+        pr_dict = (
+            pr_base.model_dump(exclude_none=True) if isinstance(pr_base, ProRepairPlan) else {}
+        )
+        pr_dict.update({"deess": True, "tonal_restoration": True})
+        harsh_mods = {**studio_mods, "pro_repair": ProRepairPlan(**pr_dict)}
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile="production",
+            strength=strength,
+            time_range=time_range,
+            **harsh_mods,
+            explanation="Softening sibilance and harsh highs with De-Ess and Tonal Balance.",
+        )
+    if re.search(
+        r"\b(radio\s+voice|broadcast\s+voice|rich\s+podcast|make\s+it\s+warmer|more\s+body)\b", text
+    ):
+        pr_base = studio_mods.get("pro_repair")
+        pr_dict = (
+            pr_base.model_dump(exclude_none=True) if isinstance(pr_base, ProRepairPlan) else {}
+        )
+        pr_dict.update({"tonal_restoration": True, "deplosive": True, "level_rider": True})
+        radio_mods = {
+            "delivery_preset": "podcast",
+            **studio_mods,
+            "pro_repair": ProRepairPlan(**pr_dict),
+        }
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile=_best_neural_profile(ctx),
+            strength=strength,
+            time_range=time_range,
+            **radio_mods,
+            explanation="Shaping a warm broadcast/radio voice with Tonal Balance, De-Plosive, Leveler, and Podcast loudness.",
+        )
+    if re.search(r"\b(make\s+it\s+brighter|more\s+clarity|crisp\s+voice|less\s+muddy)\b", text):
+        pr_base = studio_mods.get("pro_repair")
+        pr_dict = (
+            pr_base.model_dump(exclude_none=True) if isinstance(pr_base, ProRepairPlan) else {}
+        )
+        pr_dict.update({"tonal_restoration": True, "deess": True})
+        bright_mods = {
+            "hpf_enabled": True,
+            "hpf_cutoff_hz": 100.0,
+            **studio_mods,
+            "pro_repair": ProRepairPlan(**pr_dict),
+        }
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile=_best_neural_profile(ctx),
+            strength=strength,
+            time_range=time_range,
+            **bright_mods,
+            explanation="Clearing low mud with HPF 100 Hz and adding clarity with Tonal Balance and De-Ess.",
+        )
+    if re.search(r"\b(make\s+it\s+louder|boost\s+(?:the\s+)?volume|too\s+quiet)\b", text):
+        pr_base = studio_mods.get("pro_repair")
+        pr_dict = (
+            pr_base.model_dump(exclude_none=True) if isinstance(pr_base, ProRepairPlan) else {}
+        )
+        pr_dict.update({"level_rider": True})
+        loud_mods = {
+            "delivery_preset": "podcast",
+            **studio_mods,
+            "pro_repair": ProRepairPlan(**pr_dict),
+        }
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile="production",
+            strength=strength,
+            time_range=time_range,
+            **loud_mods,
+            explanation="Leveling dynamics and boosting loudness to Podcast target (-16 LUFS, -1.0 dBTP).",
+        )
+    if re.search(r"\b(phone\s+recording|voice\s+memo(?:\s+rescue)?)\b", text):
+        pr_base = studio_mods.get("pro_repair")
+        pr_dict = (
+            pr_base.model_dump(exclude_none=True) if isinstance(pr_base, ProRepairPlan) else {}
+        )
+        pr_dict.update({"declick": True, "declip": True})
+        memo_mods = {
+            "hpf_enabled": True,
+            "hpf_cutoff_hz": 85.0,
+            **studio_mods,
+            "pro_repair": ProRepairPlan(**pr_dict),
+        }
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile=_best_neural_profile(ctx),
+            strength=strength,
+            time_range=time_range,
+            **memo_mods,
+            explanation="Rescuing phone/voice-memo recording with neural denoise, HPF 85 Hz, De-Click, and De-Clip.",
+        )
+    if re.search(r"\b((?:film|cinema|movie)\s+dialogue)\b", text):
+        film_mods = {
+            "ambience_floor_db": -48.0,
+            "delivery_preset": "dialogue_gated",
+            **studio_mods,
+        }
+        return PlanPayload(
+            operation="clean",
+            cleanup_profile=_best_dereverb_profile(ctx),
+            strength=strength,
+            time_range=time_range,
+            **film_mods,
+            explanation="Preparing film/cinema dialogue with room dereverb, subtle ambience (-48 dB), and -27 LKFS dialogue-gated loudness.",
         )
 
     # 7. Sorani Kurdish natural-language shortcuts

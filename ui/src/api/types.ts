@@ -242,6 +242,7 @@ export interface AudioPlan {
     | 'redo'
     | 'unit_override'
     | 'reset'
+    | 'ui_action'
     | 'clarify';
   target: string | null;
   cleanup_profile: CleanupProfile | null;
@@ -272,6 +273,15 @@ export interface AudioPlan {
   wet_dry_mix?: number | null | undefined;
   export_format?: ExportFormatId | null | undefined;
   unit_override?: AudioUnitOverridePlan | null | undefined;
+  ui_action?:
+    | 'switch_pro'
+    | 'switch_simple'
+    | 'switch_kurdish'
+    | 'switch_english'
+    | 'open_models'
+    | 'diagnose'
+    | null
+    | undefined;
   explanation: string;
   provider: 'rules' | 'ollama' | 'openai';
   needs_clarification: boolean;

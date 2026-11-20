@@ -130,6 +130,7 @@ def test_generation_schema_covers_all_five_operations_without_dangling_refs() ->
         "redo",
         "unit_override",
         "reset",
+        "ui_action",
         "clarify",
     }
     assert "studio_pro" in by_op["clean"]["properties"]["cleanup_profile"]["enum"]

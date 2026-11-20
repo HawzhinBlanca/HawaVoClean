@@ -7,6 +7,7 @@ import { Footer } from './components/Footer';
 import { Header } from './components/Header';
 import { ModelManagerDrawer } from './components/ModelManagerDrawer';
 import { ProWorkspace } from './components/ProWorkspace';
+import { QuickChatBar } from './components/QuickChatBar';
 import { SimpleWorkspace } from './components/SimpleWorkspace';
 import { SlideOverDrawer } from './components/SlideOverDrawer';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
@@ -257,6 +258,7 @@ export default function App() {
       <Header />
       <EngineBanner />
       <SourceStrip />
+      <QuickChatBar />
       {/* The single place the app speaks. Polite: none of this is urgent
           enough to cut across what the user is already reading. */}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">

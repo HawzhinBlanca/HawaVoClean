@@ -5,8 +5,10 @@ import axe from 'axe-core';
 import type { AudioAnalysis, AudioPlan } from '../api/types';
 import type { EngineClient } from '../api/client';
 import { startJob } from '../state/actions';
+import { getLocale, setLocale } from '../state/i18n';
 import { getState, useStore } from '../state/store';
 import { AudioAssistant } from './AudioAssistant';
+import { QuickChatBar } from './QuickChatBar';
 
 vi.mock('../state/actions', () => ({ startJob: vi.fn(async () => undefined) }));
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -614,5 +616,165 @@ describe('AudioAssistant', () => {
     await send();
     expect(host.textContent).toContain('Playing Removed (Δ).');
     expect(host.querySelector('.aa-apply')).toBeNull();
+  });
+
+  it('QuickChatBar opens assistant, dispatches pendingChatPrompt, and passes axe accessibility', async () => {
+    armed();
+    planAudio.mockResolvedValueOnce({
+      operation: 'ui_action',
+      target: null,
+      cleanup_profile: null,
+      model_size: 'large',
+      quality: 'high',
+      ui_action: 'diagnose',
+      explanation: 'Measured clip (30.0s, 48 kHz, mono): signal looks clean.',
+      provider: 'rules',
+      needs_clarification: false,
+    });
+    await act(async () => {
+      root.render(createElement('div', null, createElement(QuickChatBar), createElement(AudioAssistant)));
+    });
+    const input = host.querySelector('#quick-chat-bar-input') as HTMLInputElement;
+    expect(input).not.toBeNull();
+    const form = host.querySelector('.quick-chat-bar') as HTMLFormElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(
+        input,
+        'What is wrong with this audio?',
+      );
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    expect(getState().assistantDrawerOpen).toBe(true);
+    expect(getState().pendingChatPrompt).toBeNull();
+    expect(planAudio).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain('Measured clip (30.0s, 48 kHz, mono)');
+    const a11y = await axe.run(host);
+    expect(a11y.violations).toEqual([]);
+  });
+
+  it('executes ui_action workspace/locale/models commands immediately and reports job completion in chat', async () => {
+    armed();
+    setLocale('en');
+    await act(async () => {
+      root.render(createElement(AudioAssistant));
+    });
+
+    // 1. Switch to Pro Studio + Kurdish + Models drawer + back to Simple & English
+    for (const [prompt, uiAction, check] of [
+      ['Switch to Pro Studio', 'switch_pro', () => expect(getState().workspaceMode).toBe('pro')],
+      ['Switch to Kurdish', 'switch_kurdish', () => expect(getLocale()).toBe('ckb')],
+      ['Open models', 'open_models', () => expect(getState().modelsDrawerOpen).toBe(true)],
+      ['Switch to Simple mode', 'switch_simple', () => expect(getState().workspaceMode).toBe('simple')],
+      ['Switch to English', 'switch_english', () => expect(getLocale()).toBe('en')],
+    ] as const) {
+      planAudio.mockResolvedValueOnce({
+        operation: 'ui_action',
+        target: null,
+        cleanup_profile: null,
+        model_size: 'large',
+        quality: 'high',
+        ui_action: uiAction,
+        explanation: `Executed ${uiAction}.`,
+        provider: 'rules',
+        needs_clarification: false,
+      });
+      await type(prompt);
+      await send();
+      check();
+      expect(host.querySelector('.aa-apply')).toBeNull();
+    }
+
+    // 2. IME composition Enter key (keyCode 229) must NOT submit prematurely
+    const ta = host.querySelector('#audio-assistant-message') as HTMLTextAreaElement;
+    await type('partial ime text');
+    const callsBeforeIme = planAudio.mock.calls.length;
+    await act(async () => {
+      const imeEvent = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      Object.defineProperty(imeEvent, 'keyCode', { value: 229 });
+      ta.dispatchEvent(imeEvent);
+    });
+    expect(planAudio.mock.calls.length).toBe(callsBeforeIme);
+
+    // 3. Live job-completion feedback in chat transcript
+    vi.mocked(startJob).mockImplementationOnce(async () => {
+      useStore.setState({
+        job: {
+          id: 'job-chat-99',
+          outputPath: '/tmp/cleaned.wav',
+          reportPath: '/tmp/report.json',
+          streamConnected: true,
+          status: {
+            job_id: 'job-chat-99',
+            input_path: '/tmp/in.wav',
+            profile: 'studio',
+            state: 'running',
+            stage: 'enhance',
+            progress: 0.5,
+            message: 'Running',
+            started_at: '2026-11-21T00:00:00Z',
+            finished_at: null,
+            output_path: '',
+            report_path: '',
+            error: null,
+          },
+        },
+      });
+    });
+    planAudio.mockResolvedValueOnce(cleanPlan);
+    await type('Clean the voice');
+    await send();
+    const applyBtn = host.querySelector('.aa-apply') as HTMLButtonElement;
+    await act(async () => {
+      applyBtn.click();
+    });
+    await act(async () => {
+      useStore.setState({
+        job: {
+          id: 'job-chat-99',
+          outputPath: '/tmp/cleaned.wav',
+          reportPath: '/tmp/report.json',
+          streamConnected: true,
+          status: {
+            job_id: 'job-chat-99',
+            input_path: '/tmp/in.wav',
+            profile: 'studio',
+            state: 'done',
+            stage: 'done',
+            progress: 1,
+            message: 'Done',
+            started_at: '2026-11-21T00:00:00Z',
+            finished_at: '2026-11-21T00:00:02Z',
+            output_path: '/tmp/cleaned.wav',
+            report_path: '/tmp/report.json',
+            error: null,
+          },
+        },
+        report: {
+          job_id: 'job-chat-99',
+          config_hash: 'abc',
+          input: { path: '/tmp/in.wav', sha256: 'a', sample_rate: 48000, channels: 1, samples: 48000, duration_s: 1 },
+          output: {
+            path: '/tmp/cleaned.wav',
+            sha256: 'b',
+            sample_rate: 48000,
+            channels: 1,
+            samples: 48000,
+            duration_s: 1,
+            integrated_lufs: -16.1,
+            true_peak_dbtp: -1.0,
+          },
+          core: { id: 'studio', algorithm: 'studio', params_hash: 'x' },
+          guard: { id: 'g', probe_hash: 'p', calibration_id: 'c' },
+          environment: {},
+          summary: { units_total: 10, enhanced: 9 },
+        },
+      });
+    });
+    expect(host.textContent).toContain('Output -16.1 LUFS');
+    expect(host.textContent).toContain('Peak -1.0 dBTP');
+    expect(host.textContent).toContain('9/10 units enhanced');
   });
 });

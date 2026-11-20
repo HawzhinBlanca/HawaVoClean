@@ -16,7 +16,7 @@ import type {
 import { getPlayer } from '../audio/player';
 import { SPECTRAL_SELECTION_EVENT } from '../render/stftSpectrogram';
 import * as actions from '../state/actions';
-import { useI18n } from '../state/i18n';
+import { setLocale, useI18n } from '../state/i18n';
 import {
   assistantReducer,
   deriveWorkspacePhase,
@@ -80,7 +80,7 @@ function formatBandRange(fLowHz: number, fHighHz: number): string {
 }
 
 function isImmediateControlOp(op: AudioPlan['operation']): boolean {
-  return op === 'playback' || op === 'undo' || op === 'redo' || op === 'reset';
+  return op === 'playback' || op === 'undo' || op === 'redo' || op === 'reset' || op === 'ui_action';
 }
 
 function collectPlanChips(plan: AudioPlan): string[] {
@@ -237,6 +237,27 @@ function executeImmediateControl(plan: AudioPlan): string | null {
     getAction('clearSelectionRange')?.();
     return null;
   }
+  if (plan.operation === 'ui_action' && plan.ui_action) {
+    switch (plan.ui_action) {
+      case 'switch_pro':
+        getState().setWorkspaceMode?.('pro');
+        return null;
+      case 'switch_simple':
+        getState().setWorkspaceMode?.('simple');
+        return null;
+      case 'switch_kurdish':
+        setLocale('ckb');
+        return null;
+      case 'switch_english':
+        setLocale('en');
+        return null;
+      case 'open_models':
+        getState().setModelsDrawerOpen?.(true);
+        return null;
+      case 'diagnose':
+        return null;
+    }
+  }
   if (plan.operation === 'playback' && plan.playback_action) {
     const player = typeof getPlayer === 'function' ? getPlayer() : null;
     switch (plan.playback_action) {
@@ -360,6 +381,9 @@ export function AudioAssistant() {
   const analyzing = workspacePhase === 'uploading' || workspacePhase === 'analyzing';
   const running = workspacePhase === 'processing';
   const capabilities = useStore((s) => s.capabilities);
+  const job = useStore((s) => s.job);
+  const pendingChatPrompt = useStore((s) => s.pendingChatPrompt);
+  const setPendingChatPrompt = useStore((s) => s.setPendingChatPrompt);
   const selectionRange = useStore((s) => s.selectionRange);
   const setSelectionRange = useStore((s) => s.setSelectionRange);
   const spectralSelection = useStore((s) => s.spectralSelection);
@@ -371,6 +395,7 @@ export function AudioAssistant() {
   const sequence = useRef(0);
   const applying = useRef(false);
   const planningRequest = useRef(false);
+  const lastChatJobIdRef = useRef<string | null>(null);
   const [messages, setMessages] = useState<AudioChatMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [machine, dispatch] = useReducer(assistantReducer, INITIAL_ASSISTANT_STATE);
@@ -400,6 +425,7 @@ export function AudioAssistant() {
     dispatch({ type: 'RESET' });
     planningRequest.current = false;
     applying.current = false;
+    lastChatJobIdRef.current = null;
     setLastProvider(null);
     return () => {
       sequence.current += 1;
@@ -654,8 +680,11 @@ export function AudioAssistant() {
 
       const priorJob = getState().job?.id;
       await actions.startJob(strategy);
-      if (getState().job?.id === priorJob && currentSource.current === sourceKey) {
+      const nextJobId = getState().job?.id ?? null;
+      if (nextJobId === priorJob && currentSource.current === sourceKey) {
         applyFailed = getState().error || 'The edit did not start. Check the processing message below.';
+      } else if (nextJobId) {
+        lastChatJobIdRef.current = nextJobId;
       }
     } finally {
       applying.current = false;
@@ -665,9 +694,8 @@ export function AudioAssistant() {
     }
   };
 
-  const send = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    const message = draft.trim();
+  const submitMessage = async (rawMessage: string): Promise<void> => {
+    const message = rawMessage.trim();
     if (!message || planningRequest.current || !client || !engineReady || status?.available === false || running || submitting) return;
     planningRequest.current = true;
     const sourceAtSend = sourceKey;
@@ -733,6 +761,50 @@ export function AudioAssistant() {
       }
     }
   };
+
+  const send = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    await submitMessage(draft);
+  };
+
+  useEffect(() => {
+    if (!pendingChatPrompt) return;
+    if (!client || !engineReady || status?.available === false || running || submitting || planningRequest.current) {
+      return;
+    }
+    const promptToRun = pendingChatPrompt;
+    setPendingChatPrompt(null);
+    void submitMessage(promptToRun);
+  }, [pendingChatPrompt, client, engineReady, status?.available, running, submitting]);
+
+  useEffect(() => {
+    if (!lastChatJobIdRef.current) return;
+    if (!job || job.id !== lastChatJobIdRef.current) return;
+    if (job.status?.state !== 'done' || !report) return;
+    lastChatJobIdRef.current = null;
+    const parts: string[] = [];
+    const lufs = report.output?.integrated_lufs;
+    if (typeof lufs === 'number' && Number.isFinite(lufs)) {
+      parts.push(`Output ${lufs.toFixed(1)} LUFS`);
+    }
+    const peak = report.output?.true_peak_dbtp;
+    if (typeof peak === 'number' && Number.isFinite(peak)) {
+      parts.push(`Peak ${peak.toFixed(1)} dBTP`);
+    }
+    const enhanced = report.summary?.enhanced;
+    const total = report.summary?.units_total;
+    if (typeof enhanced === 'number' && typeof total === 'number' && total > 0) {
+      parts.push(`${enhanced}/${total} units enhanced`);
+    }
+    const summary = parts.length > 0 ? `${parts.join(' · ')}.` : 'Processing complete.';
+    setMessages((prev) => [
+      ...prev,
+      {
+        role: 'assistant',
+        content: `Done! ${summary} Say "Hear what was removed", "Dial it back", or "Export WAV".`,
+      },
+    ]);
+  }, [job?.id, job?.status?.state, report]);
 
   const apply = async (): Promise<void> => {
     if (!plan) return;
@@ -897,8 +969,16 @@ export function AudioAssistant() {
             dispatch({ type: 'DRAFT_CHANGED' });
           }}
           onKeyDown={(event) => {
-            if (event.key === 'Enter' && (!event.shiftKey || event.ctrlKey || event.metaKey)) {
+            if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
               event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+              return;
+            }
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              if (event.nativeEvent.isComposing || event.keyCode === 229) {
+                return;
+              }
               event.currentTarget.form?.requestSubmit();
             }
           }}

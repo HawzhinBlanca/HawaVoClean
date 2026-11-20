@@ -381,6 +381,7 @@ export interface AppState {
   workspaceMode: WorkspaceMode;
   livePreviewEnabled: boolean;
   assistantDrawerOpen: boolean;
+  pendingChatPrompt: string | null;
   batchDrawerOpen: boolean;
   modelsDrawerOpen: boolean;
   activeGoalId: string | null;
@@ -449,6 +450,7 @@ export interface AppState {
   setWorkspaceMode(mode: WorkspaceMode): void;
   setLivePreviewEnabled(enabled: boolean): void;
   setAssistantDrawerOpen(open: boolean): void;
+  setPendingChatPrompt(prompt: string | null): void;
   setBatchDrawerOpen(open: boolean): void;
   setModelsDrawerOpen(open: boolean): void;
   setActiveGoalId(goalId: string | null): void;
@@ -537,6 +539,7 @@ export const useStore = create<AppState>((set) => ({
   workspaceMode: loadWorkspaceMode(),
   livePreviewEnabled: loadLivePreview(),
   assistantDrawerOpen: false,
+  pendingChatPrompt: null,
   batchDrawerOpen: false,
   modelsDrawerOpen: false,
   activeGoalId: null,
@@ -727,6 +730,7 @@ export const useStore = create<AppState>((set) => ({
     set({ livePreviewEnabled });
   },
   setAssistantDrawerOpen: (assistantDrawerOpen) => set({ assistantDrawerOpen }),
+  setPendingChatPrompt: (pendingChatPrompt) => set({ pendingChatPrompt }),
   setBatchDrawerOpen: (batchDrawerOpen) => set({ batchDrawerOpen }),
   setModelsDrawerOpen: (modelsDrawerOpen) => set({ modelsDrawerOpen }),
   setActiveGoalId: (activeGoalId) => set({ activeGoalId }),

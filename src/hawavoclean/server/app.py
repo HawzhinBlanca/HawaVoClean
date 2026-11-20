@@ -472,11 +472,13 @@ class LocalSecurityMiddleware:
         token: str,
         sessions: SessionRegistry,
         trusted_origins: frozenset[str],
+        trusted_hosts: frozenset[str] = frozenset(),
     ) -> None:
         self.app = app
         self.token = token
         self.sessions = sessions
         self.trusted_origins = trusted_origins
+        self.trusted_hosts = trusted_hosts
 
     @staticmethod
     async def _send_response(
@@ -504,7 +506,13 @@ class LocalSecurityMiddleware:
         headers = Headers(scope=scope)
         hosts = headers.getlist("host")
         host = hosts[0] if len(hosts) == 1 else None
-        if not _loopback_host(host):
+        host_allowed = _loopback_host(host) or (
+            host is not None
+            and host == host.strip()
+            and not any(c in host for c in "\r\n,@")
+            and host.lower() in self.trusted_hosts
+        )
+        if not host_allowed:
             response = error_response(
                 403, "forbidden", "request Host is not an allowed loopback address"
             )
@@ -2234,6 +2242,8 @@ def create_app(
     trusted_origins: frozenset[str] = TRUSTED_APP_ORIGINS,
     max_concurrent_analyses: int = DEFAULT_MAX_CONCURRENT_ANALYSES,
     native_source_registry: NativeSourceRegistry | None = None,
+    web_public: bool | None = None,
+    cors_origins: tuple[str, ...] | list[str] | None = None,
 ) -> FastAPI:
     """Build the engine app. ``on_shutdown`` runs (in a thread) shortly after
     ``POST /api/shutdown`` has been answered; when omitted the process hard-exits.
@@ -2242,14 +2252,48 @@ def create_app(
     Total upload bytes, age, and the emergency free-space reserve are always
     bounded; zero/negative values are rejected rather than becoming an
     accidental unlimited mode."""
+    from hawavoclean.server.policy import is_web_public_mode
+
     if not token:
         raise ValueError("token must be non-empty")
     if max_concurrent_analyses < 1 or max_concurrent_analyses > 32:
         raise ValueError("max_concurrent_analyses must be between 1 and 32")
-    if not trusted_origins or any(
-        origin in {"*", "null"} or "\r" in origin or "\n" in origin for origin in trusted_origins
+    is_web_public = is_web_public_mode(web_public)
+    extra_origins: list[str] = []
+    raw_cors = (
+        list(cors_origins)
+        if cors_origins is not None
+        else [
+            part.strip()
+            for part in os.environ.get("HAWAVOCLEAN_CORS_ORIGINS", "").split(",")
+            if part.strip()
+        ]
+    )
+    for origin in raw_cors:
+        if (
+            origin in {"*", "null"}
+            or "\r" in origin
+            or "\n" in origin
+            or not (
+                origin.startswith("https://")
+                or origin.startswith("http://127.0.0.1")
+                or origin.startswith("http://localhost")
+            )
+        ):
+            raise ValueError(f"invalid CORS origin: {origin!r}")
+        extra_origins.append(origin.rstrip("/"))
+    effective_trusted_origins = frozenset((*trusted_origins, *extra_origins))
+    if not effective_trusted_origins or any(
+        origin in {"*", "null"} or "\r" in origin or "\n" in origin
+        for origin in effective_trusted_origins
     ):
         raise ValueError("trusted_origins must be explicit non-null origins")
+    trusted_origins = effective_trusted_origins
+    web_trusted_hosts = (
+        frozenset(netloc for origin in extra_origins if (netloc := urlsplit(origin).netloc.lower()))
+        if is_web_public
+        else frozenset()
+    )
     manager = job_manager if job_manager is not None else JobManager()
     sessions = SessionRegistry(session_ttl_s, clock=session_clock)
     native_sources = native_source_registry or NativeSourceRegistry()
@@ -2310,6 +2354,7 @@ def create_app(
     app.state.health_signals = health_signals
     app.state.token = token
     app.state.ui_dir = ui_dir
+    app.state.web_public = is_web_public
     app.state.max_upload_bytes = upload_limit
     app.state.upload_store = upload_store
     app.state.upload_lock = asyncio.Lock()
@@ -2330,6 +2375,9 @@ def create_app(
 
     def _resolve_read_path(request: Request, raw: str) -> Path:
         """Apply the renderer capability boundary to one legacy path read."""
+
+        if is_web_public:
+            return resolve_client_path(raw, must_exist=True, web_public=True)
 
         if _auth_kind(request) == "root":
             # One-release native/CLI compatibility. The root secret never
@@ -2386,6 +2434,7 @@ def create_app(
         token=token,
         sessions=sessions,
         trusted_origins=trusted_origins,
+        trusted_hosts=web_trusted_hosts,
     )
 
     # --- error shape ---------------------------------------------------------
@@ -2485,6 +2534,12 @@ def create_app(
         turn a guessed path into authority by calling the registration API.
         """
 
+        if is_web_public:
+            raise ApiError(
+                403,
+                "forbidden",
+                "native source registration is disabled in web-public mode",
+            )
         if _auth_kind(request) != "root":
             raise ApiError(403, "forbidden", "native source registration requires root authority")
         source = native_sources.register(req.path)
@@ -2501,6 +2556,7 @@ def create_app(
         return {
             "ok": True,
             "version": __version__,
+            "deployment_mode": "web_public" if is_web_public else "local",
             "profiles": list(PROFILES),
             "speakers": speakers,
             # Loose profile.json files prove only that research identities are
@@ -2605,6 +2661,12 @@ def create_app(
 
     @app.post("/api/v1/models/{model_id}/install")
     async def install_v1_model(model_id: str) -> dict[str, Any]:
+        if is_web_public:
+            raise ApiError(
+                403,
+                "forbidden",
+                "model installation is disabled in web-public mode",
+            )
         from hawavoclean import model_manager
 
         try:
@@ -2882,7 +2944,7 @@ def create_app(
         )
         effective_preset: DeliveryPreset = req.delivery_preset or "match_input"
         if req.dest_path is not None:
-            dest_resolved = resolve_client_output_path(req.dest_path)
+            dest_resolved = resolve_client_output_path(req.dest_path, web_public=is_web_public)
             _reject_export_destination_symlink(req.dest_path, dest_resolved)
             if _auth_kind(request) != "root":
                 exports_root = (work_root() / "exports").resolve()
@@ -3002,7 +3064,9 @@ def create_app(
         resolved = _resolve_read_path(request, req.path)
         extracted_root = (work_root() / "extracted_tracks").resolve()
         if req.out_dir is not None:
-            target_dir = resolve_client_path(req.out_dir, must_exist=False)
+            target_dir = resolve_client_path(
+                req.out_dir, must_exist=False, web_public=is_web_public
+            )
             _reject_export_destination_symlink(req.out_dir, target_dir)
             if os.path.lexists(target_dir) and not target_dir.is_dir():
                 raise ApiError(
@@ -3601,7 +3665,7 @@ def create_app(
         )
         if req.output_path:
             output_path = (
-                resolve_client_output_path(req.output_path)
+                resolve_client_output_path(req.output_path, web_public=is_web_public)
                 if _auth_kind(request) == "root"
                 else _session_output_path(selected_input_path, req.profile, req.output_path)
             )
@@ -3899,7 +3963,15 @@ def _configure_uvicorn_logging() -> None:
         uv_logger.propagate = False
 
 
-def run_server(host: str, port: int, token: str, ui_dir: Path | None = None) -> int:
+def run_server(
+    host: str,
+    port: int,
+    token: str,
+    ui_dir: Path | None = None,
+    *,
+    web_public: bool = False,
+    cors_origins: tuple[str, ...] | list[str] | None = None,
+) -> int:
     """Serve until ``POST /api/shutdown`` or SIGINT/SIGTERM. Prints the ready
     line on stdout once the socket is listening; everything after that goes
     to stderr (stdout is re-pointed at stderr so no library can pollute it)."""
@@ -3910,7 +3982,14 @@ def run_server(host: str, port: int, token: str, ui_dir: Path | None = None) -> 
     if ui_dir is not None and not (ui_dir / "index.html").is_file():
         raise InvalidUserInputError(f"--ui-dir has no index.html: {ui_dir}")
 
-    sock = bind_loopback_socket(host, port)
+    if web_public and host in {"0.0.0.0", "::"}:
+        family = socket.AF_INET6 if host == "::" else socket.AF_INET
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(128)
+    else:
+        sock = bind_loopback_socket(host, port)
     actual_port = int(sock.getsockname()[1])
     _configure_uvicorn_logging()
 
@@ -3924,7 +4003,14 @@ def run_server(host: str, port: int, token: str, ui_dir: Path | None = None) -> 
         if server is not None:
             server.should_exit = True
 
-    app = create_app(token, ui_dir, job_manager=manager, on_shutdown=request_shutdown)
+    app = create_app(
+        token,
+        ui_dir,
+        job_manager=manager,
+        on_shutdown=request_shutdown,
+        web_public=web_public,
+        cors_origins=cors_origins,
+    )
     config = uvicorn.Config(
         app,
         host=host,

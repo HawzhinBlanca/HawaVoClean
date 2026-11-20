@@ -195,12 +195,22 @@ def is_blocked_windows_system_path(
     return False
 
 
+def is_web_public_mode(web_public: bool | None = None) -> bool:
+    """Return True when the server is locked down to upload-only web-public mode."""
+    if web_public is not None:
+        return bool(web_public)
+    return os.environ.get("HAWAVOCLEAN_WEB_PUBLIC", "").strip().lower() in {"1", "true", "yes"}
+
+
 def allowed_roots(
     *,
     platform: str | None = None,
     windows_drives: Iterable[Path] | None = None,
+    web_public: bool | None = None,
 ) -> list[Path]:
     """Roots a client path may resolve under (resolved, deduplicated)."""
+    if is_web_public_mode(web_public):
+        return [work_root().resolve()]
     candidates: list[Path] = [Path.home(), Path("/Volumes"), work_root()]
     if _active_platform(platform) == "win32":
         candidates.extend(
@@ -260,6 +270,7 @@ def resolve_client_path(
     must_exist: bool = False,
     platform: str | None = None,
     windows_drives: Iterable[Path] | None = None,
+    web_public: bool | None = None,
 ) -> Path:
     """Validate ``raw`` against the policy and return its resolved ``Path``.
 
@@ -285,13 +296,18 @@ def resolve_client_path(
             "forbidden",
             f"path is inside a protected Windows system directory: {raw}",
         )
-    roots = allowed_roots(platform=platform, windows_drives=windows_drives)
+    roots = allowed_roots(
+        platform=platform,
+        windows_drives=windows_drives,
+        web_public=web_public,
+    )
     if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
-        raise PathPolicyError(
-            403,
-            "forbidden",
-            f"path is outside the allowed locations (home, /Volumes, work dir): {raw}",
+        detail = (
+            f"web-public mode only allows uploaded files inside work dir: {raw}"
+            if is_web_public_mode(web_public)
+            else f"path is outside the allowed locations (home, /Volumes, work dir): {raw}"
         )
+        raise PathPolicyError(403, "forbidden", detail)
     if must_exist:
         try:
             exists = resolved.is_file()
@@ -307,6 +323,7 @@ def resolve_client_output_path(
     *,
     platform: str | None = None,
     windows_drives: Iterable[Path] | None = None,
+    web_public: bool | None = None,
 ) -> Path:
     """Validate a writable public path without following its final alias.
 
@@ -325,7 +342,11 @@ def resolve_client_output_path(
         raise PathPolicyError(400, "bad_request", f"path must be absolute: {raw}")
     if path.name in {".", ".."}:
         return resolve_client_path(
-            raw, must_exist=False, platform=platform, windows_drives=windows_drives
+            raw,
+            must_exist=False,
+            platform=platform,
+            windows_drives=windows_drives,
+            web_public=web_public,
         )
     try:
         parent = path.parent.resolve()
@@ -342,11 +363,12 @@ def resolve_client_output_path(
             "forbidden",
             f"path is inside a protected Windows system directory: {raw}",
         )
-    roots = allowed_roots(platform=platform, windows_drives=windows_drives)
+    roots = allowed_roots(platform=platform, windows_drives=windows_drives, web_public=web_public)
     if not any(parent == root or parent.is_relative_to(root) for root in roots):
-        raise PathPolicyError(
-            403,
-            "forbidden",
-            f"path is outside the allowed locations (home, /Volumes, work dir): {raw}",
+        detail = (
+            f"web-public mode only allows uploaded files inside work dir: {raw}"
+            if is_web_public_mode(web_public)
+            else f"path is outside the allowed locations (home, /Volumes, work dir): {raw}"
         )
+        raise PathPolicyError(403, "forbidden", detail)
     return candidate
