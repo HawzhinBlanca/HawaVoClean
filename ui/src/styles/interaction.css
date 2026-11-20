@@ -2915,7 +2915,7 @@ input:focus-visible,
 
 @media (max-height: 720px) {
   .app[data-offline='true'] {
-    grid-template-rows: 40px auto 40px minmax(0, 1fr) 24px;
+    grid-template-rows: 40px auto 40px 32px minmax(0, 1fr) 24px;
   }
 }
 

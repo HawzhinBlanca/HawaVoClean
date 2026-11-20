@@ -1397,8 +1397,8 @@ button.sd-clean-btn.process.running {
 .main.pro-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(220px, 1.35fr) minmax(186px, 0.85fr) auto;
-  gap: 10px;
+  grid-template-rows: minmax(180px, 1.25fr) minmax(150px, 0.8fr) auto;
+  gap: 8px;
   min-height: 0;
   overflow: hidden;
 }
@@ -1549,18 +1549,32 @@ button.sd-clean-btn.process.running {
 }
 
 @media (max-height: 830px) {
-  .pro-main {
+  .main.pro-main {
     gap: 6px;
-    grid-template-rows: minmax(150px, 1fr) minmax(110px, 0.55fr) auto;
+    grid-template-rows: minmax(126px, 1fr) minmax(104px, 0.5fr) auto;
   }
 
   .pro-main > .right.pro-console {
-    padding: 8px 12px;
-    gap: 10px;
+    padding: 6px 10px;
+    gap: 8px;
   }
 
   .pro-console .pc-zone {
     gap: 4px;
+  }
+
+  .pro-console .pc-modules {
+    gap: 4px;
+  }
+
+  .pro-console .pc-pill-row .pill-toggle {
+    min-height: 22px;
+    padding: 0 7px;
+    font-size: 10px;
+  }
+
+  .pro-console .pc-action-top .process {
+    min-height: 44px;
   }
 
   .pro-console .pc-actions .exports-grid {

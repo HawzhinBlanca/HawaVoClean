@@ -174,7 +174,7 @@ kbd {
   min-width: 960px;
   min-height: 640px;
   display: grid;
-  grid-template-rows: 46px 56px minmax(0, 1fr) 28px;
+  grid-template-rows: 46px 46px 34px minmax(0, 1fr) 28px;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--gap);
   padding: var(--gap);
@@ -187,7 +187,7 @@ kbd {
    the chassis. An overlay can cover a control, and the moment something has
    gone wrong is the moment the controls matter most. */
 .app[data-offline='true'] {
-  grid-template-rows: 46px auto 56px minmax(0, 1fr) 28px;
+  grid-template-rows: 46px auto 46px 34px minmax(0, 1fr) 28px;
 }
 
 .main {
@@ -2154,7 +2154,7 @@ kbd {
 
 @media (max-height: 720px) {
   .app {
-    grid-template-rows: 40px 48px minmax(0, 1fr) 24px;
+    grid-template-rows: 40px 44px 32px minmax(0, 1fr) 24px;
     gap: 10px;
     padding: 10px;
   }
@@ -2172,7 +2172,7 @@ kbd {
   }
 
   .app[data-offline='true'] {
-    grid-template-rows: 40px auto 48px minmax(0, 1fr) 24px;
+    grid-template-rows: 40px auto 44px 32px minmax(0, 1fr) 24px;
   }
 
   .right {
