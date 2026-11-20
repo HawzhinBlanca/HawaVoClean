@@ -204,14 +204,16 @@ def test_chaos_disk_full_at_publish_leaves_no_partial_output(
     real_replace = os.replace
     calls = {"n": 0}
 
-    def failing_replace(src: Any, dst: Any) -> None:
-        calls["n"] += 1
-        if calls["n"] >= 2:  # audio lands, then the report rename fails
-            raise OSError(28, "No space left on device")
-        real_replace(src, dst)
-
     dest_dir = tmp_path / "published"
     dest_dir.mkdir()
+
+    def failing_replace(src: Any, dst: Any) -> None:
+        if Path(dst).resolve().is_relative_to(dest_dir.resolve()):
+            calls["n"] += 1
+            if calls["n"] >= 2:  # audio lands, then the report rename fails
+                raise OSError(28, "No space left on device")
+        real_replace(src, dst)
+
     monkeypatch.setattr(os, "replace", failing_replace)
 
     with pytest.raises(PublicationError):
@@ -236,14 +238,16 @@ def test_chaos_interrupt_between_renames_rolls_back(
     real_replace = os.replace
     calls = {"n": 0}
 
-    def interrupted_replace(src: Any, dst: Any) -> None:
-        calls["n"] += 1
-        if calls["n"] >= 2:  # prepared journal landed; alias creation is interrupted
-            raise KeyboardInterrupt
-        real_replace(src, dst)
-
     dest_dir = tmp_path / "published"
     dest_dir.mkdir()
+
+    def interrupted_replace(src: Any, dst: Any) -> None:
+        if Path(dst).resolve().is_relative_to(dest_dir.resolve()):
+            calls["n"] += 1
+            if calls["n"] >= 2:  # prepared journal landed; alias creation is interrupted
+                raise KeyboardInterrupt
+        real_replace(src, dst)
+
     monkeypatch.setattr(os, "replace", interrupted_replace)
 
     with pytest.raises(KeyboardInterrupt):  # an interrupt stays an interrupt

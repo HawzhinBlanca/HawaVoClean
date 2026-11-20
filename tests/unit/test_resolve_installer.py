@@ -36,6 +36,7 @@ def _write_stage(root: Path, version: str, payload: str) -> Path:
         "preload.js": "// preload\n",
         "session-auth.js": "// session auth\n",
         "engine-discovery.js": "// engine discovery\n",
+        "sdk-preflight.js": "// sdk preflight\n",
         "timeline-transactions.js": "// timeline transactions\n",
         "engine.json": '{"command":["./engine/hawavoclean-engine","serve"],"cwd":".","env":{}}\n',
         "index.html": f"<html>{payload}</html>\n",

@@ -500,14 +500,29 @@ def _preserve_high_band_air(
     if sample_rate <= _INTERNAL_SAMPLE_RATE or n < 128 or crossover_hz >= 0.45 * sample_rate:
         return np.ascontiguousarray(dereverbed, dtype=np.float32)
 
-    orig64 = original.astype(np.float64, copy=False)
-    derev_aligned = estimate_gcc_phat_delay(
-        original,
-        _match_length(dereverbed, n),
+    orig_raw = original.astype(np.float64, copy=False)
+    derev_matched = _match_length(dereverbed, n)
+    derev_raw = derev_matched.astype(np.float64, copy=False)
+    if not (bool(np.all(np.isfinite(orig_raw))) and bool(np.all(np.isfinite(derev_raw)))):
+        return np.ascontiguousarray(dereverbed, dtype=np.float32)
+
+    scale = max(
+        float(np.max(np.abs(orig_raw))) if n > 0 else 0.0,
+        float(np.max(np.abs(derev_raw))) if n > 0 else 0.0,
+    )
+    if scale <= 0.0 or not np.isfinite(scale):
+        return np.ascontiguousarray(dereverbed, dtype=np.float32)
+
+    orig_norm32 = np.ascontiguousarray(orig_raw / scale, dtype=np.float32)
+    derev_norm32 = np.ascontiguousarray(derev_raw / scale, dtype=np.float32)
+    derev_aligned_norm = estimate_gcc_phat_delay(
+        orig_norm32,
+        derev_norm32,
         sample_rate=sample_rate,
         max_delay_ms=50.0,
     ).aligned_candidate[:n]
-    derev64 = derev_aligned.astype(np.float64, copy=False)
+    orig64 = orig_norm32.astype(np.float64, copy=False)
+    derev64 = derev_aligned_norm.astype(np.float64, copy=False)
 
     sos_lp = scipy.signal.butter(2, crossover_hz, btype="lowpass", fs=sample_rate, output="sos")
     sos_hp = scipy.signal.butter(2, crossover_hz, btype="highpass", fs=sample_rate, output="sos")
@@ -563,9 +578,11 @@ def _preserve_high_band_air(
     hf_gain = scipy.ndimage.uniform_filter1d(hf_gain, size=smooth_win, mode="nearest")
     hf_gain = np.clip(hf_gain, 0.0, 1.0)
 
-    combined = derev_low + orig_high * hf_gain
+    combined = (derev_low + orig_high * hf_gain) * scale
     if not bool(np.all(np.isfinite(combined))):
         return np.ascontiguousarray(dereverbed, dtype=np.float32)
+    f32_max = float(np.finfo(np.float32).max) * 0.5
+    combined = np.clip(combined, -f32_max, f32_max)
     return np.ascontiguousarray(combined, dtype=np.float32)
 
 

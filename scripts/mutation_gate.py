@@ -1069,6 +1069,150 @@ _TORCH_BACKED: dict[str, str] = {
             "tests/unit/test_realworld_regressions.py::test_mouth_declick_preserves_consonant_onset_flanked_by_speech",
         ),
     ),
+    Mutation(
+        "M65",
+        "explicit hpf_cutoff_hz user override ignored in apply_safe_finishing",
+        "src/hawavoclean/finishing/safe_finish.py",
+        """    elif hpf_cutoff_hz is not None or hpf_enabled is True:
+        eff_hpf_hz = float(hpf_cutoff_hz) if hpf_cutoff_hz is not None else 80.0
+        current = remove_dc_subsonic(current, sample_rate, cutoff_hz=eff_hpf_hz)""",
+        """    elif False and (hpf_cutoff_hz is not None or hpf_enabled is True):
+        eff_hpf_hz = float(hpf_cutoff_hz) if hpf_cutoff_hz is not None else 80.0
+        current = remove_dc_subsonic(current, sample_rate, cutoff_hz=eff_hpf_hz)""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_hpf_default_none_bit_identical_and_override_cuts_rumble",
+        ),
+    ),
+    Mutation(
+        "M66",
+        "pre-enhancement de-clip skipped before neural enhancer in pipeline",
+        "src/hawavoclean/pipeline.py",
+        """            declipped, clips_repaired = apply_declip(working_buf.data, working_buf.sample_rate)
+            working_buf = AudioBuffer(data=declipped, sample_rate=working_buf.sample_rate)""",
+        """            clips_repaired = 0
+            _ = apply_declip""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_pre_enhancement_declip_runs_before_enhancer_in_pipeline",
+        ),
+    ),
+    Mutation(
+        "M67",
+        "hybrid fast input-seek (-ss before -i) disabled in decode_audio_window",
+        "src/hawavoclean/audio/decode.py",
+        """        pre_seek_args = (
+            ["-ss", f"{preroll_start_samples / probe.sample_rate:.9f}"]
+            if preroll_start_samples > 0
+            else []
+        )
+        post_seek_args = (
+            ["-ss", f"{preroll_samples / probe.sample_rate:.9f}"] if preroll_samples > 0 else []
+        )""",
+        """        pre_seek_args = []
+        post_seek_args = ["-ss", f"{start / probe.sample_rate:.9f}"] if start > 0 else []""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_decode_window_fast_input_seek_and_mono_os_replace",
+        ),
+    ),
+    Mutation(
+        "M68",
+        "true_stereo_ms Side-channel reconstruction bypassed during unit re-stitch",
+        "src/hawavoclean/server/unit_restitch.py",
+        """    is_true_stereo_ms = str(job_meta.get("stereo_mode", "")) == "true_stereo_ms\"""",
+        """    is_true_stereo_ms = False""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_unit_restitch_preserves_true_stereo_ms_finishing_delivery_and_bwf",
+        ),
+    ),
+    Mutation(
+        "M69",
+        "GCC-PHAT delay alignment disabled in preview wet/dry blend",
+        "src/hawavoclean/server/warm_worker.py",
+        """        aligned = estimate_gcc_phat_delay(dry, wet, target_sr, max_delay_ms=50.0).aligned_candidate""",
+        """        aligned = wet""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_render_region_preview_wysiwyg_gcc_phat_hpf_and_pro_repair",
+        ),
+    ),
+    Mutation(
+        "M70",
+        "mains hum harmonic notch cascade truncated to fundamental only",
+        "src/hawavoclean/finishing/repair.py",
+        """    for h in range(1, num_harmonics + 1):""",
+        """    for h in range(1, 2):""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_parabolic_dehum_snaps_60hz_notches_high_harmonics_and_preserves_clean",
+        ),
+    ),
+    Mutation(
+        "M71",
+        "48 kHz >8 kHz high-band air preservation disabled in NeuralDereverberator",
+        "src/hawavoclean/enhancement/dereverb_neural.py",
+        """            if not bwe_applied:
+                derev_out = _preserve_high_band_air(
+                    orig32,
+                    derev_out,
+                    sample_rate,
+                    crossover_hz=self._bwe_cutoff_hz,
+                )""",
+        """            if False and not bwe_applied:
+                derev_out = _preserve_high_band_air(
+                    orig32,
+                    derev_out,
+                    sample_rate,
+                    crossover_hz=self._bwe_cutoff_hz,
+                )""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_dereverb_48k_preserves_hf_air_and_real_warmup",
+        ),
+    ),
+    Mutation(
+        "M72",
+        "dialogue-gated loudness measurement disabled in apply_delivery_loudness",
+        "src/hawavoclean/audio/delivery.py",
+        """    pre = measure_loudness_and_peaks(wave_2d, sample_rate, dialogue_gated=spec.dialogue_gated)""",
+        """    pre = measure_loudness_and_peaks(wave_2d, sample_rate, dialogue_gated=False)""",
+        owners=(
+            "tests/unit/test_wave_ab_backend.py::test_dialogue_gated_loudness_true_match_input_and_dithered_wav24",
+        ),
+    ),
+    Mutation(
+        "M73",
+        "SHA-256 digest mismatch rejection disabled in model_manager",
+        "src/hawavoclean/model_manager.py",
+        """        if not hmac.compare_digest(actual_sha, artifact.expected_sha256):
+            raise ModelHashMismatchError(""",
+        """        if False and not hmac.compare_digest(actual_sha, artifact.expected_sha256):
+            raise ModelHashMismatchError(""",
+        owners=(
+            "tests/unit/test_wave_e_models_assistant.py::test_install_model_sha256_mismatch_fails_closed_and_deletes_part_file",
+            "tests/unit/test_wave_e_models_assistant.py::test_api_v1_models_install_unknown_404_mismatch_422_and_success_200",
+        ),
+    ),
+    Mutation(
+        "M74",
+        "Windows protected system-directory blocklist disabled in server/policy.py",
+        "src/hawavoclean/server/policy.py",
+        """    if is_blocked_windows_system_path(resolved, platform=platform, windows_drives=windows_drives):
+        raise PathPolicyError(""",
+        """    if False and is_blocked_windows_system_path(resolved, platform=platform, windows_drives=windows_drives):
+        raise PathPolicyError(""",
+        owners=(
+            "tests/unit/test_wave_e_models_assistant.py::test_windows_policy_allows_secondary_drives_and_blocks_system_dirs",
+        ),
+    ),
+    Mutation(
+        "M75",
+        "Homebrew /opt/homebrew dylib rejection disabled in build_resolve_engine.py",
+        "scripts/build_resolve_engine.py",
+        """            if is_forbidden_dylib(dep):
+                violations.append(f"{macho.name} -> {dep} (forbidden non-portable host path)")""",
+        """            if False and is_forbidden_dylib(dep):
+                violations.append(f"{macho.name} -> {dep} (forbidden non-portable host path)")""",
+        owners=(
+            "tests/unit/test_wave_f_packaging.py::test_verify_macho_rejects_remaining_homebrew_and_usr_local_references",
+            "tests/unit/test_wave_f_packaging.py::test_relocate_fails_loudly_if_homebrew_ref_survives_rewrite",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")
