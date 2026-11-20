@@ -234,7 +234,7 @@ export function SpectrogramDisplay({
     if (effectiveMode === 'cleaned' && cleanedTile) return;
     if (effectiveMode === 'delta' && originalTile && cleanedTile) return;
 
-    const cleanFile = cleaned?.path ?? cleanedPath ?? null;
+    const cleanFile = cleanedPath ?? cleaned?.path ?? null;
     if ((effectiveMode === 'cleaned' || effectiveMode === 'delta') && !cleanFile) return;
 
     const v = waveView.view;
@@ -363,7 +363,7 @@ export function SpectrogramDisplay({
   }, [cleanedTile, cleanedPcm, cleaned, sampleRate]);
 
   const activeTile = useMemo<StftTile | null>(() => {
-    const cleanFile = cleaned?.path ?? cleanedPath ?? '';
+    const cleanFile = cleanedPath ?? cleaned?.path ?? '';
     const modePrefix = `${original?.path ?? ''}|${effectiveMode === 'original' ? '' : cleanFile}|${effectiveMode}|`;
     if (
       serverTile &&

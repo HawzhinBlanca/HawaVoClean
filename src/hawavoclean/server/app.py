@@ -2519,7 +2519,12 @@ def create_app(
         # simply by issuing many revision-1 waveform requests and create an
         # unbounded collection of decoder/FFT threads.
         async with app.state.analysis_slots:
-            return await asyncio.to_thread(analyze_audio, path, req.buckets)
+            result = await asyncio.to_thread(analyze_audio, path, req.buckets)
+        pub = public_output_path(req.path)
+        if _requested_job_artifact(manager, pub) is not None:
+            result = dict(result)
+            result["path"] = str(pub)
+        return result
 
     @app.post("/api/v1/analyze")
     async def analyze_v1(req: SmartAnalysisRequestV1) -> dict[str, Any]:
@@ -3407,11 +3412,16 @@ def create_app(
         path = _resolve_read_path(request, req.path)
         try:
             async with app.state.analysis_slots:
-                return await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     compute_peaks_window, path, req.start_s, req.end_s, req.buckets
                 )
         except PeaksWindowError as e:
             raise ApiError(400, "bad_request", str(e)) from e
+        pub = public_output_path(req.path)
+        if _requested_job_artifact(manager, pub) is not None and "path" in result:
+            result = dict(result)
+            result["path"] = str(pub)
+        return result
 
     @app.post("/api/jobs", status_code=202)
     async def create_job(request: Request, req: JobRequest) -> dict[str, Any]:

@@ -1351,7 +1351,14 @@ def test_v1_uploaded_source_retained_after_terminal_for_preview_spectrogram_and_
     time.sleep(0.15)
     assert Path(uploaded_path).is_file()
 
-    # Post-Process Preview, Delta Spectrogram, and 2nd Take all succeed
+    # Post-Process Analyze (must return public output path, never internal generation dir),
+    # Preview, Delta Spectrogram, and 2nd Take all succeed
+    r_an = real_client.post("/api/analyze", headers=sess_h, json={"path": done1["output_path"]})
+    assert r_an.status_code == 200, r_an.text
+    analyzed_clean_path = r_an.json()["path"]
+    assert "generations" not in Path(analyzed_clean_path).parts
+    assert analyzed_clean_path == str(Path(done1["output_path"]).resolve())
+
     r_prev = real_client.post(
         "/api/v1/preview",
         headers=sess_h,
@@ -1364,7 +1371,7 @@ def test_v1_uploaded_source_retained_after_terminal_for_preview_spectrogram_and_
         headers=sess_h,
         json={
             "path": uploaded_path,
-            "cleanedPath": done1["output_path"],
+            "cleanedPath": analyzed_clean_path,
             "mode": "delta",
             "startS": 0.0,
             "endS": 1.5,
