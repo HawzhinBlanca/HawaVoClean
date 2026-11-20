@@ -5,6 +5,7 @@ import { BatchQueue } from './components/BatchQueue';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
+import { ModelManagerDrawer } from './components/ModelManagerDrawer';
 import { ProWorkspace } from './components/ProWorkspace';
 import { SimpleWorkspace } from './components/SimpleWorkspace';
 import { SlideOverDrawer } from './components/SlideOverDrawer';
@@ -191,6 +192,8 @@ export default function App() {
   const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
   const batchDrawerOpen = useStore((s) => s.batchDrawerOpen);
   const setBatchDrawerOpen = useStore((s) => s.setBatchDrawerOpen);
+  const modelsDrawerOpen = useStore((s) => s.modelsDrawerOpen);
+  const setModelsDrawerOpen = useStore((s) => s.setModelsDrawerOpen);
   const deck = abMode === 'cleaned' && (cleanedPath || previewActive) ? 'cleaned' : 'original';
   // The banner is a *row* of the shell grid, never an overlay: a bar that
   // floats over the chassis is a bar that can cover a control, and the one
@@ -275,6 +278,13 @@ export default function App() {
         onClose={() => setBatchDrawerOpen(false)}
       >
         <BatchQueue />
+      </SlideOverDrawer>
+      <SlideOverDrawer
+        open={modelsDrawerOpen}
+        title="Neural Models"
+        onClose={() => setModelsDrawerOpen(false)}
+      >
+        <ModelManagerDrawer />
       </SlideOverDrawer>
       <ToastStack />
       <ShortcutOverlay />

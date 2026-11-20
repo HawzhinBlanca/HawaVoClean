@@ -17,11 +17,16 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_IDENTITY_PATH = ROOT / "src" / "hawavoclean" / "release.json"
 HEX40 = set("0123456789abcdef")
+SYSTEM_DYLIB_PREFIXES = ("/System/Library/", "/usr/lib/")
+FORBIDDEN_DYLIB_PREFIXES = ("/opt/homebrew/", "/usr/local/")
 LAUNCHER_SOURCE = """from pathlib import Path
 import multiprocessing
 import os
@@ -172,6 +177,259 @@ def _prune_and_normalize_install(stage: Path, site_packages: Path) -> None:
             writer.writerows(sorted(rows))
 
 
+def _load_release_version(root: Path = ROOT) -> str:
+    identity_path = root / "src" / "hawavoclean" / "release.json"
+    try:
+        data: Any = json.loads(identity_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BundleError(f"cannot read release identity {identity_path}: {exc}") from exc
+    version = data.get("version") if isinstance(data, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        raise BundleError("release.json does not contain a valid version string")
+    return version.strip()
+
+
+def parse_otool_l(output: str) -> list[str]:
+    """Parse `otool -L` stdout into referenced Mach-O install names."""
+    deps: list[str] = []
+    lines = output.splitlines()
+    start = 1 if lines and lines[0].rstrip().endswith(":") else 0
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        dep_path = stripped.split(" (", 1)[0].strip()
+        if dep_path:
+            deps.append(dep_path)
+    return deps
+
+
+def parse_otool_rpaths(output: str) -> list[str]:
+    """Parse `otool -l` stdout and extract `LC_RPATH` path entries."""
+    rpaths: list[str] = []
+    in_rpath = False
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if line.startswith("cmd "):
+            in_rpath = line == "cmd LC_RPATH"
+            continue
+        if in_rpath and line.startswith("path "):
+            rpath = line[len("path ") :].split(" (offset", 1)[0].strip()
+            if rpath:
+                rpaths.append(rpath)
+            in_rpath = False
+    return rpaths
+
+
+def is_system_dylib(dep: str) -> bool:
+    """Return True if *dep* is an Apple macOS system library."""
+    return dep.startswith(SYSTEM_DYLIB_PREFIXES)
+
+
+def is_forbidden_dylib(dep: str) -> bool:
+    """Return True if *dep* points to a non-portable Homebrew or /usr/local path."""
+    return dep.startswith(FORBIDDEN_DYLIB_PREFIXES)
+
+
+def is_non_system_dylib(dep: str) -> bool:
+    """Return True if *dep* requires relocation into engine/lib/."""
+    if is_system_dylib(dep):
+        return False
+    return (
+        dep.startswith(FORBIDDEN_DYLIB_PREFIXES)
+        or dep.startswith("@rpath/")
+        or dep.startswith("@loader_path/")
+        or dep.startswith("@executable_path/")
+        or dep.startswith("/")
+    )
+
+
+def _resolve_dylib_path(
+    dep: str,
+    referencing_src: Path,
+    main_src: Path,
+    rpaths: list[str],
+    extra_search_dirs: tuple[Path, ...] = (),
+) -> Path | None:
+    """Locate the real on-disk file for a non-system Mach-O dependency."""
+    if dep.startswith("/"):
+        candidate = Path(dep)
+        return candidate if candidate.is_file() else None
+
+    if dep.startswith("@loader_path/"):
+        rel = dep.removeprefix("@loader_path/")
+        candidate = referencing_src.parent / rel
+        return candidate if candidate.is_file() else None
+
+    if dep.startswith("@executable_path/"):
+        rel = dep.removeprefix("@executable_path/")
+        candidate = main_src.parent / rel
+        return candidate if candidate.is_file() else None
+
+    if dep.startswith("@rpath/"):
+        rel = dep.removeprefix("@rpath/")
+        search_dirs: list[Path] = []
+        for rpath in rpaths:
+            if rpath.startswith("@loader_path"):
+                suffix = rpath.removeprefix("@loader_path").lstrip("/")
+                search_dirs.append(referencing_src.parent / suffix)
+            elif rpath.startswith("@executable_path"):
+                suffix = rpath.removeprefix("@executable_path").lstrip("/")
+                search_dirs.append(main_src.parent / suffix)
+            elif rpath.startswith("/"):
+                search_dirs.append(Path(rpath))
+        search_dirs.extend(
+            [
+                referencing_src.parent,
+                main_src.parent,
+                main_src.parent.parent / "lib",
+                *extra_search_dirs,
+                Path("/opt/homebrew/lib"),
+                Path("/usr/local/lib"),
+            ]
+        )
+        for directory in search_dirs:
+            candidate = directory / rel
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def verify_macho_no_forbidden_dylibs(
+    macho_paths: list[Path],
+    *,
+    run_cmd: Callable[[list[str]], str] | None = None,
+) -> None:
+    """Inspect Mach-O binaries with `otool -L` and fail loudly on non-portable dylibs."""
+    runner = run_cmd or _run
+    violations: list[str] = []
+    for macho in macho_paths:
+        output = runner(["otool", "-L", str(macho)])
+        for dep in parse_otool_l(output):
+            if is_system_dylib(dep):
+                continue
+            if is_forbidden_dylib(dep):
+                violations.append(f"{macho.name} -> {dep} (forbidden non-portable host path)")
+            elif dep.startswith("@rpath/"):
+                violations.append(f"{macho.name} -> {dep} (unresolved @rpath reference)")
+            elif dep.startswith("/"):
+                violations.append(f"{macho.name} -> {dep} (non-system absolute dylib path)")
+            elif dep.startswith("@loader_path/"):
+                rel = dep.removeprefix("@loader_path/")
+                resolved = (macho.parent / rel).resolve()
+                if not resolved.is_file():
+                    violations.append(
+                        f"{macho.name} -> {dep} (relocated target missing at {resolved})"
+                    )
+    if violations:
+        joined = "; ".join(violations)
+        raise BundleError(
+            f"FFmpeg/ffprobe portability verification failed with forbidden or broken dylib references: {joined}"
+        )
+
+
+def relocate_or_verify_ffmpeg_binary(
+    src: Path,
+    dst_bin: Path,
+    lib_dir: Path,
+    *,
+    run_cmd: Callable[[list[str]], str] | None = None,
+    is_macos: bool | None = None,
+) -> list[Path]:
+    """Copy a media binary into *dst_bin*, relocate transitive macOS dylibs into *lib_dir*, and verify."""
+    if not src.is_file():
+        raise BundleError(f"FFmpeg/ffprobe binary not found: {src}")
+
+    resolved_src = src.resolve()
+    dst_bin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(resolved_src, dst_bin)
+    dst_bin.chmod(0o755)
+
+    macos = (platform.system() == "Darwin") if is_macos is None else is_macos
+    if not macos:
+        return []
+
+    runner = run_cmd or _run
+    rel_lib_prefix = Path(os.path.relpath(lib_dir, dst_bin.parent)).as_posix()
+
+    # Track copied libraries by filename to prevent duplicate copies / cycles.
+    copied_libs: dict[str, Path] = {}
+    modified_machos: list[Path] = []
+    queue: deque[tuple[Path, Path, bool]] = deque([(resolved_src, dst_bin, True)])
+
+    while queue:
+        src_macho, dst_macho, is_main = queue.popleft()
+        otool_out = runner(["otool", "-L", str(dst_macho)])
+        deps = parse_otool_l(otool_out)
+
+        rpaths: list[str] = []
+        if any(dep.startswith("@rpath/") for dep in deps):
+            try:
+                rpaths = parse_otool_rpaths(runner(["otool", "-l", str(src_macho)]))
+            except subprocess.SubprocessError:
+                rpaths = []
+
+        changed = False
+        if not is_main:
+            runner(["install_name_tool", "-id", f"@loader_path/{dst_macho.name}", str(dst_macho)])
+            changed = True
+
+        for dep in deps:
+            if is_system_dylib(dep):
+                continue
+            # On dylibs, `otool -L` includes the dylib's own install name ID as an entry.
+            if not is_main and Path(dep).name in {dst_macho.name, src_macho.name}:
+                continue
+            if not is_non_system_dylib(dep):
+                continue
+
+            dep_name = Path(dep).name
+            if not dep_name:
+                raise BundleError(f"Malformed dylib reference {dep!r} in {src_macho}")
+
+            target_lib = lib_dir / dep_name
+            if dep_name not in copied_libs:
+                if target_lib.is_file():
+                    copied_libs[dep_name] = target_lib
+                else:
+                    resolved_dep = _resolve_dylib_path(
+                        dep,
+                        src_macho,
+                        resolved_src,
+                        rpaths,
+                        extra_search_dirs=(lib_dir,),
+                    )
+                    if resolved_dep is None:
+                        raise BundleError(
+                            f"Cannot resolve non-system dylib {dep!r} referenced by {src_macho}"
+                        )
+                    lib_dir.mkdir(parents=True, exist_ok=True)
+                    real_dep = resolved_dep.resolve()
+                    shutil.copy2(real_dep, target_lib)
+                    target_lib.chmod(0o755)
+                    copied_libs[dep_name] = target_lib
+                    queue.append((real_dep, target_lib, False))
+
+            new_ref = (
+                f"@loader_path/{rel_lib_prefix}/{dep_name}"
+                if is_main
+                else f"@loader_path/{dep_name}"
+            )
+            if dep != new_ref:
+                runner(["install_name_tool", "-change", dep, new_ref, str(dst_macho)])
+                changed = True
+
+        if changed:
+            modified_machos.append(dst_macho)
+
+    for macho in modified_machos:
+        runner(["codesign", "--force", "--sign", "-", str(macho)])
+
+    relocated = [copied_libs[name] for name in sorted(copied_libs)]
+    verify_macho_no_forbidden_dylibs([dst_bin, *relocated], run_cmd=runner)
+    return relocated
+
+
 def _write_launchers(stage: Path) -> None:
     (stage / "launcher.py").write_text(LAUNCHER_SOURCE)
     launcher = stage / "hawavoclean-engine"
@@ -179,7 +437,13 @@ def _write_launchers(stage: Path) -> None:
     launcher.chmod(0o755)
 
 
-def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
+def build_bundle(
+    wheel: Path,
+    output: Path,
+    python_spec: str,
+    *,
+    allow_missing_ffmpeg: bool = False,
+) -> None:
     wheel = wheel.resolve()
     output = output.resolve()
     if output.exists():
@@ -189,6 +453,7 @@ def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise BundleError("Resolve v3.3 engine bundles are qualified only on Apple silicon macOS")
 
+    release_version = _load_release_version()
     provenance = _wheel_provenance(wheel)
     revision = _run(["git", "rev-parse", "HEAD"])
     dirty = _run(["git", "status", "--porcelain", "--untracked-files=normal"])
@@ -271,21 +536,26 @@ def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
         # self-contained runtime. It is covered by ENGINE-SHA256SUMS below.
         shutil.copy2(ROOT / "THIRD_PARTY_LICENSES.md", stage / "THIRD_PARTY_LICENSES.md")
 
-        # Bundle pinned FFmpeg and ffprobe binaries into engine bin/
+        # Bundle and relocate FFmpeg and ffprobe binaries into engine bin/ + lib/
         bin_dir = stage / "bin"
+        lib_dir = stage / "lib"
         bin_dir.mkdir(parents=True, exist_ok=True)
         for tool_name in ("ffmpeg", "ffprobe"):
             tool_path = shutil.which(tool_name)
-            if tool_path:
-                dest_tool = bin_dir / tool_name
-                shutil.copy2(tool_path, dest_tool)
-                dest_tool.chmod(0o755)
+            if not tool_path:
+                if allow_missing_ffmpeg:
+                    continue
+                raise BundleError(
+                    f"Required media binary '{tool_name}' was not found on PATH. "
+                    "Install ffmpeg/ffprobe or pass --allow-missing-ffmpeg for non-release dev builds."
+                )
+            relocate_or_verify_ffmpeg_binary(Path(tool_path), bin_dir / tool_name, lib_dir)
 
         _write_launchers(stage)
         launcher = stage / "hawavoclean-engine"
 
         version_output = _run([str(launcher), "--version"], cwd=stage)
-        if version_output != "hawavoclean 3.3.0":
+        if version_output != f"hawavoclean {release_version}":
             raise BundleError(f"bundled engine reported unexpected version: {version_output}")
         _remove_bytecode(stage)
         distributions = sorted(
@@ -298,7 +568,10 @@ def build_bundle(wheel: Path, output: Path, python_spec: str) -> None:
         metadata_value = {
             "bundle_schema_version": 1,
             "artifact_type": "resolve-engine-directory",
-            "product_version": "3.3.0",
+            "product_version": release_version,
+            "version": release_version,
+            "launcher": "hawavoclean-engine",
+            "arch": "arm64",
             "source_revision": revision,
             "source_date_epoch": provenance["source_date_epoch"],
             "dependency_lock_sha256": lock_sha,
@@ -326,9 +599,19 @@ def main() -> int:
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--python", default="3.11")
+    parser.add_argument(
+        "--allow-missing-ffmpeg",
+        action="store_true",
+        help="Allow building without ffmpeg/ffprobe on PATH (non-release dev builds only).",
+    )
     args = parser.parse_args()
     try:
-        build_bundle(args.wheel, args.output, args.python)
+        build_bundle(
+            args.wheel,
+            args.output,
+            args.python,
+            allow_missing_ffmpeg=args.allow_missing_ffmpeg,
+        )
     except (BundleError, OSError, subprocess.SubprocessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

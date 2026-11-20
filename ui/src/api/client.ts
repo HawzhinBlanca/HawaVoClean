@@ -17,6 +17,9 @@ import type {
   JobStage,
   JobState,
   JobStatus,
+  ModelInstallResponseV1,
+  ModelsResponseV1,
+  ModelStatusV1,
   PeaksWindow,
   ProcessingRequestV1,
   Profile,
@@ -871,6 +874,93 @@ export class EngineClient {
       fHighHz: Number(raw.fHighHz ?? raw.f_high_hz ?? req.fHighHz),
       attenuationDb: Number(raw.attenuationDb ?? raw.attenuation_db ?? req.attenuationDb ?? 24),
       renderMs: Number(raw.renderMs ?? raw.render_ms ?? 0),
+    };
+  }
+
+  // ---- Hash-Verified Model Manager API (Wave E) -----------------------------
+
+  async getModels(signal?: AbortSignal): Promise<ModelsResponseV1> {
+    const raw = await this.json<Record<string, unknown>>('/api/v1/models', { method: 'GET' }, signal);
+    const models = Array.isArray(raw.models)
+      ? raw.models.map((item): ModelStatusV1 => {
+          const m = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+          return {
+            model_id: String(m.model_id ?? m.modelId ?? ''),
+            display_name: String(m.display_name ?? m.displayName ?? ''),
+            description: String(m.description ?? ''),
+            used_by: Array.isArray(m.used_by) ? m.used_by.map((u) => String(u)) : [],
+            license: String(m.license ?? ''),
+            expected_sha256: String(m.expected_sha256 ?? m.expectedSha256 ?? ''),
+            approx_size_mb: Number(m.approx_size_mb ?? m.approxSizeMb ?? 0),
+            bundled: Boolean(m.bundled),
+            downloadable: Boolean(m.downloadable),
+            installed: Boolean(m.installed),
+            verified: Boolean(m.verified),
+            size_bytes: Number(m.size_bytes ?? m.sizeBytes ?? 0),
+            ...(typeof m.path === 'string' || m.path === null ? { path: m.path } : {}),
+          };
+        })
+      : [];
+    return {
+      schema_version: 1,
+      models,
+    };
+  }
+
+  async installModel(modelId: string, signal?: AbortSignal): Promise<ModelInstallResponseV1> {
+    const raw = await this.json<Record<string, unknown>>(
+      `/api/v1/models/${encodeURIComponent(modelId)}/install`,
+      { method: 'POST' },
+      signal,
+    );
+    const resObj = (raw.result && typeof raw.result === 'object'
+      ? raw.result
+      : {}) as Record<string, unknown>;
+    const models = Array.isArray(raw.models)
+      ? raw.models.map((item): ModelStatusV1 => {
+          const m = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+          return {
+            model_id: String(m.model_id ?? m.modelId ?? ''),
+            display_name: String(m.display_name ?? m.displayName ?? ''),
+            description: String(m.description ?? ''),
+            used_by: Array.isArray(m.used_by) ? m.used_by.map((u) => String(u)) : [],
+            license: String(m.license ?? ''),
+            expected_sha256: String(m.expected_sha256 ?? m.expectedSha256 ?? ''),
+            approx_size_mb: Number(m.approx_size_mb ?? m.approxSizeMb ?? 0),
+            bundled: Boolean(m.bundled),
+            downloadable: Boolean(m.downloadable),
+            installed: Boolean(m.installed),
+            verified: Boolean(m.verified),
+            size_bytes: Number(m.size_bytes ?? m.sizeBytes ?? 0),
+            ...(typeof m.path === 'string' || m.path === null ? { path: m.path } : {}),
+          };
+        })
+      : [];
+    const capabilities = Array.isArray(raw.capabilities)
+      ? raw.capabilities.map((c: any) => ({
+          capability_id: c.capability_id ?? c.capabilityId,
+          available: Boolean(c.available),
+          maturity: c.maturity,
+          reason: c.reason ?? null,
+          manifest_sha256: c.manifest_sha256 ?? c.manifestSha256 ?? null,
+          providers: c.providers ?? [],
+        }))
+      : undefined;
+    return {
+      schema_version: 1,
+      ok: Boolean(raw.ok ?? true),
+      result: {
+        model_id: String(resObj.model_id ?? resObj.modelId ?? modelId),
+        installed: Boolean(resObj.installed),
+        verified: Boolean(resObj.verified),
+        sha256: String(resObj.sha256 ?? ''),
+        size_bytes: Number(resObj.size_bytes ?? resObj.sizeBytes ?? 0),
+        ...(typeof resObj.path === 'string' || resObj.path === null ? { path: resObj.path } : {}),
+        already_installed: Boolean(resObj.already_installed ?? resObj.alreadyInstalled ?? false),
+        message: String(resObj.message ?? ''),
+      },
+      models,
+      ...(capabilities !== undefined ? { capabilities } : {}),
     };
   }
 }

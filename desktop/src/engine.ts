@@ -5,7 +5,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-import type { EngineEndpoint } from './contracts.js';
+import { type EngineEndpoint, redactDiagnosticText } from './contracts.js';
 
 const READY_TIMEOUT_MS = 60_000;
 const SHUTDOWN_HTTP_TIMEOUT_MS = 1_000;
@@ -18,6 +18,14 @@ const SESSION_MAX_TTL_S = 60 * 60;
 const SESSION_RENEW_SKEW_MS = 60_000;
 const STDERR_TAIL_LIMIT = 80;
 const LINE_BUFFER_LIMIT = 65_536;
+const DEFAULT_MAX_RESTART_ATTEMPTS = 3;
+const DEFAULT_RESTART_BASE_DELAY_MS = 250;
+const DEFAULT_HEALTHY_RESET_MS = 30_000;
+const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const SHA256_LINE_PATTERN = /^([0-9a-fA-F]{64})(?:  | \*)(.+)$/;
+
+export const ENGINE_LOG_MAX_BYTES = 5 * 1024 * 1024;
+export const ENGINE_LOG_MAX_ROTATIONS = 3;
 
 export type EngineSpec = Readonly<{
   executable: string;
@@ -44,6 +52,92 @@ export type NativeSourceRegistration = Readonly<{
   sourceId: string;
   path: string;
 }>;
+
+export type EngineIntegrityResult = Readonly<{
+  valid: boolean;
+  manifestSha256: string | null;
+  verifiedFiles?: number;
+  error?: string;
+}>;
+
+export type EngineBrokerOptions = Readonly<{
+  maxRestartAttempts?: number;
+  restartBaseDelayMs?: number;
+  healthyResetMs?: number;
+  logMaxBytes?: number;
+  logMaxRotations?: number;
+  onPhaseChange?: (phase: EngineBrokerPhase) => void;
+}>;
+
+/** Bounded, redacted, rotating log writer for desktop engine diagnostics. */
+export class RotatingFileLogger {
+  readonly #logPath: string;
+  readonly #maxBytes: number;
+  readonly #maxRotations: number;
+
+  constructor(
+    logPath: string,
+    maxBytes: number = ENGINE_LOG_MAX_BYTES,
+    maxRotations: number = ENGINE_LOG_MAX_ROTATIONS,
+  ) {
+    this.#logPath = logPath;
+    this.#maxBytes = Math.max(256, Math.floor(maxBytes));
+    this.#maxRotations = Math.max(1, Math.floor(maxRotations));
+  }
+
+  get logPath(): string {
+    return this.#logPath;
+  }
+
+  append(rawLine: string): void {
+    const trimmed = rawLine.replace(/[\r\n]+/g, ' ').slice(0, 4096).trim();
+    if (!trimmed) return;
+    const entry = `[${new Date().toISOString()}] ${redactDiagnosticText(trimmed)}\n`;
+    const entryBytes = Buffer.byteLength(entry, 'utf8');
+    try {
+      fs.mkdirSync(path.dirname(this.#logPath), { recursive: true, mode: 0o700 });
+      if (fs.existsSync(this.#logPath)) {
+        const size = fs.statSync(this.#logPath).size;
+        if (size > 0 && size + entryBytes > this.#maxBytes) {
+          this.#rotate();
+        }
+      }
+      fs.appendFileSync(this.#logPath, entry, { encoding: 'utf8', mode: 0o600 });
+      try {
+        fs.chmodSync(this.#logPath, 0o600);
+      } catch {
+        // Best-effort on platforms without POSIX mode bits.
+      }
+    } catch {
+      // Logging must never crash the desktop host.
+    }
+  }
+
+  readRecentLines(maxLines: number = 200): string[] {
+    if (!fs.existsSync(this.#logPath)) return [];
+    try {
+      const content = fs.readFileSync(this.#logPath, 'utf8');
+      const lines = content.split(/\r?\n/).filter(Boolean);
+      return lines.slice(-Math.max(1, maxLines));
+    } catch {
+      return [];
+    }
+  }
+
+  #rotate(): void {
+    for (let index = this.#maxRotations; index >= 1; index -= 1) {
+      const current = `${this.#logPath}.${index}`;
+      if (index === this.#maxRotations) {
+        if (fs.existsSync(current)) fs.unlinkSync(current);
+      } else if (fs.existsSync(current)) {
+        fs.renameSync(current, `${this.#logPath}.${index + 1}`);
+      }
+    }
+    if (fs.existsSync(this.#logPath)) {
+      fs.renameSync(this.#logPath, `${this.#logPath}.1`);
+    }
+  }
+}
 
 export function engineSessionNeedsRenewal(
   capability: EngineSessionCapability | null,
@@ -268,11 +362,47 @@ export function parseDevelopmentCommand(raw: string | undefined): readonly strin
   return value;
 }
 
+function isMatchingManifestPlatform(manifestPlatform: unknown, hostPlatform: NodeJS.Platform): boolean {
+  if (typeof manifestPlatform !== 'string') return false;
+  if (hostPlatform === 'darwin') {
+    return (
+      manifestPlatform === 'darwin' ||
+      manifestPlatform === 'macos-arm64' ||
+      manifestPlatform === 'darwin-arm64'
+    );
+  }
+  if (hostPlatform === 'win32') {
+    return (
+      manifestPlatform === 'win32' ||
+      manifestPlatform === 'win32-x64' ||
+      manifestPlatform === 'windows-x64'
+    );
+  }
+  if (hostPlatform === 'linux') {
+    return (
+      manifestPlatform === 'linux' ||
+      manifestPlatform === 'linux-x64' ||
+      manifestPlatform === 'linux-arm64'
+    );
+  }
+  return manifestPlatform === hostPlatform;
+}
+
+function normalizeSafeChecksumRelativePath(rawRel: string): string | null {
+  if (!rawRel || rawRel.includes('\u0000') || rawRel.includes('\\')) return null;
+  if (rawRel.startsWith('/') || /^[A-Za-z]:/.test(rawRel) || path.isAbsolute(rawRel)) return null;
+  const trimmed = rawRel.startsWith('./') ? rawRel.slice(2) : rawRel;
+  if (!trimmed) return null;
+  const parts = trimmed.split('/');
+  if (parts.some((part) => part === '' || part === '.' || part === '..')) return null;
+  return parts.join('/');
+}
+
 export function verifyBundledEngineIntegrity(
   engineDir: string,
   platform: NodeJS.Platform,
-): { valid: boolean; manifestSha256: string | null; error?: string } {
-  const executable = platform === 'win32' ? 'hawavoclean-engine.exe' : 'hawavoclean-engine';
+): EngineIntegrityResult {
+  const executable = executableName(platform);
   const launcher = path.join(engineDir, executable);
   const placeholder = path.join(engineDir, 'README.txt');
   if (fs.existsSync(placeholder)) {
@@ -291,8 +421,138 @@ export function verifyBundledEngineIntegrity(
     return { valid: false, manifestSha256: null, error: 'Engine manifest or checksum inventory missing' };
   }
   try {
-    const manifestDigest = crypto.createHash('sha256').update(fs.readFileSync(manifestPath)).digest('hex');
-    return { valid: true, manifestSha256: manifestDigest };
+    const realEngineDir = fs.realpathSync(engineDir);
+    if (!fs.lstatSync(launcher).isFile()) {
+      return { valid: false, manifestSha256: null, error: `Engine launcher is not a regular file: ${launcher}` };
+    }
+    if (!fs.lstatSync(manifestPath).isFile() || !fs.lstatSync(checksumsPath).isFile()) {
+      return { valid: false, manifestSha256: null, error: 'Engine manifest or checksums is not a regular file' };
+    }
+
+    const manifestBytes = fs.readFileSync(manifestPath);
+    const manifestDigest = crypto.createHash('sha256').update(manifestBytes).digest('hex');
+
+    let parsedManifest: unknown;
+    try {
+      parsedManifest = JSON.parse(manifestBytes.toString('utf8')) as unknown;
+    } catch {
+      return { valid: false, manifestSha256: null, error: 'ENGINE-MANIFEST.json is not valid JSON' };
+    }
+    if (typeof parsedManifest !== 'object' || parsedManifest === null || Array.isArray(parsedManifest)) {
+      return { valid: false, manifestSha256: null, error: 'ENGINE-MANIFEST.json must be a JSON object' };
+    }
+    const manifest = parsedManifest as Record<string, unknown>;
+
+    const versionField = typeof manifest.version === 'string' ? manifest.version : null;
+    const productVersionField = typeof manifest.product_version === 'string' ? manifest.product_version : null;
+    const effectiveVersion = versionField ?? productVersionField;
+    if (effectiveVersion === null || !SEMVER_PATTERN.test(effectiveVersion)) {
+      return { valid: false, manifestSha256: null, error: 'ENGINE-MANIFEST.json has missing or invalid version' };
+    }
+    if (versionField !== null && productVersionField !== null && versionField !== productVersionField) {
+      return {
+        valid: false,
+        manifestSha256: null,
+        error: 'ENGINE-MANIFEST.json version and product_version disagree',
+      };
+    }
+    if (typeof manifest.launcher !== 'string' || manifest.launcher !== executable) {
+      return {
+        valid: false,
+        manifestSha256: null,
+        error: `ENGINE-MANIFEST.json launcher mismatch: expected ${executable}`,
+      };
+    }
+    if (!isMatchingManifestPlatform(manifest.platform, platform)) {
+      return {
+        valid: false,
+        manifestSha256: null,
+        error: `ENGINE-MANIFEST.json platform mismatch for host ${platform}`,
+      };
+    }
+
+    const lines = fs
+      .readFileSync(checksumsPath, 'utf8')
+      .split(/\r?\n/)
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) {
+      return { valid: false, manifestSha256: null, error: 'ENGINE-SHA256SUMS is empty' };
+    }
+
+    const verifiedPaths = new Set<string>();
+    for (const line of lines) {
+      const match = SHA256_LINE_PATTERN.exec(line);
+      if (!match) {
+        return { valid: false, manifestSha256: null, error: 'Malformed ENGINE-SHA256SUMS entry' };
+      }
+      const expectedHash = match[1]!.toLowerCase();
+      const rawRel = match[2]!;
+      const safeRel = normalizeSafeChecksumRelativePath(rawRel);
+      if (safeRel === null) {
+        return {
+          valid: false,
+          manifestSha256: null,
+          error: `Unsafe or traversal path in ENGINE-SHA256SUMS: ${rawRel}`,
+        };
+      }
+      if (verifiedPaths.has(safeRel)) {
+        return {
+          valid: false,
+          manifestSha256: null,
+          error: `Duplicate entry in ENGINE-SHA256SUMS: ${safeRel}`,
+        };
+      }
+      const candidatePath = path.resolve(realEngineDir, safeRel);
+      if (candidatePath !== realEngineDir && !candidatePath.startsWith(realEngineDir + path.sep)) {
+        return {
+          valid: false,
+          manifestSha256: null,
+          error: `Path escapes engine root in ENGINE-SHA256SUMS: ${rawRel}`,
+        };
+      }
+      if (!fs.existsSync(candidatePath)) {
+        return {
+          valid: false,
+          manifestSha256: null,
+          error: `Checksummed engine file is missing: ${safeRel}`,
+        };
+      }
+      const stats = fs.lstatSync(candidatePath);
+      if (!stats.isFile()) {
+        return {
+          valid: false,
+          manifestSha256: null,
+          error: `Checksummed engine entry is not a regular file: ${safeRel}`,
+        };
+      }
+      const realTarget = fs.realpathSync(candidatePath);
+      if (!realTarget.startsWith(realEngineDir + path.sep)) {
+        return {
+          valid: false,
+          manifestSha256: null,
+          error: `Checksummed engine file resolves outside engine root: ${safeRel}`,
+        };
+      }
+      const actualHash = crypto.createHash('sha256').update(fs.readFileSync(candidatePath)).digest('hex');
+      if (actualHash !== expectedHash) {
+        return {
+          valid: false,
+          manifestSha256: null,
+          error: `Engine checksum mismatch for ${safeRel}`,
+        };
+      }
+      verifiedPaths.add(safeRel);
+    }
+
+    if (!verifiedPaths.has(executable)) {
+      return {
+        valid: false,
+        manifestSha256: null,
+        error: `ENGINE-SHA256SUMS does not cover launcher ${executable}`,
+      };
+    }
+
+    return { valid: true, manifestSha256: manifestDigest, verifiedFiles: verifiedPaths.size };
   } catch (err) {
     return { valid: false, manifestSha256: null, error: String(err) };
   }
@@ -402,14 +662,22 @@ function forceKillWindowsTree(child: ChildProcess): Promise<void> {
   });
 }
 
-export type EngineBrokerPhase = 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
+export type EngineBrokerPhase =
+  | 'idle'
+  | 'starting'
+  | 'ready'
+  | 'restarting'
+  | 'stopping'
+  | 'stopped'
+  | 'failed';
 
 export const ALLOWED_ENGINE_BROKER_TRANSITIONS: Readonly<
   Record<EngineBrokerPhase, readonly EngineBrokerPhase[]>
 > = Object.freeze({
   idle: Object.freeze(['starting', 'stopping', 'stopped'] as const),
-  starting: Object.freeze(['ready', 'failed', 'stopping', 'stopped'] as const),
-  ready: Object.freeze(['stopping', 'stopped', 'failed'] as const),
+  starting: Object.freeze(['ready', 'restarting', 'failed', 'stopping', 'stopped'] as const),
+  ready: Object.freeze(['restarting', 'stopping', 'stopped', 'failed'] as const),
+  restarting: Object.freeze(['starting', 'stopping', 'stopped', 'failed'] as const),
   stopping: Object.freeze(['stopped'] as const),
   stopped: Object.freeze([] as const),
   failed: Object.freeze(['stopping', 'stopped'] as const),
@@ -485,6 +753,11 @@ export class EngineBroker {
   readonly #paths: EnginePaths;
   readonly #token = crypto.randomBytes(32).toString('hex');
   readonly #stderrTail: string[] = [];
+  readonly #logger: RotatingFileLogger;
+  readonly #maxRestartAttempts: number;
+  readonly #restartBaseDelayMs: number;
+  readonly #healthyResetMs: number;
+  readonly #onPhaseChange: ((phase: EngineBrokerPhase) => void) | undefined;
   #phase: EngineBrokerPhase = 'idle';
   #child: ChildProcess | null = null;
   #endpoint: EngineEndpoint | null = null;
@@ -497,9 +770,23 @@ export class EngineBroker {
   #stopPromise: Promise<void> | null = null;
   #rendezvousFile: string | null = null;
   #rendezvousPid: number | null = null;
+  #hasBeenReady = false;
+  #restartAttempts = 0;
+  #restartTimer: ReturnType<typeof setTimeout> | null = null;
+  #readyTimer: ReturnType<typeof setTimeout> | null = null;
+  #healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(paths: EnginePaths) {
+  constructor(paths: EnginePaths, options?: EngineBrokerOptions) {
     this.#paths = paths;
+    this.#maxRestartAttempts = options?.maxRestartAttempts ?? DEFAULT_MAX_RESTART_ATTEMPTS;
+    this.#restartBaseDelayMs = options?.restartBaseDelayMs ?? DEFAULT_RESTART_BASE_DELAY_MS;
+    this.#healthyResetMs = options?.healthyResetMs ?? DEFAULT_HEALTHY_RESET_MS;
+    this.#onPhaseChange = options?.onPhaseChange;
+    this.#logger = new RotatingFileLogger(
+      path.join(paths.userData, 'logs', 'engine.log'),
+      options?.logMaxBytes ?? ENGINE_LOG_MAX_BYTES,
+      options?.logMaxRotations ?? ENGINE_LOG_MAX_ROTATIONS,
+    );
   }
 
   get phase(): EngineBrokerPhase {
@@ -518,14 +805,40 @@ export class EngineBroker {
     return this.#child?.pid ?? null;
   }
 
+  get restartCount(): number {
+    return this.#restartAttempts;
+  }
+
+  get logPath(): string {
+    return this.#logger.logPath;
+  }
+
+  log(message: string): void {
+    this.#logger.append(message);
+  }
+
+  readRecentLogLines(maxLines: number = 200): string[] {
+    return this.#logger.readRecentLines(maxLines);
+  }
+
   start(): void {
     if (this.#phase !== 'idle') return;
-    this.#transition('starting');
+    this.#createReadyPromise();
+    this.#spawnEngine();
+  }
+
+  #createReadyPromise(): void {
     this.#readyPromise = new Promise<EngineEndpoint>((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
     });
     this.#readyPromise.catch(() => undefined);
+  }
+
+  #spawnEngine(): void {
+    if (this.#phase !== 'idle' && this.#phase !== 'restarting') return;
+    this.#transition('starting');
+    this.#clearReadyTimer();
 
     let spec: EngineSpec;
     try {
@@ -582,6 +895,10 @@ export class EngineBroker {
       return;
     }
     this.#child = child;
+    this.#logger.append(
+      `[broker] spawned engine pid=${String(child.pid ?? 'unknown')} attempt=${String(this.#restartAttempts)}`,
+    );
+
     // One-shot bootstrap channel: close it immediately so the secret is not
     // retained in argv, environment, renderer state, or an open IPC stream.
     child.stdin?.once('error', () => undefined);
@@ -590,6 +907,7 @@ export class EngineBroker {
     let stdoutBuffer = '';
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
+      if (this.#child !== child) return;
       stdoutBuffer += chunk;
       let newline = stdoutBuffer.indexOf('\n');
       while (newline >= 0) {
@@ -604,6 +922,7 @@ export class EngineBroker {
     let stderrBuffer = '';
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string) => {
+      if (this.#child !== child) return;
       stderrBuffer += chunk;
       let newline = stderrBuffer.indexOf('\n');
       while (newline >= 0) {
@@ -614,29 +933,70 @@ export class EngineBroker {
       if (stderrBuffer.length > LINE_BUFFER_LIMIT) stderrBuffer = stderrBuffer.slice(-LINE_BUFFER_LIMIT);
     });
 
-    child.once('error', (error) => this.#fail(new Error(`Engine process error: ${error.message}`)));
+    child.once('error', (error) => {
+      if (this.#child !== child) return;
+      this.#logger.append(`[broker] engine process error: ${error.message}`);
+      this.#fail(new Error(`Engine process error: ${error.message}`));
+    });
     child.once('exit', (code, signal) => {
+      if (this.#child !== child) return;
+      this.#clearReadyTimer();
+      this.#clearHealthyResetTimer();
       this.invalidateSession();
+      this.#endpoint = null;
+      this.#cleanupRendezvous();
+
+      const exitSummary = signal ?? `code ${String(code)}`;
       if (this.#phase === 'starting') {
-        this.#fail(new Error(`Engine exited before ready (${signal ?? `code ${String(code)}`}).`));
+        this.#logger.append(`[broker] engine exited before ready (${exitSummary})`);
+        if (this.#hasBeenReady) {
+          this.#handleUnexpectedCrash(exitSummary);
+        } else {
+          this.#fail(new Error(`Engine exited before ready (${exitSummary}).`));
+        }
       } else if (this.#phase === 'ready') {
-        this.#endpoint = null;
-        this.#cleanupRendezvous();
-        this.#transition('stopped');
+        this.#logger.append(`[broker] engine exited unexpectedly while ready (${exitSummary})`);
+        this.#handleUnexpectedCrash(exitSummary);
       }
     });
 
-    const timer = setTimeout(() => {
-      if (this.#phase === 'starting') {
-        this.#fail(new Error('Engine did not report ready within 60 seconds.'));
-        signalProcessTree(child, 'SIGTERM');
-      }
+    this.#readyTimer = setTimeout(() => {
+      if (this.#child !== child || this.#phase !== 'starting') return;
+      this.#logger.append('[broker] engine did not report ready within 60 seconds');
+      this.#fail(new Error('Engine did not report ready within 60 seconds.'));
+      signalProcessTree(child, 'SIGTERM');
     }, READY_TIMEOUT_MS);
-    timer.unref();
-    this.#readyPromise.then(
-      () => clearTimeout(timer),
-      () => clearTimeout(timer),
+    this.#readyTimer.unref();
+  }
+
+  #handleUnexpectedCrash(exitSummary: string): void {
+    if (this.#phase !== 'ready' && this.#phase !== 'starting') return;
+    if (this.#restartAttempts >= this.#maxRestartAttempts) {
+      const exhaustedError = new Error(
+        `Engine crashed repeatedly (${exitSummary}) and exceeded maximum restart attempts (${this.#maxRestartAttempts}).`,
+      );
+      this.#logger.append(`[broker] ${exhaustedError.message}`);
+      this.#fail(exhaustedError);
+      return;
+    }
+
+    this.#restartAttempts += 1;
+    const delayMs = this.#restartBaseDelayMs * 2 ** (this.#restartAttempts - 1);
+    const wasReady = this.#phase === 'ready';
+    this.#transition('restarting');
+    if (wasReady || this.#resolveReady === null) {
+      this.#createReadyPromise();
+    }
+    this.#logger.append(
+      `[broker] scheduling crash recovery attempt ${this.#restartAttempts}/${this.#maxRestartAttempts} in ${delayMs}ms`,
     );
+    this.#clearRestartTimer();
+    this.#restartTimer = setTimeout(() => {
+      this.#restartTimer = null;
+      if (this.#phase !== 'restarting') return;
+      this.#spawnEngine();
+    }, delayMs);
+    this.#restartTimer.unref();
   }
 
   async endpoint(): Promise<EngineEndpoint> {
@@ -697,9 +1057,12 @@ export class EngineBroker {
 
   async #performStop(): Promise<void> {
     if (this.#phase === 'stopped') return;
-    const wasStarting = this.#phase === 'starting';
+    this.#clearRestartTimer();
+    this.#clearReadyTimer();
+    this.#clearHealthyResetTimer();
+    const wasStartingOrRestarting = this.#phase === 'starting' || this.#phase === 'restarting';
     if (this.#phase !== 'stopping') this.#transition('stopping');
-    if (wasStarting || this.#rejectReady !== null) {
+    if (wasStartingOrRestarting || this.#rejectReady !== null) {
       const rejectReady = this.#rejectReady;
       this.#resolveReady = null;
       this.#rejectReady = null;
@@ -733,6 +1096,7 @@ export class EngineBroker {
       }
     }
     if (this.#phase === 'stopping') this.#transition('stopped');
+    this.#logger.append('[broker] engine stopped cleanly');
   }
 
   #handleStdoutLine(line: string): void {
@@ -748,15 +1112,53 @@ export class EngineBroker {
         this.#pushStderr(`[stdout] ${line}`);
         return;
       }
+      this.#clearReadyTimer();
       this.#endpoint = rendererEngineEndpoint(port);
+      this.#hasBeenReady = true;
       this.#transition('ready');
       this.#writeRendezvous(port);
+      this.#logger.append(`[broker] engine ready on loopback port ${String(port)}`);
+      this.#armHealthyResetTimer();
       const resolveReady = this.#resolveReady;
       this.#resolveReady = null;
       this.#rejectReady = null;
       resolveReady?.(this.#endpoint);
     } catch {
       this.#pushStderr(`[stdout] ${line}`);
+    }
+  }
+
+  #armHealthyResetTimer(): void {
+    this.#clearHealthyResetTimer();
+    if (this.#restartAttempts === 0) return;
+    this.#healthyResetTimer = setTimeout(() => {
+      this.#healthyResetTimer = null;
+      if (this.#phase === 'ready') {
+        this.#restartAttempts = 0;
+        this.#logger.append('[broker] engine remained healthy; reset crash restart counter');
+      }
+    }, this.#healthyResetMs);
+    this.#healthyResetTimer.unref();
+  }
+
+  #clearRestartTimer(): void {
+    if (this.#restartTimer !== null) {
+      clearTimeout(this.#restartTimer);
+      this.#restartTimer = null;
+    }
+  }
+
+  #clearReadyTimer(): void {
+    if (this.#readyTimer !== null) {
+      clearTimeout(this.#readyTimer);
+      this.#readyTimer = null;
+    }
+  }
+
+  #clearHealthyResetTimer(): void {
+    if (this.#healthyResetTimer !== null) {
+      clearTimeout(this.#healthyResetTimer);
+      this.#healthyResetTimer = null;
     }
   }
 
@@ -795,10 +1197,12 @@ export class EngineBroker {
 
   #pushStderr(line: string): void {
     if (!line) return;
-    this.#stderrTail.push(line.slice(0, 4096));
+    const bounded = line.slice(0, 4096);
+    this.#stderrTail.push(bounded);
     if (this.#stderrTail.length > STDERR_TAIL_LIMIT) {
       this.#stderrTail.splice(0, this.#stderrTail.length - STDERR_TAIL_LIMIT);
     }
+    this.#logger.append(bounded);
   }
 
   #transition(next: EngineBrokerPhase): void {
@@ -807,10 +1211,18 @@ export class EngineBroker {
       throw new Error(`Illegal engine broker transition: ${this.#phase} -> ${next}`);
     }
     this.#phase = next;
+    try {
+      this.#onPhaseChange?.(next);
+    } catch {
+      // Phase observer errors must not corrupt broker transitions.
+    }
   }
 
   #fail(error: Error): void {
-    if (this.#phase !== 'starting') return;
+    if (this.#phase !== 'starting' && this.#phase !== 'ready' && this.#phase !== 'restarting') return;
+    this.#clearRestartTimer();
+    this.#clearReadyTimer();
+    this.#clearHealthyResetTimer();
     this.#failure = error;
     this.#transition('failed');
     const rejectReady = this.#rejectReady;

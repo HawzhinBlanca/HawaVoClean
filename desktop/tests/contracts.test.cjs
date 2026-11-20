@@ -68,7 +68,9 @@ test('IPC surface is fixed, unique, and contains no generic transport', () => {
   const values = Object.values(IPC);
   assert.equal(new Set(values).size, values.length);
   assert.deepEqual(values.sort(), [
+    'hawa:app:get-preferences',
     'hawa:app:info',
+    'hawa:app:set-preferences',
     'hawa:engine:endpoint',
     'hawa:files:choose-export',
     'hawa:files:pick-audio',
@@ -90,9 +92,16 @@ test('IPC surface is fixed, unique, and contains no generic transport', () => {
 test('packaged media chooser advertises only the production decode contract', () => {
   assert.deepEqual([...AUDIO_EXTENSIONS], [
     'wav', 'wave', 'aif', 'aiff', 'aifc', 'flac', 'mp3', 'm4a', 'mp4',
+    'mov', 'aac', 'ogg', 'opus', 'webm', 'mxf',
   ]);
   assert.equal(requireSupportedMediaPath('/tmp/take.MP4', 'source'), '/tmp/take.MP4');
-  for (const extension of ['mov', 'aac', 'ogg', 'opus', 'caf', 'mkv', 'webm']) {
+  for (const extension of ['mov', 'aac', 'ogg', 'opus', 'webm', 'mxf']) {
+    assert.equal(
+      requireSupportedMediaPath(`/tmp/take.${extension}`, 'source'),
+      `/tmp/take.${extension}`,
+    );
+  }
+  for (const extension of ['caf', 'mkv', 'txt', 'exe', 'sh', 'html']) {
     assert.throws(
       () => requireSupportedMediaPath(`/tmp/take.${extension}`, 'source'),
       /supported audio or video extension/,
@@ -564,11 +573,26 @@ test('bundled engine integrity verification strictly rejects placeholders and re
     assert.equal(res2.valid, false);
     assert.match(res2.error, /manifest or checksum/);
 
-    // 3. Complete payload
-    fs.writeFileSync(manifest, JSON.stringify({ product: 'hawavoclean' }));
-    fs.writeFileSync(checksums, 'hash  ./hawavoclean-engine\n');
+    // 3. Complete payload with valid manifest and real SHA-256 sums
+    const crypto = require('node:crypto');
+    const sha256File = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        product: 'hawavoclean',
+        version: '3.3.0',
+        product_version: '3.3.0',
+        launcher: 'hawavoclean-engine',
+        platform: 'macos-arm64',
+      }),
+    );
+    fs.writeFileSync(
+      checksums,
+      `${sha256File(launcher)}  ./hawavoclean-engine\n${sha256File(manifest)}  ./ENGINE-MANIFEST.json\n`,
+    );
     const res3 = verifyBundledEngineIntegrity(temp, 'darwin');
     assert.equal(res3.valid, true);
+    assert.equal(res3.verifiedFiles, 2);
     assert.ok(res3.manifestSha256);
 
     // 4. Injected placeholder file must be rejected fail-closed

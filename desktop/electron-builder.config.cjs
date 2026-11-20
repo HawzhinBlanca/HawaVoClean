@@ -65,6 +65,15 @@ module.exports = {
   publish: null,
   beforePack: './scripts/before-pack.cjs',
   afterPack: './scripts/after-pack.cjs',
+  fileAssociations: [
+    { ext: 'wav', name: 'WAV Audio', description: 'Waveform Audio File', role: 'Editor' },
+    { ext: 'm4a', name: 'M4A Audio', description: 'MPEG-4 Audio File', role: 'Editor' },
+    { ext: 'mp3', name: 'MP3 Audio', description: 'MP3 Audio File', role: 'Editor' },
+    { ext: 'flac', name: 'FLAC Audio', description: 'Free Lossless Audio Codec', role: 'Editor' },
+    { ext: 'aiff', name: 'AIFF Audio', description: 'Audio Interchange File Format', role: 'Editor' },
+    { ext: 'mp4', name: 'MP4 Media', description: 'MPEG-4 Media File', role: 'Editor' },
+    { ext: 'mov', name: 'QuickTime Movie', description: 'QuickTime Movie File', role: 'Editor' },
+  ],
   mac: {
     icon: 'build/icon.icns',
     target: [

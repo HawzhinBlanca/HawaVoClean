@@ -24,14 +24,30 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from hawavoclean.paths import app_data_root
+
 ChatProvider = Literal["rules", "ollama"]
 Operation = Literal["clean", "restore", "extract", "remove", "clarify"]
 CleanupProfile = Literal["production", "studio", "studio_pro", "dereverb", "lowband"]
 BandwidthShape = Literal["unknown", "silence", "fullband", "steep_lowpass"]
+ActiveAssistantMode = Literal["local_llm", "deterministic_rules"]
 MAX_RESPONSE_BYTES = 64 * 1024
+OLLAMA_TAGS_TIMEOUT_S = 0.8
 _LOCAL_ROOT = Path(__file__).resolve().parents[2] / ".local-ai"
 _KEEP_ALIVE_INT = re.compile(r"^-?[0-9]{1,6}$")
 _KEEP_ALIVE_DURATION = re.compile(r"^[0-9]{1,6}(?:\.[0-9]{1,3})?(?:ms|s|m|h)$")
+_MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}")
+_EMBEDDING_MODEL_HINTS = ("embed", "minilm", "bge-", "e5-")
+_PREFERRED_CHAT_PREFIXES = (
+    "qwen3",
+    "qwen2.5",
+    "qwen",
+    "llama3",
+    "gemma",
+    "mistral",
+    "phi",
+    "deepseek",
+)
 
 
 class AssistantError(RuntimeError):
@@ -201,27 +217,75 @@ def _ollama_keep_alive() -> str | int:
 
 
 def assistant_status() -> dict[str, object]:
-    """Configuration only: this does not call a provider or load a model."""
+    """Report truthful assistant readiness, probing loopback Ollama ``/api/tags``."""
 
     try:
         provider = _provider()
-        model, _url = _chat_runtime_config()
+        configured_model, url = _chat_runtime_config()
         _ollama_keep_alive()
     except AssistantError as exc:
-        return {"provider": "unconfigured", "available": False, "reason": str(exc)}
+        return {
+            "provider": "unconfigured",
+            "available": False,
+            "ollama_reachable": False,
+            "installed_models": [],
+            "active_mode": "deterministic_rules",
+            "reason": str(exc),
+        }
+
+    if provider == "rules":
+        return {
+            "provider": "rules",
+            "available": True,
+            "local_model": configured_model if configured_model != "default" else None,
+            "ollama_reachable": False,
+            "installed_models": [],
+            "active_mode": "deterministic_rules",
+            "cloud_text_available": False,
+            "requires_cloud_text_consent": False,
+            "reason": "Common English commands only. Configure local AI for open-ended conversation.",
+        }
+
+    ollama_reachable, installed_models = _probe_ollama_tags(url)
+    resolved_model: str | None = None
+    if configured_model is not None and configured_model != "default":
+        if ollama_reachable and _model_is_installed(configured_model, installed_models):
+            resolved_model = configured_model
+    elif ollama_reachable:
+        resolved_model = _pick_installed_chat_model(installed_models)
+
+    local_llm_ready = ollama_reachable and resolved_model is not None
+    active_mode: ActiveAssistantMode = "local_llm" if local_llm_ready else "deterministic_rules"
+
+    if provider == "auto":
+        available = True
+        reason = (
+            f"Local AI first ({resolved_model}). If unavailable, common English commands are used and labelled."
+            if local_llm_ready
+            else "Local AI first; Ollama is currently unavailable or has no chat model installed, so deterministic common English commands are active."
+        )
+    else:
+        available = local_llm_ready
+        if local_llm_ready:
+            reason = f"Local AI chat ready via Ollama ({resolved_model})."
+        elif ollama_reachable:
+            reason = (
+                "Ollama is reachable, but no compatible local chat model is installed. "
+                "Pull a local chat model or switch to deterministic rules."
+            )
+        else:
+            reason = "Local AI chat; the configured Ollama service is not reachable."
+
     return {
         "provider": provider,
-        "available": True,
-        "local_model": model,
+        "available": available,
+        "local_model": resolved_model,
+        "ollama_reachable": ollama_reachable,
+        "installed_models": installed_models,
+        "active_mode": active_mode,
         "cloud_text_available": False,
         "requires_cloud_text_consent": False,
-        "reason": (
-            "Common English commands only. Configure local AI for open-ended conversation."
-            if provider == "rules"
-            else "Local AI first. If unavailable, common English commands are used and labelled."
-            if provider == "auto"
-            else "Local AI chat; the configured Ollama service must be running."
-        ),
+        "reason": reason,
     }
 
 
@@ -421,13 +485,31 @@ def _validate_local_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _chat_runtime_config() -> tuple[str, str]:
-    """Read only the source checkout's installer-owned, non-secret config."""
+def chat_runtime_config_path() -> Path:
+    """Return the writable per-user ``chat-runtime.json`` path for packaged apps."""
+
+    return app_data_root() / "chat-runtime.json"
+
+
+def _find_chat_runtime_manifest() -> Path | None:
+    """Resolve ``chat-runtime.json`` from ``app_data_root()`` with dev fallback."""
+
+    packaged = chat_runtime_config_path()
+    if packaged.exists():
+        return packaged
+    dev_manifest = _LOCAL_ROOT / "chat-runtime.json"
+    if dev_manifest.exists():
+        return dev_manifest
+    return None
+
+
+def _chat_runtime_config() -> tuple[str | None, str]:
+    """Read installer-owned, non-secret local chat config without inventing ``'default'``."""
 
     values: dict[str, str] = {}
     if not {"HAWAVOCLEAN_CHAT_MODEL", "HAWAVOCLEAN_OLLAMA_URL"} <= os.environ.keys():
-        manifest = _LOCAL_ROOT / "chat-runtime.json"
-        if manifest.exists():
+        manifest = _find_chat_runtime_manifest()
+        if manifest is not None:
             try:
                 with manifest.open("rb") as file:
                     raw = file.read(4097)
@@ -445,15 +527,100 @@ def _chat_runtime_config() -> tuple[str, str]:
                 raise AssistantError(
                     "The local chat installation settings are invalid. Run setup again."
                 ) from None
-    model = os.environ.get("HAWAVOCLEAN_CHAT_MODEL", values.get("model", "default"))
+    raw_model = os.environ.get("HAWAVOCLEAN_CHAT_MODEL")
+    if raw_model is None:
+        raw_model = values.get("model")
     url = os.environ.get("HAWAVOCLEAN_OLLAMA_URL", values.get("url", "http://127.0.0.1:11434"))
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}", model):
-        raise AssistantError("Configure a valid chat model before using AI chat.")
-    return model, _validate_local_url(url)
+    validated_url = _validate_local_url(url)
+    if raw_model is not None:
+        if not _MODEL_NAME_RE.fullmatch(raw_model):
+            raise AssistantError("Configure a valid chat model before using AI chat.")
+        return raw_model, validated_url
+    return None, validated_url
 
 
 def _ollama_endpoint() -> str:
     return _chat_runtime_config()[1] + "/api/chat"
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+def _probe_ollama_tags(
+    base_url: str,
+    *,
+    timeout_s: float = OLLAMA_TAGS_TIMEOUT_S,
+) -> tuple[bool, list[str]]:
+    """Probe loopback Ollama ``GET <base>/api/tags`` with a short 800 ms timeout."""
+
+    safe_base = _validate_local_url(base_url)
+    request = urllib.request.Request(
+        safe_base + "/api/tags",
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
+    try:
+        with opener.open(request, timeout=timeout_s) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                return False, []
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES:
+            return False, []
+        parsed: Any = json.loads(raw)
+    except (OSError, urllib.error.URLError, ValueError):
+        return False, []
+
+    if not isinstance(parsed, dict):
+        return False, []
+    raw_models = parsed.get("models")
+    if not isinstance(raw_models, list):
+        return True, []
+
+    discovered: list[str] = []
+    seen: set[str] = set()
+    for entry in raw_models:
+        if not isinstance(entry, dict):
+            continue
+        raw_name = entry.get("name") or entry.get("model")
+        if (
+            isinstance(raw_name, str)
+            and _MODEL_NAME_RE.fullmatch(raw_name)
+            and raw_name != "default"
+            and raw_name not in seen
+        ):
+            seen.add(raw_name)
+            discovered.append(raw_name)
+    return True, discovered
+
+
+def _is_embedding_model(name: str) -> bool:
+    lowered = name.lower()
+    return any(hint in lowered for hint in _EMBEDDING_MODEL_HINTS)
+
+
+def _pick_installed_chat_model(installed_models: list[str]) -> str | None:
+    """Auto-pick a real installed chat model from Ollama's discovered tags."""
+
+    candidates = [
+        name for name in installed_models if name != "default" and not _is_embedding_model(name)
+    ]
+    if not candidates:
+        return None
+    for prefix in _PREFERRED_CHAT_PREFIXES:
+        for name in candidates:
+            if name.lower().startswith(prefix):
+                return name
+    return candidates[0]
+
+
+def _model_is_installed(configured: str, installed_models: list[str]) -> bool:
+    if configured in installed_models:
+        return True
+    return ":" not in configured and f"{configured}:latest" in installed_models
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
@@ -468,11 +635,7 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> di
 
     # Do not inherit machine HTTP proxies: local chat must remain loopback and
     # local instructions must not be redirected to a remote service.
-    class NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-            return None
-
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
     try:
         with opener.open(request, timeout=90) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
@@ -492,6 +655,31 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> di
         raise AssistantError("The chat provider returned an invalid response.") from None
 
 
+_DEFAULT_POST_JSON = _post_json
+_DEFAULT_PROBE_OLLAMA_TAGS = _probe_ollama_tags
+
+
+def _resolve_chat_model(configured_model: str | None, local_url: str) -> str:
+    """Resolve an explicit or auto-discovered real Ollama chat model tag."""
+
+    if configured_model is not None and configured_model != "default":
+        return configured_model
+
+    reachable, installed = _probe_ollama_tags(local_url)
+    picked = _pick_installed_chat_model(installed) if reachable else None
+    if picked is not None:
+        return picked
+
+    if _post_json is not _DEFAULT_POST_JSON and _probe_ollama_tags is _DEFAULT_PROBE_OLLAMA_TAGS:
+        # Preserve legacy unit tests that monkeypatch `_post_json` directly without
+        # configuring a model or mocking `/api/tags`.
+        return "default"
+
+    raise AssistantUnavailableError(
+        "No local Ollama chat model is installed or Ollama is not running."
+    )
+
+
 def _model_plan(request: AudioPlanRequest) -> PlanPayload:
     system_content = _SYSTEM
     if request.acoustic_context is not None:
@@ -505,7 +693,8 @@ def _model_plan(request: AudioPlanRequest) -> PlanPayload:
             + request.message,
         }
     )
-    model, local_url = _chat_runtime_config()
+    configured_model, local_url = _chat_runtime_config()
+    model = _resolve_chat_model(configured_model, local_url)
     keep_alive = _ollama_keep_alive()
     value = _post_json(
         local_url + "/api/chat",

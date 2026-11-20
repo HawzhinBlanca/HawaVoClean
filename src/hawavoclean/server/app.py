@@ -2591,6 +2591,46 @@ def create_app(
     async def capabilities() -> dict[str, Any]:
         return capabilities_v1().model_dump(by_alias=True, mode="json", exclude_none=True)
 
+    @app.get("/api/v1/models")
+    async def list_v1_models() -> dict[str, Any]:
+        from hawavoclean.model_manager import list_models
+
+        statuses = await asyncio.to_thread(list_models)
+        return {
+            "schema_version": 1,
+            "models": [
+                status.to_dict(redact_path=_redact_capability_detail) for status in statuses
+            ],
+        }
+
+    @app.post("/api/v1/models/{model_id}/install")
+    async def install_v1_model(model_id: str) -> dict[str, Any]:
+        from hawavoclean import model_manager
+
+        try:
+            result = await asyncio.to_thread(model_manager.install_model, model_id)
+        except model_manager.UnknownModelError as exc:
+            raise ApiError(404, "not_found", str(exc)) from exc
+        except model_manager.ModelNotDownloadableError as exc:
+            raise ApiError(400, "bad_request", str(exc)) from exc
+        except model_manager.ModelHashMismatchError as exc:
+            raise ApiError(422, "integrity_error", str(exc)) from exc
+        except model_manager.ModelDownloadError as exc:
+            raise ApiError(502, "download_failed", str(exc)) from exc
+
+        statuses = await asyncio.to_thread(model_manager.list_models)
+        refreshed_caps = await asyncio.to_thread(capabilities_v1)
+        caps_payload = refreshed_caps.model_dump(by_alias=True, mode="json", exclude_none=True)
+        return {
+            "schema_version": 1,
+            "ok": True,
+            "result": result.to_dict(redact_path=_redact_capability_detail),
+            "models": [
+                status.to_dict(redact_path=_redact_capability_detail) for status in statuses
+            ],
+            "capabilities": caps_payload["capabilities"],
+        }
+
     @app.get("/api/v1/jobs")
     async def list_v1_jobs() -> dict[str, Any]:
         jobs = [
@@ -3215,7 +3255,7 @@ def create_app(
     async def audio_assistant_status() -> dict[str, Any]:
         from hawavoclean.assistant import assistant_status
 
-        return assistant_status()
+        return await asyncio.to_thread(assistant_status)
 
     # Planning only: no audio bytes, source paths, or processing authority are
     # passed to a language model. Execution still uses the closed job contract.

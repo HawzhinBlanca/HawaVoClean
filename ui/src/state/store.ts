@@ -382,6 +382,7 @@ export interface AppState {
   livePreviewEnabled: boolean;
   assistantDrawerOpen: boolean;
   batchDrawerOpen: boolean;
+  modelsDrawerOpen: boolean;
   activeGoalId: string | null;
   stageBlend: number;
   toasts: ToastItem[];
@@ -449,6 +450,7 @@ export interface AppState {
   setLivePreviewEnabled(enabled: boolean): void;
   setAssistantDrawerOpen(open: boolean): void;
   setBatchDrawerOpen(open: boolean): void;
+  setModelsDrawerOpen(open: boolean): void;
   setActiveGoalId(goalId: string | null): void;
   setStageBlend(blend: number): void;
   pushToast(text: string, kind?: ToastItem['kind'], durationMs?: number): void;
@@ -536,6 +538,7 @@ export const useStore = create<AppState>((set) => ({
   livePreviewEnabled: loadLivePreview(),
   assistantDrawerOpen: false,
   batchDrawerOpen: false,
+  modelsDrawerOpen: false,
   activeGoalId: null,
   stageBlend: 0,
   toasts: [],
@@ -725,6 +728,7 @@ export const useStore = create<AppState>((set) => ({
   },
   setAssistantDrawerOpen: (assistantDrawerOpen) => set({ assistantDrawerOpen }),
   setBatchDrawerOpen: (batchDrawerOpen) => set({ batchDrawerOpen }),
+  setModelsDrawerOpen: (modelsDrawerOpen) => set({ modelsDrawerOpen }),
   setActiveGoalId: (activeGoalId) => set({ activeGoalId }),
   setStageBlend: (blend) => set({ stageBlend: Math.min(1, Math.max(0, Number.isFinite(blend) ? blend : 0)) }),
   pushToast: (text, kind = 'info', durationMs = 4200) => {

@@ -7,7 +7,10 @@ import {
   dialog,
   ipcMain,
   type IpcMainInvokeEvent,
+  Menu,
+  type MenuItemConstructorOptions,
   protocol,
+  screen,
   session,
   shell,
 } from 'electron';
@@ -15,15 +18,23 @@ import {
 import {
   AUDIO_EXTENSIONS,
   type AppInfo,
+  extractExternalMediaPaths,
   IPC,
+  IPC_EVENTS,
+  loadUserPreferences,
+  MASTER_EXPORT_FILTERS,
   parseExportRequest,
+  RECORD_BUNDLE_EXPORT_FILTERS,
+  redactDiagnosticText,
   requireAbsolutePath,
   requireSupportedMediaPath,
   safeClearSessionStorage,
   safeSuggestedExportName,
+  saveUserPreferences,
   SESSION_PARTITION,
+  type WindowBounds,
 } from './contracts.js';
-import { EngineBroker } from './engine.js';
+import { EngineBroker, type NativeSourceRegistration } from './engine.js';
 import { packagedProofSelfTestAllowed } from './proof.js';
 import {
   APP_ENTRY_URL,
@@ -39,6 +50,9 @@ import {
 
 const APP_TITLE = 'HawaVoClean';
 const QUIT_DEADLINE_MS = 10_000;
+const RENDERER_CRASH_WINDOW_MS = 60_000;
+const MAX_RENDERER_CRASH_RELOADS = 3;
+const BOUNDS_SAVE_DEBOUNCE_MS = 300;
 const DEVTOOLS = !app.isPackaged && process.env.HAWAVOCLEAN_DESKTOP_DEVTOOLS === '1';
 const SELFTEST_REQUESTED = process.env.HAWAVOCLEAN_DESKTOP_SELFTEST === '1';
 const PACKAGED_PROOF_SELFTEST = packagedProofSelfTestAllowed(process.resourcesPath, app.isPackaged);
@@ -92,7 +106,10 @@ const broker = new EngineBroker({
 });
 
 let mainWindow: BrowserWindow | null = null;
+let mainWindowLoaded = false;
 let quitState: 'running' | 'stopping' | 'done' = 'running';
+const pendingExternalFiles: string[] = [];
+const rendererCrashTimestamps: number[] = [];
 
 function isTrustedIpcSender(event: IpcMainInvokeEvent): boolean {
   return isTrustedIpcSenderEvent(
@@ -121,10 +138,239 @@ function saveDialogFor(event: IpcMainInvokeEvent, options: Electron.SaveDialogOp
   return owner ? dialog.showSaveDialog(owner, options) : dialog.showSaveDialog(options);
 }
 
-function configureSession(): void {
+function resolveInitialWindowBounds(): { width: number; height: number; x?: number; y?: number } {
+  const fallback = { width: 1280, height: 820 };
+  if (SELFTEST) return fallback;
+  const prefs = loadUserPreferences(app.getPath('userData'));
+  const saved: WindowBounds | undefined = prefs.windowBounds;
+  if (!saved) return fallback;
+
+  const width = Math.max(960, saved.width);
+  const height = Math.max(640, saved.height);
+  if (saved.x === undefined || saved.y === undefined) {
+    return { width, height };
+  }
+  const visibleOnSomeDisplay = screen.getAllDisplays().some((display) => {
+    const area = display.workArea;
+    return (
+      saved.x! + width > area.x + 64 &&
+      saved.x! < area.x + area.width - 64 &&
+      saved.y! + height > area.y + 64 &&
+      saved.y! < area.y + area.height - 64
+    );
+  });
+  return visibleOnSomeDisplay ? { width, height, x: saved.x, y: saved.y } : { width, height };
+}
+
+function persistWindowBounds(window: BrowserWindow): void {
+  if (SELFTEST || window.isDestroyed() || window.isMinimized() || window.isFullScreen()) return;
+  try {
+    const bounds = window.getBounds();
+    saveUserPreferences(app.getPath('userData'), {
+      windowBounds: {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      },
+    });
+  } catch (error) {
+    broker.log(`[prefs] failed to persist window bounds: ${String(error)}`);
+  }
+}
+
+async function dispatchExternalMediaFile(rawFilePath: string): Promise<void> {
+  if (SELFTEST || quitState !== 'running') return;
+  let validatedPath: string;
+  try {
+    validatedPath = requireSupportedMediaPath(rawFilePath, 'openFile');
+  } catch (error) {
+    broker.log(`[open-file] ignored unsupported path: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  if (!fs.existsSync(validatedPath)) {
+    broker.log('[open-file] ignored missing file path.');
+    return;
+  }
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindowLoaded) {
+    if (!pendingExternalFiles.includes(validatedPath)) {
+      pendingExternalFiles.push(validatedPath);
+    }
+    return;
+  }
+  try {
+    const registered = await broker.registerNativeSource(validatedPath);
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.send(IPC_EVENTS.openFile, registered);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    broker.log(`[open-file] failed to register native source: ${message}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      dialog.showErrorBox('Could not open file', `HawaVoClean could not register the selected media file.\n\n${message}`);
+    }
+  }
+}
+
+function flushPendingExternalFiles(): void {
+  if (SELFTEST || !mainWindowLoaded || !mainWindow || mainWindow.isDestroyed()) return;
+  while (pendingExternalFiles.length > 0) {
+    const next = pendingExternalFiles.shift();
+    if (next) void dispatchExternalMediaFile(next);
+  }
+}
+
+async function openAudioViaMenu(): Promise<void> {
+  if (quitState !== 'running') return;
+  const target = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose audio or video files',
+    buttonLabel: 'Open',
+    properties: ['openFile', 'multiSelections', 'treatPackageAsDirectory'],
+    filters: [{ name: 'Audio and video', extensions: [...AUDIO_EXTENSIONS] }],
+  };
+  const result = target ? await dialog.showOpenDialog(target, options) : await dialog.showOpenDialog(options);
+  if (result.canceled || result.filePaths.length === 0) return;
+  for (const filePath of result.filePaths) {
+    await dispatchExternalMediaFile(filePath);
+  }
+}
+
+async function exportRedactedDiagnostics(): Promise<void> {
+  const target = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const defaultPath = path.join(app.getPath('documents'), `HawaVoClean-Diagnostics-${timestamp}.json`);
+  const options: Electron.SaveDialogOptions = {
+    title: 'Export Redacted Diagnostics',
+    buttonLabel: 'Export',
+    defaultPath,
+    filters: [
+      { name: 'JSON diagnostics', extensions: ['json'] },
+      { name: 'Text log', extensions: ['txt'] },
+    ],
+    properties: ['showOverwriteConfirmation', 'createDirectory'],
+  };
+  const result = target ? await dialog.showSaveDialog(target, options) : await dialog.showSaveDialog(options);
+  if (result.canceled || !result.filePath) return;
+
+  const recentLogLines = broker.readRecentLogLines(200).map((line) => redactDiagnosticText(line));
+  const stderrTail = broker.stderrTail.map((line) => redactDiagnosticText(line));
+  const payload = {
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    redacted: true,
+    app: {
+      name: app.getName(),
+      version: app.getVersion(),
+      locale: app.getLocale(),
+      platform: process.platform,
+      arch: process.arch,
+      packaged: app.isPackaged,
+    },
+    engine: {
+      phase: broker.phase,
+      restartCount: broker.restartCount,
+      recentLogLines,
+      stderrTail,
+    },
+  };
+  try {
+    fs.writeFileSync(result.filePath, JSON.stringify(payload, null, 2) + '\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    shell.showItemInFolder(result.filePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    broker.log(`[diagnostics] export failed: ${message}`);
+    dialog.showErrorBox('Export Diagnostics Failed', message);
+  }
+}
+
+function buildApplicationMenu(): void {
+  const isMac = process.platform === 'darwin';
+  const viewSubmenu: MenuItemConstructorOptions[] = [
+    { role: 'reload' },
+    { role: 'forceReload' },
+    ...(DEVTOOLS ? ([{ role: 'toggleDevTools' }] as MenuItemConstructorOptions[]) : []),
+    { type: 'separator' },
+    { role: 'resetZoom' },
+    { role: 'zoomIn' },
+    { role: 'zoomOut' },
+    { type: 'separator' },
+    { role: 'togglefullscreen' },
+  ];
+
+  const template: MenuItemConstructorOptions[] = [
+    ...(isMac
+      ? ([
+          {
+            label: APP_TITLE,
+            submenu: [
+              { role: 'about' },
+              { type: 'separator' },
+              { role: 'services' },
+              { type: 'separator' },
+              { role: 'hide' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit' },
+            ],
+          },
+        ] as MenuItemConstructorOptions[])
+      : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Open Audio/Video…',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => {
+            void openAudioViaMenu();
+          },
+        },
+        { type: 'separator' },
+        isMac ? { role: 'close' } : { role: 'quit' },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: 'View',
+      submenu: viewSubmenu,
+    },
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Export Redacted Diagnostics…',
+          click: () => {
+            void exportRedactedDiagnostics();
+          },
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+async function configureSession(): Promise<void> {
   const appSession = session.fromPartition(SESSION_PARTITION);
-  // Ensure legacy partition disk storage is cleaned and initial in-memory cache is flushed
-  void safeClearSessionStorage(app.getPath('userData'), {
+  // Await legacy partition disk cleanup and initial in-memory cache flush before opening any window.
+  await safeClearSessionStorage(app.getPath('userData'), {
     clearCache: () => appSession.clearCache(),
     clearStorageData: () =>
       appSession.clearStorageData({
@@ -226,7 +472,7 @@ function registerIpc(): void {
     return broker.endpoint();
   });
 
-  ipcMain.handle(IPC.pickAudioFiles, async (event) => {
+  ipcMain.handle(IPC.pickAudioFiles, async (event): Promise<readonly NativeSourceRegistration[]> => {
     requireTrustedIpcSender(event);
     const result = await openDialogFor(event, {
       title: 'Choose audio or video files',
@@ -237,34 +483,47 @@ function registerIpc(): void {
       ],
     });
     if (result.canceled) return [];
-    const registered: string[] = [];
+    const registered: NativeSourceRegistration[] = [];
     for (const filePath of result.filePaths) {
-      registered.push(
-        (await broker.registerNativeSource(requireSupportedMediaPath(filePath, 'pickAudio'))).path,
-      );
+      try {
+        const validated = requireSupportedMediaPath(filePath, 'pickAudio');
+        const source = await broker.registerNativeSource(validated);
+        registered.push({ sourceId: source.sourceId, path: source.path });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        broker.log(`[ipc:pickAudioFiles] native registration failed: ${message}`);
+        throw new Error(`Could not register selected media file: ${message}`);
+      }
     }
     return registered;
   });
 
-  ipcMain.handle(IPC.registerDroppedFile, async (event, value: unknown) => {
+  ipcMain.handle(IPC.registerDroppedFile, async (event, value: unknown): Promise<NativeSourceRegistration> => {
     requireTrustedIpcSender(event);
-    const filePath = requireSupportedMediaPath(value, 'registerDroppedFile');
-    const registered = await broker.registerNativeSource(filePath);
-    return { sourceId: registered.sourceId, path: registered.path };
+    try {
+      const filePath = requireSupportedMediaPath(value, 'registerDroppedFile');
+      const registered = await broker.registerNativeSource(filePath);
+      return { sourceId: registered.sourceId, path: registered.path };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      broker.log(`[ipc:registerDroppedFile] native registration failed: ${message}`);
+      throw error;
+    }
   });
 
   ipcMain.handle(IPC.chooseExportPath, async (event, value: unknown) => {
     requireTrustedIpcSender(event);
     const request = parseExportRequest(value);
     const defaultPath = path.join(app.getPath('documents'), safeSuggestedExportName(request));
+    const filters =
+      request.kind === 'master'
+        ? MASTER_EXPORT_FILTERS.map((f) => ({ name: f.name, extensions: [...f.extensions] }))
+        : RECORD_BUNDLE_EXPORT_FILTERS.map((f) => ({ name: f.name, extensions: [...f.extensions] }));
     const result = await saveDialogFor(event, {
       title: request.kind === 'master' ? 'Save Master WAV' : 'Save Full Processing Record',
       buttonLabel: 'Save',
       defaultPath,
-      filters:
-        request.kind === 'master'
-          ? [{ name: 'WAV audio', extensions: ['wav'] }]
-          : [{ name: 'ZIP archive', extensions: ['zip'] }],
+      filters,
       properties: ['showOverwriteConfirmation', 'createDirectory'],
     });
     if (result.canceled || !result.filePath) return null;
@@ -297,6 +556,16 @@ function registerIpc(): void {
     });
   });
 
+  ipcMain.handle(IPC.getPreferences, (event) => {
+    requireTrustedIpcSender(event);
+    return loadUserPreferences(app.getPath('userData'));
+  });
+
+  ipcMain.handle(IPC.setPreferences, (event, value: unknown) => {
+    requireTrustedIpcSender(event);
+    return saveUserPreferences(app.getPath('userData'), value);
+  });
+
   ipcMain.handle(IPC.clearLocalData, async (event) => {
     requireTrustedIpcSender(event);
     const appSession = session.fromPartition(SESSION_PARTITION);
@@ -312,9 +581,12 @@ function registerIpc(): void {
 }
 
 function createWindow(): BrowserWindow {
+  const initialBounds = resolveInitialWindowBounds();
   const window = new BrowserWindow({
-    width: 1280,
-    height: 820,
+    width: initialBounds.width,
+    height: initialBounds.height,
+    ...(initialBounds.x !== undefined ? { x: initialBounds.x } : {}),
+    ...(initialBounds.y !== undefined ? { y: initialBounds.y } : {}),
     minWidth: 960,
     minHeight: 640,
     title: APP_TITLE,
@@ -339,11 +611,110 @@ function createWindow(): BrowserWindow {
     },
   });
   mainWindow = window;
+  mainWindowLoaded = false;
+
+  let boundsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleBoundsSave = (): void => {
+    if (SELFTEST) return;
+    if (boundsSaveTimer !== null) clearTimeout(boundsSaveTimer);
+    boundsSaveTimer = setTimeout(() => {
+      boundsSaveTimer = null;
+      persistWindowBounds(window);
+    }, BOUNDS_SAVE_DEBOUNCE_MS);
+    boundsSaveTimer.unref();
+  };
+  window.on('resize', scheduleBoundsSave);
+  window.on('move', scheduleBoundsSave);
+  window.on('close', () => {
+    if (boundsSaveTimer !== null) {
+      clearTimeout(boundsSaveTimer);
+      boundsSaveTimer = null;
+    }
+    persistWindowBounds(window);
+  });
+
   window.once('ready-to-show', () => {
     if (!SELFTEST) window.show();
   });
   window.once('closed', () => {
-    if (mainWindow === window) mainWindow = null;
+    if (mainWindow === window) {
+      mainWindow = null;
+      mainWindowLoaded = false;
+    }
+  });
+
+  window.on('unresponsive', () => {
+    broker.log('[renderer] window became unresponsive');
+    if (SELFTEST || quitState !== 'running' || window.isDestroyed()) return;
+    void dialog
+      .showMessageBox(window, {
+        type: 'warning',
+        title: 'HawaVoClean is not responding',
+        message: 'The interface stopped responding. You can wait for it to recover or reload the window.',
+        buttons: ['Wait', 'Reload Window'],
+        defaultId: 0,
+        cancelId: 0,
+      })
+      .then(({ response }) => {
+        if (response === 1 && !window.isDestroyed()) {
+          broker.log('[renderer] user triggered reload after unresponsive prompt');
+          mainWindowLoaded = false;
+          void window.loadURL(APP_ENTRY_URL);
+        }
+      })
+      .catch(() => undefined);
+  });
+
+  window.on('responsive', () => {
+    broker.log('[renderer] window became responsive again');
+  });
+
+  window.webContents.on('render-process-gone', (_event, details) => {
+    broker.log(
+      `[renderer] render-process-gone reason=${details.reason} exitCode=${String(details.exitCode)}`,
+    );
+    mainWindowLoaded = false;
+    if (quitState !== 'running' || details.reason === 'clean-exit') return;
+    if (SELFTEST) {
+      console.error(`HAWA_DESKTOP_SELFTEST_ERROR renderer process gone: ${details.reason}`);
+      process.exitCode = 1;
+      app.quit();
+      return;
+    }
+    const now = Date.now();
+    while (rendererCrashTimestamps.length > 0 && now - rendererCrashTimestamps[0]! > RENDERER_CRASH_WINDOW_MS) {
+      rendererCrashTimestamps.shift();
+    }
+    rendererCrashTimestamps.push(now);
+    if (rendererCrashTimestamps.length <= MAX_RENDERER_CRASH_RELOADS) {
+      broker.log(
+        `[renderer] auto-recovering renderer (${rendererCrashTimestamps.length}/${MAX_RENDERER_CRASH_RELOADS})`,
+      );
+      if (!window.isDestroyed()) {
+        void window.loadURL(APP_ENTRY_URL);
+      }
+      return;
+    }
+    if (!window.isDestroyed()) {
+      void dialog
+        .showMessageBox(window, {
+          type: 'error',
+          title: 'HawaVoClean Renderer Crashed',
+          message: 'The interface crashed repeatedly and could not recover automatically.',
+          buttons: ['Reload Window', 'Quit'],
+          defaultId: 0,
+          cancelId: 1,
+        })
+        .then(({ response }) => {
+          if (response === 0 && !window.isDestroyed()) {
+            rendererCrashTimestamps.length = 0;
+            void window.loadURL(APP_ENTRY_URL);
+          } else {
+            app.quit();
+          }
+        })
+        .catch(() => app.quit());
+    }
   });
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -352,8 +723,13 @@ function createWindow(): BrowserWindow {
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
   if (DEVTOOLS) window.webContents.openDevTools({ mode: 'detach' });
-  window.webContents.once('did-finish-load', () => {
-    if (SELFTEST) void runSelfTest(window);
+  window.webContents.on('did-finish-load', () => {
+    mainWindowLoaded = true;
+    if (SELFTEST) {
+      void runSelfTest(window);
+    } else {
+      flushPendingExternalFiles();
+    }
   });
   void window.loadURL(APP_ENTRY_URL).catch((error: unknown) => {
     dialog.showErrorBox('HawaVoClean failed to load', error instanceof Error ? error.message : String(error));
@@ -524,15 +900,25 @@ async function stopAndQuit(): Promise<void> {
   }
 }
 
+// Register macOS open-file early so files launched at startup are queued reliably.
+app.on('open-file', (event, filePath) => {
+  event.preventDefault();
+  void dispatchExternalMediaFile(filePath);
+});
+
 const ownsSingleInstance = app.requestSingleInstanceLock();
 if (!ownsSingleInstance) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+  app.on('second-instance', (_event, argv) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    for (const mediaPath of extractExternalMediaPaths(argv.slice(1))) {
+      void dispatchExternalMediaFile(mediaPath);
+    }
   });
 
   app.on('before-quit', (event) => {
@@ -548,7 +934,7 @@ if (!ownsSingleInstance) {
     event.preventDefault();
     callback(false);
   });
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     if (REJECTED_PACKAGED_SELFTEST) {
       console.error(
         'HAWA_DESKTOP_SELFTEST_ERROR Packaged self-test requires a marked non-distributable full-engine proof.',
@@ -561,10 +947,22 @@ if (!ownsSingleInstance) {
       app.quit();
       return;
     }
-    configureSession();
+    await configureSession();
+    buildApplicationMenu();
     registerIpc();
     broker.start();
+    if (!SELFTEST) {
+      for (const mediaPath of extractExternalMediaPaths(process.argv.slice(1))) {
+        if (!pendingExternalFiles.includes(mediaPath)) {
+          pendingExternalFiles.push(mediaPath);
+        }
+      }
+    }
     createWindow();
+  }).catch((error: unknown) => {
+    broker.log(`[startup] fatal initialization error: ${error instanceof Error ? error.message : String(error)}`);
+    dialog.showErrorBox('HawaVoClean failed to start', error instanceof Error ? error.message : String(error));
+    app.exit(1);
   });
 
   app.on('activate', () => {

@@ -222,7 +222,10 @@ export interface AudioAssistantStatus {
   available?: boolean;
   reason?: string | null;
   cloud_text_available?: boolean;
-  local_model?: string;
+  local_model?: string | null;
+  ollama_reachable?: boolean;
+  installed_models?: string[];
+  active_mode?: 'local_llm' | 'deterministic_rules';
 }
 
 export interface ProcessingRequestV1 {
@@ -802,4 +805,47 @@ export interface SpectralRepairResponse {
   attenuationDb: number;
   renderMs: number;
 }
+
+// ---- Hash-Verified Model Manager API Types (Wave E) ------------------------
+
+export interface ModelStatusV1 {
+  model_id: string;
+  display_name: string;
+  description: string;
+  used_by: string[];
+  license: string;
+  expected_sha256: string;
+  approx_size_mb: number;
+  bundled: boolean;
+  downloadable: boolean;
+  installed: boolean;
+  verified: boolean;
+  size_bytes: number;
+  path?: string | null | undefined;
+}
+
+export interface ModelsResponseV1 {
+  schema_version: 1;
+  models: ModelStatusV1[];
+}
+
+export interface ModelInstallResultV1 {
+  model_id: string;
+  installed: boolean;
+  verified: boolean;
+  sha256: string;
+  size_bytes: number;
+  path?: string | null | undefined;
+  already_installed: boolean;
+  message: string;
+}
+
+export interface ModelInstallResponseV1 {
+  schema_version: 1;
+  ok: boolean;
+  result: ModelInstallResultV1;
+  models: ModelStatusV1[];
+  capabilities?: CapabilityStatusV1[] | undefined;
+}
+
 

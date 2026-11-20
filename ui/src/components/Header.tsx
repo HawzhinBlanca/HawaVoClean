@@ -189,6 +189,8 @@ export function Header() {
   const setWorkspaceMode = useStore((s) => s.setWorkspaceMode);
   const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
   const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
+  const modelsDrawerOpen = useStore((s) => s.modelsDrawerOpen);
+  const setModelsDrawerOpen = useStore((s) => s.setModelsDrawerOpen);
   const rackUndo = useStore((s) => s.rackUndo);
   const overrideUndo = useStore((s) => s.overrideUndo);
   const spectralUndo = useStore((s) => s.spectralUndo);
@@ -323,6 +325,16 @@ export function Header() {
             {t.modePro}
           </button>
         </div>
+        <button
+          type="button"
+          className="hdr-ai-btn hdr-models-btn"
+          aria-expanded={modelsDrawerOpen}
+          aria-label="Models"
+          title="Manage local neural models"
+          onClick={() => setModelsDrawerOpen(!modelsDrawerOpen)}
+        >
+          <span>Models</span>
+        </button>
         <button
           type="button"
           className="hdr-ai-btn"
