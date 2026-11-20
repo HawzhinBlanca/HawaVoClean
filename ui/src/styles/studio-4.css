@@ -1103,6 +1103,33 @@ button.sd-clean-btn.process.running {
   flex-direction: column;
 }
 
+.as-stack[data-blended='blend'] .as-spec-layer > .spectrogram-panel {
+  background: transparent;
+  box-shadow: none;
+}
+
+.as-stack[data-spec-active='true'] .as-wave-layer .panel-head,
+.as-stack[data-spec-active='true'] .as-wave-layer .verdict,
+.as-stack[data-spec-active='true'] .as-wave-layer .verdicts,
+.as-stack[data-spec-active='true'] .as-wave-layer .verdict-strip,
+.as-stack[data-spec-active='true'] .as-wave-layer .wave-overview,
+.as-stack[data-spec-active='true'] .as-wave-layer .wave-legend,
+.as-stack[data-spec-active='true'] .as-wave-layer .wave-time {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.as-stack[data-spec-active='true'] .as-spec-layer .panel-head {
+  background: var(--panel);
+  border-radius: var(--r-panel) var(--r-panel) 0 0;
+}
+
+.as-stack[data-blended='blend'][data-spec-active='false'] .as-spec-layer .panel-head,
+.as-stack[data-blended='blend'][data-spec-active='false'] .as-spec-layer .spectrogram-colorbar {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .as-repair-popover {
   position: absolute;
   inset-block-end: 12px;
@@ -1419,6 +1446,33 @@ button.sd-clean-btn.process.running {
 @media (max-width: 1180px) {
   .pro-main > .right.pro-console {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-height: 830px) {
+  .pro-main {
+    gap: 6px;
+    grid-template-rows: minmax(150px, 1fr) minmax(110px, 0.55fr) auto;
+  }
+
+  .pro-main > .right.pro-console {
+    padding: 8px 12px;
+    gap: 10px;
+  }
+
+  .pro-console .pc-zone {
+    gap: 4px;
+  }
+
+  .pro-console .pc-actions .exports-grid {
+    gap: 4px;
+  }
+
+  .pro-console .export-btn,
+  .pro-console .sr-btn {
+    min-height: 22px;
+    padding: 2px 7px;
+    font-size: 10px;
   }
 }
 

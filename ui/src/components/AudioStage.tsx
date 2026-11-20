@@ -49,6 +49,7 @@ export function AudioStage() {
     <div
       className="as-stack"
       data-blended={blendMode}
+      data-spec-active={specInteractive ? 'true' : 'false'}
       style={{ '--stage-blend': String(stageBlend) } as CSSProperties}
     >
       {hasSource ? (

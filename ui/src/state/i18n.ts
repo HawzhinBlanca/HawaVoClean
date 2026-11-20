@@ -53,6 +53,8 @@ export interface TranslationCatalog {
   modeProTitle: string;
   aiAssistant: string;
   aiAssistantTitle: string;
+  modelsLabel: string;
+  modelsTitle: string;
   drawerAiTitle: string;
   drawerBatchTitle: string;
   undo: string;
@@ -237,6 +239,8 @@ export const CATALOGS: Record<Locale, TranslationCatalog> = {
     modeProTitle: 'Pro Studio — spectrogram, spectrum HPF, surgical repair, and broadcast delivery',
     aiAssistant: 'AI Assistant',
     aiAssistantTitle: 'AI Audio Assistant (Cmd+K)',
+    modelsLabel: 'Models',
+    modelsTitle: 'Manage local neural models',
     drawerAiTitle: 'AI Audio Assistant',
     drawerBatchTitle: 'Batch Queue',
     undo: 'Undo',
@@ -415,6 +419,8 @@ export const CATALOGS: Record<Locale, TranslationCatalog> = {
     modeProTitle: 'ستۆدیۆی پرۆ — سپێکترۆگرام، فلتەری HPF، چاککردنەوەی ورد و پەخش',
     aiAssistant: 'یاریدەدەری ژیر',
     aiAssistantTitle: 'یاریدەدەری دەنگی ژیر (Cmd+K)',
+    modelsLabel: 'مۆدێلەکان',
+    modelsTitle: 'بەڕێوەبردنی مۆدێلە دەمارییە ناوخۆییەکان',
     drawerAiTitle: 'یاریدەدەری دەنگی ژیر',
     drawerBatchTitle: 'ڕیزبەندی کۆمەڵە فایل',
     undo: 'گەڕانەوە',

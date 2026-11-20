@@ -1117,8 +1117,16 @@ _TORCH_BACKED: dict[str, str] = {
         "M68",
         "true_stereo_ms Side-channel reconstruction bypassed during unit re-stitch",
         "src/hawavoclean/server/unit_restitch.py",
-        """    is_true_stereo_ms = str(job_meta.get("stereo_mode", "")) == "true_stereo_ms\"""",
-        """    is_true_stereo_ms = False""",
+        """    if (
+        (is_true_stereo_ms or side_timeline_out is not None)
+        and side_timeline_out is not None
+        and len(channel_timelines) == 1
+    ):""",
+        """    if False and (
+        (is_true_stereo_ms or side_timeline_out is not None)
+        and side_timeline_out is not None
+        and len(channel_timelines) == 1
+    ):""",
         owners=(
             "tests/unit/test_wave_ab_backend.py::test_unit_restitch_preserves_true_stereo_ms_finishing_delivery_and_bwf",
         ),
@@ -1204,10 +1212,12 @@ _TORCH_BACKED: dict[str, str] = {
         "M75",
         "Homebrew /opt/homebrew dylib rejection disabled in build_resolve_engine.py",
         "scripts/build_resolve_engine.py",
-        """            if is_forbidden_dylib(dep):
-                violations.append(f"{macho.name} -> {dep} (forbidden non-portable host path)")""",
-        """            if False and is_forbidden_dylib(dep):
-                violations.append(f"{macho.name} -> {dep} (forbidden non-portable host path)")""",
+        """    if violations:
+        joined = "; ".join(violations)
+        raise BundleError(""",
+        """    if False and violations:
+        joined = "; ".join(violations)
+        raise BundleError(""",
         owners=(
             "tests/unit/test_wave_f_packaging.py::test_verify_macho_rejects_remaining_homebrew_and_usr_local_references",
             "tests/unit/test_wave_f_packaging.py::test_relocate_fails_loudly_if_homebrew_ref_survives_rewrite",

@@ -329,11 +329,11 @@ export function Header() {
           type="button"
           className="hdr-ai-btn hdr-models-btn"
           aria-expanded={modelsDrawerOpen}
-          aria-label="Models"
-          title="Manage local neural models"
+          aria-label={t.modelsLabel}
+          title={t.modelsTitle}
           onClick={() => setModelsDrawerOpen(!modelsDrawerOpen)}
         >
-          <span>Models</span>
+          <span>{t.modelsLabel}</span>
         </button>
         <button
           type="button"
