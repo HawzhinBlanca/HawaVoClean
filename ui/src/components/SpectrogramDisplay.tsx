@@ -468,10 +468,11 @@ export function SpectrogramDisplay({
   const scheduleRedrawRef = useRef<() => void>(scheduleRedraw);
   scheduleRedrawRef.current = scheduleRedraw;
 
-  // Mount/unmount StftCanvasRenderer ONLY when the spectrogram body is shown/hidden
-  // so tile arrivals and scale/mode changes never tear down the WebGL2 context.
+  // Mount/unmount StftCanvasRenderer ONLY when the spectrogram canvas mounts/unmounts
+  // (visible or hasData toggling) so tile arrivals and scale/mode changes never tear
+  // down the WebGL2 context, while loading a new clip cleanly rebinds the fresh canvas.
   useEffect(() => {
-    if (!visible) {
+    if (!visible || !hasData) {
       setDragRect(null);
       rendererRef.current?.dispose();
       rendererRef.current = null;
@@ -515,7 +516,7 @@ export function SpectrogramDisplay({
       renderer.dispose();
       rendererRef.current = null;
     };
-  }, [visible]);
+  }, [visible, hasData]);
 
   // Redraw when active tile, view mode, or frequency scale changes.
   useEffect(() => {
