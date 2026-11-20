@@ -151,13 +151,14 @@ describe('Wave 2 StudioRack actions & undo/redo', () => {
       }),
     );
 
-    // Clear job and modify rack settings -> attaches strength, ambienceFloorDb, deliveryPreset, proRepair
+    // Clear job and modify rack settings -> attaches strength, ambienceFloorDb, deliveryPreset, stereoMode, proRepair
     useStore.setState({ job: null });
     updateRackSettings({
       ...DEFAULT_STUDIO_RACK_SETTINGS,
       strength: 0.85,
       ambienceFloorDb: -38,
       deliveryPreset: 'podcast',
+      stereoMode: 'true_stereo_ms',
       deplosive: true,
       mouthDeclick: false,
     });
@@ -171,6 +172,7 @@ describe('Wave 2 StudioRack actions & undo/redo', () => {
           strength: 0.85,
           ambienceFloorDb: -38,
           deliveryPreset: 'podcast',
+          stereoMode: 'true_stereo_ms',
           proRepair: expect.objectContaining({
             deplosive: true,
             mouth_declick: false,

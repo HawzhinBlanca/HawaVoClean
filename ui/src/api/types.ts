@@ -127,6 +127,8 @@ export interface ManualStrategyV1 {
   ambienceFloorDb?: number | null | undefined;
   delivery_preset?: DeliveryPresetId | null | undefined;
   deliveryPreset?: DeliveryPresetId | null | undefined;
+  stereo_mode?: 'auto' | 'dual_mono_same' | 'split_speakers' | 'true_stereo_ms' | null | undefined;
+  stereoMode?: 'auto' | 'dual_mono_same' | 'split_speakers' | 'true_stereo_ms' | null | undefined;
   pro_repair?: Record<string, boolean> | null | undefined;
   proRepair?: Record<string, boolean> | null | undefined;
 }

@@ -175,6 +175,7 @@ class JobRecord:
     time_range: tuple[float, float] | None = None
     ambience_floor_db: float | None = None
     delivery_preset: str | None = None
+    stereo_mode: str | None = None
     pro_repair: dict[str, bool] | None = None
     speaker_id: str | None = None
     cutoff_hz: float | None = None
@@ -237,6 +238,8 @@ class JobRecord:
             out["ambience_floor_db"] = self.ambience_floor_db
         if self.delivery_preset is not None:
             out["delivery_preset"] = self.delivery_preset
+        if self.stereo_mode is not None:
+            out["stereo_mode"] = self.stereo_mode
         if self.pro_repair is not None:
             out["pro_repair"] = dict(self.pro_repair)
         if self.unit is not None:
@@ -281,6 +284,7 @@ class JobRecord:
             "time_range": list(self.time_range) if self.time_range is not None else None,
             "ambience_floor_db": self.ambience_floor_db,
             "delivery_preset": self.delivery_preset,
+            "stereo_mode": self.stereo_mode,
             "pro_repair": dict(self.pro_repair) if self.pro_repair is not None else None,
             "speaker_id": self.speaker_id,
             "cutoff_hz": self.cutoff_hz,
@@ -357,6 +361,9 @@ class JobRecord:
             ),
             delivery_preset=(
                 str(value["delivery_preset"]) if value.get("delivery_preset") is not None else None
+            ),
+            stereo_mode=(
+                str(value["stereo_mode"]) if value.get("stereo_mode") is not None else None
             ),
             pro_repair=(
                 {str(k): bool(v) for k, v in value["pro_repair"].items()}
@@ -467,10 +474,25 @@ def default_command(record: JobRecord) -> list[str]:
             cmd += ["--ambience-floor-db", str(record.ambience_floor_db)]
         if record.delivery_preset is not None:
             cmd += ["--delivery-preset", str(record.delivery_preset)]
+        if record.stereo_mode is not None and record.stereo_mode != "auto":
+            cmd += ["--stereo-mode", str(record.stereo_mode)]
         if record.pro_repair:
-            enabled_repairs = sorted(k for k, v in record.pro_repair.items() if v)
-            if enabled_repairs:
-                cmd += ["--pro-repair", ",".join(enabled_repairs)]
+            finishing_toggle_keys = {
+                "deess",
+                "tonal_restoration",
+                "tonalRestoration",
+                "level_rider",
+                "levelRider",
+            }
+            repair_tokens: list[str] = []
+            for k in sorted(record.pro_repair):
+                v = record.pro_repair[k]
+                if v:
+                    repair_tokens.append(k)
+                elif k in finishing_toggle_keys:
+                    repair_tokens.append(f"{k}=false")
+            if repair_tokens:
+                cmd += ["--pro-repair", ",".join(repair_tokens)]
     if record.overwrite:
         cmd.append("--overwrite")
     if record.record_bundle:
@@ -960,6 +982,7 @@ class JobManager:
         time_range: tuple[float, float] | None = None,
         ambience_floor_db: float | None = None,
         delivery_preset: str | None = None,
+        stereo_mode: str | None = None,
         pro_repair: dict[str, bool] | None = None,
         speaker_id: str | None = None,
         cutoff_hz: float | None = None,
@@ -1054,6 +1077,8 @@ class JobManager:
                 request_payload["ambience_floor_db"] = ambience_floor_db
             if delivery_preset is not None:
                 request_payload["delivery_preset"] = delivery_preset
+            if stereo_mode is not None:
+                request_payload["stereo_mode"] = stereo_mode
             if pro_repair is not None:
                 request_payload["pro_repair"] = dict(pro_repair)
             request_hash = canonical_request_hash(request_payload)
@@ -1102,6 +1127,7 @@ class JobManager:
                 time_range=time_range,
                 ambience_floor_db=ambience_floor_db,
                 delivery_preset=delivery_preset,
+                stereo_mode=stereo_mode,
                 pro_repair=dict(pro_repair) if pro_repair is not None else None,
                 speaker_id=speaker_id,
                 cutoff_hz=cutoff_hz,
@@ -2120,7 +2146,11 @@ class JobManager:
             # The leader's exit is not proof that every decoder/model child
             # exited.  Releasing the boundary is therefore fail-closed.
             supervisor.close(kill_remaining=True)
-        stderr_thread.join(timeout=2.0)
+            stderr_thread.join(timeout=2.0)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        pipe.close()
 
         with self._locked():
             if record.state in TERMINAL_STATES:  # pragma: no cover - defensive

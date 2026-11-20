@@ -3183,6 +3183,7 @@ def create_app(
         submit_time_range: tuple[float, float] | None = None
         submit_ambience_floor_db: float | None = None
         submit_delivery_preset: str | None = None
+        submit_stereo_mode: str | None = None
         submit_pro_repair: dict[str, bool] | None = None
         if isinstance(req.strategy, SmartSafeStrategyV1):
             smart_cap = next(
@@ -3247,6 +3248,7 @@ def create_app(
                 submit_time_range = req.strategy.time_range
                 submit_ambience_floor_db = req.strategy.ambience_floor_db
                 submit_delivery_preset = req.strategy.delivery_preset
+                submit_stereo_mode = req.strategy.stereo_mode
                 submit_pro_repair = req.strategy.pro_repair
                 output_profile = "restore_source"
             elif req.strategy.route in {
@@ -3271,6 +3273,7 @@ def create_app(
                 submit_time_range = req.strategy.time_range
                 submit_ambience_floor_db = req.strategy.ambience_floor_db
                 submit_delivery_preset = req.strategy.delivery_preset
+                submit_stereo_mode = req.strategy.stereo_mode
                 submit_pro_repair = req.strategy.pro_repair
                 output_profile = req.strategy.route
             else:
@@ -3362,6 +3365,7 @@ def create_app(
                             time_range=submit_time_range,
                             ambience_floor_db=submit_ambience_floor_db,
                             delivery_preset=submit_delivery_preset,
+                            stereo_mode=submit_stereo_mode,
                             pro_repair=submit_pro_repair,
                             speaker_id=submit_speaker_id,
                             cutoff_hz=submit_cutoff_hz,

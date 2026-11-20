@@ -531,6 +531,15 @@ def cmd_process(args: argparse.Namespace) -> int:
                 f"Unsupported --delivery-preset: {raw_delivery_preset!r}",
             )
         delivery_preset = raw_delivery_preset
+    raw_stereo_mode = getattr(args, "stereo_mode", None)
+    stereo_mode: str | None = None
+    if raw_stereo_mode is not None:
+        if raw_stereo_mode not in ("auto", "dual_mono_same", "split_speakers", "true_stereo_ms"):
+            exit_with_code(
+                ExitCode.INVALID_USER_INPUT,
+                f"Unsupported --stereo-mode: {raw_stereo_mode!r}",
+            )
+        stereo_mode = str(raw_stereo_mode)
     raw_pro_repair = getattr(args, "pro_repair", None)
     pro_repair: dict[str, bool] | None = None
     if raw_pro_repair is not None:
@@ -547,14 +556,28 @@ def cmd_process(args: argparse.Namespace) -> int:
             "level_rider",
         }
         tokens = [tok.strip() for tok in str(raw_pro_repair).split(",") if tok.strip()]
-        bad_tokens = [tok for tok in tokens if tok not in allowed_repair]
+        parsed_repair: dict[str, bool] = {}
+        bad_tokens: list[str] = []
+        for tok in tokens:
+            if "=" in tok:
+                key, val = tok.split("=", 1)
+                key = key.strip()
+                val_low = val.strip().lower()
+                if key not in allowed_repair or val_low not in ("true", "false"):
+                    bad_tokens.append(tok)
+                else:
+                    parsed_repair[key] = val_low == "true"
+            elif tok not in allowed_repair:
+                bad_tokens.append(tok)
+            else:
+                parsed_repair[tok] = True
         if bad_tokens:
             exit_with_code(
                 ExitCode.INVALID_USER_INPUT,
                 f"Unsupported --pro-repair flag(s): {', '.join(bad_tokens)}",
             )
-        if tokens:
-            pro_repair = dict.fromkeys(tokens, True)
+        if parsed_repair:
+            pro_repair = parsed_repair
     time_range: tuple[float, float] | None = None
     if strength is not None and (
         not math.isfinite(float(strength)) or not 0.1 <= float(strength) <= 1.0
@@ -641,6 +664,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 ambience_floor_db=ambience_floor_db,
                 delivery_preset=delivery_preset,
                 pro_repair=pro_repair,
+                stereo_mode=stereo_mode,
             )
         elif passes == 1:
             # The default path: byte-identical to a run before --passes
@@ -663,6 +687,7 @@ def cmd_process(args: argparse.Namespace) -> int:
                 ambience_floor_db=ambience_floor_db,
                 delivery_preset=delivery_preset,
                 pro_repair=pro_repair,
+                stereo_mode=stereo_mode,
             )
         else:
             run_multipass(
@@ -813,6 +838,7 @@ def _run_natural_edit_blend(
     ambience_floor_db: float | None = None,
     delivery_preset: DeliveryPreset | None = None,
     pro_repair: dict[str, bool] | None = None,
+    stereo_mode: str | None = None,
 ) -> None:
     """Run single-pass natural cleanup with wet/dry strength and/or surgical time_range."""
     from hawavoclean.audio.decode import decode_audio
@@ -864,6 +890,7 @@ def _run_natural_edit_blend(
                 allow_research_restore=allow_research_restore,
                 ambience_floor_db=ambience_floor_db,
                 pro_repair=pro_repair,
+                stereo_mode=stereo_mode,
             )
             enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
             enh_window = resample_audio(enh_raw.T, enh_sr, sr, pad_end - pad_start)
@@ -896,6 +923,7 @@ def _run_natural_edit_blend(
                 allow_research_restore=allow_research_restore,
                 ambience_floor_db=ambience_floor_db,
                 pro_repair=pro_repair,
+                stereo_mode=stereo_mode,
             )
             enh_raw, enh_sr = sf.read(tmp_out, dtype="float32", always_2d=True)
             enh_full = resample_audio(enh_raw.T, enh_sr, sr, original.samples)
@@ -2746,6 +2774,12 @@ def _main() -> None:
         choices=sorted(DELIVERY_PRESETS.keys()),
         default=None,
         help="Optional broadcast/streaming loudness delivery preset",
+    )
+    p_proc.add_argument(
+        "--stereo-mode",
+        choices=["auto", "dual_mono_same", "split_speakers", "true_stereo_ms"],
+        default=None,
+        help="Optional stereo routing mode (auto, dual_mono_same, split_speakers, true_stereo_ms)",
     )
     p_proc.add_argument(
         "--pro-repair",

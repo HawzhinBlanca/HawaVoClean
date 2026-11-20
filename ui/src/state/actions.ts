@@ -1662,6 +1662,7 @@ export async function startJob(strategyOverride?: ProcessingStrategyV1): Promise
               strength: rs.strength,
               ambienceFloorDb: rs.ambienceFloorDb,
               deliveryPreset: rs.deliveryPreset,
+              ...(rs.stereoMode !== 'auto' ? { stereoMode: rs.stereoMode } : {}),
               proRepair: {
                 deplosive: rs.deplosive,
                 mouth_declick: rs.mouthDeclick,

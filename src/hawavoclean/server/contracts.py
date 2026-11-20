@@ -45,6 +45,7 @@ class ContractModel(BaseModel):
 
 RestorePolicy = Literal["disabled", "source_allowed", "enrolled_only", "auto"]
 DeliveryPresetV1 = Literal["match_input", "ebu_r128", "atsc_a85", "podcast", "streaming"]
+StereoModeV1 = Literal["auto", "dual_mono_same", "split_speakers", "true_stereo_ms"]
 ExportFormatV1 = Literal["wav24", "wav32f", "flac", "aac", "video_mux"]
 PreviewProfileV1 = Literal["production", "studio", "studio_pro", "dereverb", "lowband"]
 SpectrogramModeV1 = Literal["original", "cleaned", "delta"]
@@ -115,6 +116,7 @@ class ManualStrategyV1(ContractModel):
     time_range: tuple[float, float] | None = None
     ambience_floor_db: float | None = Field(default=None, ge=-120.0, le=-12.0, allow_inf_nan=False)
     delivery_preset: DeliveryPresetV1 | None = None
+    stereo_mode: StereoModeV1 | None = None
     pro_repair: dict[str, bool] | None = None
 
     @field_validator("strength", "ambience_floor_db", mode="before")

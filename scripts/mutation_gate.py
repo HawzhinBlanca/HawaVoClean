@@ -1000,6 +1000,75 @@ _TORCH_BACKED: dict[str, str] = {
             "tests/unit/test_pro_security_redteam.py::test_redteam_malformed_oversized_nan_inf_bool_and_extra_json",
         ),
     ),
+    Mutation(
+        "M60",
+        "attached_pic cover-art exclusion disabled in probe_audio has_video",
+        "src/hawavoclean/audio/probe.py",
+        """        has_video = any(
+            st.get("codec_type") == "video"
+            and not (
+                isinstance(st.get("disposition"), dict)
+                and bool(st["disposition"].get("attached_pic"))
+            )
+            for st in streams
+        )""",
+        """        has_video = any(st.get("codec_type") == "video" for st in streams)""",
+        # Owner: embedded album cover art (attached_pic=1) must never be
+        # misclassified as a video track.
+        owners=(
+            "tests/unit/test_realworld_regressions.py::test_probe_audio_has_video_distinguishes_audio_only_cover_art_and_real_video",
+        ),
+    ),
+    Mutation(
+        "M61",
+        "audio-only container guard disabled on video_mux export",
+        "src/hawavoclean/audio/delivery.py",
+        """            if source_probe is not None and not source_probe.has_video:
+                raise ValueError(""",
+        """            if False and source_probe is not None and not source_probe.has_video:
+                raise ValueError(""",
+        # Owner: video_mux must refuse audio-only containers cleanly before
+        # invoking ffmpeg -map 0:v.
+        owners=(
+            "tests/unit/test_realworld_regressions.py::test_video_mux_rejects_audio_only_mp4_cleanly",
+        ),
+    ),
+    Mutation(
+        "M62",
+        "long-clip NISQA v2 windowing threshold raised to 18000s",
+        "src/hawavoclean/guard/perceptual_mos.py",
+        "        if dur_s <= 18.0:",
+        "        if dur_s <= 18000.0:",
+        # Owner: recordings longer than 18 s must window into <=8 active 12 s
+        # chunks rather than exceeding NISQA v2's max mel-window limit.
+        owners=(
+            "tests/unit/test_realworld_regressions.py::test_perceptual_scorer_windows_long_clips_without_falling_back_to_proxy",
+        ),
+    ),
+    Mutation(
+        "M63",
+        "single-GPU worker pool concurrency cap disabled in _natural_worker_limit",
+        "src/hawavoclean/pipeline.py",
+        '    if device in {"mps", "cuda"} and not explicit_override:',
+        '    if False and device in {"mps", "cuda"} and not explicit_override:',
+        # Owner: single-GPU MPS/CUDA neural cores must default to 1 worker to
+        # prevent multi-process GPU thrashing.
+        owners=(
+            "tests/unit/test_realworld_regressions.py::test_natural_worker_limit_caps_single_gpu_cores_unless_overridden",
+        ),
+    ),
+    Mutation(
+        "M64",
+        "bilateral flank isolation disabled in apply_mouth_declick",
+        "src/hawavoclean/finishing/pro_repair.py",
+        "        if span_peak <= max(flank_scale * bilateral_ratio, abs_floor):\n            continue",
+        "        if False and span_peak <= max(flank_scale * bilateral_ratio, abs_floor):\n            continue",
+        # Owner: consonant onsets flanked by speech energy must not trigger
+        # false-positive mouth de-click reconstruction.
+        owners=(
+            "tests/unit/test_realworld_regressions.py::test_mouth_declick_preserves_consonant_onset_flanked_by_speech",
+        ),
+    ),
 ]
 
 _FAILED_LINE = re.compile(r"^(?:FAILED|ERROR)\s+(\S+)")

@@ -375,7 +375,7 @@ def load_unit_slice(
     if not target_path.is_file():
         raise FileNotFoundError(f"Cached slice not found for unit {unit_id} channel {channel}")
     try:
-        with np.load(target_path, allow_pickle=False) as archive:
+        with target_path.open("rb") as fh, np.load(fh, allow_pickle=False) as archive:
             orig_arr = np.ascontiguousarray(archive["original"], dtype=np.float32)
             has_cand_arr = np.asarray(archive["has_candidate"])
             if has_cand_arr.ndim != 0:

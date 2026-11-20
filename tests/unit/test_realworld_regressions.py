@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-import scipy.signal
 import soundfile as sf
 
 from hawavoclean.audio.delivery import export_delivery_artifact
@@ -255,17 +254,63 @@ def test_mouth_declick_preserves_consonant_onset_flanked_by_speech() -> None:
     rng = np.random.default_rng(123)
     n = SR
     sig = np.zeros(n, dtype=np.float32)
-    # Silence for 0.3 s, then sharp consonant onset followed by 80 ms sustained HF speech
+    # Silence for 0.3 s, then a 1.5 ms plosive onset transient (AR residual
+    # clearly above abs_floor=0.0198) immediately followed by 60 ms of bounded
+    # fricative/consonant speech energy whose 95th-percentile flank residual
+    # protects the onset ONLY when the bilateral flank check is active.
     onset = int(0.3 * SR)
-    burst_len = int(0.080 * SR)
-    sos = scipy.signal.butter(4, [2500.0, 6500.0], btype="bandpass", fs=SR, output="sos")
-    consonant = scipy.signal.sosfiltfilt(sos, rng.standard_normal(burst_len))
-    # Sharp leading edge (realistic plosive/fricative onset)
-    env = np.ones(burst_len, dtype=np.float64)
-    env[:48] = np.linspace(0.0, 1.0, 48)
-    env[-240:] = np.linspace(1.0, 0.0, 240)
-    sig[onset : onset + burst_len] = (0.04 * env * consonant).astype(np.float32)
+    tail_len = int(0.060 * SR)
+    # Sharp 3-sample plosive burst (AR residual ~0.065 > local threshold, yet
+    # < flank_p95 * 5.0 ~ 0.081 so ONLY the bilateral flank check protects it).
+    burst = np.array([0.068, -0.062, 0.038], dtype=np.float32)
+    sig[onset : onset + len(burst)] = burst
+    tail = rng.uniform(-0.017, 0.017, size=tail_len).astype(np.float32)
+    sig[onset + len(burst) : onset + len(burst) + tail_len] = tail
 
     out, count = apply_mouth_declick(sig, SR, sensitivity=0.5)
     assert count == 0
     assert np.allclose(out, sig, atol=1e-6)
+
+
+@pytest.mark.unit
+def test_pipeline_stereo_mode_true_stereo_ms_and_pro_repair_finishing_overrides(
+    tmp_path: Path,
+) -> None:
+    """stereo_mode='true_stereo_ms' and finishing toggles wire cleanly through run_pipeline."""
+    t = np.arange(SR, dtype=np.float64) / SR
+    f0 = 150.0 + 15.0 * np.sin(2.0 * np.pi * 1.5 * t)
+    phase = 2.0 * np.pi * np.cumsum(f0) / SR
+    voice = (0.25 * np.sin(phase) + 0.12 * np.sin(2.0 * phase)).astype(np.float32)
+    # Distinct L/R imaging (ambiguous stereo if auto-classified, valid under true_stereo_ms)
+    side = (0.04 * np.sin(2.0 * np.pi * 510.0 * t)).astype(np.float32)
+    stereo = np.stack([voice + side, voice - side], axis=1)
+    in_wav = tmp_path / "stereo_ms.wav"
+    out_wav = tmp_path / "stereo_ms_out.wav"
+    sf.write(str(in_wav), stereo, SR, subtype="PCM_24")
+
+    report = run_pipeline(
+        in_wav,
+        out_wav,
+        profile="production",
+        stereo_mode="true_stereo_ms",
+        pro_repair={"deess": True, "tonal_restoration": False, "level_rider": False},
+        overwrite=True,
+    )
+    assert out_wav.is_file()
+    assert report.output.channels == 2
+    assert report.output.samples == SR
+    # Stereo imaging is preserved (L and R are not collapsed to identical dual-mono)
+    out_data, _ = sf.read(str(out_wav), dtype="float32", always_2d=True)
+    assert float(np.max(np.abs(out_data[:, 0] - out_data[:, 1]))) > 1e-3
+
+    # Unknown stereo_mode fails closed with InvalidUserInputError
+    from hawavoclean.errors import InvalidUserInputError
+
+    with pytest.raises(InvalidUserInputError, match="Unknown stereo_mode"):
+        run_pipeline(
+            in_wav,
+            tmp_path / "bad.wav",
+            profile="production",
+            stereo_mode="invalid",
+            overwrite=True,
+        )
