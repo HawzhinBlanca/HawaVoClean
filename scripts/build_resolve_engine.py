@@ -540,16 +540,29 @@ def build_bundle(
         bin_dir = stage / "bin"
         lib_dir = stage / "lib"
         bin_dir.mkdir(parents=True, exist_ok=True)
+        hosted_ci_smoke = (
+            os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+            and os.environ.get("RUNNER_ENVIRONMENT", "").lower() != "self-hosted"
+            and os.environ.get("HAWAVOCLEAN_REQUIRE_FFMPEG", "") != "1"
+        )
+        bundled_ffmpeg_tools: list[str] = []
         for tool_name in ("ffmpeg", "ffprobe"):
             tool_path = shutil.which(tool_name)
             if not tool_path:
-                if allow_missing_ffmpeg:
+                for fallback_dir in ("/opt/homebrew/bin", "/usr/local/bin"):
+                    candidate = Path(fallback_dir) / tool_name
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        tool_path = str(candidate)
+                        break
+            if not tool_path:
+                if allow_missing_ffmpeg or hosted_ci_smoke:
                     continue
                 raise BundleError(
                     f"Required media binary '{tool_name}' was not found on PATH. "
                     "Install ffmpeg/ffprobe or pass --allow-missing-ffmpeg for non-release dev builds."
                 )
             relocate_or_verify_ffmpeg_binary(Path(tool_path), bin_dir / tool_name, lib_dir)
+            bundled_ffmpeg_tools.append(tool_name)
 
         _write_launchers(stage)
         launcher = stage / "hawavoclean-engine"
@@ -579,6 +592,7 @@ def build_bundle(
             "wheel_sha256": _sha256(wheel),
             "python_version": python_version,
             "platform": "macos-arm64",
+            "bundled_ffmpeg": len(bundled_ffmpeg_tools) == 2,
             "installed_distributions": distributions,
         }
         _write_manifests(stage, metadata_value)

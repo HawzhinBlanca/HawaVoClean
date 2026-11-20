@@ -549,3 +549,339 @@ def test_windows_policy_preserves_symlink_escape_and_unc_refusals(
         platform="win32",
         windows_drives=[drive_d],
     )
+
+
+def test_model_manager_stream_variants_ast_fallback_and_already_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ctypes
+    import importlib.util
+    import io
+    import sys as sys_mod
+    import types
+    import urllib.error
+    import urllib.request
+    from typing import cast
+
+    from hawavoclean import model_manager as mm
+    from hawavoclean.model_manager import (
+        ModelDownloadError,
+        ModelNotDownloadableError,
+        _https_stream_fetcher,
+        _HttpsOnlyRedirectHandler,
+        _load_nisqa_constants,
+        _nisqa_discovered_path,
+        _normalize_fetch_stream,
+        install_model,
+    )
+    from hawavoclean.server import policy as policy_mod
+
+    # 1. AST fallback when torch is absent
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+    fname, sha = _load_nisqa_constants()
+    assert fname.endswith(".tar") and len(sha) == 64
+
+    # 2. _nisqa_discovered_path env overrides
+    custom_weights = tmp_path / "custom_nisqa.tar"
+    monkeypatch.setenv("HAWAVOCLEAN_NISQA_WEIGHTS", str(custom_weights))
+    assert _nisqa_discovered_path(None) == custom_weights.resolve()
+    monkeypatch.delenv("HAWAVOCLEAN_NISQA_WEIGHTS", raising=False)
+    monkeypatch.setenv("HAWAVOCLEAN_MODEL_DIR", str(tmp_path / "mdir"))
+    assert _nisqa_discovered_path(None).parent.name == "nisqa"
+    monkeypatch.delenv("HAWAVOCLEAN_MODEL_DIR", raising=False)
+    assert _nisqa_discovered_path(tmp_path / "mroot") == tmp_path / "mroot" / "nisqa" / fname
+
+    # 3. _normalize_fetch_stream variants: bytes, (bytes, total), file-like .read()
+    chunks_b, tot_b = _normalize_fetch_stream(b"hello")
+    assert list(chunks_b) == [b"hello"] and tot_b == 5
+    chunks_tb, tot_tb = _normalize_fetch_stream(cast(Any, (b"abc", 3)))
+    assert list(chunks_tb) == [b"abc"] and tot_tb == 3
+    chunks_io, tot_io = _normalize_fetch_stream(io.BytesIO(b"streamed-bytes"))
+    assert b"".join(chunks_io) == b"streamed-bytes" and tot_io is None
+
+    # 4. _HttpsOnlyRedirectHandler rejects HTTP downgrade redirects
+    handler = _HttpsOnlyRedirectHandler()
+    req = urllib.request.Request("https://example.com/model.bin")
+    with pytest.raises(ModelDownloadError, match="Only HTTPS"):
+        handler.redirect_request(req, None, 302, "Found", {}, "http://example.com/downgrade")
+
+    # 5. _https_stream_fetcher success, open error, and mid-stream read error
+    class _FakeResp:
+        def __init__(self, payload: bytes, *, fail_on_read: bool = False) -> None:
+            self._buf = io.BytesIO(payload)
+            self._fail = fail_on_read
+            self.headers = {"Content-Length": str(len(payload))}
+            self.closed = False
+
+        def read(self, n: int = -1) -> bytes:
+            if self._fail:
+                raise urllib.error.URLError("connection reset")
+            return self._buf.read(n)
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeOpener:
+        def __init__(self, resp: _FakeResp | None = None, *, fail_open: bool = False) -> None:
+            self._resp = resp
+            self._fail_open = fail_open
+
+        def open(self, _req: Any, timeout: float = 0.0) -> _FakeResp:
+            _ = timeout
+            if self._fail_open or self._resp is None:
+                raise urllib.error.URLError("dns failure")
+            return self._resp
+
+    good_resp = _FakeResp(b"chunk-payload")
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _FakeOpener(good_resp))
+    stream_it, content_len = _https_stream_fetcher("https://example.com/weights.bin")
+    assert content_len == len(b"chunk-payload")
+    assert b"".join(stream_it) == b"chunk-payload"
+    assert good_resp.closed
+
+    bad_read = _FakeResp(b"x", fail_on_read=True)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _FakeOpener(bad_read))
+    bad_it, _ = _https_stream_fetcher("https://example.com/weights.bin")
+    with pytest.raises(ModelDownloadError, match="Interrupted"):
+        list(bad_it)
+    assert bad_read.closed
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _FakeOpener(fail_open=True))
+    with pytest.raises(ModelDownloadError, match="Could not download"):
+        _https_stream_fetcher("https://example.com/weights.bin")
+
+    # 6. Bundled deepfilternet3 returns already_installed=True; oversized download fails closed
+    dfn_res = install_model("deepfilternet3")
+    assert dfn_res.installed and dfn_res.verified and dfn_res.already_installed
+
+    import dataclasses
+
+    models_root = tmp_path / "models_install"
+    payload = b"verified-model-bytes"
+    payload_sha = hashlib.sha256(payload).hexdigest()
+    spec = mm.get_model_spec("nisqa_v2", models_root=models_root)
+    patched_spec = dataclasses.replace(
+        spec,
+        expected_sha256=payload_sha,
+        bundled=False,
+        artifacts=(
+            mm.ModelArtifact(
+                filename=spec.artifacts[0].filename,
+                expected_sha256=payload_sha,
+                download_urls=spec.artifacts[0].download_urls,
+            ),
+        ),
+    )
+    monkeypatch.setattr(mm, "get_model_spec", lambda _mid, **_kw: patched_spec)
+    # Oversized payload rejected before hash check
+    with pytest.raises(ModelDownloadError, match="exceeded maximum"):
+        mm._stream_and_verify_artifact(
+            patched_spec.artifacts[0],
+            models_root / "nisqa" / patched_spec.artifacts[0].filename,
+            fetcher=lambda _u: [b"", b"123456"],
+            max_bytes=4,
+            progress_cb=None,
+            bytes_before=0,
+            total_hint=None,
+        )
+
+    # Install once, then verify fetcher=None short-circuits as already_installed
+    first = install_model("nisqa_v2", models_root=models_root, fetcher=lambda _u: [b"", payload])
+    assert first.installed and first.verified and not first.already_installed
+    second = install_model("nisqa_v2", models_root=models_root, fetcher=None)
+    assert second.installed and second.verified and second.already_installed
+
+    # Missing download URL raises ModelNotDownloadableError
+    no_url_spec = dataclasses.replace(
+        patched_spec,
+        download_urls=(),
+        artifacts=(mm.ModelArtifact(filename="a.bin", expected_sha256=payload_sha),),
+    )
+    monkeypatch.setattr(mm, "get_model_spec", lambda _mid, **_kw: no_url_spec)
+    with pytest.raises(ModelNotDownloadableError):
+        install_model("nisqa_v2", models_root=models_root, fetcher=lambda _u: [payload])
+
+    # 7. Windows policy drive enumeration & env system-dir blocking exercised cross-platform
+    monkeypatch.setenv("SYSTEMDRIVE", "c")
+    assert policy_mod._windows_system_drive() == "C:"
+
+    fake_kernel32 = types.SimpleNamespace(
+        # Bits for C (2), D (3), E (4), Z (25)
+        GetLogicalDrives=lambda: (1 << 2) | (1 << 3) | (1 << 4) | (1 << 25),
+        GetDriveTypeW=lambda root: {
+            "C:\\": 3,  # fixed (system)
+            "D:\\": 3,  # fixed (secondary)
+            "E:\\": 2,  # removable (secondary)
+            "Z:\\": 4,  # remote/network (excluded)
+        }.get(root, 0),
+    )
+    monkeypatch.setattr(sys_mod, "platform", "win32")
+    monkeypatch.setattr(
+        ctypes, "windll", types.SimpleNamespace(kernel32=fake_kernel32), raising=False
+    )
+    drives = policy_mod.windows_local_drives(include_system_drive=False)
+    drive_strs = [str(d) for d in drives]
+    assert "D:\\" in drive_strs and "E:\\" in drive_strs
+    assert "Z:\\" not in drive_strs
+    all_drives = policy_mod.windows_local_drives(include_system_drive=True)
+    assert any("C:" in str(d) for d in all_drives)
+
+    fake_sysroot = tmp_path / "WinSysRoot"
+    fake_sysroot.mkdir()
+    monkeypatch.setenv("SYSTEMROOT", str(fake_sysroot))
+    assert policy_mod.is_blocked_windows_system_path(
+        (fake_sysroot / "cmd.exe").resolve(), platform="win32"
+    )
+
+
+def test_assistant_transport_and_runtime_rss_cross_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+    import io
+    import urllib.error
+    import urllib.request
+
+    from hawavoclean import assistant as ast_mod
+    from hawavoclean import runtime as rt_mod
+
+    class _Resp:
+        def __init__(self, body: bytes, status: int = 200) -> None:
+            self._body = body
+            self.status = status
+
+        def read(self, n: int = -1) -> bytes:
+            return self._body if n < 0 else self._body[:n]
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    class _Opener:
+        def __init__(self, resp: _Resp | None = None, *, exc: Exception | None = None) -> None:
+            self._resp = resp
+            self._exc = exc
+
+        def open(self, _req: Any, timeout: float = 0.0) -> _Resp:
+            _ = timeout
+            if self._exc is not None:
+                raise self._exc
+            assert self._resp is not None
+            return self._resp
+
+    # 1. _probe_ollama_tags: 200 mixed entries, non-200, oversized, bad JSON, non-dict, non-list, error
+    payload_tags = json.dumps(
+        {
+            "models": [
+                "not-a-dict",
+                {"name": "default"},
+                {"name": "nomic-embed-text:latest"},
+                {"name": "custom-chat:7b"},
+                {"model": "custom-chat:7b"},
+                {"model": "phi4:latest"},
+            ]
+        }
+    ).encode("utf-8")
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _Opener(_Resp(payload_tags)))
+    ok, models = ast_mod._probe_ollama_tags("http://127.0.0.1:11434")
+    assert ok and models == ["nomic-embed-text:latest", "custom-chat:7b", "phi4:latest"]
+    assert (
+        ast_mod._pick_installed_chat_model(["nomic-embed-text", "custom-chat:7b"])
+        == "custom-chat:7b"
+    )
+    assert ast_mod._model_is_installed("phi4", models)
+    assert ast_mod._model_is_installed("phi4:latest", models)
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_a: _Opener(_Resp(b"{}", status=503))
+    )
+    assert ast_mod._probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_a: _Opener(_Resp(b"x" * (ast_mod.MAX_RESPONSE_BYTES + 2))),
+    )
+    assert ast_mod._probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _Opener(_Resp(b"not-json")))
+    assert ast_mod._probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _Opener(_Resp(b"[1,2]")))
+    assert ast_mod._probe_ollama_tags("http://127.0.0.1:11434") == (False, [])
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_a: _Opener(_Resp(b'{"models":null}'))
+    )
+    assert ast_mod._probe_ollama_tags("http://127.0.0.1:11434") == (True, [])
+
+    # 2. _post_json: success, oversized, non-dict, bad JSON, URLError
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _Opener(_Resp(b'{"ok":true}')))
+    assert ast_mod._post_json("http://127.0.0.1:11434/chat", {"a": 1}, {}) == {"ok": True}
+
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_a: _Opener(_Resp(b"x" * (ast_mod.MAX_RESPONSE_BYTES + 2))),
+    )
+    with pytest.raises(ast_mod.AssistantError, match="too large"):
+        ast_mod._post_json("http://127.0.0.1:11434/chat", {}, {})
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _Opener(_Resp(b"[1,2]")))
+    with pytest.raises(ast_mod.AssistantError, match="invalid response"):
+        ast_mod._post_json("http://127.0.0.1:11434/chat", {}, {})
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_a: _Opener(_Resp(b"{bad")))
+    with pytest.raises(ast_mod.AssistantError, match="invalid response"):
+        ast_mod._post_json("http://127.0.0.1:11434/chat", {}, {})
+
+    monkeypatch.setattr(
+        urllib.request, "build_opener", lambda *_a: _Opener(exc=urllib.error.URLError("down"))
+    )
+    with pytest.raises(ast_mod.AssistantUnavailableError):
+        ast_mod._post_json("http://127.0.0.1:11434/chat", {}, {})
+
+    # 3. runtime.py: _linux_current_rss_bytes & process_current_rss_bytes branches
+    real_open = builtins.open
+
+    def _fake_statm(content: str) -> Any:
+        def _opener(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if str(path) == "/proc/self/statm":
+                return io.StringIO(content)
+            return real_open(path, *args, **kwargs)
+
+        return _opener
+
+    monkeypatch.setattr(builtins, "open", _fake_statm("1000 250 100 0 0 0 0\n"))
+    assert rt_mod._linux_current_rss_bytes() > 0
+
+    monkeypatch.setattr(builtins, "open", _fake_statm("1000\n"))
+    with pytest.raises(OSError, match="Malformed"):
+        rt_mod._linux_current_rss_bytes()
+
+    monkeypatch.setattr(builtins, "open", _fake_statm("1000 0\n"))
+    with pytest.raises(OSError, match="Non-positive"):
+        rt_mod._linux_current_rss_bytes()
+
+    import sys as sys_mod
+
+    monkeypatch.setattr(builtins, "open", real_open)
+    monkeypatch.setattr(sys_mod, "platform", "linux")
+    monkeypatch.setattr(rt_mod, "_linux_current_rss_bytes", lambda: 12345678)
+    assert rt_mod.process_current_rss_bytes() == 12345678
+
+    monkeypatch.setattr(sys_mod, "platform", "win32")
+    monkeypatch.setattr(
+        rt_mod, "_windows_rss_bytes", lambda *, current=False: 87654321 if current else 99999999
+    )
+    assert rt_mod.process_current_rss_bytes() == 87654321
+
+    def _boom(*, current: bool = False) -> int:
+        _ = current
+        raise OSError("probe failed")
+
+    monkeypatch.setattr(rt_mod, "_windows_rss_bytes", _boom)
+    monkeypatch.setattr(rt_mod, "process_peak_rss_bytes", lambda: 424242)
+    assert rt_mod.process_current_rss_bytes() == 424242
