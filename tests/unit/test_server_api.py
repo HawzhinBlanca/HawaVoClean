@@ -254,10 +254,17 @@ def test_v1_job_is_batch_idempotent_after_upload_retention(client: TestClient) -
     assert history.status_code == 200
     assert any(job["jobId"] == job_id for job in history.json()["jobs"])
 
-    deadline = time.monotonic() + 5
-    while source_path.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert not source_path.exists()  # retention has removed the source and marker
+    # Interactive V1 sessions retain the uploaded source right after completion so
+    # post-Process Preview, Spectrogram, Multi-Take, and Video Mux remain usable;
+    # once UploadStore retention later removes the upload and marker, idempotent
+    # replay still returns the prior batch snapshot and conflicting requests 409.
+    time.sleep(0.1)
+    assert source_path.exists()
+    from hawavoclean.server.retention import UPLOAD_MARKER
+
+    source_path.unlink()
+    (source_path.parent / UPLOAD_MARKER).unlink(missing_ok=True)
+    assert not source_path.exists()
     after_retention = client.post("/api/v1/jobs", headers=H, json=request)
     assert after_retention.status_code == 202
     assert after_retention.json() == first.json()
