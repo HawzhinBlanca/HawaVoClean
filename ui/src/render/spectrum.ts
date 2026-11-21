@@ -42,6 +42,9 @@ export interface SpectrumCurve {
 
 export type SpectrumDeck = 'original' | 'cleaned';
 
+/** Visual tilt slope around 1 kHz (FabFilter Pro-Q standard: 0 flat, 3 pink, 4.5 broadcast). */
+export type SpectrumTiltSlope = 0 | 3 | 4.5;
+
 type RGB = readonly [number, number, number];
 
 const F_MIN = 20;
@@ -317,6 +320,13 @@ export class SpectrumRenderer {
   private livePeakYs = new Float32Array(BANDS.length);
   private liveVisible = 0; // 0..1 fade
   private lastT = 0;
+  /** Visual tilt slope in dB/octave around 1 kHz (0 = flat, 3 = pink, 4.5 = Pro-Q standard). */
+  private tiltSlope: SpectrumTiltSlope = 0;
+  /** Frozen snapshot of the live 1/12-oct peak-hold curve for forensic inspection. */
+  private frozenFlag = false;
+  private frozenDb = new Float32Array(BANDS.length).fill(DB_MIN);
+  private frozenYs = new Float32Array(BANDS.length);
+  private hasFrozenData = false;
 
   // cached paints / gradients (rebuilt on resize or theme change)
   private paints: Paints;
@@ -645,6 +655,56 @@ export class SpectrumRenderer {
     }
   }
 
+  /** Set visual tilt slope around 1 kHz (0 = flat, 3 = pink noise, 4.5 = Pro-Q broadcast). */
+  setTiltDbPerOct(tilt: SpectrumTiltSlope): void {
+    if (this.tiltSlope === tilt) return;
+    this.tiltSlope = tilt;
+    this.projectAll();
+    this.invalidate();
+  }
+
+  get tiltDbPerOct(): SpectrumTiltSlope {
+    return this.tiltSlope;
+  }
+
+  /** Freeze or unfreeze the live peak-hold curve for forensic transient inspection. */
+  setFrozen(frozen: boolean): void {
+    const next = Boolean(frozen);
+    if (next === this.frozenFlag) return;
+    this.frozenFlag = next;
+    if (next) {
+      let anyAboveFloor = false;
+      for (let i = 0; i < BANDS.length; i++) {
+        const peak = this.livePeak[i] ?? DB_MIN;
+        const cur = this.liveDb[i] ?? DB_MIN;
+        const v = Math.max(peak, cur);
+        this.frozenDb[i] = v;
+        if (v > DB_MIN + 0.5) anyAboveFloor = true;
+      }
+      // If user freezes while paused with a loaded LTAS curve, capture the active LTAS curve.
+      if (!anyAboveFloor) {
+        const src = this.curves[this.focus] ?? this.curves.cleaned ?? this.curves.original;
+        if (src) {
+          for (let i = 0; i < BANDS.length; i++) {
+            const v = SpectrumRenderer.sampleAt(src, BANDS[i] ?? F_MIN);
+            this.frozenDb[i] = v;
+            if (v > DB_MIN + 0.5) anyAboveFloor = true;
+          }
+        }
+      }
+      this.hasFrozenData = anyAboveFloor;
+    } else {
+      this.hasFrozenData = false;
+      this.frozenDb.fill(DB_MIN);
+    }
+    this.dirty = true;
+    this.kick();
+  }
+
+  get frozen(): boolean {
+    return this.frozenFlag;
+  }
+
   setLive(
     analyser: AnalyserNode | null,
     sampleRate: number,
@@ -724,8 +784,12 @@ export class SpectrumRenderer {
     return p.x + (Math.log2(clamped / F_MIN) / LOG_SPAN) * p.w;
   }
 
-  private yOf(db: number, p: Plot): number {
-    const clamped = db < DB_MIN ? DB_MIN : db > DB_MAX ? DB_MAX : db;
+  private yOf(db: number, p: Plot, f?: number): number {
+    const tilted =
+      this.tiltSlope !== 0 && typeof f === 'number' && f > 0
+        ? db + this.tiltSlope * Math.log2(f / 1000)
+        : db;
+    const clamped = tilted < DB_MIN ? DB_MIN : tilted > DB_MAX ? DB_MAX : tilted;
     return p.y + ((DB_MAX - clamped) / DB_SPAN) * p.h;
   }
 
@@ -743,8 +807,9 @@ export class SpectrumRenderer {
     const xs = new Float32Array(n);
     const ys = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      xs[i] = this.xOf(curve.freqs[i] ?? F_MIN, p);
-      ys[i] = this.yOf(curve.db[i] ?? DB_MIN, p);
+      const freq = curve.freqs[i] ?? F_MIN;
+      xs[i] = this.xOf(freq, p);
+      ys[i] = this.yOf(curve.db[i] ?? DB_MIN, p, freq);
     }
     return { n, xs, ys };
   }
@@ -803,8 +868,8 @@ export class SpectrumRenderer {
       const dbO = o.db[i] ?? DB_MIN;
       const dbC = sameGrid ? (c.db[i] ?? DB_MIN) : SpectrumRenderer.sampleAt(c, f);
       this.diffX[i] = this.xOf(f, p);
-      this.diffYo[i] = this.yOf(dbO, p);
-      this.diffYc[i] = this.yOf(dbC, p);
+      this.diffYo[i] = this.yOf(dbO, p, f);
+      this.diffYc[i] = this.yOf(dbC, p, f);
     }
     this.diffN = n;
   }
@@ -977,6 +1042,15 @@ export class SpectrumRenderer {
       ctx.rect(p.x, p.y, p.w, p.h);
       ctx.clip();
       this.drawLive(p);
+      ctx.restore();
+    }
+
+    if (this.frozenFlag && this.hasFrozenData) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(p.x, p.y, p.w, p.h);
+      ctx.clip();
+      this.drawFrozen(p);
       ctx.restore();
     }
 
@@ -1351,8 +1425,9 @@ export class SpectrumRenderer {
     const ctx = this.ctx;
     const n = BANDS.length;
     for (let i = 0; i < n; i++) {
-      this.liveYs[i] = this.yOf(this.liveDb[i] ?? DB_MIN, p);
-      this.livePeakYs[i] = this.yOf(this.livePeak[i] ?? DB_MIN, p);
+      const f = BANDS[i] ?? F_MIN;
+      this.liveYs[i] = this.yOf(this.liveDb[i] ?? DB_MIN, p, f);
+      this.livePeakYs[i] = this.yOf(this.livePeak[i] ?? DB_MIN, p, f);
     }
     const pen = this.strokeOf[this.liveDeck];
     const a = this.liveVisible;
@@ -1387,6 +1462,25 @@ export class SpectrumRenderer {
     // the peak line stays a hair thinner than the live trace
     ctx.lineWidth = this.dpr >= 2 ? 0.75 : 1;
     ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawFrozen(p: Plot): void {
+    const ctx = this.ctx;
+    const n = BANDS.length;
+    for (let i = 0; i < n; i++) {
+      const f = BANDS[i] ?? F_MIN;
+      this.frozenYs[i] = this.yOf(this.frozenDb[i] ?? DB_MIN, p, f);
+    }
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.setLineDash([5, 3]);
+    this.tracePath(ctx, this.liveXs, this.frozenYs, n);
+    ctx.strokeStyle = 'rgba(220, 248, 255, 0.92)';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    ctx.setLineDash([]);
     ctx.restore();
   }
 
@@ -1444,8 +1538,8 @@ export class SpectrumRenderer {
     const c = this.curves.cleaned;
     const dbO = o ? SpectrumRenderer.sampleAt(o, f) : null;
     const dbC = c ? SpectrumRenderer.sampleAt(c, f) : null;
-    if (dbO !== null) this.dot(sx, this.yOf(dbO, p), this.paints.amber);
-    if (dbC !== null) this.dot(sx, this.yOf(dbC, p), this.paints.cyan);
+    if (dbO !== null) this.dot(sx, this.yOf(dbO, p, f), this.paints.amber);
+    if (dbC !== null) this.dot(sx, this.yOf(dbC, p, f), this.paints.cyan);
     ctx.restore();
 
     const baseFreq = f >= 1000 ? `${(f / 1000).toFixed(f >= 10000 ? 1 : 2)} kHz` : `${Math.round(f)} Hz`;

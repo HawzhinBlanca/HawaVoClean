@@ -199,6 +199,22 @@ export function VerdictStrip() {
   }, [hover, placeTip]);
 
   const enhanced = units.filter((u) => u.final_decision === 'enhanced').length;
+  const flaggedUnits = useMemo(
+    () =>
+      units.filter((u) => {
+        const c = classifyDecision(u.final_decision);
+        return c === 'reverted' || c === 'error';
+      }),
+    [units],
+  );
+
+  const jumpNextFlagged = useCallback(() => {
+    if (flaggedUnits.length === 0) return;
+    const curKey = selected ? unitKey(selected) : null;
+    const curIdx = curKey ? flaggedUnits.findIndex((u) => unitKey(u) === curKey) : -1;
+    const nextUnit = flaggedUnits[(curIdx + 1) % flaggedUnits.length];
+    if (nextUnit) selectUnit(nextUnit);
+  }, [flaggedUnits, selected]);
 
   // One segment, wherever it lives — directly in the track for a mono report,
   // inside its channel's lane for a multi-channel one. Written once so the two
@@ -262,6 +278,25 @@ export function VerdictStrip() {
               : `${units.length} ${unitNoun(units.length)} · ${enhanced} enhanced`
             : '—'}
         </span>
+        {flaggedUnits.length > 0 ? (
+          <button
+            type="button"
+            className="verdict-jump-btn"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              jumpNextFlagged();
+            }}
+            title={
+              isCkb
+                ? 'بازدان بۆ یەکەی گەڕێنراوە یان هەڵەی داهاتوو'
+                : 'Jump to next reverted or errored speech unit'
+            }
+          >
+            {isCkb
+              ? `${flaggedUnits.length} گەڕێنراوە ←`
+              : `${flaggedUnits.length} flagged →`}
+          </button>
+        ) : null}
       </div>
       <div
         className="verdict-track"

@@ -275,10 +275,13 @@ export interface AudioPlan {
     | 'loop_off'
     | 'seek'
     | 'set_mix'
+    | 'solo_freq'
+    | 'clear_solo'
     | null
     | undefined;
   seek_s?: number | null | undefined;
   wet_dry_mix?: number | null | undefined;
+  solo_hz?: number | null | undefined;
   export_format?: ExportFormatId | null | undefined;
   unit_override?: AudioUnitOverridePlan | null | undefined;
   ui_action?:
@@ -288,6 +291,11 @@ export interface AudioPlan {
     | 'switch_english'
     | 'open_models'
     | 'diagnose'
+    | 'show_spectrogram'
+    | 'show_waveform'
+    | 'open_batch'
+    | 'open_shortcuts'
+    | 'download_certificate'
     | null
     | undefined;
   explanation: string;

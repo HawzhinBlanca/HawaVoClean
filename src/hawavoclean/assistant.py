@@ -51,6 +51,11 @@ UiActionPlan = Literal[
     "switch_english",
     "open_models",
     "diagnose",
+    "show_spectrogram",
+    "show_waveform",
+    "open_batch",
+    "open_shortcuts",
+    "download_certificate",
 ]
 CleanupProfile = Literal["production", "studio", "studio_pro", "dereverb", "lowband"]
 DeliveryPresetPlan = Literal[
@@ -67,6 +72,8 @@ PlaybackActionPlan = Literal[
     "loop_off",
     "seek",
     "set_mix",
+    "solo_freq",
+    "clear_solo",
 ]
 ExportFormatPlan = Literal["wav24", "wav32f", "flac", "aac", "video_mux"]
 UnitOverrideActionPlan = Literal["force_original", "force_enhanced", "blend"]
@@ -264,13 +271,20 @@ class PlanPayload(_ClosedModel):
     playback_action: PlaybackActionPlan | None = None
     seek_s: float | None = Field(default=None, ge=0.0, le=86400.0, allow_inf_nan=False)
     wet_dry_mix: float | None = Field(default=None, ge=0.0, le=1.0, allow_inf_nan=False)
+    solo_hz: float | None = Field(default=None, ge=20.0, le=18000.0, allow_inf_nan=False)
     export_format: ExportFormatPlan | None = None
     unit_override: UnitOverridePlan | None = None
     ui_action: UiActionPlan | None = None
     explanation: str = Field(min_length=1, max_length=700)
 
     @field_validator(
-        "strength", "hpf_cutoff_hz", "ambience_floor_db", "seek_s", "wet_dry_mix", mode="before"
+        "strength",
+        "hpf_cutoff_hz",
+        "ambience_floor_db",
+        "seek_s",
+        "wet_dry_mix",
+        "solo_hz",
+        mode="before",
     )
     @classmethod
     def reject_bool_numbers(cls, value: Any) -> Any:
@@ -451,12 +465,14 @@ You can control EVERY feature of HawaVoClean from chat. Choose exactly one opera
 - spectral_repair: 2D time-frequency surgical attenuation. Set spectral_repair={start_s, end_s, f_low_hz, f_high_hz, attenuation_db}.
 - preview: run a fast warm audition (6-8s) with the requested profile/settings before full processing.
 - playback: control playback/comparison immediately. Set playback_action to one of:
-  play, pause, play_original, play_cleaned, hear_removed, loop_on, loop_off, seek (with seek_s), set_mix (with wet_dry_mix 0..1).
+  play, pause, play_original, play_cleaned, hear_removed, loop_on, loop_off, seek (with seek_s),
+  set_mix (with wet_dry_mix 0..1), solo_freq (with solo_hz 20..18000 to isolate a frequency band live), clear_solo.
 - export: save/export the cleaned master. Set export_format to wav24, wav32f, flac, aac, or video_mux (and optional delivery_preset).
 - undo / redo / reset: undo last edit, redo last edit, or reset all studio settings to defaults.
 - unit_override: override one guard decision unit. Set unit_override={unit_id, action ("force_original"|"force_enhanced"|"blend"), strength}.
 - ui_action: control workspace UI or diagnose the loaded recording. Set ui_action to one of:
-  switch_pro, switch_simple, switch_kurdish, switch_english, open_models, diagnose (report measured acoustic health honestly).
+  switch_pro, switch_simple, switch_kurdish, switch_english, open_models, diagnose,
+  show_spectrogram, show_waveform, open_batch, open_shortcuts, download_certificate.
 - clarify: ask one concise question when the request is ambiguous, contradictory, or unsupported
   (transcription, translation, voice cloning, multi-stem output, music creation).
 
@@ -557,6 +573,8 @@ def _schema() -> dict[str, Any]:
         "loop_off",
         "seek",
         "set_mix",
+        "solo_freq",
+        "clear_solo",
     ]
     export_enum = ["wav24", "wav32f", "flac", "aac", "video_mux"]
     nullable_bool: dict[str, Any] = {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
@@ -633,6 +651,9 @@ def _schema() -> dict[str, Any]:
     nullable_mix: dict[str, Any] = {
         "anyOf": [{"type": "number", "minimum": 0.0, "maximum": 1.0}, {"type": "null"}]
     }
+    nullable_solo_hz: dict[str, Any] = {
+        "anyOf": [{"type": "number", "minimum": 20.0, "maximum": 18000.0}, {"type": "null"}]
+    }
     strength_range: dict[str, Any] = {"type": "number", "minimum": 0.1, "maximum": 1.0}
     all_ops: tuple[Operation, ...] = (
         "clean",
@@ -658,6 +679,11 @@ def _schema() -> dict[str, Any]:
         "switch_english",
         "open_models",
         "diagnose",
+        "show_spectrogram",
+        "show_waveform",
+        "open_batch",
+        "open_shortcuts",
+        "download_certificate",
     ]
     branches = []
     for operation in all_ops:
@@ -689,6 +715,7 @@ def _schema() -> dict[str, Any]:
             ),
             "seek_s": nullable_seek if operation == "playback" else {"type": "null"},
             "wet_dry_mix": nullable_mix if operation == "playback" else {"type": "null"},
+            "solo_hz": nullable_solo_hz if operation == "playback" else {"type": "null"},
             "export_format": (
                 {"type": "string", "enum": export_enum}
                 if operation == "export"
@@ -1592,6 +1619,68 @@ def _rules_plan(request: AudioPlanRequest) -> PlanPayload:
             ui_action="open_models",
             explanation="Opening the local Neural Model Manager.",
         )
+    if re.search(
+        r"\b(show\s+(?:the\s+)?spectrogram|open\s+(?:the\s+)?spectrogram|2d\s+spectrogram|شەبەنگی\s+٢\s*ڕەهەندی)\b",
+        raw_lower,
+    ):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="show_spectrogram",
+            explanation="Switching to Pro Studio 2D STFT Spectrogram view.",
+        )
+    if re.search(
+        r"\b(show\s+(?:the\s+)?waveform|back\s+to\s+waveform|hide\s+spectrogram|شەپۆل\s+پیشان\s+بدە)\b",
+        raw_lower,
+    ):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="show_waveform",
+            explanation="Switching the audio stage back to Waveform view.",
+        )
+    if re.search(r"\b(open\s+batch(?:\s+queue)?|show\s+batch(?:\s+queue)?)\b", raw_lower):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="open_batch",
+            explanation="Opening the Batch Queue drawer.",
+        )
+    if re.search(r"\b(show\s+(?:keyboard\s+)?shortcuts?|open\s+shortcuts?)\b", raw_lower):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="open_shortcuts",
+            explanation="Opening the keyboard shortcuts reference.",
+        )
+    if re.search(
+        r"\b(download\s+(?:qc|quality)\s+(?:report|certificate)|qc\s+(?:report|certificate)|quality\s+certificate|بڕوانامەی\s+qc)\b",
+        raw_lower,
+    ):
+        return PlanPayload(
+            operation="ui_action",
+            ui_action="download_certificate",
+            explanation="Generating and downloading the offline Broadcast Quality Certificate (HTML).",
+        )
+    if re.search(
+        r"\b(stop\s+solo|clear\s+solo|exit\s+solo|disable\s+solo|turn\s+off\s+solo|fullband)\b",
+        raw_lower,
+    ):
+        return PlanPayload(
+            operation="playback",
+            playback_action="clear_solo",
+            explanation="Disabled frequency band solo and restored full-band playback.",
+        )
+    solo_match = re.search(
+        r"\b(?:solo|audition|listen\s+to|sweep)\s+(?:band\s+|freq(?:uency)?\s+)?(\d+(?:\.\d+)?)\s*(khz|hz)\b",
+        raw_lower,
+    )
+    if solo_match:
+        hz = _parse_freq_hz(solo_match.group(1), solo_match.group(2))
+        if 20.0 <= hz <= 18000.0:
+            lbl = f"{hz / 1000.0:.2f} kHz" if hz >= 1000.0 else f"{round(hz)} Hz"
+            return PlanPayload(
+                operation="playback",
+                playback_action="solo_freq",
+                solo_hz=round(hz, 1),
+                explanation=f"Soloing the frequency band around {lbl} in real time. Say 'stop solo' when done.",
+            )
     if re.search(
         r"(what(?:'s|\s+is)\s+wrong|diagnos\w*|how\s+loud|check\s+(?:the\s+)?(?:audio|noise|reverb|clipping|levels?)|analyze\s+this|کێشەی\s+(?:ئەم\s+)?دەنگە)",
         raw_lower,

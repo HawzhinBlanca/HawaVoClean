@@ -1735,6 +1735,99 @@ button.sd-clean-btn.process.running {
   font-size: 10px;
 }
 
+/* ----------------------------------------------------- Studio 4.5 Pro Tools */
+.as-zoom-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.as-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 5px;
+  border: 1px solid var(--hair-strong);
+  background: var(--display-2);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 120ms ease-out, color 120ms ease-out, background 120ms ease-out;
+}
+
+.as-tool-btn:hover {
+  color: var(--fg);
+  border-color: var(--cyan-dim);
+}
+
+.as-tool-btn.accent {
+  border-color: color-mix(in oklab, var(--cyan) 48%, transparent);
+  background: color-mix(in oklab, var(--cyan) 14%, var(--display-2));
+  color: var(--cyan-2);
+}
+
+.hc-autofix-btn {
+  margin-inline-start: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--cyan) 55%, transparent);
+  background: color-mix(in oklab, var(--cyan) 16%, var(--display-2));
+  color: var(--cyan-2);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease-out, border-color 140ms ease-out;
+}
+
+.hc-autofix-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--cyan) 26%, var(--display-2));
+  border-color: var(--cyan);
+}
+
+.verdict-jump-btn {
+  margin-inline-start: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--amber) 52%, transparent);
+  background: color-mix(in oklab, var(--amber) 14%, var(--display-2));
+  color: var(--amber-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease-out, border-color 120ms ease-out;
+}
+
+.verdict-jump-btn:hover {
+  background: color-mix(in oklab, var(--amber) 24%, var(--display-2));
+  border-color: var(--amber);
+}
+
+.sit-pill.sit-compliance.status-pass {
+  border-color: color-mix(in oklab, var(--ok) 55%, transparent);
+  background: color-mix(in oklab, var(--ok) 14%, var(--display-2));
+  color: #86efac;
+}
+
+.sit-pill.sit-compliance.status-warn {
+  border-color: color-mix(in oklab, var(--amber) 55%, transparent);
+  background: color-mix(in oklab, var(--amber) 14%, var(--display-2));
+  color: var(--amber-2);
+}
+
+.sit-pill.sit-compliance.status-clip {
+  border-color: color-mix(in oklab, var(--err) 65%, transparent);
+  background: color-mix(in oklab, var(--err) 18%, var(--display-2));
+  color: #ffb3b5;
+}
+
 /* ----------------------------------------------------- forced-colors accessibility */
 @media (forced-colors: active) {
 

@@ -221,6 +221,11 @@ def test_schema_includes_ui_action_enum_without_refs() -> None:
         "switch_english",
         "open_models",
         "diagnose",
+        "show_spectrogram",
+        "show_waveform",
+        "open_batch",
+        "open_shortcuts",
+        "download_certificate",
     }
     assert ui_branch["additionalProperties"] is False
 

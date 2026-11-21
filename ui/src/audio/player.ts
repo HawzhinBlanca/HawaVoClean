@@ -65,6 +65,14 @@ export interface LiveMeterLevels {
   truePeakHoldDbfs: number;
   /** Instantaneous noise reduction in dB (Original RMS - Cleaned RMS) when both decks play; null otherwise. */
   nrDb?: number | null;
+  /** Real-time stereo phase correlation in [-1, +1] (+1 = mono/in-phase, <0 = out of phase); null when silent. */
+  stereoCorrelation?: number | null;
+}
+
+export interface BandSoloState {
+  active: boolean;
+  hz: number;
+  q: number;
 }
 
 /**
@@ -168,6 +176,20 @@ export class DualPlayer {
   private hpfWetGain: GainNode | null = null;
   private liveHpfEnabled = false;
   private liveHpfCutoffHz = 80;
+  /** Parallel FabFilter-style real-time bandpass frequency solo audition (post-analyser, pre-destination). */
+  private soloFilter: BiquadFilterNode | null = null;
+  private soloDryGain: GainNode | null = null;
+  private soloWetGain: GainNode | null = null;
+  private soloActive = false;
+  private soloCenterHz = 1000;
+  private soloQ = 4.5;
+  /** Stereo phase correlation splitter & per-channel analysers (meter-only, never routed to destination). */
+  private corrSplitter: ChannelSplitterNode | null = null;
+  private corrAnalyserL: AnalyserNode | null = null;
+  private corrAnalyserR: AnalyserNode | null = null;
+  private corrBufL: Float32Array<ArrayBuffer> | null = null;
+  private corrBufR: Float32Array<ArrayBuffer> | null = null;
+  private smoothCorr: number | null = null;
   /** Raw bytes and decoded PCM AudioBuffers for 0-sample-skew AudioBufferSourceNode playback. */
   private rawBytes: Record<Deck, ArrayBuffer | null> = { original: null, cleaned: null };
   private buffers: Record<Deck, AudioBuffer | null> = { original: null, cleaned: null };
@@ -409,6 +431,12 @@ export class DualPlayer {
       this.hpfStage2?.disconnect();
       this.hpfDryGain?.disconnect();
       this.hpfWetGain?.disconnect();
+      this.soloFilter?.disconnect();
+      this.soloDryGain?.disconnect();
+      this.soloWetGain?.disconnect();
+      this.corrSplitter?.disconnect();
+      this.corrAnalyserL?.disconnect();
+      this.corrAnalyserR?.disconnect();
     } catch {
       // Ignore disconnect errors on torn-down or closed contexts.
     }
@@ -427,6 +455,12 @@ export class DualPlayer {
     this.hpfStage2 = null;
     this.hpfDryGain = null;
     this.hpfWetGain = null;
+    this.soloFilter = null;
+    this.soloDryGain = null;
+    this.soloWetGain = null;
+    this.corrSplitter = null;
+    this.corrAnalyserL = null;
+    this.corrAnalyserR = null;
     if (closeContext && ctx && ctx.state !== 'closed') {
       try {
         void ctx.close().catch(() => undefined);
@@ -460,6 +494,30 @@ export class DualPlayer {
     analyser.minDecibels = -100;
     analyser.maxDecibels = 0;
     analyser.connect(ctx.destination);
+
+    // Meter-only stereo phase correlation branch (ChannelSplitter -> L/R analysers).
+    let corrSplitter: ChannelSplitterNode | null = null;
+    let corrAnalyserL: AnalyserNode | null = null;
+    let corrAnalyserR: AnalyserNode | null = null;
+    if (typeof ctx.createChannelSplitter === 'function') {
+      try {
+        const splitter = ctx.createChannelSplitter(2);
+        const aL = ctx.createAnalyser();
+        const aR = ctx.createAnalyser();
+        if (aL && aR && aL !== analyser && aR !== analyser && aL !== aR) {
+          aL.fftSize = 1024;
+          aR.fftSize = 1024;
+          analyser.connect(splitter);
+          splitter.connect(aL, 0);
+          splitter.connect(aR, 1);
+          corrSplitter = splitter;
+          corrAnalyserL = aL;
+          corrAnalyserR = aR;
+        }
+      } catch {
+        // Fail soft on mock or channel-limited AudioContexts.
+      }
+    }
     const gains = {
       original: ctx.createGain(),
       cleaned: ctx.createGain(),
@@ -587,7 +645,16 @@ export class DualPlayer {
     this.hpfStage2 = hpfStage2;
     this.hpfDryGain = hpfDryGain;
     this.hpfWetGain = hpfWetGain;
+    this.soloFilter = null;
+    this.soloDryGain = null;
+    this.soloWetGain = null;
+    this.corrSplitter = corrSplitter;
+    this.corrAnalyserL = corrAnalyserL;
+    this.corrAnalyserR = corrAnalyserR;
     this.applyTargetGain(true);
+    if (this.soloActive) {
+      this.applyBandSolo(true);
+    }
 
     // Trigger background decode for any in-memory decks already fetched.
     for (const deck of ['original', 'cleaned'] as const) {
@@ -853,6 +920,92 @@ export class DualPlayer {
       }
       this.rampParam(this.hpfDryGain.gain, activeHpf ? 0 : 1, now, immediate);
       this.rampParam(this.hpfWetGain.gain, activeHpf ? 1 : 0, now, immediate);
+    } catch {
+      // Fail soft if AudioContext closed mid-ramp.
+    }
+  }
+
+  /**
+   * FabFilter-style real-time bandpass frequency solo audition.
+   * Isolates a narrow band around `centerHz` (20–18000 Hz) with quality factor `q` (1.0–12.0)
+   * at 0 ms latency without altering the spectrum analyser or LUFS meters.
+   */
+  setBandSolo(active: boolean, centerHz?: number, q?: number): void {
+    const nextActive = Boolean(active);
+    const maxHz = Math.min(18000, Math.max(4000, this.sampleRate * 0.45));
+    const nextHz =
+      typeof centerHz === 'number' && Number.isFinite(centerHz)
+        ? Math.max(20, Math.min(maxHz, centerHz))
+        : this.soloCenterHz;
+    const nextQ =
+      typeof q === 'number' && Number.isFinite(q) ? Math.max(1.0, Math.min(12.0, q)) : this.soloQ;
+    if (
+      nextActive === this.soloActive &&
+      Math.abs(nextHz - this.soloCenterHz) < 0.1 &&
+      Math.abs(nextQ - this.soloQ) < 0.01
+    ) {
+      return;
+    }
+    this.soloActive = nextActive;
+    this.soloCenterHz = nextHz;
+    this.soloQ = nextQ;
+    this.applyBandSolo(false);
+  }
+
+  get bandSolo(): BandSoloState {
+    return { active: this.soloActive, hz: this.soloCenterHz, q: this.soloQ };
+  }
+
+  private ensureSoloBranch(): void {
+    if (!this.ctx || this.ctx.state === 'closed' || !this.analyser) return;
+    if (this.soloFilter && this.soloDryGain && this.soloWetGain) return;
+    if (typeof this.ctx.createBiquadFilter !== 'function') return;
+    try {
+      const sDry = this.ctx.createGain();
+      const sWet = this.ctx.createGain();
+      const sBp = this.ctx.createBiquadFilter();
+      sDry.gain.value = 1;
+      sWet.gain.value = 0;
+      sBp.type = 'bandpass';
+      sBp.frequency.value = this.soloCenterHz;
+      sBp.Q.value = this.soloQ;
+      try {
+        this.analyser.disconnect(this.ctx.destination);
+      } catch {
+        // Ignore if mock AudioNode does not support selective disconnect.
+      }
+      this.analyser.connect(sDry);
+      sDry.connect(this.ctx.destination);
+      this.analyser.connect(sBp);
+      sBp.connect(sWet);
+      sWet.connect(this.ctx.destination);
+      this.soloFilter = sBp;
+      this.soloDryGain = sDry;
+      this.soloWetGain = sWet;
+    } catch {
+      // Fail soft if biquad creation fails.
+    }
+  }
+
+  private applyBandSolo(immediate = false): void {
+    if (!this.ctx || this.ctx.state === 'closed') return;
+    if (this.soloActive) {
+      this.ensureSoloBranch();
+    }
+    if (!this.soloFilter || !this.soloDryGain || !this.soloWetGain) return;
+    try {
+      const now = this.ctx.currentTime;
+      if (!immediate && typeof this.soloFilter.frequency.setTargetAtTime === 'function') {
+        this.soloFilter.frequency.setTargetAtTime(this.soloCenterHz, now, 0.012);
+        this.soloFilter.Q.setTargetAtTime(this.soloQ, now, 0.012);
+      } else {
+        this.soloFilter.frequency.value = this.soloCenterHz;
+        this.soloFilter.Q.value = this.soloQ;
+      }
+      // Subtle makeup gain (+2.5 dB when narrow Q) keeps soloed bands easily audible without clipping.
+      const wetGain = this.soloActive ? Math.min(1.8, 1.0 + Math.max(0, this.soloQ - 1) * 0.08) : 0;
+      this.rampParam(this.soloDryGain.gain, this.soloActive ? 0 : 1, now, immediate);
+      this.rampParam(this.soloWetGain.gain, wetGain, now, immediate);
     } catch {
       // Fail soft if AudioContext closed mid-ramp.
     }
@@ -1188,12 +1341,52 @@ export class DualPlayer {
       }
     }
 
+    // Real-time stereo phase correlation r = sum(L*R) / sqrt(sum(L^2) * sum(R^2)).
+    let stereoCorrelation: number | null = null;
+    if (this.corrAnalyserL && this.corrAnalyserR) {
+      const lSize = this.corrAnalyserL.fftSize > 0 ? this.corrAnalyserL.fftSize : 1024;
+      const rSize = this.corrAnalyserR.fftSize > 0 ? this.corrAnalyserR.fftSize : 1024;
+      if (!this.corrBufL || this.corrBufL.length !== lSize) {
+        this.corrBufL = new Float32Array(lSize);
+      }
+      if (!this.corrBufR || this.corrBufR.length !== rSize) {
+        this.corrBufR = new Float32Array(rSize);
+      }
+      try {
+        this.corrAnalyserL.getFloatTimeDomainData(this.corrBufL);
+        this.corrAnalyserR.getFloatTimeDomainData(this.corrBufR);
+        const n = Math.min(this.corrBufL.length, this.corrBufR.length);
+        let dot = 0;
+        let eL = 0;
+        let eR = 0;
+        for (let i = 0; i < n; i++) {
+          const lv = this.corrBufL[i] ?? 0;
+          const rv = this.corrBufR[i] ?? 0;
+          if (Number.isFinite(lv) && Number.isFinite(rv)) {
+            dot += lv * rv;
+            eL += lv * lv;
+            eR += rv * rv;
+          }
+        }
+        const denom = Math.sqrt(eL * eR);
+        if (denom > 1e-8) {
+          const raw = Math.max(-1, Math.min(1, dot / denom));
+          this.smoothCorr =
+            this.smoothCorr === null ? raw : this.smoothCorr * 0.72 + raw * 0.28;
+          stereoCorrelation = this.smoothCorr;
+        }
+      } catch {
+        stereoCorrelation = null;
+      }
+    }
+
     return {
       momentaryLufs,
       shortTermLufs,
       peakDbfs,
       truePeakHoldDbfs: this.peakHoldDbfs,
       nrDb,
+      stereoCorrelation,
     };
   }
 
@@ -1336,6 +1529,9 @@ export class DualPlayer {
       this.lufsHistory = [];
       this.lastMeterSampleTime = 0;
       this.smoothNrDb = 0;
+      this.smoothCorr = null;
+      this.soloActive = false;
+      this.applyBandSolo(true);
       this.bufferPosition = 0;
     }
     this.rawBytes[deck] = null;
@@ -2114,10 +2310,14 @@ export class DualPlayer {
     this.lufsHistory = [];
     this.lastMeterSampleTime = 0;
     this.smoothNrDb = 0;
+    this.smoothCorr = null;
+    this.soloActive = false;
     this.meterBuf = null;
     this.kMeterBuf = null;
     this.origMeterBuf = null;
     this.cleanMeterBuf = null;
+    this.corrBufL = null;
+    this.corrBufR = null;
     this.peakHoldDbfs = METER_FLOOR_DB;
     for (const deck of ['original', 'cleaned'] as const) {
       const el = this.els[deck];

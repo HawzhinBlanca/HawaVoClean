@@ -16,7 +16,7 @@ import type {
 import { getPlayer } from '../audio/player';
 import { SPECTRAL_SELECTION_EVENT } from '../render/stftSpectrogram';
 import * as actions from '../state/actions';
-import { setLocale, useI18n } from '../state/i18n';
+import { getLocale, setLocale, useI18n } from '../state/i18n';
 import {
   assistantReducer,
   deriveWorkspacePhase,
@@ -254,6 +254,22 @@ function executeImmediateControl(plan: AudioPlan): string | null {
       case 'open_models':
         getState().setModelsDrawerOpen?.(true);
         return null;
+      case 'show_spectrogram':
+        getState().setWorkspaceMode?.('pro');
+        getState().setStageBlend?.(1);
+        return null;
+      case 'show_waveform':
+        getState().setStageBlend?.(0);
+        return null;
+      case 'open_batch':
+        getState().setBatchDrawerOpen?.(true);
+        return null;
+      case 'open_shortcuts':
+        getState().setShortcutsOpen?.(true);
+        return null;
+      case 'download_certificate':
+        void getAction('downloadQcCertificate')?.(getLocale() === 'ckb' ? 'ckb' : 'en');
+        return null;
       case 'diagnose':
         return null;
     }
@@ -305,6 +321,15 @@ function executeImmediateControl(plan: AudioPlan): string | null {
         if (typeof plan.wet_dry_mix === 'number' && Number.isFinite(plan.wet_dry_mix)) {
           player?.setWetDryMix?.(plan.wet_dry_mix);
         }
+        return null;
+      case 'solo_freq':
+        if (typeof plan.solo_hz === 'number' && Number.isFinite(plan.solo_hz)) {
+          player?.setBandSolo?.(true, plan.solo_hz, 4.5);
+          if (player) void player.play();
+        }
+        return null;
+      case 'clear_solo':
+        player?.setBandSolo?.(false);
         return null;
     }
   }

@@ -51,6 +51,9 @@ export function LiveMeter({ playing, readLevels, onResetPeak }: LiveMeterProps) 
   const sValRef = useRef<HTMLSpanElement | null>(null);
   const nrWrapRef = useRef<HTMLSpanElement | null>(null);
   const nrValRef = useRef<HTMLSpanElement | null>(null);
+  const corrWrapRef = useRef<HTMLSpanElement | null>(null);
+  const corrFillRef = useRef<HTMLSpanElement | null>(null);
+  const corrValRef = useRef<HTMLSpanElement | null>(null);
   const peakBtnRef = useRef<HTMLButtonElement | null>(null);
 
   const sampleNow = useCallback((): LiveMeterLevels => {
@@ -99,6 +102,30 @@ export function LiveMeter({ playing, readLevels, onResetPeak }: LiveMeterProps) 
         }
       }
 
+      if (corrWrapRef.current && corrFillRef.current && corrValRef.current) {
+        const r = levels.stereoCorrelation;
+        if (typeof r === 'number' && Number.isFinite(r)) {
+          const clamped = Math.max(-1, Math.min(1, r));
+          corrWrapRef.current.style.display = 'inline-flex';
+          const isNeg = clamped < 0;
+          const isLow = clamped >= 0 && clamped < 0.35;
+          const pct = Math.abs(clamped) * 50;
+          corrFillRef.current.style.left = isNeg ? `${(50 - pct).toFixed(1)}%` : '50%';
+          corrFillRef.current.style.width = `${pct.toFixed(1)}%`;
+          corrFillRef.current.style.background = isNeg
+            ? 'var(--err, #ff5a5f)'
+            : isLow
+              ? 'var(--amber, #ffb347)'
+              : 'var(--ok, #4ade80)';
+          corrValRef.current.textContent = `${clamped >= 0 ? '+' : ''}${clamped.toFixed(2)}`;
+          corrWrapRef.current.style.borderColor = isNeg
+            ? 'rgba(255, 90, 95, 0.55)'
+            : 'var(--hair, rgba(255, 255, 255, 0.09))';
+        } else {
+          corrWrapRef.current.style.display = 'none';
+        }
+      }
+
       const btn = peakBtnRef.current;
       if (btn) {
         btn.className = `live-meter-peak${isClip ? ' clip' : isWarn ? ' warn' : ''}`;
@@ -140,6 +167,7 @@ export function LiveMeter({ playing, readLevels, onResetPeak }: LiveMeterProps) 
         peakDbfs: SILENCE_FLOOR_DB,
         truePeakHoldDbfs: peakHoldRef.current,
         nrDb: null,
+        stereoCorrelation: null,
       });
       return;
     }
@@ -279,6 +307,62 @@ export function LiveMeter({ playing, readLevels, onResetPeak }: LiveMeterProps) 
       >
         <span>NR</span>
         <span ref={nrValRef}>−0.0 dB</span>
+      </span>
+      <span
+        ref={corrWrapRef}
+        className="live-meter-corr"
+        title="Broadcast stereo phase correlation (−1 out-of-phase · 0 wide · +1 mono coherent)"
+        style={{
+          display: 'none',
+          alignItems: 'center',
+          gap: '4px',
+          padding: '0 5px',
+          height: '20px',
+          borderRadius: '3px',
+          background: 'var(--panel-2, #1a1e24)',
+          border: '1px solid var(--hair, rgba(255, 255, 255, 0.09))',
+          color: 'var(--fg-2, #aab2bf)',
+          whiteSpace: 'nowrap',
+          fontSize: '10px',
+        }}
+      >
+        <span aria-hidden="true" style={{ color: 'var(--fg-3, #949daa)' }}>
+          Φ
+        </span>
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'relative',
+            width: '28px',
+            height: '5px',
+            borderRadius: '2px',
+            background: 'rgba(255,255,255,0.08)',
+            overflow: 'hidden',
+          }}
+        >
+          <span
+            style={{
+              position: 'absolute',
+              left: '50%',
+              top: 0,
+              bottom: 0,
+              width: '1px',
+              background: 'rgba(255,255,255,0.28)',
+            }}
+          />
+          <span
+            ref={corrFillRef}
+            style={{
+              position: 'absolute',
+              left: '50%',
+              top: 0,
+              bottom: 0,
+              width: '50%',
+              background: 'var(--ok, #4ade80)',
+            }}
+          />
+        </span>
+        <span ref={corrValRef}>+1.00</span>
       </span>
       <button
         ref={peakBtnRef}

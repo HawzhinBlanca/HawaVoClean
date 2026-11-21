@@ -963,4 +963,23 @@ export class EngineClient {
       ...(capabilities !== undefined ? { capabilities } : {}),
     };
   }
+
+  /** Fetch a self-contained HTML Broadcast Quality Certificate for a completed job. */
+  async fetchJobCertificate(
+    jobId: string,
+    lang: 'en' | 'ckb' = 'en',
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const query = new URLSearchParams({ lang, download: '1' }).toString();
+    const res = await this.fetchOrOffline(
+      `${this.baseUrl}/api/v1/jobs/${encodeURIComponent(jobId)}/certificate?${query}`,
+      {
+        method: 'GET',
+        credentials: 'same-origin',
+        signal: signal ?? null,
+      },
+    );
+    if (!res.ok) throw await parseError(res);
+    return await res.text();
+  }
 }

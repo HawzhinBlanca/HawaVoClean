@@ -1,12 +1,53 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react';
 import { getPlayer } from '../audio/player';
-import { SPECTRUM_PLOT_INSETS, SpectrumRenderer } from '../render/spectrum';
+import { SPECTRUM_PLOT_INSETS, SpectrumRenderer, type SpectrumTiltSlope } from '../render/spectrum';
 import '../render/spectrum.css';
 import { updateRackSettings } from '../state/actions';
 import { useI18n } from '../state/i18n';
 import { scheduleLivePreview } from '../state/liveAudition';
-import { HPF_MAX_HZ, HPF_MIN_HZ } from '../state/presets';
+import { HPF_MAX_HZ, HPF_MIN_HZ, type DeliveryPresetId } from '../state/presets';
 import { useStore } from '../state/store';
+
+const TILT_STEPS: readonly SpectrumTiltSlope[] = [0, 3, 4.5];
+
+function evaluateDeliveryCompliance(
+  preset: DeliveryPresetId,
+  lufs: number | null,
+  peak: number | null,
+  channels: number,
+): { status: 'pass' | 'warn' | 'clip'; label: string; title: string } | null {
+  if (preset === 'match_input' || lufs === null || !Number.isFinite(lufs)) return null;
+  const targets: Record<Exclude<DeliveryPresetId, 'match_input'>, { lufs: number; ceiling: number; name: string }> = {
+    podcast: { lufs: channels <= 1 ? -19.0 : -16.0, ceiling: -1.0, name: 'Podcast' },
+    ebu_r128: { lufs: -23.0, ceiling: -1.0, name: 'EBU R128' },
+    atsc_a85: { lufs: -24.0, ceiling: -2.0, name: 'ATSC A/85' },
+    dialogue_gated: { lufs: -27.0, ceiling: -2.0, name: 'Dialogue' },
+    streaming: { lufs: -14.0, ceiling: -1.0, name: 'Streaming' },
+  };
+  const spec = targets[preset];
+  if (!spec) return null;
+  const peakOver = peak !== null && Number.isFinite(peak) && peak > spec.ceiling + 0.15;
+  if (peakOver) {
+    return {
+      status: 'clip',
+      label: 'PEAK',
+      title: `${spec.name}: true peak ${peak.toFixed(1)} dBTP exceeds ${spec.ceiling.toFixed(1)} dBTP ceiling`,
+    };
+  }
+  const delta = Math.abs(lufs - spec.lufs);
+  if (delta <= 1.5) {
+    return {
+      status: 'pass',
+      label: `${spec.name} OK`,
+      title: `Compliant with ${spec.name} (${lufs.toFixed(1)} vs ${spec.lufs.toFixed(1)} LUFS target)`,
+    };
+  }
+  return {
+    status: 'warn',
+    label: `${lufs - spec.lufs > 0 ? '+' : ''}${(lufs - spec.lufs).toFixed(1)} LU`,
+    title: `${spec.name} target is ${spec.lufs.toFixed(1)} LUFS (currently ${lufs.toFixed(1)} LUFS)`,
+  };
+}
 
 const FALLBACK_PLOT_INSETS = { left: 33, right: 9, top: 11, bottom: 17 } as const;
 
@@ -98,6 +139,17 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   const rackSettings = useStore((s) => s.rackSettings);
   const [removedCoverage, setRemovedCoverage] = useState(0);
   const [draggingHpf, setDraggingHpf] = useState(false);
+  const [tiltSlope, setTiltSlope] = useState<SpectrumTiltSlope>(0);
+  const [frozen, setFrozen] = useState(false);
+  const [soloArmed, setSoloArmed] = useState(false);
+  const [soloQ, setSoloQ] = useState(4.5);
+  const [soloBand, setSoloBand] = useState<{
+    hz: number;
+    leftPct: number;
+    widthPct: number;
+    q: number;
+  } | null>(null);
+  const soloPointerIdRef = useRef<number | null>(null);
   const [hoverInfo, setHoverInfo] = useState<{
     leftPct: number;
     topPct: number;
@@ -162,6 +214,21 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
     rendererRef.current?.setLive(player.getAnalyser(), player.sampleRate, abMode, playing);
   }, [playing, abMode]);
 
+  useEffect(() => {
+    rendererRef.current?.setTiltDbPerOct?.(tiltSlope);
+  }, [tiltSlope]);
+
+  useEffect(() => {
+    rendererRef.current?.setFrozen?.(frozen);
+  }, [frozen]);
+
+  // Always release real-time frequency band solo on unmount.
+  useEffect(() => {
+    return () => {
+      getPlayer().setBandSolo?.(false);
+    };
+  }, []);
+
   const both = original !== null && cleaned !== null;
   // The band is lit by the pixels it will have, not by the pair of curves.
   const hasRemoved = both && removedCoverage > 0;
@@ -184,6 +251,73 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   const activeLufs = (cleaned ?? original)?.loudness.integrated_lufs ?? null;
   const activePeak = (cleaned ?? original)?.loudness.true_peak_dbtp ?? null;
   const activeNoise = (cleaned ?? original)?.noise_floor_db ?? null;
+  const compliance =
+    wide && cleaned
+      ? evaluateDeliveryCompliance(
+          rackSettings.deliveryPreset,
+          activeLufs,
+          activePeak,
+          cleaned.channels ?? original?.channels ?? 1,
+        )
+      : null;
+
+  const updateBandSoloAtClientX = (clientX: number, qValue = soloQ): void => {
+    const plotRect = plotOverlayRef.current?.getBoundingClientRect();
+    if (!plotRect || plotRect.width <= 0) return;
+    const normX = Math.min(1, Math.max(0, (clientX - plotRect.left) / plotRect.width));
+    const hz = SPEC_F_MIN * Math.pow(2, normX * SPEC_LOG_SPAN);
+    const clampedHz = Math.max(20, Math.min(18000, hz));
+    const halfBw = clampedHz / (2 * Math.max(1, qValue));
+    const loPct = hzToNormX(Math.max(SPEC_F_MIN, clampedHz - halfBw)) * 100;
+    const hiPct = hzToNormX(Math.min(SPEC_F_MAX, clampedHz + halfBw)) * 100;
+    setSoloBand({
+      hz: clampedHz,
+      leftPct: loPct,
+      widthPct: Math.max(1.8, hiPct - loPct),
+      q: qValue,
+    });
+    getPlayer().setBandSolo?.(true, clampedHz, qValue);
+  };
+
+  const stopBandSolo = (): void => {
+    soloPointerIdRef.current = null;
+    setSoloBand(null);
+    getPlayer().setBandSolo?.(false);
+  };
+
+  const onDisplayPointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (e.button !== 0 || draggingHpf || !original) return;
+    if (!soloArmed && !e.altKey) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('button')) return;
+    e.preventDefault();
+    soloPointerIdRef.current = e.pointerId;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    updateBandSoloAtClientX(e.clientX, soloQ);
+  };
+
+  const onDisplayPointerUp = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (soloPointerIdRef.current !== e.pointerId) return;
+    try {
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+    stopBandSolo();
+  };
+
+  const onDisplayWheel = (e: ReactWheelEvent<HTMLDivElement>): void => {
+    if (!soloBand) return;
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 0.6 : -0.6;
+    const nextQ = Math.round(Math.max(1.0, Math.min(12.0, soloQ + delta)) * 10) / 10;
+    setSoloQ(nextQ);
+    const halfBw = soloBand.hz / (2 * Math.max(1, nextQ));
+    const loPct = hzToNormX(Math.max(SPEC_F_MIN, soloBand.hz - halfBw)) * 100;
+    const hiPct = hzToNormX(Math.min(SPEC_F_MAX, soloBand.hz + halfBw)) * 100;
+    setSoloBand({ ...soloBand, q: nextQ, leftPct: loPct, widthPct: Math.max(1.8, hiPct - loPct) });
+    getPlayer().setBandSolo?.(true, soloBand.hz, nextQ);
+  };
 
   const updateHpfFromPointer = (clientX: number): void => {
     const plotRect = plotOverlayRef.current?.getBoundingClientRect();
@@ -230,6 +364,9 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   };
 
   const onPlotPointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    if (soloPointerIdRef.current === e.pointerId) {
+      updateBandSoloAtClientX(e.clientX, soloQ);
+    }
     const plotRect = plotOverlayRef.current?.getBoundingClientRect();
     if (!plotRect || plotRect.width <= 0 || plotRect.height <= 0) return;
     const normX = (e.clientX - plotRect.left) / plotRect.width;
@@ -289,8 +426,65 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
                   {activeNoise !== null && Number.isFinite(activeNoise) ? `${activeNoise.toFixed(1)} dB` : '—'}
                 </span>
               </span>
+              {compliance ? (
+                <span
+                  className={`sit-pill sit-compliance status-${compliance.status}`}
+                  title={compliance.title}
+                >
+                  <span className="sit-v mono">{compliance.label}</span>
+                </span>
+              ) : null}
             </div>
           ) : null}
+          <button
+            type="button"
+            className="spec-hpf-chip"
+            aria-pressed={tiltSlope !== 0}
+            onClick={() => {
+              const idx = TILT_STEPS.indexOf(tiltSlope);
+              setTiltSlope(TILT_STEPS[(idx + 1) % TILT_STEPS.length] ?? 0);
+            }}
+            title={
+              isCkb
+                ? 'لاری پیشاندانی شەبەنگ (0 / 3 / 4.5 dB/oct — ستانداردی FabFilter)'
+                : 'Spectrum visual tilt around 1 kHz (0 flat / 3 pink / 4.5 dB/oct Pro-Q standard)'
+            }
+          >
+            <span>{tiltSlope === 0 ? (isCkb ? 'تەخت' : 'Flat') : `${tiltSlope} dB/oct`}</span>
+          </button>
+          <button
+            type="button"
+            className="spec-hpf-chip"
+            aria-pressed={frozen}
+            disabled={!original}
+            onClick={() => setFrozen((prev) => !prev)}
+            title={
+              isCkb
+                ? 'بەستنی کێرڤی ڕاستەوخۆ بۆ پشکنینی وردی دەنگ'
+                : 'Freeze live peak-hold spectrum trace for inspection'
+            }
+          >
+            <span>{isCkb ? 'بەستن' : 'Freeze'}</span>
+          </button>
+          <button
+            type="button"
+            className="spec-hpf-chip"
+            aria-pressed={soloArmed || Boolean(soloBand)}
+            disabled={!original}
+            onClick={() => {
+              setSoloArmed((prev) => {
+                if (prev) stopBandSolo();
+                return !prev;
+              });
+            }}
+            title={
+              isCkb
+                ? 'تاقیکردنەوەی باندی فریکوێنسی بە ڕاکێشان لەسەر شەبەنگ (یان Alt+ڕاکێشان)'
+                : 'Band Solo audition: drag anywhere on the spectrum to isolate frequencies in real time (or hold Alt + drag; wheel adjusts Q)'
+            }
+          >
+            <span>{isCkb ? 'سۆلۆ' : 'Solo'}</span>
+          </button>
           <button
             type="button"
             className="spec-hpf-chip"
@@ -309,9 +503,16 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
         <div
           ref={displayRef}
           className="display spectrum-display"
-          style={{ position: 'relative' }}
+          style={{ position: 'relative', cursor: soloArmed || soloBand ? 'crosshair' : undefined }}
+          onPointerDown={onDisplayPointerDown}
           onPointerMove={onPlotPointerMove}
-          onPointerLeave={() => setHoverInfo(null)}
+          onPointerUp={onDisplayPointerUp}
+          onPointerCancel={onDisplayPointerUp}
+          onPointerLeave={() => {
+            setHoverInfo(null);
+            if (soloPointerIdRef.current === null && soloBand) stopBandSolo();
+          }}
+          onWheel={onDisplayWheel}
           onDoubleClick={onPlotDoubleClick}
         >
           {/* D1 · a canvas with no role is an unlabelled graphic. The plot
@@ -399,6 +600,49 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
                   vectorEffect="non-scaling-stroke"
                 />
               </svg>
+            ) : null}
+            {soloBand ? (
+              <div
+                className="spec-solo-band"
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  bottom: 0,
+                  left: `${soloBand.leftPct.toFixed(2)}%`,
+                  width: `${soloBand.widthPct.toFixed(2)}%`,
+                  background: 'linear-gradient(180deg, rgba(44,212,255,0.28), rgba(74,222,128,0.12))',
+                  borderLeft: '1px solid rgba(156,236,255,0.75)',
+                  borderRight: '1px solid rgba(156,236,255,0.75)',
+                  boxShadow: '0 0 18px rgba(44,212,255,0.24)',
+                  pointerEvents: 'none',
+                  zIndex: 3,
+                }}
+              >
+                <span
+                  className="mono"
+                  dir="ltr"
+                  style={{
+                    position: 'absolute',
+                    top: '4px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    padding: '1px 6px',
+                    borderRadius: '4px',
+                    background: 'rgba(5, 8, 14, 0.92)',
+                    border: '1px solid rgba(44,212,255,0.55)',
+                    color: 'var(--cyan-2)',
+                    fontSize: '10px',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  SOLO{' '}
+                  {soloBand.hz >= 1000
+                    ? `${(soloBand.hz / 1000).toFixed(2)} kHz`
+                    : `${Math.round(soloBand.hz)} Hz`}{' '}
+                  · {hzToMusicalNote(soloBand.hz)} · Q {soloBand.q.toFixed(1)}
+                </span>
+              </div>
             ) : null}
             {hoverInfo ? (
               <>

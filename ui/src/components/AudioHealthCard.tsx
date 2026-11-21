@@ -1,5 +1,7 @@
+import { updateRackSettings } from '../state/actions';
 import { useI18n } from '../state/i18n';
-import { useStore } from '../state/store';
+import { scheduleLivePreview } from '../state/liveAudition';
+import { isProfileUnavailable, jobInFlight, useStore } from '../state/store';
 import { IconBolt, IconCheck } from './Icons';
 import { sourceHasVideo } from './VideoPreview';
 
@@ -17,13 +19,19 @@ function fmtMinSec(seconds: number): string {
 }
 
 export function AudioHealthCard() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const source = useStore((s) => s.source);
   const original = useStore((s) => s.original);
   const cleaned = useStore((s) => s.cleaned);
   const report = useStore((s) => s.report);
   const analyzing = useStore((s) => s.analyzing);
   const previewActive = useStore((s) => s.previewActive);
+  const rackSettings = useStore((s) => s.rackSettings);
+  const capabilities = useStore((s) => s.capabilities);
+  const setProfile = useStore((s) => s.setProfile);
+  const pushToast = useStore((s) => s.pushToast);
+  const busy = useStore((s) => jobInFlight(s.job) || s.analyzing);
 
   if (!source) return null;
 
@@ -130,6 +138,50 @@ export function AudioHealthCard() {
     });
   }
 
+  const hasFixableIssues =
+    !report &&
+    ((origNoise !== null && Number.isFinite(origNoise) && origNoise > -55) ||
+      (origLufs !== null && Number.isFinite(origLufs) && origLufs < -26) ||
+      (origPeak !== null && Number.isFinite(origPeak) && origPeak > -0.3));
+
+  const applyAutoFix = (): void => {
+    if (busy || !original) return;
+    const next = { ...rackSettings };
+    const tuned: string[] = [];
+    if (origNoise !== null && Number.isFinite(origNoise) && origNoise > -45) {
+      const targetProfile = isProfileUnavailable(capabilities ?? [], 'studio_pro')
+        ? 'studio'
+        : 'studio_pro';
+      setProfile(targetProfile);
+      next.strength = Math.max(next.strength, 0.85);
+      next.hpfEnabled = true;
+      next.hpfCutoffHz = Math.max(80, next.hpfCutoffHz);
+      tuned.push(targetProfile === 'studio_pro' ? 'Studio Pro' : 'Studio');
+    } else if (origNoise !== null && Number.isFinite(origNoise) && origNoise > -55) {
+      setProfile('studio');
+      next.strength = Math.max(next.strength, 0.72);
+      next.hpfEnabled = true;
+      tuned.push('Studio');
+    }
+    if (origPeak !== null && Number.isFinite(origPeak) && origPeak > -0.3) {
+      next.declip = true;
+      tuned.push('De-Clip');
+    }
+    if (origLufs !== null && Number.isFinite(origLufs) && origLufs < -26) {
+      next.levelRider = true;
+      next.deliveryPreset = 'podcast';
+      tuned.push('Leveler + Podcast');
+    }
+    updateRackSettings(next);
+    scheduleLivePreview();
+    pushToast(
+      isCkb
+        ? `چارەسەری خۆکار ڕێکخرا: ${tuned.join(' · ')}`
+        : `Auto-configured: ${tuned.join(' · ')}`,
+      'ok',
+    );
+  };
+
   const headline = report
     ? t.healthHeadlineDone
     : previewActive
@@ -141,6 +193,21 @@ export function AudioHealthCard() {
       <div className="hc-headline">
         {report ? <IconCheck size={16} /> : <IconBolt size={16} />}
         <span>{headline}</span>
+        {hasFixableIssues ? (
+          <button
+            type="button"
+            className="hc-autofix-btn"
+            disabled={busy}
+            onClick={applyAutoFix}
+            title={
+              isCkb
+                ? 'ڕێکخستنی خۆکاری پڕۆفایل و چارەسەرەکان بەپێی کێشە دۆزراوەکان'
+                : 'Automatically configure profile and repair modules for detected issues'
+            }
+          >
+            {isCkb ? 'چارەسەری خۆکار' : 'Auto-Configure Fix'}
+          </button>
+        ) : null}
       </div>
       <div className="hc-chips" role="list" aria-label="Detected audio traits">
         {chips.map((c) => (

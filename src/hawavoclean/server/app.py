@@ -36,7 +36,7 @@ import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
@@ -3804,6 +3804,63 @@ def create_app(
             request.headers.get("range"),
             head_only=request.method == "HEAD",
         )
+
+    @app.get("/api/v1/jobs/{job_id}/certificate")
+    async def job_qc_certificate(
+        job_id: str,
+        lang: Literal["en", "ckb"] = "en",
+        download: bool = False,
+    ) -> HTMLResponse:
+        """Render a self-contained, print-ready Broadcast Quality Certificate (HTML)."""
+        from hawavoclean.report.certificate import render_qc_certificate_html
+
+        snapshot = manager.get_status(job_id)
+        if snapshot is None:
+            raise ApiError(404, "not_found", f"unknown job: {job_id}")
+        report_data: dict[str, Any] | None = None
+        if isinstance(snapshot.get("report"), dict):
+            report_data = cast(dict[str, Any], snapshot["report"])
+        else:
+            try:
+                artifact = _job_artifact_path(snapshot, "report")
+            except (HawaVoCleanError, OSError, ValueError, KeyError) as exc:
+                raise ApiError(
+                    409,
+                    "artifact_unavailable",
+                    "the completed job report failed authoritative verification",
+                ) from exc
+            if artifact is not None and artifact.is_file():
+                try:
+                    raw = artifact.read_bytes()
+                    if len(raw) > 16 * 1024 * 1024:
+                        raise ValueError("report too large")
+                    parsed = json.loads(raw.decode("utf-8"))
+                    if isinstance(parsed, dict):
+                        report_data = parsed
+                except (OSError, ValueError) as exc:
+                    raise ApiError(
+                        409,
+                        "artifact_unavailable",
+                        "the completed job report could not be decoded",
+                    ) from exc
+        if report_data is None:
+            raise ApiError(
+                409,
+                "artifact_unavailable",
+                "this job has no completed report available for certificate export",
+            )
+        html_doc = await asyncio.to_thread(render_qc_certificate_html, report_data, lang=lang)
+        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "_", job_id)[:48] or "run"
+        headers: dict[str, str] = {
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'"
+            ),
+        }
+        if download:
+            headers["Content-Disposition"] = f'attachment; filename="hawavoclean-qc-{safe_id}.html"'
+        return HTMLResponse(content=html_doc, headers=headers)
 
     @app.api_route("/api/audio", methods=["GET", "HEAD"])
     async def audio(request: Request, path: str = "") -> Response:

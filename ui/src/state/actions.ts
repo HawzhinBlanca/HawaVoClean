@@ -4010,4 +4010,45 @@ export async function extractAndLoadTrack(
   }
 }
 
+/**
+ * Download a self-contained, print-ready Broadcast Quality Certificate (HTML)
+ * for the currently inspected or completed job.
+ */
+export async function downloadQcCertificate(lang: 'en' | 'ckb' = 'en'): Promise<boolean> {
+  const st = getState();
+  const client = st.client;
+  const jobId = st.job?.id ?? st.report?.job_id ?? st.currentRunId ?? null;
+  if (!client || st.engineStatus !== 'ready' || !jobId || typeof client.fetchJobCertificate !== 'function') {
+    st.setStatus('QC certificate unavailable — finish a run while engine is ready');
+    return false;
+  }
+  try {
+    const html = await client.fetchJobCertificate(jobId, lang);
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stem = (st.source?.name ?? 'hawavoclean')
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^A-Za-z0-9._-]+/g, '_')
+      .slice(0, 48);
+    a.download = `${stem || 'hawavoclean'}-qc-certificate.html`;
+    a.rel = 'noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    st.pushToast(
+      lang === 'ckb' ? 'بڕوانامەی کوالێتی QC دابەزێنرا' : 'Downloaded Broadcast QC Certificate (.html)',
+      'ok',
+    );
+    return true;
+  } catch (e) {
+    const msg = describeError(e);
+    st.setError(msg, 'QC certificate failed');
+    st.setStatus(`QC certificate failed · ${msg}`);
+    return false;
+  }
+}
+
 

@@ -7,12 +7,14 @@ import {
   artifactsFor,
   cleanTrackWithMarkersInResolve,
   copyReportSummary,
+  downloadQcCertificate,
   exportWithDelivery,
   importToResolve,
   replaceInResolve,
   revealOutput,
   saveCleanedMaster,
   saveProcessingRecord,
+  updateRackSettings,
 } from '../state/actions';
 import { useI18n } from '../state/i18n';
 import type { ExportFormatId } from '../state/presets';
@@ -149,19 +151,77 @@ function ExportDeliveryButton({
   }, [enabled, targetFormat]);
 
   return (
+    <span className="export-delivery-group" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+      <select
+        className="btn small export-format-select"
+        aria-label={isCkb ? 'فۆرماتی هەناردە' : 'Export format'}
+        value={targetFormat}
+        disabled={exporting}
+        onChange={(e) => {
+          updateRackSettings({ ...rackSettings, exportFormat: e.target.value as ExportFormatId });
+        }}
+        style={{ paddingInline: '6px', maxWidth: '94px' }}
+      >
+        <option value="wav24">WAV 24</option>
+        <option value="wav32f">WAV 32f</option>
+        <option value="flac">FLAC</option>
+        <option value="aac">AAC</option>
+        {isVideo ? <option value="video_mux">{isCkb ? 'ڤیدیۆ' : 'Mux Video'}</option> : null}
+      </select>
+      <button
+        className="btn small export-delivery-btn"
+        type="button"
+        disabled={!enabled}
+        onClick={onExport}
+        title={
+          enabled
+            ? `${label} with ${rackSettings.deliveryPreset} loudness target`
+            : 'Available once a run has finished and the engine is ready'
+        }
+      >
+        <IconImport size={14} />
+        <span>{exporting ? (isCkb ? 'هەناردە…' : 'Exporting…') : label}</span>
+      </button>
+    </span>
+  );
+}
+
+/** Downloads a self-contained, print-ready HTML Broadcast Quality Certificate. */
+function QcCertificateButton({
+  masterServed,
+  engineReady,
+}: {
+  masterServed: boolean;
+  engineReady: boolean;
+}) {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
+  const job = useStore((s) => s.job);
+  const report = useStore((s) => s.report);
+  const [busy, setBusy] = useState(false);
+  const hasJob = Boolean(job?.id || report?.job_id);
+  const enabled = masterServed && engineReady && hasJob && !busy;
+
+  return (
     <button
-      className="btn small export-delivery-btn"
+      className="btn small qc-cert-btn"
       type="button"
       disabled={!enabled}
-      onClick={onExport}
+      onClick={() => {
+        if (!enabled) return;
+        setBusy(true);
+        void downloadQcCertificate(isCkb ? 'ckb' : 'en').finally(() => setBusy(false));
+      }}
       title={
         enabled
-          ? `${label} with ${rackSettings.deliveryPreset} loudness target`
+          ? isCkb
+            ? 'دابەزاندنی بڕوانامەی کوالێتی پەخش (HTML/PDF)'
+            : 'Download offline Broadcast Quality Certificate (printable HTML/PDF)'
           : 'Available once a run has finished and the engine is ready'
       }
     >
-      <IconImport size={14} />
-      <span>{exporting ? 'Exporting…' : label}</span>
+      <IconCheck size={14} />
+      <span>{busy ? (isCkb ? 'دروستکردن…' : 'Building…') : isCkb ? 'ڕاپۆرتی QC' : 'QC Report'}</span>
     </button>
   );
 }
@@ -220,6 +280,7 @@ export function Actions() {
           title={artifacts ? (artifacts.txt.note ?? `Download ${artifacts.txt.name}`) : note}
         />
         <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
+        <QcCertificateButton masterServed={masterServed} engineReady={engineReady} />
         <CopySummary />
       </div>
     );
@@ -320,6 +381,7 @@ export function Actions() {
         <span>{isCkb ? 'نیشاندان لە فایندەر' : 'Reveal in Finder'}</span>
       </button>
       <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
+      <QcCertificateButton masterServed={masterServed} engineReady={engineReady} />
       <CopySummary />
     </div>
   );

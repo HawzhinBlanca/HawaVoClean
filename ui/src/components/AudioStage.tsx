@@ -1,5 +1,6 @@
 import { useState, type CSSProperties } from 'react';
-import { applySpectralBoxRepair } from '../state/actions';
+import { waveView } from '../render/viewWindow';
+import { applySpectralBoxRepair, playSelection } from '../state/actions';
 import { useI18n } from '../state/i18n';
 import { jobInFlight, useStore } from '../state/store';
 import { FloatingPopover } from './controls/FloatingPopover';
@@ -7,11 +8,13 @@ import { SpectrogramDisplay } from './SpectrogramDisplay';
 import { WaveformDisplay } from './WaveformDisplay';
 
 export function AudioStage() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const stageBlend = useStore((s) => s.stageBlend);
   const setStageBlend = useStore((s) => s.setStageBlend);
   const spectralSelection = useStore((s) => s.spectralSelection);
   const setSpectralSelection = useStore((s) => s.setSpectralSelection);
+  const selectionRange = useStore((s) => s.selectionRange);
   const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
   const pushToast = useStore((s) => s.pushToast);
   const hasSource = useStore((s) => Boolean(s.source && s.original));
@@ -22,6 +25,24 @@ export function AudioStage() {
 
   const blendPct = Math.round(stageBlend * 100);
   const canRepair = hasSource && engineReady && !busy && !repairing && Boolean(spectralSelection);
+  const hasSelection = Boolean(selectionRange && selectionRange.end > selectionRange.start);
+
+  const zoomBy = (factor: number): void => {
+    const v = waveView.view;
+    const pivot = v.start + (v.end - v.start) / 2;
+    waveView.zoomAt(pivot, factor);
+  };
+
+  const resetZoom = (): void => {
+    const dur = waveView.duration;
+    if (dur > 0) waveView.set(0, dur);
+  };
+
+  const zoomToSelection = (): void => {
+    if (!selectionRange || selectionRange.end <= selectionRange.start) return;
+    const pad = Math.max(0.15, (selectionRange.end - selectionRange.start) * 0.12);
+    waveView.set(Math.max(0, selectionRange.start - pad), selectionRange.end + pad);
+  };
 
   const handleQuickRepair = async (db: number): Promise<void> => {
     if (!canRepair || !spectralSelection) return;
@@ -71,6 +92,54 @@ export function AudioStage() {
             <span className="mono" style={{ fontSize: '11px', color: 'var(--cyan-2)', minWidth: '34px' }}>
               {blendPct}%
             </span>
+          </div>
+          <div className="as-zoom-tools" role="group" aria-label={isCkb ? 'کۆنترۆڵی گەورەکردن' : 'Timeline zoom controls'}>
+            <button
+              type="button"
+              className="as-tool-btn"
+              onClick={() => zoomBy(0.5)}
+              aria-label={isCkb ? 'بچووککردنەوە' : 'Zoom out'}
+              title={isCkb ? 'بچووککردنەوە' : 'Zoom out'}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="as-tool-btn"
+              onClick={() => zoomBy(2.0)}
+              aria-label={isCkb ? 'گەورەکردن' : 'Zoom in'}
+              title={isCkb ? 'گەورەکردن' : 'Zoom in'}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              className="as-tool-btn"
+              onClick={resetZoom}
+              title={isCkb ? 'پیشاندانی هەموو تۆمار' : 'Reset zoom to full clip'}
+            >
+              {isCkb ? 'هەمووی' : 'Fit'}
+            </button>
+            {hasSelection ? (
+              <>
+                <button
+                  type="button"
+                  className="as-tool-btn accent"
+                  onClick={zoomToSelection}
+                  title={isCkb ? 'گەورەکردنی بەشە هەڵبژێردراوەکە' : 'Zoom to selected region'}
+                >
+                  {isCkb ? 'بەش' : 'Zoom Sel'}
+                </button>
+                <button
+                  type="button"
+                  className="as-tool-btn accent"
+                  onClick={() => playSelection(true)}
+                  title={isCkb ? 'دووبارە لێدانی بەشە هەڵبژێردراوەکە' : 'Loop play selected region'}
+                >
+                  {isCkb ? 'دووبارەی بەش' : 'Loop Sel'}
+                </button>
+              </>
+            ) : null}
           </div>
         </div>
       ) : null}
