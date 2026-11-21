@@ -26,6 +26,74 @@ function Row({ k, v, title }: { k: string; v: string; title?: string | undefined
 }
 
 export function RestorationCard({ rest }: { rest: RestorationSection }) {
+  if (rest.mode === 'smart_safe') {
+    const cls = rest.abstained ? 'reverted' : 'enhanced';
+    const verdict = rest.abstained ? 'FALLBACK' : 'QUALIFIED';
+    const selectedRoute = rest.selected_route ? rest.selected_route.toUpperCase() : 'PRESERVE';
+    const conf = typeof rest.confidence === 'number' ? `${(rest.confidence * 100).toFixed(1)}%` : '—';
+
+    return (
+      <div className="rest-card" data-verdict={cls} role="group" aria-label="Smart Safe Decision">
+        <div className="rest-head">
+          <span className="caps">Smart Safe Decision</span>
+          <span className="rest-speaker mono">{selectedRoute}</span>
+          <span className={`pill ${cls}`}>{verdict}</span>
+        </div>
+        {rest.abstained ? (
+          <p className="rest-ship">
+            {rest.fallback_route
+              ? `Hard guards triggered abstention — fell back to ${rest.fallback_route.toUpperCase()} (least intervention).`
+              : 'Hard guards triggered abstention — fell back to least intervention route.'}
+          </p>
+        ) : null}
+        <div className="rest-rows">
+          <Row k="Selected Route" v={selectedRoute} />
+          <Row k="Confidence" v={conf} />
+          {rest.fallback_route ? <Row k="Fallback Route" v={rest.fallback_route.toUpperCase()} /> : null}
+        </div>
+        {rest.candidates && rest.candidates.length > 0 ? (
+          <div className="rest-candidates" style={{ marginTop: 6 }}>
+            <span className="caps" style={{ fontSize: '11px', color: 'var(--fg-3)' }}>
+              Candidate Evaluation
+            </span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginTop: 4 }}>
+              {rest.candidates.map((c) => (
+                <div
+                  key={c.route}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    fontSize: 'var(--fs-sm)',
+                    alignItems: 'center',
+                  }}
+                >
+                  <span className="mono">{c.route}</span>
+                  <span
+                    style={{
+                      color:
+                        c.status === 'accepted'
+                          ? 'var(--green, #4ade80)'
+                          : 'var(--amber, #facc15)',
+                    }}
+                  >
+                    {c.status.toUpperCase()}
+                    {c.rejection_reason ? ` (${c.rejection_reason})` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {rest.reason ? (
+          <div className="insp-reason rest-reason">
+            <span className="caps">Decision Rationale</span>
+            <p>{rest.reason}</p>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   const guard = rest.guard_r ?? {};
   const verdict = guard.verdict ?? 'N/A';
   const cls = classifyRestorationVerdict(guard.verdict);

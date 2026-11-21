@@ -20,9 +20,9 @@ import soundfile as sf
 from hawavoclean.restoration.hawarestore_kd import HawaRestoreKD
 from hawavoclean.restoration.profiles import load_speaker_profile
 from hawavoclean.restoration.speaker_embed import SpeakerEmbeddingExtractor
-from hawavoclean.restoration.universr_upstream import UniverSRBaseline
 from research.restoration.evaluation.metrics import evaluate_restoration
 from research.restoration.simulation.degradation import DegradationSimulator
+from research.restoration.universr_upstream import UniverSRBaseline
 
 
 @dataclass(frozen=True)

@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 
+from hawavoclean.runtime import evict_memmap_pages
 from hawavoclean.segmentation.types import SpeechInterval
 
 
@@ -36,12 +37,19 @@ def detect_speech_energy(
     hop_size = max(1, hop_size)
     num_frames = max(1, (len(waveform) - frame_size) // hop_size + 1)
     frame_rms = np.zeros(num_frames, dtype=np.float32)
+    evict_every = 50_000
+    last_evict_sample = 0
 
     for i in range(num_frames):
         start = i * hop_size
         chunk = waveform[start : start + frame_size]
         chunk = chunk - np.mean(chunk)
         frame_rms[i] = np.sqrt(np.mean(chunk**2) + 1e-12)
+        if i > 0 and i % evict_every == 0:
+            evict_memmap_pages(waveform, last_evict_sample, start)
+            last_evict_sample = start
+    if last_evict_sample < len(waveform):
+        evict_memmap_pages(waveform, last_evict_sample, len(waveform))
 
     max_rms = float(np.max(frame_rms))
     if max_rms < 1e-5:

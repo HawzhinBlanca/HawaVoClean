@@ -190,6 +190,41 @@ def test_checkpoint_rejects_an_incomplete_artifact_set(tmp_path: Path) -> None:
         validator.validate_checkpoint(path)
 
 
+def test_version_2_checkpoint_requires_packaged_desktop_evidence(tmp_path: Path) -> None:
+    checkpoint = json.loads(validator.DEFAULT_CHECKPOINT.read_text(encoding="utf-8"))
+    checkpoint["schema_version"] = 2
+    checkpoint["result"]["desktop"] = {
+        "packaged_app": "unsigned macos-arm64 proof in both checkouts",
+        "source_shell_lifecycle": "passed in both checkouts",
+        "hard_crash_process_tree": "passed in both checkouts",
+        "package_integrity_app_runtime_and_engine_smoke": "passed in both checkouts",
+        "signing_notarization": "pending native release gate",
+    }
+    checkpoint["reproducibility"]["artifact_sha256"].update(
+        {
+            "desktop-app": "d" * 64,
+            "desktop-engine-smoke-audio": "e" * 64,
+        }
+    )
+    path = tmp_path / "checkpoint-v2.json"
+    path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    assert validator.validate_checkpoint(path)["schema_version"] == 2
+
+    checkpoint["result"]["desktop"].pop("package_integrity_app_runtime_and_engine_smoke")
+    path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    with pytest.raises(validator.CheckpointError, match="desktop result differs"):
+        validator.validate_checkpoint(path)
+
+
+def test_version_2_full_proof_requires_the_packaged_app_runtime_log() -> None:
+    assert "desktop-packaged-app-self-test" in validator.DESKTOP_RUNTIME_STEPS_V2
+    assert {
+        "desktop-package-integrity-pre-smoke",
+        "desktop-packaged-app-self-test",
+        "desktop-package-integrity-post-smoke",
+    }.issubset(validator.DESKTOP_RUNTIME_STEPS_V2)
+
+
 def test_checkpoint_rejects_a_tool_version_that_differs_from_its_lock(tmp_path: Path) -> None:
     checkpoint = json.loads(validator.DEFAULT_CHECKPOINT.read_text(encoding="utf-8"))
     checkpoint["toolchain"]["pnpm"] = "999.0.0"

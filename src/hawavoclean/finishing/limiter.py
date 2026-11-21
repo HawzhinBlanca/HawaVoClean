@@ -8,15 +8,26 @@ A final verified trim guarantees the ceiling; if it cannot, the limiter
 raises instead of silently clipping.
 """
 
+import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import scipy.ndimage
 import scipy.signal
 
 from hawavoclean.errors import OutputValidationError
-from hawavoclean.finishing.truepeak import oversampled_peak_envelope, true_peak_linear
+from hawavoclean.finishing.truepeak import EDGE as TRUE_PEAK_EDGE
+from hawavoclean.finishing.truepeak import (
+    oversampled_peak_envelope,
+    oversampled_peak_envelope_window,
+    true_peak_linear,
+)
+from hawavoclean.runtime import evict_memmap_pages
+
+LIMITER_STREAM_CHUNK_SAMPLES = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -61,7 +72,11 @@ def _release_scalar(
     return current
 
 
-def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: float) -> None:
+def _release_smooth(
+    gain: np.ndarray[Any, np.dtype[np.float32]],
+    release_coeff: float,
+    current: float = 1.0,
+) -> float:
     """Asymmetric attack/release smoothing of the gain envelope, in place.
 
     Sample-exact equivalent of the scalar recurrence, state carried in float64::
@@ -69,7 +84,9 @@ def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: 
         g = t                          if t < g   (instant attack)
         g = t + release_coeff*(g - t)  otherwise  (one-pole release)
 
-    run over every sample. The state is only ever *rewritten* where it differs
+    run over every sample. Returns the final carried release state so chunked
+    streaming callers can carry state across chunk boundaries bit-identically.
+    The state is only ever *rewritten* where it differs
     from the target, and the targets come in long identical runs: an attack
     lands on the first sample of a run, and once the state equals the run's
     target it stays there exactly (``release_coeff * 0.0`` is ``0.0``). So the
@@ -87,18 +104,16 @@ def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: 
     """
     n = int(gain.shape[0])
     if n == 0:
-        return
+        return current
     bits = gain.view(np.uint32)
     changed = bits[1:] != bits[:-1]
     runs = int(np.count_nonzero(changed)) + 1
     if runs * MIN_RUN_LENGTH_FOR_RUN_WALK > n:
-        _release_scalar(gain, release_coeff, 0, n, 1.0)
-        return
+        return _release_scalar(gain, release_coeff, 0, n, current)
 
     starts = [0, *(np.flatnonzero(changed) + 1).tolist(), n]
     targets = gain[np.asarray(starts[:-1], dtype=np.intp)].tolist()
 
-    current = 1.0
     for k, target in enumerate(targets):
         lo = starts[k]
         hi = starts[k + 1]
@@ -118,6 +133,7 @@ def _release_smooth(gain: np.ndarray[Any, np.dtype[np.float32]], release_coeff: 
             ramp.append(current)
         if ramp:
             gain[lo : lo + len(ramp)] = ramp
+    return current
 
 
 def _slope_limited_min_envelope(
@@ -220,3 +236,171 @@ def apply_lookahead_limiter(
         ceiling_dbtp=ceiling_dbtp,
         gain_envelope=smooth_gain,
     )
+
+
+def _future_gain_dependency(lookahead: int) -> int:
+    """Samples of future input that the existing envelope algorithm reads."""
+    if lookahead <= 0:
+        return 0
+    highest = 1 << (lookahead.bit_length() - 1)
+    # minimum_filter1d reads lookahead samples ahead. The shift-doubling
+    # slope limiter then reads 1+2+4+...+highest samples ahead.
+    return lookahead + (2 * highest - 1)
+
+
+def _stream_required_gain(
+    waveform: np.ndarray[Any, np.dtype[np.float32]],
+    *,
+    start: int,
+    end: int,
+    input_gain: np.float32,
+    ceiling_linear: float,
+    lookahead_samples: int,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Unsmoothed anticipating gain for ``[start, end)`` with exact context."""
+    samples = int(waveform.shape[1])
+    dependency = _future_gain_dependency(lookahead_samples)
+    needed_end = min(samples, end + dependency)
+
+    # Scale before oversampling, exactly like the in-memory path. Include real
+    # FIR context outside the requested envelope window so internal chunk
+    # edges cannot become resample boundaries.
+    source_start = max(0, start - TRUE_PEAK_EDGE)
+    source_end = min(samples, needed_end + TRUE_PEAK_EDGE)
+    gained = np.multiply(waveform[:, source_start:source_end], input_gain, dtype=np.float32)
+    peak_envelope = oversampled_peak_envelope_window(
+        gained,
+        4,
+        start - source_start,
+        needed_end - source_start,
+    )
+    inst_gain = np.ones(len(peak_envelope), dtype=np.float32)
+    over = peak_envelope > ceiling_linear
+    inst_gain[over] = ceiling_linear / (peak_envelope[over] + 1e-12)
+
+    if lookahead_samples > 0 and samples > 1:
+        size = min(lookahead_samples + 1, samples)
+        windowed = scipy.ndimage.minimum_filter1d(
+            inst_gain,
+            size=size,
+            origin=-(size // 2),
+            mode="nearest",
+        )
+    else:
+        windowed = inst_gain
+    anticipated = _slope_limited_min_envelope(windowed, lookahead_samples)
+    return np.asarray(anticipated[: end - start], dtype=np.float32)
+
+
+def apply_lookahead_limiter_to_memmap(
+    waveform: np.ndarray[Any, np.dtype[np.float32]],
+    sample_rate: int,
+    output_path: Path | str,
+    *,
+    input_gain_linear: float = 1.0,
+    ceiling_dbtp: float = -1.0,
+    lookahead_ms: float = 5.0,
+    release_ms: float = 50.0,
+    chunk_samples: int = LIMITER_STREAM_CHUNK_SAMPLES,
+    on_progress: Callable[[float], None] | None = None,
+) -> LimiterResult:
+    """Apply static gain + the canonical limiter into a disk-backed stage.
+
+    This is numerically the same limiter as :func:`apply_lookahead_limiter`:
+    4x peak envelope, future minimum, shift-doubling attack ramp, scalar
+    carried release, 8x verification and one transparent global trim. Only
+    one bounded chunk plus FIR/future context is resident. The returned gain
+    envelope is intentionally empty; retaining it would recreate the very
+    file-length allocation this path removes.
+    """
+    if waveform.ndim != 2:
+        raise ValueError(f"Waveform must have shape (channels, samples), got {waveform.shape}")
+    channels, samples = (int(waveform.shape[0]), int(waveform.shape[1]))
+    if samples <= 0 or channels <= 0:
+        raise OutputValidationError("Cannot stream-limit an empty waveform.")
+    if chunk_samples < 1:
+        raise ValueError(f"chunk_samples must be >= 1, got {chunk_samples}")
+    if not np.isfinite(input_gain_linear) or input_gain_linear < 0.0:
+        raise ValueError(
+            f"input_gain_linear must be finite and non-negative, got {input_gain_linear}"
+        )
+
+    destination = Path(output_path).resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise OutputValidationError(f"Limiter stage already exists: {destination}")
+    byte_count = channels * samples * np.dtype(np.float32).itemsize
+    with open(destination, "xb") as handle:
+        handle.truncate(byte_count)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    limited: np.memmap[Any, np.dtype[np.float32]] | None = None
+    try:
+        limited = np.memmap(
+            destination,
+            dtype=np.float32,
+            mode="r+",
+            shape=(channels, samples),
+        )
+        ceiling_linear = float(10.0 ** (ceiling_dbtp / 20.0))
+        lookahead_samples = int(round(sample_rate * (lookahead_ms / 1000.0)))
+        release_coeff = float(np.exp(-1.0 / (sample_rate * (release_ms / 1000.0))))
+        input_gain = np.float32(input_gain_linear)
+        release_state = 1.0
+        min_gain = 1.0
+
+        for start in range(0, samples, chunk_samples):
+            if on_progress is not None and samples > 0:
+                on_progress(float(start) / float(samples))
+            end = min(samples, start + chunk_samples)
+            smooth = _stream_required_gain(
+                waveform,
+                start=start,
+                end=end,
+                input_gain=input_gain,
+                ceiling_linear=ceiling_linear,
+                lookahead_samples=lookahead_samples,
+            )
+            release_state = _release_smooth(
+                smooth,
+                release_coeff,
+                release_state,
+            )
+            if smooth.size:
+                min_gain = min(min_gain, float(np.min(smooth)))
+            gained = np.multiply(waveform[:, start:end], input_gain, dtype=np.float32)
+            limited[:, start:end] = np.multiply(gained, smooth, dtype=np.float32)
+            evict_memmap_pages(waveform, start, end)
+            evict_memmap_pages(limited, start, end)
+        limited.flush()
+
+        peak = true_peak_linear(limited, factor=8)
+        trim = np.float32(1.0)
+        if peak > ceiling_linear:
+            trim = np.float32((ceiling_linear / peak) * (1.0 - 1e-6))
+            for start in range(0, samples, chunk_samples):
+                end = min(samples, start + chunk_samples)
+                np.multiply(limited[:, start:end], trim, out=limited[:, start:end])
+                evict_memmap_pages(limited, start, end)
+            limited.flush()
+
+            min_gain *= float(trim)
+            peak = true_peak_linear(limited, factor=8)
+        if peak > ceiling_linear:
+            raise OutputValidationError(
+                f"Limiter failed to enforce ceiling: true peak {peak:.6f} > {ceiling_linear:.6f}"
+            )
+
+        max_gr_db = float(-20.0 * np.log10(max(min_gain, 1e-6)))
+        return LimiterResult(
+            limited_waveform=limited,
+            max_gain_reduction_db=max_gr_db,
+            ceiling_dbtp=ceiling_dbtp,
+            gain_envelope=np.empty(0, dtype=np.float32),
+        )
+    except Exception:
+        if limited is not None:
+            cast(Any, limited)._mmap.close()  # numpy exposes no public close
+        destination.unlink(missing_ok=True)
+        raise

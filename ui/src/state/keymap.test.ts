@@ -8,7 +8,13 @@ import type { HawaVoCleanReport, JobStatus, UnitDecisionRecord } from '../api/ty
 import { handleKeyDown, isActivatable, isEditable } from './keymap';
 import { getState, useStore } from './store';
 
-const player = vi.hoisted(() => ({ time: 0, seek: vi.fn() }));
+const player = vi.hoisted(() => ({
+  time: 0,
+  seek: vi.fn(),
+  toggleDeltaMode: vi.fn(),
+  toggleLoop: vi.fn(),
+  setLoopRange: vi.fn(),
+}));
 vi.mock('../audio/player', () => ({ getPlayer: () => player }));
 
 const actions = vi.hoisted(() => ({
@@ -16,10 +22,13 @@ const actions = vi.hoisted(() => ({
   cancelJob: vi.fn(),
   cancelUpload: vi.fn(),
   isAnalyzing: vi.fn(() => false),
+  previewRegion: vi.fn(),
+  redoAction: vi.fn(),
   seekTo: vi.fn(),
   setAb: vi.fn(),
   startJob: vi.fn(),
   togglePlay: vi.fn(),
+  undoAction: vi.fn(),
 }));
 vi.mock('./actions', () => actions);
 
@@ -153,6 +162,7 @@ describe('the ? overlay owns the keyboard while it is up', () => {
     press('a');
     expect(actions.togglePlay).not.toHaveBeenCalled();
     expect(actions.seekTo).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
     expect(actions.setAb).not.toHaveBeenCalled();
   });
@@ -171,6 +181,7 @@ describe('inertness', () => {
     expect(actions.togglePlay).not.toHaveBeenCalled();
     expect(actions.seekTo).not.toHaveBeenCalled();
     expect(actions.setAb).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
     expect(getState().shortcutsOpen).toBe(false);
   });
@@ -188,6 +199,7 @@ describe('inertness', () => {
     press(' ', { code: 'Space', target: ce });
     expect(actions.togglePlay).not.toHaveBeenCalled();
     expect(actions.seekTo).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
   });
 
@@ -324,17 +336,28 @@ describe('A / B — deck switching', () => {
   });
 });
 
-describe('P — process', () => {
-  it('starts a run only when every precondition is met', () => {
+describe('P — instant warm region preview & Shift+P — process', () => {
+  it('triggers previewRegion on P when every precondition is met', () => {
     armed();
-    press('p');
+    const ev = press('p');
+    expect(ev.defaultPrevented).toBe(true);
+    expect(actions.previewRegion).toHaveBeenCalledTimes(1);
+    expect(actions.startJob).not.toHaveBeenCalled();
+  });
+
+  it('triggers startJob on Shift+P when idle', () => {
+    armed();
+    const ev = press('P', { shiftKey: true });
+    expect(ev.defaultPrevented).toBe(true);
     expect(actions.startJob).toHaveBeenCalledTimes(1);
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 
   it('is silent while the engine is offline', () => {
     armed();
     getState().setEngine('offline', null, '3.2.0');
     press('p');
+    expect(actions.previewRegion).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
   });
 
@@ -342,27 +365,27 @@ describe('P — process', () => {
     armed();
     getState().setAnalyzing(true);
     press('p');
-    expect(actions.startJob).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 
   it('is silent while a run is already going', () => {
     armed();
     runningJob();
     press('p');
-    expect(actions.startJob).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 
   it('arms again once the run has reached a terminal state', () => {
     armed();
     runningJob('done');
     press('p');
-    expect(actions.startJob).toHaveBeenCalledTimes(1);
+    expect(actions.previewRegion).toHaveBeenCalledTimes(1);
   });
 
   it('is silent with no clip at all', () => {
     getState().setEngine('ready', null, '3.2.0');
     press('p');
-    expect(actions.startJob).not.toHaveBeenCalled();
+    expect(actions.previewRegion).not.toHaveBeenCalled();
   });
 });
 
@@ -426,6 +449,13 @@ describe('Escape — stop the innermost thing that is happening', () => {
     expect(getState().highlightRange).toBeNull();
   });
 
+  it('clears an active waveform region selection when idle and no unit is selected', () => {
+    armed();
+    getState().setSelectionRange({ start: 10, end: 22 });
+    press('Escape');
+    expect(getState().selectionRange).toBeNull();
+  });
+
   it('is swallowed even when there is nothing to stop', () => {
     const ev = press('Escape');
     expect(ev.defaultPrevented).toBe(true);
@@ -444,5 +474,72 @@ describe('keys the app does not claim', () => {
     expect(actions.togglePlay).not.toHaveBeenCalled();
     expect(actions.setAb).not.toHaveBeenCalled();
     expect(actions.startJob).not.toHaveBeenCalled();
+  });
+});
+
+describe('D — Delta ("Listen to Removed") toggle', () => {
+  it('toggles Delta mode when cleaned deck is ready', () => {
+    armed();
+    press('d');
+    expect(player.toggleDeltaMode).not.toHaveBeenCalled();
+
+    getState().setCleaned(analysis(), '/out/a.wav');
+    const ev = press('d');
+    expect(ev.defaultPrevented).toBe(true);
+    expect(player.toggleDeltaMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays inert when master artifact is missing', () => {
+    armed();
+    getState().setCleaned(analysis(), '/out/a.wav');
+    getState().setArtifacts({ master: false, json: true, txt: true, reason: 'gone' });
+    press('d');
+    expect(player.toggleDeltaMode).not.toHaveBeenCalled();
+  });
+});
+
+describe('L — Region / Clip Loop toggle', () => {
+  it('toggles loop on DualPlayer when audio is loaded and syncs selectionRange', () => {
+    press('l');
+    expect(player.toggleLoop).not.toHaveBeenCalled();
+
+    armed();
+    getState().setSelectionRange({ start: 2, end: 8 });
+    const ev = press('l');
+    expect(ev.defaultPrevented).toBe(true);
+    expect(player.setLoopRange).toHaveBeenCalledWith([2, 8]);
+    expect(player.toggleLoop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z — Undo / Redo', () => {
+  it('invokes undoAction and redoAction with Cmd or Ctrl when not in an input', () => {
+    const u1 = press('z', { metaKey: true });
+    expect(u1.defaultPrevented).toBe(true);
+    expect(actions.undoAction).toHaveBeenCalledTimes(1);
+
+    const u2 = press('z', { ctrlKey: true });
+    expect(u2.defaultPrevented).toBe(true);
+    expect(actions.undoAction).toHaveBeenCalledTimes(2);
+
+    const r1 = press('z', { metaKey: true, shiftKey: true });
+    expect(r1.defaultPrevented).toBe(true);
+    expect(actions.redoAction).toHaveBeenCalledTimes(1);
+
+    const r2 = press('Z', { ctrlKey: true, shiftKey: true });
+    expect(r2.defaultPrevented).toBe(true);
+    expect(actions.redoAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not intercept Cmd/Ctrl+Z inside editable fields, when shortcuts dialog is open, or with Alt', () => {
+    const input = el('input');
+    press('z', { metaKey: true, target: input });
+    press('z', { ctrlKey: true, shiftKey: true, target: el('textarea') });
+    press('z', { metaKey: true, altKey: true });
+    getState().setShortcutsOpen(true);
+    press('z', { metaKey: true });
+
+    expect(actions.undoAction).not.toHaveBeenCalled();
+    expect(actions.redoAction).not.toHaveBeenCalled();
   });
 });

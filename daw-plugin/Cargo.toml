@@ -1,0 +1,25 @@
+[package]
+name = "hawavoclean-daw"
+version = "3.3.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "HawaVoClean native VST3 / CLAP real-time dialogue restoration plugin"
+publish = false
+
+[lib]
+name = "hawavoclean_daw"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Enable ONNX Runtime neural execution provider (CPU / CoreML / DirectML).
+onnx = ["dep:ort"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "coreml"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+codegen-units = 1

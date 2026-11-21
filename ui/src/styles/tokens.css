@@ -16,66 +16,59 @@
 :root {
   color-scheme: dark;
 
-  /* ------------------------------------------------------------- surfaces */
-  --page: #0e1013;
-  --panel: #14171c;
-  --panel-2: #1a1e24;
-  --panel-3: #20252c;
-  --display: #07080a;
-  --display-2: #0a0c0f;
+  /* ------------------------------------------------------------- surfaces
+   * Studio 4.0 Luminous Obsidian palette: deeper pure-slate ground with clean
+   * glass separation, zero muddy grey cast, and high-contrast legibility. */
+  --page: #07090e;
+  --panel: #0e121a;
+  --panel-2: #141a24;
+  --panel-3: #1b2230;
+  --display: #05070b;
+  --display-2: #090c12;
 
   /* --------------------------------------------------------- hairlines
    * One hairline colour per role, used everywhere. `--hair` divides two lit
    * surfaces, `--hair-dark` is the shadow side of an edge, `--hair-hi` the lit
    * side. `--line*` are the historical aliases. */
-  --hair: rgba(255, 255, 255, 0.07);
-  --hair-strong: rgba(255, 255, 255, 0.11);
-  --hair-dark: rgba(0, 0, 0, 0.62);
-  --hair-hi: rgba(255, 255, 255, 0.08);
+  --hair: rgba(255, 255, 255, 0.08);
+  --hair-strong: rgba(255, 255, 255, 0.14);
+  --hair-dark: rgba(0, 0, 0, 0.72);
+  --hair-hi: rgba(255, 255, 255, 0.11);
   --line: var(--hair);
   --line-strong: var(--hair-strong);
   --line-dark: var(--hair-dark);
   --bevel-hi: var(--hair-hi);
-  --bevel-lo: rgba(0, 0, 0, 0.6);
+  --bevel-lo: rgba(0, 0, 0, 0.68);
 
   /* ----------------------------------------------------------------- text */
-  --fg: #e6e9ee;
-  --fg-2: #aab2bf;
-  /* The bottom two steps used to sit at #7c8593 / #545c69. Measured against
-   * the surfaces they are actually painted on (--panel #14171c, --panel-2
-   * #1a1e24) that put --fg-4 at 2.66:1 — every unit suffix, every kv key, the
-   * file-type list and the footer job id were below the 4.5:1 floor and read
-   * as switched-off rather than as quiet. The ramp is re-cut so all four steps
-   * clear 4.5:1 on --panel-2 and stay four visibly separate greys.
-   *
-   * D2 re-cut the bottom step once more. Those figures were taken against the
-   * flat panel tokens; measured on the shipped pixels the raised controls
-   * panel paints its interior around rgb(30 36 40) — lighter than --panel-2 —
-   * and there --fg-4 came out at 4.42:1, the one text on the whole screen
-   * still under the floor. #86909f clears it on the real surface with margin
-   * and keeps four visibly separate greys. */
-  --fg-3: #949daa; /* 6.4:1 on --panel  ·  5.9:1 on --panel-2 */
-  --fg-4: #86909f; /* 5.6:1 on --panel  ·  5.2:1 on --panel-2  ·  4.8:1 on the raised controls panel */
+  --fg: #edf1f7;
+  --fg-2: #b4bece;
+  --fg-3: #949daa; /* >=6.8:1 on --panel  ·  >=6.2:1 on --panel-2 */
+  --fg-4: #86909f; /* >=5.8:1 on --panel  ·  >=5.3:1 on --panel-2 */
 
   /* -------------------------------------------------------------- accents */
-  --amber: #ffb347;
-  --amber-2: #ffd28a;
-  --amber-dim: rgba(255, 179, 71, 0.35);
-  --amber-glow: rgba(255, 179, 71, 0.45);
-  --cyan: #39d0ff;
-  --cyan-2: #9ae8ff;
-  --cyan-dim: rgba(57, 208, 255, 0.35);
-  --cyan-glow: rgba(57, 208, 255, 0.45);
+  --amber: #ffb44c;
+  --amber-2: #ffd694;
+  --amber-dim: rgba(255, 180, 76, 0.34);
+  --amber-glow: rgba(255, 180, 76, 0.48);
+  --cyan: #2cd4ff;
+  --cyan-2: #9cecff;
+  --cyan-dim: rgba(44, 212, 255, 0.34);
+  --cyan-glow: rgba(44, 212, 255, 0.5);
+  --coral: #ff6b8b;
+  --coral-2: #ffb3c4;
+  --coral-dim: rgba(255, 107, 139, 0.32);
+  --coral-glow: rgba(255, 107, 139, 0.45);
 
   /* --------------------------------------------------------------- status */
-  --ok: #4ade80;
-  --ok-glow: rgba(74, 222, 128, 0.55);
-  --busy: #ffb347;
-  --busy-glow: rgba(255, 179, 71, 0.55);
-  --err: #ff5a5f;
-  --err-glow: rgba(255, 90, 95, 0.55);
-  --err-bg: rgba(255, 90, 95, 0.12);
-  --neutral: #5b6473;
+  --ok: #34d399;
+  --ok-glow: rgba(52, 211, 153, 0.52);
+  --busy: #ffb44c;
+  --busy-glow: rgba(255, 180, 76, 0.52);
+  --err: #ff5c6c;
+  --err-glow: rgba(255, 92, 108, 0.55);
+  --err-bg: rgba(255, 92, 108, 0.13);
+  --neutral: #606a7c;
 
   /* =================================================================== TYPE
    * Three stacks, all system fonts — no webfont is ever downloaded.
@@ -127,26 +120,15 @@
   --gap-lg: var(--pad-6);
 
   /* ============================================================== LIGHTING
-   * Chrome gradients: a top-lit vertical ramp, deliberately shallow (≈6% of
-   * value across the whole run) so it reads as machined metal, not as plastic. */
-  --metal: linear-gradient(180deg, #1b1f26 0%, #15181e 45%, #12151a 100%);
-  --metal-2: linear-gradient(180deg, #22272f 0%, #1a1e25 50%, #161a20 100%);
-  --metal-raised: linear-gradient(180deg, #2a3038 0%, #1f242b 55%, #1a1e25 100%);
+   * Studio 4.0 obsidian-glass gradients: clean, ultra-refined depth without
+   * dated brushed-metal scanlines. */
+  --metal: linear-gradient(180deg, #121722 0%, #0e121a 55%, #0b0e15 100%);
+  --metal-2: linear-gradient(180deg, #171e2b 0%, #121721 55%, #0e131b 100%);
+  --metal-raised: linear-gradient(180deg, #1e2738 0%, #161c28 60%, #121721 100%);
 
-  /* 1.5% monochrome fractal noise, inline so it works offline and from
-   * file://. It exists to break up the banding in the ramps above. */
-  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
-  /* Layer alpha, not perceived strength: with `overlay` compositing this
-   * lands at roughly ±1.5% luminance on the graphite ramp. */
-  --grain-opacity: 0.045;
-  /* brushed-metal micro-lines, one device pixel on, two off */
-  --brushed: repeating-linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.014) 0px,
-    rgba(255, 255, 255, 0.014) 1px,
-    transparent 1px,
-    transparent 3px
-  );
+  --grain: none;
+  --grain-opacity: 0;
+  --brushed: none;
 
   /* -------------------------------------------------------- elevation scale
    * --elev-0  ground / inset      (light falls *into* the surface)

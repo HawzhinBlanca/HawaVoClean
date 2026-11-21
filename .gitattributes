@@ -1,0 +1,23 @@
+# Auto-detect text files and normalize line endings to LF
+* text=auto eol=lf
+
+# Explicitly ensure model configs, code, scripts, locks, and data retain LF across all platforms
+*.ini text eol=lf
+*.toml text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+# Binary files
+*.wav binary
+*.ckpt binary
+*.best binary
+*.whl binary
+*.zip binary
+*.tar.gz binary
+*.png binary
+*.ico binary

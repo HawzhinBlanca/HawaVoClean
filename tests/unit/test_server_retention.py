@@ -68,7 +68,7 @@ def _client(work: Path, manager: JobManager, **kwargs: Any) -> Iterator[TestClie
         min_free_bytes=0,
         **kwargs,
     )
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1") as client:
         yield client
 
 
@@ -96,6 +96,53 @@ def test_cleanup_removes_only_the_marked_input_not_sibling_output(tmp_path: Path
     assert not (input_path.parent / UPLOAD_MARKER).exists()
     assert output.read_bytes() == b"committed output"
     assert store.cleanup_input(input_path) is False
+
+
+def test_source_ids_are_opaque_marker_bound_and_fail_closed(tmp_path: Path) -> None:
+    store = UploadStore(tmp_path / "uploads", min_free_bytes=0)
+    input_path = store.stage("source.wav")
+    input_path.write_bytes(b"input")
+    source_id = store.source_id(input_path)
+
+    assert len(source_id) == 32
+    assert store.resolve_source(source_id) == input_path
+    assert store.resolve_source("../" + source_id) is None
+    assert store.resolve_source("not-an-id") is None
+
+    input_path.unlink()
+    input_path.symlink_to("outside.wav")
+    assert store.resolve_source(source_id) is None
+    with pytest.raises(ValueError, match="not owned"):
+        store.source_id(tmp_path / "unmanaged.wav")
+
+
+def test_source_lease_closes_resolve_then_cleanup_race(tmp_path: Path) -> None:
+    now = [0.0]
+    store = UploadStore(
+        tmp_path / "uploads",
+        ttl_s=1.0,
+        min_free_bytes=0,
+        clock=lambda: now[0],
+    )
+    input_path = store.stage("source.wav")
+    input_path.write_bytes(b"input")
+    source_id = store.source_id(input_path)
+    now[0] = 2.0
+
+    with store.lease_source(source_id) as leased:
+        assert leased == input_path.resolve()
+        assert store.scavenge() == 0
+        assert store.cleanup_input(input_path) is False
+        assert input_path.read_bytes() == b"input"
+
+    assert store.scavenge() == 1
+    assert not input_path.exists()
+
+
+def test_unknown_source_lease_is_a_noop(tmp_path: Path) -> None:
+    store = UploadStore(tmp_path / "uploads", min_free_bytes=0)
+    with store.lease_source("not-an-id") as leased:
+        assert leased is None
 
 
 def test_fake_clock_scavenging_protects_active_and_unknown_files(tmp_path: Path) -> None:
@@ -330,7 +377,7 @@ def test_a_finished_job_does_not_delete_an_upload_another_job_still_needs(
 
     def factory(record: Any) -> list[str]:
         # The first job finishes promptly, the second lingers.
-        delay = 0.1 if record.output_path.name == "a.wav" else 3.0
+        delay = 0.5 if record.output_path.name == "a.wav" else 3.0
         return [
             sys.executable,
             "-u",
@@ -417,6 +464,22 @@ def test_a_terminal_callback_may_ask_the_manager_a_question(tmp_path: Path) -> N
     seen: list[int] = []
 
     def ask_the_manager(record: JobRecord) -> None:
+        # Terminal callbacks must run with the manager lock released so other threads can query/submit.
+        acquired_from_other_thread = threading.Event()
+
+        def probe() -> None:
+            if manager._lock.acquire(timeout=0.5):
+                try:
+                    acquired_from_other_thread.set()
+                finally:
+                    manager._lock.release()
+
+        probe_thread = threading.Thread(target=probe)
+        probe_thread.start()
+        probe_thread.join(timeout=1.0)
+        assert acquired_from_other_thread.is_set(), (
+            "manager lock was held during terminal callback execution"
+        )
         # Every one of these re-enters the lock the callback used to hold.
         manager.active_input_paths()
         manager.list_jobs()
@@ -439,7 +502,7 @@ def test_a_terminal_callback_may_ask_the_manager_a_question(tmp_path: Path) -> N
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
             status = manager.get_status(job_id)
-            if status is not None and status["state"] in TERMINAL_STATES:
+            if status is not None and status["state"] in TERMINAL_STATES and seen:
                 reached.append(str(status["state"]))
                 return
             time.sleep(0.02)

@@ -40,10 +40,7 @@ class _NoTorch(MetaPathFinder):
 #: cached object back and the lazy guard never runs -- which passed in
 #: isolation and failed only in the full suite, where an earlier test had
 #: already imported them.
-_TORCH_BACKED_MODULES = (
-    "hawavoclean.restoration.hawarestore_kd",
-    "hawavoclean.restoration.universr_upstream",
-)
+_TORCH_BACKED_MODULES = ("hawavoclean.restoration.hawarestore_kd",)
 
 
 @pytest.fixture

@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "kurdish_shahen",
+  "display_name": "Kurdish Shahen (Central)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "0abe7710fc131ce0e50d6dec08e0d81081e3f60d6f9746e883811ae3a213e3ad",
+    "e66030f49ede3f02a78ed2a5b9b596590424577997a6439f7a7766d6c78c26bd"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "5321d60b6e07ac19e57f3abc2aefd7c45a6f8669ac916c0a7f82b2671c958b0b",
+  "f0_statistics": {
+    "median_hz": 147.8,
+    "p05_hz": 126.8,
+    "p95_hz": 207.1
+  },
+  "training_split_id": "pending-training",
+  "adapter": null,
+  "created_by_commit": "8e77d50",
+  "notes": "Real speaker profile enrolled from 2 production recordings (0.0 hours). Source: shahen."
+}

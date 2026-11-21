@@ -16,6 +16,21 @@ class RestorationCandidate:
     protected_band_error: float = 0.0
 
 
+@dataclass(frozen=True)
+class RestorationRenderResult:
+    """Typed render result carrying model/provider/solver telemetry, fallback status, and candidates."""
+
+    success: bool
+    fallback_status: (
+        str  # "none", "input_too_short", "solver_failure", "empty_input", "runtime_error"
+    )
+    model_name: str
+    provider: str
+    solver: str
+    candidates: list[RestorationCandidate]
+    error_message: str | None = None
+
+
 @runtime_checkable
 class Restorer(Protocol):
     """Protocol implemented by bandwidth restoration backends."""
@@ -33,4 +48,19 @@ class Restorer(Protocol):
         seed: int = 42,
     ) -> list[RestorationCandidate]:
         """Generate candidates for candidate high-band strengths from strongest to weakest."""
+        ...
+
+    def render(
+        self,
+        audio_48k: np.ndarray,
+        sample_rate: int,
+        effective_cutoff_hz: float,
+        speaker_id: str | None = None,
+        speaker_embedding: np.ndarray | None = None,
+        f0_trajectory: np.ndarray | None = None,
+        vuv_mask: np.ndarray | None = None,
+        strengths: list[float] | None = None,
+        seed: int = 42,
+    ) -> RestorationRenderResult:
+        """Generate typed render result carrying execution telemetry and candidates."""
         ...

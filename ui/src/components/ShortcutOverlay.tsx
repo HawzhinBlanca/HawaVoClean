@@ -25,8 +25,21 @@ const GROUPS: Group[] = [
       { keys: [['Space']], what: 'Play / pause' },
       { keys: [['A']], what: 'Listen to the ORIGINAL deck' },
       { keys: [['B']], what: 'Listen to the CLEANED deck', when: 'after a run' },
+      { keys: [['Hold']], what: 'Hold for Original button — briefly audition Original', when: 'after a run' },
+      { keys: [['D']], what: 'Toggle Removed (Δ) audition', when: 'after a run' },
+      { keys: [['L']], what: 'Toggle region / clip loop' },
       { keys: [['←'], ['→']], what: 'Seek ∓ 5 seconds' },
       { keys: [['Shift', '←'], ['Shift', '→']], what: 'Seek ∓ 1 second' },
+    ],
+  },
+  {
+    title: 'Editing',
+    rows: [
+      { keys: [['⌘', 'Z'], ['Ctrl', 'Z']], what: 'Undo unit override or rack change' },
+      {
+        keys: [['⌘', 'Shift', 'Z'], ['Ctrl', 'Shift', 'Z']],
+        what: 'Redo unit override or rack change',
+      },
     ],
   },
   {
@@ -40,7 +53,8 @@ const GROUPS: Group[] = [
   {
     title: 'Job',
     rows: [
-      { keys: [['P']], what: 'Process the loaded clip', when: 'when idle' },
+      { keys: [['P']], what: 'Instant warm region preview (loop)', when: 'when idle' },
+      { keys: [['Shift', 'P']], what: 'Process the loaded clip', when: 'when idle' },
       { keys: [['Esc']], what: 'Cancel the upload', when: 'while uploading' },
       { keys: [['Esc']], what: 'Cancel the analysis', when: 'while analyzing' },
       { keys: [['Esc']], what: 'Cancel the running job', when: 'while running' },
@@ -54,10 +68,11 @@ const GROUPS: Group[] = [
     ],
   },
   {
-    title: 'Help',
+    title: 'Help & Assistant',
     rows: [
+      { keys: [['⌘', 'K'], ['Ctrl', 'K']], what: 'Open / close AI Audio Assistant' },
       { keys: [['?']], what: 'Open this panel' },
-      { keys: [['Esc']], what: 'Close this panel' },
+      { keys: [['Esc']], what: 'Close this panel or active drawer' },
     ],
   },
   {
@@ -78,6 +93,16 @@ const GROUPS: Group[] = [
       { keys: [['Drag', 'ruler']], what: 'Pan the visible window' },
       { keys: [['Double', 'click']], what: 'Fit the whole clip' },
       { keys: [['Click', 'segment']], what: 'Select that unit and seek to it' },
+      { keys: [['Shift', 'Drag']], what: 'Select a time range' },
+    ],
+  },
+  {
+    title: 'Selection',
+    rows: [
+      { keys: [['I']], what: 'Set selection in-point', when: 'display focused' },
+      { keys: [['O']], what: 'Set selection out-point', when: 'display focused' },
+      { keys: [['L']], what: 'Toggle region / clip loop' },
+      { keys: [['Esc']], what: 'Clear the selection', when: 'display focused' },
     ],
   },
 ];
@@ -85,8 +110,11 @@ const GROUPS: Group[] = [
 const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 export function ShortcutOverlay() {
+  const host = useStore((s) => s.host);
   const open = useStore((s) => s.shortcutsOpen);
   const setOpen = useStore((s) => s.setShortcutsOpen);
+  const hostModeLabel =
+    host === 'electron' ? 'desktop mode' : host === 'resolve' ? 'resolve mode' : 'web mode';
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
@@ -154,7 +182,7 @@ export function ShortcutOverlay() {
               reset to inherit its type, so nothing about the drawing moves. */}
           <h2 className="panel-title" id="sc-title">
             <span>Keyboard shortcuts</span>
-            <span className="sub">· web mode</span>
+            <span className="sub">· {hostModeLabel}</span>
           </h2>
           <button
             type="button"
@@ -204,8 +232,8 @@ export function ShortcutOverlay() {
         </div>
         <div className="sc-foot">
           <span>
-            Modifier combinations (<kbd>⌘</kbd>/<kbd>Ctrl</kbd>/<kbd>Alt</kbd>) are left to the
-            browser — nothing here hijacks them.
+            Other modifier combinations (<kbd>⌘</kbd>/<kbd>Ctrl</kbd>/<kbd>Alt</kbd>) are left to
+            the browser — nothing here hijacks them.
           </span>
         </div>
       </div>

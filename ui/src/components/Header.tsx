@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { redoAction, undoAction } from '../state/actions';
+import { useI18n } from '../state/i18n';
+import { deriveEnginePhase, deriveWorkspacePhase } from '../state/machines';
 import { useReducedMotion } from '../state/reducedMotion';
-import { useStore } from '../state/store';
+import { jobInFlight, useStore } from '../state/store';
 import { Led, type LedState } from './Led';
 
 const HOST_LABEL: Record<string, string> = {
@@ -66,79 +69,89 @@ function HeaderNow() {
   const source = useStore((s) => s.source);
   const original = useStore((s) => s.original);
   const cleaned = useStore((s) => s.cleaned);
+  const cleanedPath = useStore((s) => s.cleanedPath);
   const analyzing = useStore((s) => s.analyzing);
   const upload = useStore((s) => s.upload);
   const job = useStore((s) => s.job);
   const report = useStore((s) => s.report);
+  const { t } = useI18n();
 
+  const phase = deriveWorkspacePhase({
+    source,
+    upload,
+    analyzing,
+    original,
+    job,
+    cleanedPath,
+    report,
+  });
   const status = job?.status ?? null;
   const state = status?.state ?? (job ? 'queued' : null);
-  const running = state === 'running' || state === 'queued';
 
   let tone = 'idle';
-  let label = 'No clip';
+  let label = t.noClip;
   const facts: Array<{ k: string; v: string }> = [];
 
-  if (upload) {
+  if (phase === 'uploading' && upload) {
     tone = 'busy';
-    label = 'Uploading';
+    label = t.uploading;
     // The name goes in the *value* slot, like every other branch here. It was
     // in the key slot, which does not shrink, so a long filename clipped hard
     // and pushed the percentage off the end of the header.
-    facts.push({ k: 'Clip', v: upload.name });
+    facts.push({ k: t.clip, v: upload.name });
     // "Sent", not "Done": `upload.phase` reaches 'finishing' at
     // loaded === total while the engine is still writing the file, so 100%
     // here does not mean the upload is over.
     facts.push({
-      k: 'Sent',
+      k: t.sent,
       v: `${Math.round((upload.total ? upload.loaded / upload.total : 0) * 100)}%`,
     });
-  } else if (analyzing) {
+  } else if (phase === 'analyzing') {
     tone = 'busy';
-    label = 'Analyzing';
-    if (source) facts.push({ k: 'Clip', v: source.name });
-  } else if (running) {
+    label = t.analyzing;
+    if (source) facts.push({ k: t.clip, v: source.name });
+  } else if (phase === 'processing') {
     tone = 'busy';
-    label = 'Running';
-    facts.push({ k: 'Stage', v: status?.stage ?? 'working' });
-    if (status?.unit) facts.push({ k: 'Unit', v: `${status.unit.index} / ${status.unit.total}` });
-    facts.push({ k: 'Done', v: `${Math.round((status?.progress ?? 0) * 100)}%` });
-  } else if (state === 'failed') {
+    label = t.running;
+    facts.push({ k: t.stage, v: status?.stage ?? 'working' });
+    if (status?.unit) facts.push({ k: t.unit, v: `${status.unit.index} / ${status.unit.total}` });
+    facts.push({ k: t.done, v: `${Math.round((status?.progress ?? 0) * 100)}%` });
+  } else if (state === 'failed' || state === 'interrupted') {
     tone = 'fail';
-    label = 'Failed';
-    facts.push({ k: 'Reason', v: status?.error?.code ?? status?.message ?? 'unknown' });
+    label = state === 'interrupted' ? 'Interrupted' : t.failed;
+    facts.push({ k: t.reason, v: status?.error?.code ?? status?.message ?? 'unknown' });
   } else if (state === 'cancelled') {
     tone = 'idle';
-    label = 'Cancelled';
-    if (source) facts.push({ k: 'Clip', v: source.name });
-  } else if (state === 'done' && report) {
+    label = t.cancelled;
+    if (source) facts.push({ k: t.clip, v: source.name });
+  } else if (phase === 'reviewed' && report) {
     tone = 'done';
-    label = 'Done';
+    label = t.done;
     const sum = report.summary;
-    facts.push({ k: 'Units', v: `${sum.enhanced ?? 0} / ${sum.units_total ?? 0}` });
+    facts.push({ k: t.units, v: `${sum.enhanced ?? 0} / ${sum.units_total ?? 0}` });
     const li = original?.loudness.integrated_lufs;
     const lo = cleaned?.loudness.integrated_lufs;
     if (li !== null && li !== undefined && lo !== null && lo !== undefined) {
-      facts.push({ k: 'LUFS', v: signed(lo - li) });
+      facts.push({ k: t.lufs, v: signed(lo - li) });
     }
     const ni = original?.noise_floor_db;
     const no = cleaned?.noise_floor_db;
     if (ni !== null && ni !== undefined && no !== null && no !== undefined) {
-      facts.push({ k: 'Noise', v: `${signed(no - ni)} dB` });
+      facts.push({ k: t.noise, v: `${signed(no - ni)} dB` });
     }
-  } else if (source && original) {
+  } else if (phase === 'ready' && source && original) {
     tone = 'ready';
-    label = 'Armed';
-    facts.push({ k: 'Clip', v: source.name });
-    facts.push({ k: 'Length', v: fmtDur(original.duration_s) });
+    label = t.armed;
+    facts.push({ k: t.clip, v: source.name });
+    facts.push({ k: t.length, v: fmtDur(original.duration_s) });
     facts.push({
-      k: 'Format',
-      v: `${(original.sample_rate / 1000).toFixed(1)} kHz · ${original.channels === 1 ? 'mono' : original.channels === 2 ? 'stereo' : `${original.channels} ch`}`,
+      k: t.format,
+      v: `${(original.sample_rate / 1000).toFixed(1)} kHz · ${original.channels === 1 ? t.mono : original.channels === 2 ? t.stereo : `${original.channels} ${t.channelsSuffix}`}`,
     });
   } else if (source) {
     tone = 'idle';
-    label = 'No analysis';
-    facts.push({ k: 'Clip', v: source.name });
+    label = t.noAnalysis;
+    facts.push({ k: t.clip, v: source.name });
   }
 
   return (
@@ -162,23 +175,75 @@ export function Header() {
   const host = useStore((s) => s.host);
   const engineStatus = useStore((s) => s.engineStatus);
   const engineVersion = useStore((s) => s.engineVersion);
+  const engineOfflineSince = useStore((s) => s.engineOfflineSince);
+  const engineNextProbeAt = useStore((s) => s.engineNextProbeAt);
+  const engineProbing = useStore((s) => s.engineProbing);
+  const source = useStore((s) => s.source);
+  const upload = useStore((s) => s.upload);
+  const original = useStore((s) => s.original);
+  const cleanedPath = useStore((s) => s.cleanedPath);
+  const report = useStore((s) => s.report);
   const job = useStore((s) => s.job);
   const analyzing = useStore((s) => s.analyzing);
+  const workspaceMode = useStore((s) => s.workspaceMode);
+  const setWorkspaceMode = useStore((s) => s.setWorkspaceMode);
+  const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
+  const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
+  const modelsDrawerOpen = useStore((s) => s.modelsDrawerOpen);
+  const setModelsDrawerOpen = useStore((s) => s.setModelsDrawerOpen);
+  const rackUndo = useStore((s) => s.rackUndo);
+  const overrideUndo = useStore((s) => s.overrideUndo);
+  const spectralUndo = useStore((s) => s.spectralUndo);
+  const running = useStore((s) => jobInFlight(s.job));
   const reduced = useReducedMotion() === true;
+  const { locale, setLocale, t } = useI18n();
 
+  const canUndo =
+    !running && (rackUndo.canUndo || overrideUndo.canUndo || spectralUndo.canUndo);
+  const canRedo =
+    !running && (rackUndo.canRedo || overrideUndo.canRedo || spectralUndo.canRedo);
+
+  const switchMode = (next: 'simple' | 'pro'): void => {
+    if (next === workspaceMode) return;
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => void };
+    if (!reduced && typeof doc.startViewTransition === 'function') {
+      doc.startViewTransition(() => setWorkspaceMode(next));
+    } else {
+      setWorkspaceMode(next);
+    }
+  };
+
+  const workspacePhase = deriveWorkspacePhase({
+    source,
+    upload,
+    analyzing,
+    original,
+    job,
+    cleanedPath,
+    report,
+  });
+  const engine = deriveEnginePhase({
+    engineStatus,
+    engineVersion,
+    engineOfflineSince,
+    engineNextProbeAt,
+    engineProbing,
+  });
   const busy =
-    analyzing || (job?.status && (job.status.state === 'running' || job.status.state === 'queued'));
+    workspacePhase === 'uploading' ||
+    workspacePhase === 'analyzing' ||
+    workspacePhase === 'processing';
   let led: LedState = 'off';
-  let text = 'ENGINE OFFLINE';
-  if (engineStatus === 'connecting') {
+  let text = t.engineOffline;
+  if (engine.phase === 'connecting') {
     led = 'busy';
-    text = 'ENGINE CONNECTING';
-  } else if (engineStatus === 'ready') {
+    text = t.engineConnecting;
+  } else if (engine.phase === 'ready') {
     led = busy ? 'busy' : 'ok';
-    text = busy ? 'ENGINE BUSY' : 'ENGINE READY';
+    text = busy ? t.engineBusy : t.engineReady;
   } else {
     led = 'err';
-    text = 'ENGINE OFFLINE';
+    text = t.engineOffline;
   }
 
   // CONNECTING → READY → BUSY are three readings of one instrument, so they
@@ -217,19 +282,96 @@ export function Header() {
           accessibility tree, readable whenever the user browses the header;
           the one engine transition that is *not* covered elsewhere — the
           engine going away — is announced assertively by the offline banner. */}
-      <div className="engine">
-        <Led state={led} />
-        <span className="txt">
-          {prev ? (
-            <span className="out" key={prev} aria-hidden="true">
-              {prev}
+      <div className="header-right">
+        <div className="hdr-undo-group" role="group" aria-label="History">
+          <button
+            type="button"
+            className="hdr-undo-btn"
+            disabled={!canUndo}
+            onClick={undoAction}
+            aria-label={`${t.undo} (Cmd+Z)`}
+            title={`${t.undo} (⌘Z)`}
+          >
+            <span aria-hidden="true">↶</span>
+          </button>
+          <button
+            type="button"
+            className="hdr-undo-btn"
+            disabled={!canRedo}
+            onClick={redoAction}
+            aria-label={`${t.redo} (Cmd+Shift+Z)`}
+            title={`${t.redo} (⇧⌘Z)`}
+          >
+            <span aria-hidden="true">↷</span>
+          </button>
+        </div>
+        <div className="hdr-mode-group" role="group" aria-label="Workspace mode">
+          <button
+            type="button"
+            className={`hdr-mode-btn${workspaceMode === 'simple' ? ' active' : ''}`}
+            aria-pressed={workspaceMode === 'simple'}
+            onClick={() => switchMode('simple')}
+            title={t.modeSimpleTitle}
+          >
+            {t.modeSimple}
+          </button>
+          <button
+            type="button"
+            className={`hdr-mode-btn${workspaceMode === 'pro' ? ' active' : ''}`}
+            aria-pressed={workspaceMode === 'pro'}
+            onClick={() => switchMode('pro')}
+            title={t.modeProTitle}
+          >
+            {t.modePro}
+          </button>
+        </div>
+        <button
+          type="button"
+          className="hdr-ai-btn hdr-models-btn"
+          aria-expanded={modelsDrawerOpen}
+          aria-label={t.modelsLabel}
+          title={t.modelsTitle}
+          onClick={() => setModelsDrawerOpen(!modelsDrawerOpen)}
+        >
+          <span>{t.modelsLabel}</span>
+        </button>
+        <button
+          type="button"
+          className="hdr-ai-btn"
+          aria-expanded={assistantDrawerOpen}
+          aria-label={t.aiAssistant}
+          title={t.aiAssistantTitle}
+          onClick={() => setAssistantDrawerOpen(!assistantDrawerOpen)}
+        >
+          <span>{t.aiAssistant}</span>
+          <kbd className="hdr-ai-kbd" aria-hidden="true">
+            ⌘K
+          </kbd>
+        </button>
+        <button
+          type="button"
+          className="lang-toggle"
+          onClick={() => setLocale(locale === 'en' ? 'ckb' : 'en')}
+          aria-label={t.langToggleAria}
+          title={t.langToggleAria}
+          data-locale={locale}
+        >
+          {t.langToggleLabel}
+        </button>
+        <div className="engine">
+          <Led state={led} />
+          <span className="txt">
+            {prev ? (
+              <span className="out" key={prev} aria-hidden="true">
+                {prev}
+              </span>
+            ) : null}
+            <span className="in" key={text}>
+              {text}
             </span>
-          ) : null}
-          <span className="in" key={text}>
-            {text}
           </span>
-        </span>
-        {engineVersion ? <span className="ver">v{engineVersion}</span> : null}
+          {engineVersion ? <span className="ver">v{engineVersion}</span> : null}
+        </div>
       </div>
     </header>
   );

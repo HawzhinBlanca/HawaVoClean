@@ -1,8 +1,12 @@
 # ADR 0005: Commit Output Triplets Through One Generation Pointer
 
-**Status:** Accepted  
+**Status:** Superseded by ADR 0009 on 2026-08-27
 **Date:** 2026-08-21  
 **Deciders:** Hawzhin Mahmood and the HawaVoClean release implementation
+
+> Historical note: the immutable-generation/single-authority decision remains. ADR 0009 replaces the
+> POSIX public-symlink mechanism with a cross-platform regular pointer, ordinary self-contained
+> exports and job-bound immutable artifact resolution.
 
 ## Context
 

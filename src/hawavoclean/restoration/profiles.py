@@ -42,11 +42,30 @@ class SpeakerProfile:
     created_by_commit: str
     notes: str
     embedding_vector: np.ndarray | None = None  # Shape: (dim,), float32
+    variance_vector: np.ndarray | None = None  # Shape: (dim,), float32
+    profile_variance_path: str | None = None
+    profile_variance_sha256: str | None = None
+    status: str = "active"
+    embedding_dim: int = 192
+    extractor_name: str | None = None
+    extractor_version: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert profile to serializable dictionary."""
         d = asdict(self)
         d.pop("embedding_vector", None)
+        d.pop("variance_vector", None)
+        if self.profile_variance_path is None:
+            d.pop("profile_variance_path", None)
+            d.pop("profile_variance_sha256", None)
+        if self.status == "active":
+            d.pop("status", None)
+        if self.embedding_dim == 192:
+            d.pop("embedding_dim", None)
+        if self.extractor_name is None:
+            d.pop("extractor_name", None)
+        if self.extractor_version is None:
+            d.pop("extractor_version", None)
         return d
 
     def compute_hash(self) -> str:
@@ -77,6 +96,13 @@ def validate_speaker_profile(
     if data.get("schema_version") != "1.0":
         raise ProfileValidationError(
             f"Unsupported speaker profile schema version: {data.get('schema_version')} (expected '1.0')"
+        )
+
+    # 1b. Lifecycle status check (R2.6)
+    status = str(data.get("status", "active"))
+    if status == "revoked":
+        raise ProfileValidationError(
+            f"Speaker profile at {path} has been revoked: {data.get('revocation_reason', 'no reason provided')}"
         )
 
     # 2. Required fields check
@@ -165,8 +191,52 @@ def validate_speaker_profile(
                 f"Failed to load embedding from {embedding_path}: {e}"
             ) from e
 
-        if embedding_vector is not None and np.linalg.norm(embedding_vector) < 1e-6:
-            raise ProfileValidationError(f"Degenerate zero embedding in {embedding_path}")
+    expected_dim: int
+    if "embedding_dim" in data:
+        expected_dim = int(data["embedding_dim"])
+        if embedding_vector is not None and (
+            embedding_vector.ndim != 1 or embedding_vector.shape[0] != expected_dim
+        ):
+            raise ProfileValidationError(
+                f"Incompatible embedding dimension for {embedding_path}: expected ({expected_dim},), "
+                f"got {embedding_vector.shape}. Profile contract mismatch."
+            )
+    else:
+        expected_dim = embedding_vector.shape[0] if embedding_vector is not None else 192
+
+    if embedding_vector is not None and np.linalg.norm(embedding_vector) < 1e-6:
+        raise ProfileValidationError(f"Degenerate zero embedding in {embedding_path}")
+
+    # 5b. Profile variance vector and hash check (optional for backward compatibility)
+    profile_variance_path = data.get("profile_variance_path")
+    profile_variance_sha256 = data.get("profile_variance_sha256")
+    variance_vector: np.ndarray | None = None
+    if profile_variance_path is not None:
+        var_rel = Path(str(profile_variance_path))
+        var_path = base_dir / var_rel if not var_rel.is_absolute() else var_rel
+        if verify_files:
+            if not var_path.exists():
+                raise ProfileValidationError(f"Profile variance file missing: {var_path}")
+            actual_var_hash = hash_file(var_path)
+            expected_var_hash = str(profile_variance_sha256)
+            if profile_variance_sha256 and actual_var_hash != expected_var_hash:
+                raise ProfileValidationError(
+                    f"Variance hash mismatch for {var_path}: expected {expected_var_hash}, got {actual_var_hash}"
+                )
+        try:
+            if var_path.exists():
+                variance_vector = np.load(var_path).astype(np.float32)
+                if variance_vector.ndim != 1 or variance_vector.shape[0] != expected_dim:
+                    raise ProfileValidationError(
+                        f"Incompatible variance dimension for {var_path}: expected ({expected_dim},), "
+                        f"got {variance_vector.shape}. Profile contract mismatch."
+                    )
+        except Exception as e:
+            if isinstance(e, ProfileValidationError):
+                raise
+            raise ProfileValidationError(
+                f"Failed to load variance vector from {var_path}: {e}"
+            ) from e
 
     # 6. F0 statistics check
     f0_data = data["f0_statistics"]
@@ -195,6 +265,13 @@ def validate_speaker_profile(
         created_by_commit=str(data["created_by_commit"]),
         notes=str(data.get("notes", "")),
         embedding_vector=embedding_vector,
+        variance_vector=variance_vector,
+        profile_variance_path=profile_variance_path,
+        profile_variance_sha256=profile_variance_sha256,
+        status=status,
+        embedding_dim=expected_dim,
+        extractor_name=data.get("extractor_name"),
+        extractor_version=data.get("extractor_version"),
     )
 
 
@@ -231,13 +308,28 @@ def load_speaker_profile(
 
 
 def validate_all_profiles(profiles_root: Path | str = "profiles") -> dict[str, SpeakerProfile]:
-    """Validate all 10 registered profiles and verify embedding distinctness."""
+    """Validate all registered speaker profiles and verify embedding distinctness.
+
+    Discovers profiles dynamically: any subdirectory of ``profiles_root``
+    containing a ``profile.json`` is a registered profile.  Also checks the
+    legacy ``character_01..10`` fixture directories when present.
+    """
     root = Path(profiles_root)
     profiles: dict[str, SpeakerProfile] = {}
     seen_hashes: dict[str, str] = {}
 
-    for i in range(1, 11):
-        spk_id = f"character_{i:02d}"
+    # Dynamic discovery: any dir with profile.json
+    profile_dirs = (
+        sorted(d for d in root.iterdir() if d.is_dir() and (d / "profile.json").exists())
+        if root.exists()
+        else []
+    )
+
+    if not profile_dirs:
+        raise ProfileValidationError(f"No speaker profiles found under {root}")
+
+    for profile_dir in profile_dirs:
+        spk_id = profile_dir.name
         prof = load_speaker_profile(spk_id, profiles_root=root)
         profiles[spk_id] = prof
 
@@ -250,3 +342,37 @@ def validate_all_profiles(profiles_root: Path | str = "profiles") -> dict[str, S
         seen_hashes[emb_hash] = spk_id
 
     return profiles
+
+
+def revoke_speaker_profile(
+    speaker_id: str,
+    profiles_root: Path | str = "profiles",
+    reason: str = "Owner requested revocation",
+) -> Path:
+    """Mark a speaker profile and its consent record as revoked (R2.6)."""
+    root = Path(profiles_root)
+    profile_json = root / speaker_id / "profile.json"
+    if not profile_json.exists():
+        raise ProfileValidationError(
+            f"Cannot revoke: profile '{speaker_id}' not found under {root}"
+        )
+    with open(profile_json, encoding="utf-8") as f:
+        data = json.load(f)
+    data["status"] = "revoked"
+    data["revocation_reason"] = reason
+    with open(profile_json, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    # Also update consent record if present
+    consent_rel = Path(data.get("consent_record", "consent/consent.json"))
+    consent_path = (
+        profile_json.parent / consent_rel if not consent_rel.is_absolute() else consent_rel
+    )
+    if consent_path.exists():
+        with open(consent_path, encoding="utf-8") as f:
+            cdata = json.load(f)
+        cdata["consent_granted"] = False
+        cdata["revoked"] = True
+        cdata["revocation_reason"] = reason
+        with open(consent_path, "w", encoding="utf-8") as f:
+            json.dump(cdata, f, indent=2)
+    return profile_json

@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "kurdish_fatih",
+  "display_name": "Kurdish Fatih (Central)",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "a9260925e5fa87abd78e0d2063ed5933515b55f638a37c1928c04195b1f10d89",
+    "575a6c4880b15657ca60372885973169ce2af9eab1c1c91addf76bfc1c016257"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "290412bdd342afbf446079ec4874c636656fc132eb2f8ef2eb377077c876ef84",
+  "f0_statistics": {
+    "median_hz": 118.6,
+    "p05_hz": 84.5,
+    "p95_hz": 600.0
+  },
+  "training_split_id": "pending-training",
+  "adapter": null,
+  "created_by_commit": "8e77d50",
+  "notes": "Real speaker profile enrolled from 2 production recordings (0.0 hours). Source: fatih."
+}

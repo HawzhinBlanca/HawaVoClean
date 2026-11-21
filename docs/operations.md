@@ -12,7 +12,7 @@ in [the generated release status](generated-release-status.md) and [STATUS.md](.
 | CPU container | Linux arm64, production profile, non-root, read-only root | Built, processed, verified, reproduced and scanned locally; final-commit rebuild is still required |
 | Studio/lowband CLI | macOS/Linux with the `studio` extra | Exercised on the release workstation; no GPU-container claim |
 | Resolve plugin | Apple-silicon macOS, Resolve Studio 21.0.3 | Installer and staged shell proven; real in-host workflow/accessibility acceptance is still open |
-| Windows | None for v3.3 | Unsupported; publication depends on POSIX symlink and replacement semantics |
+| Windows standalone | Unsupported in v3.3; future Windows 11 x64 target | Cross-platform publication and Job Object foundations exist, but native NTFS fault tests, offline NSIS packaging, Authenticode, DirectML/CUDA qualification and real-host QA are open |
 
 Do not convert a declared target into a release claim until its required CI/in-host gate is green.
 
@@ -20,7 +20,7 @@ Do not convert a declared target into a release claim until its required CI/in-h
 
 The committed GitHub workflow has one stable branch-protection context: `required`. It
 succeeds only when the source contract, all eight Linux/macOS and Python 3.11–3.14 jobs, the macOS
-web/Resolve-shell job, and the exact Apple-silicon release gate all succeed on the same commit. The
+web/desktop/Resolve-shell job, and the exact Apple-silicon release gate all succeed on the same commit. The
 hosted matrix builds a wheel, installs it with hash-locked runtime dependencies in a separate virtual
 environment, then runs `doctor`, `process`, and `verify` outside the source environment.
 
@@ -44,8 +44,9 @@ hawavoclean-release]` and the protected `release-candidate` environment. Before 
    `v*` tags against updates and deletion.
 
 Every third-party action is pinned to a full commit SHA, checkout credentials are not persisted, and
-the workflow has only `contents: read`. Successful evidence uploads are source-SHA-named and use the
-immutable artifact service: 30 days for hosted evidence and 90 days for the full release proof.
+the workflow has only `contents: read`. Evidence uploads fail the job when their expected path is
+absent; retained artifacts are source-SHA-named and use the immutable service for 30 days (hosted)
+or 90 days (full release proof).
 
 Validate the committed design and inspect the exact non-mutating API plan with:
 
@@ -92,6 +93,17 @@ uv run hawavoclean batch recordings/*.m4a \
 
 uv run hawavoclean verify interview_clean.wav \
   --report interview_clean.hawavoclean.json
+
+uv run hawavoclean record create interview_clean.wav \
+  --report interview_clean.hawavoclean.json \
+  --summary interview_clean.hawavoclean.txt \
+  --output interview_clean.record.zip
+
+uv run hawavoclean record verify interview_clean.record.zip --json
+
+# One supervised process: publish the master, then create and verify the ZIP.
+uv run hawavoclean process interview.m4a -o interview_clean.wav \
+  --profile production --record-bundle interview_clean.hawavoclean.zip
 ```
 
 `--passes` is process-only. It accepts `1`–`4` or `auto`; auto keeps a later pass only while measured
@@ -119,22 +131,41 @@ interview_clean.hawavoclean.txt
 .interview_clean.wav.hawavoclean/
 ```
 
-The three visible paths are relative aliases through the hidden bundle's single `current` pointer.
-Never copy, rename, or archive a visible alias alone. To relocate without changing the output name,
-archive all four paths from their parent directory and extract them together:
+The three visible paths are ordinary regular-file exports, while the hidden bundle's single
+`current` record is the authoritative generation. A hard interruption can occur while those three
+exports are being refreshed individually; broker/job artifact readers resolve and repair them from
+the immutable authority before serving. The WAV itself remains self-contained, while the Full
+Processing Record is the portable way to keep the master and both reports bound together.
 
-```bash
-tar -cf interview_clean.publication.tar \
-  interview_clean.wav \
-  interview_clean.hawavoclean.json \
-  interview_clean.hawavoclean.txt \
-  .interview_clean.wav.hawavoclean
-```
+Use `hawavoclean record create` for relocation or archival. Its ZIP contains ordinary `master.wav`,
+`report.json`, `summary.txt`, and canonical `manifest.json` entries; it never depends on the hidden
+generation store. The destination is created under an exclusive lock and published atomically. It
+fails if the ZIP already exists unless `--overwrite` is explicit.
 
-After extraction, run `hawavoclean verify` against the visible WAV and JSON report. Renaming a
-publication is not currently an exposed operation: process again to the new destination. The
-adjacent `.interview_clean.wav.hawavoclean.lock` is transient coordination state and is not part of
-the archived generation.
+Run `hawavoclean record verify RECORD.zip` after copying the archive. This verifies the closed
+inventory, every internal hash, and the report/master binding. It does **not** authenticate who made
+the archive: version 1 has no publisher signature, and reports `authenticated_publisher: false` in
+machine output. Preserve the printed archive SHA-256 in a separately trusted system when an external
+identity anchor is required.
+
+When `process --record-bundle ZIP` is used, ZIP construction runs in the same supervised child as
+the render. Cancellation therefore kills rendering and record creation as one process tree. The job
+does not become complete until the broker independently verifies the ZIP and binds its master,
+report, and summary hashes to the authoritative committed generation. The ZIP builder hashes the
+exact bytes it copies, verifies the temporary archive before atomic replacement, and preserves a
+valid prior ZIP if source mutation or verification fails.
+
+The master generation and portable ZIP are two atomic publication boundaries, not one filesystem
+transaction: the master commits first. A hard kill between those boundaries can leave a valid new
+master without a new ZIP. Such a job is explicitly `interrupted`/`failed`, never `completed`, and
+startup will not promote it merely because the derived ZIP path contains a valid older record from a
+replace operation. Retry with the intended conflict policy and a new idempotency key. This is the
+strongest safe behavior until publication stores the ZIP inside the same immutable generation before
+the single authority-pointer transition.
+
+Renaming a committed publication is not currently an exposed operation: process again to the new
+destination, or use a Full Processing Record when the goal is portable archival. The adjacent
+`.interview_clean.wav.hawavoclean.lock` is transient coordination state and is not part of a record.
 
 On interruption, retry the same command and destination. Startup publication recovery treats only a
 verified `current` target as authoritative, preserves the prior immutable generation, completes a
@@ -148,17 +179,20 @@ Use a fresh random secret and keep the server on loopback:
 
 ```bash
 HAWA_TOKEN="$(openssl rand -hex 32)"
-uv run hawavoclean serve --host 127.0.0.1 --port 0 --token "$HAWA_TOKEN" --ui-dir ui/dist
+printf '%s\n' "$HAWA_TOKEN" | \
+  uv run hawavoclean serve --host 127.0.0.1 --port 0 --token-stdin --ui-dir ui/dist
 ```
 
-The ready line reports the assigned port. Every `/api` request needs the token. Non-loopback binds,
-empty tokens, arbitrary output paths, and unauthenticated requests fail closed.
+The ready line reports the assigned port. Every `/api` request needs the token. Native shells use
+the one-shot stdin channel so the bootstrap secret is absent from the process command line. The
+legacy `--token` argv form remains for one compatibility release. Non-loopback binds, empty tokens,
+arbitrary output paths, and unauthenticated requests fail closed.
 
 Default bounds are finite:
 
 | Resource | Default |
 |---|---:|
-| Active jobs | 8 |
+| Active jobs | 128 |
 | Retained terminal jobs | 256 for at most 24 hours |
 | One upload | 8 GiB |
 | Concurrent uploads | 2 |
@@ -209,7 +243,7 @@ uv run --frozen python scripts/release_candidate.py assemble \
 ```
 
 The output is a closed inventory: `candidate-manifest.json`, `SHA256SUMS`, its OpenSSH `sshsig`, and
-the seven proof-matched files under `assets/`. The signed checksum file covers the manifest and every
+the eight proof-matched files under `assets/`. The signed checksum file covers the manifest and every
 asset. The manifest binds the source commit, full-gate file/canonical hashes, toolchain lock, tested
 tree/image identities, two-pass release-file identities, signing namespace, and signer identity.
 Unexpected files, symlinks, duplicate JSON keys, altered bytes, altered proof, wrong identity, or a
@@ -232,13 +266,18 @@ uv run --frozen python scripts/release_candidate.py smoke \
   --output build/candidates/hawavoclean-3.3.0-smoke.json
 ```
 
-The smoke reconstructs the normalized UI and plugin trees and compares them to the exact tested tree
-hashes; installs the candidate wheel with its candidate runtime lock into a fresh managed Python 3.11
-environment; runs `doctor`, `process`, and `verify`; loads the candidate container and requires the
-exact tested image ID; then repeats non-root/read-only `doctor`, `process`, and `verify`. Its proof is
-written outside the immutable candidate. Assembly without signing arguments is permitted only for
-local rehearsal and is labeled `unsigned_pending_signing`; verification then requires the explicit
-`--allow-unsigned` flag and does not complete T7.2.
+The smoke reconstructs the normalized UI, plugin and unsigned macOS app-proof trees and compares them
+to the exact tested tree hashes. It directly exercises the app's embedded engine, installs the
+candidate wheel with its candidate runtime lock into a fresh managed Python 3.11 environment, and
+runs `doctor`, `process`, and `verify`; it also loads the candidate container and requires the exact
+tested image ID before repeating the non-root/read-only flow. Its proof is written outside the
+immutable candidate. Assembly without signing arguments is permitted only for local rehearsal and
+is labeled `unsigned_pending_signing`; verification then requires the explicit `--allow-unsigned`
+flag and does not complete T7.2.
+
+Candidate schema 2 marks the macOS app proof as non-distributable qualification evidence. Signing
+the outer checksum inventory does not turn that inner ad-hoc app into a release: Developer ID
+signing, notarization/stapling and the final DMG/ZIP remain separate native gates.
 
 ## Resolve build, install, rollback
 
@@ -284,7 +323,7 @@ explicit release decision in [resolve-runtime-risk.md](resolve-runtime-risk.md).
 1. Preserve the input, output directory (including hidden bundle), command, stderr, and JSON report.
 2. Run `hawavoclean doctor`, `hawavoclean audit-models`, then `hawavoclean verify` if a committed output
    exists.
-3. For server failures, record `/api/health` before shutdown without recording the token; inspect the
+3. For server failures, record `/api/v1/health/signals` before shutdown without recording the token; inspect the
    terminal job's structured error and confirm the job child is gone.
 4. For Resolve failures, keep the installed plugin's `VERSION`, `SHA256SUMS`, `SYMLINKS`, visible error
    page, Resolve version/build, and host/runtime identity. Never include private audio or tokens.
@@ -293,3 +332,174 @@ explicit release decision in [resolve-runtime-risk.md](resolve-runtime-risk.md).
 
 Reports intentionally exclude transcripts and speaker embeddings. Logs and support bundles should
 contain paths only when needed and must never contain audio, credentials, or the loopback token.
+
+## Health signals & alert runbooks
+
+The engine evaluates 8 real-time operational health signals accessible via `GET /api/v1/health/signals`.
+Every alert emitted by the system links to an actionable runbook anchor below and strictly adheres to the
+zero-leakage privacy invariant: alerts contain only opaque UUIDs (`job_id`), numeric metrics, and timestamps.
+
+### Queue depth runbook
+<a id="queue-depth-runbook"></a>
+
+* **Alert IDs:** `QUEUE_DEPTH_WARNING` (depth >= 100), `QUEUE_DEPTH_EXCEEDED` (depth >= 128 / full).
+* **Severity:** Warning when >= 100; Critical when >= 128.
+* **Impact:** Incoming submissions via `POST /api/v1/jobs` are rejected with HTTP 429 (`QueueFullError`).
+* **Operator Action:**
+  1. Query `GET /api/v1/jobs` to inspect the queue breakdown by state (`queued`, `running`, `done`, `failed`).
+  2. If the single worker thread is executing a long audio render, check `no_progress_timeout` to ensure the running child process is actively processing.
+  3. If batch submissions saturated the queue, pause batches with `POST /api/v1/batches/{batch_id}/pause` to allow high-priority interactive jobs to proceed.
+  4. Cancel stalled or unneeded jobs with `POST /api/v1/jobs/{job_id}/cancel`.
+  5. The queue drains automatically in FIFO order once running tasks complete.
+
+### Job timeout runbook
+<a id="job-timeout-runbook"></a>
+
+* **Alert ID:** `JOB_NO_PROGRESS_STALLED`
+* **Severity:** Critical
+* **Trigger:** A running job has emitted no progress events on stdout for more than 300.0 seconds (5 minutes).
+* **Impact:** Worker slot is blocked; queued jobs cannot start.
+* **Operator Action:**
+  1. Identify the stalled `job_id` from the alert metadata.
+  2. Inspect the tail of stderr via `GET /api/v1/jobs/{job_id}`.
+  3. Issue a graceful cancel: `POST /api/v1/jobs/{job_id}/cancel`.
+  4. The supervisor signals SIGTERM, waits 3.0s grace period, and escalates to SIGKILL / Job Object termination to guarantee complete process tree death.
+  5. If the process does not terminate within 10 seconds, restart the engine broker; publication recovery will safely transition incomplete publications to `interrupted`.
+
+### Process & lease loss runbook
+<a id="process-lease-loss-runbook"></a>
+
+* **Alert ID:** `PROCESS_OR_LEASE_LOST`
+* **Severity:** Critical
+* **Trigger:** An active worker process terminated prematurely (non-zero exit or killed before publication finalized) or the durable SQLite job store owner lease was lost.
+* **Impact:** In-flight jobs may be orphaned; durability guarantees are compromised.
+* **Operator Action:**
+  1. Check engine log for `Durable job state update failed` or `Job process exited prematurely`.
+  2. Verify if another engine instance attempted to acquire the owner lock: `~/Library/Application Support/HawaVoClean/jobs.db.owner.lock`.
+  3. Run SQLite integrity check: `sqlite3 ~/Library/Application Support/HawaVoClean/jobs.db "PRAGMA integrity_check;"`.
+  4. If database lock is stale after an ungraceful OS reboot, remove the `.owner.lock` file only when no other `hawavoclean` process is running.
+  5. Restart the engine: `hawavoclean serve`. Startup recovery safely reconciles in-flight records.
+
+### Model pack failure runbook
+<a id="pack-failure-runbook"></a>
+
+* **Alert ID:** `MODEL_PACK_INTEGRITY_FAILED`
+* **Severity:** Critical
+* **Trigger:** Model pack manifest parsing failure, Ed25519 signature trust mismatch, or payload SHA-256 hash corruption.
+* **Impact:** Restore mode (`restore_source` / `restore_enrolled`) is disabled and fails closed.
+* **Operator Action:**
+  1. Inspect installed model pack directory: `hawavoclean audit-models`.
+  2. Check trust store keys and active rotation generation in `~/Library/Application Support/HawaVoClean/model-packs/`.
+  3. If a pack was tampered or corrupted during download, remove the corrupted staging folder: `rm -rf ~/Library/Application Support/HawaVoClean/model-packs/staging/*`.
+  4. Reinstall the signed model pack using `hawavoclean pack install <signed-pack-archive>`.
+  5. Confirm signature and capability status via `GET /api/v1/capabilities`.
+
+### Guard abstention runbook
+<a id="guard-abstention-runbook"></a>
+
+* **Alert ID:** `HIGH_GUARD_ABSTENTION_RATE`
+* **Severity:** Warning
+* **Trigger:** Over the last rolling evaluation window (minimum 5 jobs), Guard R or Smart Safe abstained from neural restoration on > 30% of jobs.
+* **Impact:** Audio processing safely falls back to classical Wiener DD (`production`) or `preserve`, but user-selected restoration mode is bypassed due to acoustic safety guards.
+* **Operator Action:**
+  1. Inspect aggregate metrics in `GET /api/v1/health/signals`.
+  2. Review job reports for the triggered abstention reasons:
+     - High music risk (`music_risk > threshold`).
+     - High crosstalk risk (`crosstalk_risk > threshold`).
+     - Insufficient speaker match confidence (`speaker_match_confidence < 0.85`).
+     - High-frequency speech preservation violation.
+  3. Verify that the input audio files match the declared acoustic profile (e.g. clean dialogue vs background music).
+  4. If speaker mismatch is frequent, check enrolled voice profile calibration using `hawavoclean verify-profile <speaker_id>`.
+
+### Provider fallback runbook
+<a id="provider-fallback-runbook"></a>
+
+* **Alert IDs:** `PROVIDER_FALLBACK_ACTIVE` (fallback count > 0), `EXCESSIVE_PROVIDER_FALLBACK` (rate >= 50%).
+* **Severity:** Warning when > 0; Critical when >= 50%.
+* **Impact:** Neural restoration fell back to classical Wiener DSP due to hardware acceleration or model execution failure. Audio is successfully processed, but neural restoration quality is diminished.
+* **Operator Action:**
+  1. Check hardware accelerator status: Apple Metal / DirectML / CUDA.
+  2. Inspect engine logs for accelerator out-of-memory or driver timeout errors.
+  3. If running on macOS, verify Metal framework accessibility and unified memory pressure (`vm_stat`).
+  4. If running on Windows, verify DirectX 12 / DirectML driver versions.
+  5. Restart the engine broker to clear leaked GPU contexts.
+
+### Disk pressure runbook
+<a id="disk-pressure-runbook"></a>
+
+* **Alert IDs:** `DISK_PRESSURE_WARNING` (free space < 1024 MiB), `DISK_PRESSURE_CRITICAL` (free space < 512 MiB).
+* **Severity:** Warning (< 1024 MiB); Critical (< 512 MiB).
+* **Impact:** Incoming upload requests via `POST /api/upload` fail closed with HTTP 507 (`StoragePressureError`). Active jobs near output write may fail publication.
+* **Operator Action:**
+  1. Trigger immediate upload scavenger: engine automatically removes uploads exceeding TTL (24h) and inputs for finished jobs without active siblings.
+  2. Check work directory storage usage: `du -sh ~/.local/share/HawaVoClean/work/`.
+  3. Clean orphaned scratch directories: `rm -rf ~/.local/share/HawaVoClean/work/scratch/*`.
+  4. Verify the host drive free capacity and free up host storage space.
+  5. If needed, configure a larger work volume using `HAWAVOCLEAN_WORK_DIR=/Volumes/FastDrive/work`.
+
+### Cloud deletion lag runbook
+<a id="cloud-deletion-lag-runbook"></a>
+
+* **Alert ID:** `CLOUD_DELETION_LAG_EXCEEDED`
+* **Severity:** Critical
+* **Trigger:** Expired user uploads or temporary cloud objects exceed the 3600-second (1 hour) grace window past their 24-hour retention TTL without deletion.
+* **Impact:** Potential violation of data retention SLA and cloud storage accumulation.
+* **Operator Action:**
+  1. Query cloud deletion dead-letter queue and worker telemetry.
+  2. Check AWS S3 / Cloudflare R2 lifecycle policy rules and IAM delete permissions.
+  3. Execute manual purge for objects past TTL: `hawavoclean cloud purge --expired-before="24h"`.
+  4. Verify zero cross-tenant object retention remains in cloud object stores.
+
+---
+
+## Operational recovery, data deletion & support procedures (S7.7)
+
+### Disaster recovery & SQLite snapshot restore
+1. **Automated Snapshot Location:** SQLite durable store maintains automated VACUUM INTO snapshots under `~/.local/share/HawaVoClean/backups/jobs-<timestamp>.db`.
+2. **Restore Procedure:**
+   ```bash
+   # Stop engine broker
+   kill -TERM $(cat ~/.local/share/HawaVoClean/rendezvous/engine.json | jq .pid)
+   # Archive damaged database
+   mv ~/.local/share/HawaVoClean/jobs.db ~/.local/share/HawaVoClean/jobs.db.corrupt
+   # Copy verified snapshot
+   cp ~/.local/share/HawaVoClean/backups/jobs-latest.db ~/.local/share/HawaVoClean/jobs.db
+   # Start engine and verify recovery
+   hawavoclean serve
+   ```
+3. **Recovery SLA:** Target Recovery Time Objective (RTO) <= 60 seconds; Recovery Point Objective (RPO) <= 5 minutes.
+
+### User data deletion & right-to-erasure
+To completely wipe all user data, cached audio, model profiles, and durable job history:
+```bash
+# Complete clean-room user data purge
+hawavoclean reset --all --confirm-purge-user-data
+```
+This performs:
+- Atomic removal of all managed uploads in `work/uploads/`.
+- Deletion of all speaker enrollment profiles in `profiles/`.
+- Wipe of `jobs.db` and transaction journals.
+- Zero leftover audio, waveforms, or metadata.
+- Note: User's exported output files (`_clean.wav`) created in user-selected directories are strictly preserved.
+
+### Version rollback procedure
+When rolling back from version $N$ to $N-1$:
+1. Stop the active engine: `POST /api/shutdown` or `kill -TERM`.
+2. Verify that no job is currently in `running` state.
+3. Replace the application binary or PKG:
+   - On macOS: Install previous release PKG or replace `/Applications/HawaVoClean.app`.
+   - On DaVinci Resolve: Run `resolve-plugin/uninstall.sh`, then install previous plugin bundle.
+4. Database backward compatibility: Database schema version 1 is forward and backward compatible. Column additions use `IF NOT EXISTS` and default values.
+5. Verify rollback health: `hawavoclean doctor && hawavoclean verify <sample.wav>`.
+
+### Safe diagnostic bundle generation
+When collecting support diagnostics:
+```bash
+hawavoclean support-bundle --output ~/Desktop/hawavoclean-diagnostics.zip
+```
+The support bundle contains:
+- Exact software version, OS platform, and CPU/GPU architecture.
+- Sanitized `GET /api/v1/health/signals` output.
+- Non-sensitive engine log tail (all audio file names and user paths redacted to `[REDACTED]`).
+- Closed model pack inventory and checksum verification results.
+- **GUARANTEE:** Never contains audio, transcripts, speaker vectors, credentials, or session tokens.

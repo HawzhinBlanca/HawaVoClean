@@ -7,7 +7,10 @@ from hawavoclean.report.schema import HawaVoCleanReport
 
 def serialize_json_report(report: HawaVoCleanReport) -> str:
     """Serialize HawaVoCleanReport model to formatted JSON string."""
-    return report.model_dump_json(indent=2)
+    # Preserve existing Natural report bytes when no separation stage ran.
+    return report.model_dump_json(
+        indent=2, exclude={"separation"} if report.separation is None else None
+    )
 
 
 def write_json_report(report: HawaVoCleanReport, output_path: Path | str) -> Path:

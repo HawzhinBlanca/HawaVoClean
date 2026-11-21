@@ -2,6 +2,8 @@
 import { useEffect, useRef } from 'react';
 import type { JobStage, JobStatus } from '../api/types';
 import { cancelJob, startJob } from '../state/actions';
+import { deriveProcessingReadiness } from '../state/machines';
+import { useI18n } from '../state/i18n';
 import { useReducedMotion } from '../state/reducedMotion';
 import { useStore } from '../state/store';
 import { IconBolt, IconCheck, IconWarn } from './Icons';
@@ -197,17 +199,46 @@ function stageIndex(status: JobStatus | null): number {
 
 export function ProcessButton() {
   const source = useStore((s) => s.source);
+  const upload = useStore((s) => s.upload);
   const original = useStore((s) => s.original);
-  const engineReady = useStore((s) => s.engineStatus === 'ready');
+  const cleanedPath = useStore((s) => s.cleanedPath);
+  const report = useStore((s) => s.report);
+  const engineStatus = useStore((s) => s.engineStatus);
+  const engineReady = engineStatus === 'ready';
   const job = useStore((s) => s.job);
   const analyzing = useStore((s) => s.analyzing);
+  const mode = useStore((s) => s.mode);
+  const profile = useStore((s) => s.profile);
+  const speakerId = useStore((s) => s.speakerId);
+  const capabilities = useStore((s) => s.capabilities);
+  const reconstructionConsent = useStore((s) => s.reconstructionConsent);
   const reduced = useReducedMotion() === true;
 
   const status = job?.status ?? null;
   const state = status?.state ?? (job ? 'queued' : null);
-  const running = state === 'running' || state === 'queued';
+  const {
+    phase: workspacePhase,
+    running,
+    routeBlocked,
+    blockedReason,
+    restoreMissingConsent,
+    canStart,
+  } = deriveProcessingReadiness({
+    engineStatus,
+    source,
+    upload,
+    analyzing,
+    original,
+    job,
+    cleanedPath,
+    report,
+    mode,
+    profile,
+    speakerId,
+    capabilities,
+    reconstructionConsent,
+  });
   const progress = running || state === 'done' ? Math.max(0, Math.min(1, status?.progress ?? 0)) : 0;
-  const canStart = engineReady && !!source && !!original && !analyzing && !running;
 
   // Elapsed time. The engine's own timestamps win when they parse — they are
   // the job's real wall clock, and they survive a page reload mid-run — with a
@@ -231,59 +262,64 @@ export function ProcessButton() {
   let barCls = 'bar';
   if (!running) {
     if (state === 'done') barCls += ' done';
-    else if (state === 'failed') barCls += ' err';
+    else if (state === 'failed' || state === 'interrupted') barCls += ' err';
     else barCls += ' idle';
   }
-  const shown = running ? progress : state === 'done' ? 1 : state === 'failed' ? 1 : 0;
+  const shown =
+    running ? progress : state === 'done' ? 1 : state === 'failed' || state === 'interrupted' ? 1 : 0;
   const face = useFaceLoop(shown, running, reduced, startedMs);
   // While the loop is live it owns the attribute; otherwise React does.
   const dashOffset = running ? C * (1 - face.initial) : C * (1 - shown);
   const headDeg = (running ? face.initial : shown) * 360;
 
-  let title = 'PROCESS';
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
+  let title = isCkb ? 'جێبەجێکردن' : 'PROCESS';
   let cells: Cell[];
-  const stageName = STAGE_LABEL[status?.stage ?? ''] ?? (status?.stage ?? 'Working');
+  const stageName = STAGE_LABEL[status?.stage ?? ''] ?? (status?.stage ?? (isCkb ? 'کارکردن' : 'Working'));
 
   if (running) {
-    title = 'CANCEL';
+    title = isCkb ? 'هەڵوەشاندنەوە' : 'CANCEL';
     cells = [
-      { k: 'Stage', v: stageName },
+      { k: isCkb ? 'قۆناغ' : 'Stage', v: stageName },
       {
-        k: 'Unit',
+        k: isCkb ? 'یەکە' : 'Unit',
         v: status?.unit ? `${status.unit.index} / ${status.unit.total}` : '—',
         num: true,
       },
-      { k: 'Elapsed', v: '0:00.0', num: true },
+      { k: isCkb ? 'کات' : 'Elapsed', v: '0:00.0', num: true },
     ];
   } else if (state === 'done') {
     // The title is a verb — what the key does if you press it again — so it
     // stays neutral; the *state* line carries the state colour, and it agrees
     // with the ring (green for done, red for failed) instead of fighting it.
-    title = 'PROCESS AGAIN';
+    title = isCkb ? 'دووبارە جێبەجێکردن' : 'PROCESS AGAIN';
     const s = status?.report?.summary;
     cells = [
-      { k: 'Result', v: 'Complete' },
-      { k: 'Units', v: s ? `${s.enhanced ?? 0} / ${s.units_total ?? 0}` : '—', num: true },
-      { k: 'Took', v: fmtElapsed(finalSec), num: true },
+      { k: isCkb ? 'ئەنجام' : 'Result', v: isCkb ? 'تەواو بوو' : 'Complete' },
+      status?.report?.separation
+        ? { k: isCkb ? 'دەستکاری' : 'Edit', v: status.report.separation.operation === 'extract' ? 'Extract' : 'Remove' }
+        : { k: isCkb ? 'یەکەکان' : 'Units', v: s ? `${s.enhanced ?? 0} / ${s.units_total ?? 0}` : '—', num: true },
+      { k: isCkb ? 'ماوە' : 'Took', v: fmtElapsed(finalSec), num: true },
     ];
-  } else if (state === 'failed') {
-    title = 'RETRY';
-    const code = status?.error?.code ?? '';
+  } else if (state === 'failed' || state === 'interrupted') {
+    title = isCkb ? 'هەوڵدانەوە' : 'RETRY';
+    const code = status?.error?.code ?? (state === 'interrupted' ? 'ENGINE_RESTARTED' : '');
     cells = [
-      { k: 'Result', v: 'Failed' },
+      { k: isCkb ? 'ئەنجام' : 'Result', v: state === 'interrupted' ? (isCkb ? 'پچڕا' : 'Interrupted') : isCkb ? 'سەرنەکەوت' : 'Failed' },
       {
-        k: 'Reason',
+        k: isCkb ? 'هۆکار' : 'Reason',
         v: FAIL_REASON[code] ?? (code || status?.message || 'unknown'),
-        title: status?.error?.message ?? code ?? undefined,
+        title: status?.error?.message ?? status?.message ?? code ?? undefined,
       },
-      { k: 'Took', v: fmtElapsed(finalSec), num: true },
+      { k: isCkb ? 'ماوە' : 'Took', v: fmtElapsed(finalSec), num: true },
     ];
   } else if (state === 'cancelled') {
-    title = 'PROCESS';
+    title = isCkb ? 'جێبەجێکردن' : 'PROCESS';
     cells = [
-      { k: 'Result', v: 'Cancelled' },
-      { k: 'Stopped', v: `${Math.round((status?.progress ?? 0) * 100)}%`, num: true },
-      { k: 'Took', v: fmtElapsed(finalSec), num: true },
+      { k: isCkb ? 'ئەنجام' : 'Result', v: isCkb ? 'هەڵوەشێنرایەوە' : 'Cancelled' },
+      { k: isCkb ? 'وەستا' : 'Stopped', v: `${Math.round((status?.progress ?? 0) * 100)}%`, num: true },
+      { k: isCkb ? 'ماوە' : 'Took', v: fmtElapsed(finalSec), num: true },
     ];
   } else {
     // Idle is a designed state too: the plate reads back the clip it is armed
@@ -294,22 +330,36 @@ export function ProcessButton() {
     const khz = sr ? `${sr % 1000 ? (sr / 1000).toFixed(1) : String(sr / 1000)}k` : '—';
     cells = [
       {
-        k: 'Ready',
+        k: isCkb ? 'دۆخ' : 'Ready',
         v: !engineReady
-          ? 'Offline'
-          : !source
-            ? 'No clip'
-            : analyzing
-              ? 'Analyzing'
-              : // a clip that failed to analyse leaves `source` set and
-                // `original` null; the plate must not read "Armed" while it
-                // is disabled with nothing to process
-                !original
-                ? 'No data'
-                : 'Armed',
+          ? isCkb
+            ? 'دەرچوو'
+            : 'Offline'
+          : workspacePhase === 'uploading'
+            ? isCkb
+              ? 'بارکردن'
+              : 'Uploading'
+            : !source
+              ? isCkb
+                ? 'بێ کلیپ'
+                : 'No clip'
+              : analyzing
+                ? isCkb
+                  ? 'شیکردنەوە'
+                  : 'Analyzing'
+                : // a clip that failed to analyse leaves `source` set and
+                  // `original` null; the plate must not read "Armed" while it
+                  // is disabled with nothing to process
+                  !original
+                  ? isCkb
+                    ? 'بێ داتا'
+                    : 'No data'
+                  : isCkb
+                    ? 'ئامادە'
+                    : 'Armed',
       },
-      { k: 'Length', v: original ? fmtElapsed(original.duration_s) : '—', num: true },
-      { k: 'Format', v: original ? `${khz}\u00b7${original.channels}ch` : '—', num: true },
+      { k: isCkb ? 'ماوە' : 'Length', v: original ? fmtElapsed(original.duration_s) : '—', num: true },
+      { k: isCkb ? 'شێواز' : 'Format', v: original ? `${khz}\u00b7${original.channels}ch` : '—', num: true },
     ];
   }
 
@@ -326,12 +376,18 @@ export function ProcessButton() {
     : running
       ? 'Cancel this run (Esc)'
       : canStart
-        ? 'Process this clip (P)'
+        ? 'Process this clip (Shift+P)'
         : !source
           ? 'Load a clip first — drop one on the strip above or press Open file'
           : analyzing
             ? 'Analysis is still running'
-            : 'This clip has no analysis to process';
+            : !original
+              ? 'This clip has no analysis to process'
+              : routeBlocked
+                ? `Processing blocked: ${blockedReason ?? 'route is not qualified'}`
+                : restoreMissingConsent
+                  ? 'Acknowledge generative reconstruction consent to proceed'
+                  : 'Cannot process clip';
 
   const onClick = (): void => {
     if (inert) return;
@@ -342,12 +398,18 @@ export function ProcessButton() {
   let phaseCls = '';
   if (running) phaseCls = ' running';
   else if (state === 'done') phaseCls = ' done';
-  else if (state === 'failed') phaseCls = ' failed';
+  else if (state === 'failed' || state === 'interrupted') phaseCls = ' failed';
   else if (state === 'cancelled') phaseCls = ' cancelled';
 
   const si = stageIndex(status);
   const railCls =
-    state === 'done' ? 'rail done' : state === 'failed' ? 'rail failed' : running ? 'rail run' : 'rail';
+    state === 'done'
+      ? 'rail done'
+      : state === 'failed' || state === 'interrupted'
+        ? 'rail failed'
+        : running
+          ? 'rail run'
+          : 'rail';
 
   // The button's accessible name is the *action* (what pressing it does). The
   // readout is the *state*, and an aria-label on a button suppresses its own
@@ -435,7 +497,7 @@ export function ProcessButton() {
           re-acquired, and the whole transition survives `animation: none`
           under reduced motion (it degrades to an instant, legible swap).
         */}
-        <span className="center">
+        <span className="center" aria-hidden="true">
           <span className="glyph g-idle">
             <IconBolt className="icon" style={{ color: 'var(--amber)' }} />
           </span>
@@ -456,7 +518,7 @@ export function ProcessButton() {
 
       <span className="text">
         <span className="title">{title}</span>
-        <span className="face" id="process-readout">
+        <span className="face" id="process-readout" aria-hidden="true">
           <span className={railCls} aria-hidden="true">
             {STAGE_ORDER.map((s, i) => (
               <i

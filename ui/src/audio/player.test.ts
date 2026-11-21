@@ -643,3 +643,498 @@ describe('a webview with no WebAudio', () => {
     expect(el('original').muted).toBe(true);
   });
 });
+
+describe('loudness matching (D4.2)', () => {
+  it('computes level delta between original and cleaned and clamps to [-12, +12] dB', async () => {
+    await bothReady();
+    // Case 1: Cleaned is 2 dB louder (-18 LUFS vs -20 LUFS)
+    player.setLoudnessMatch(true, -20, -18);
+    expect(player.gainOffsetDb).toBeCloseTo(-2.0, 3);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, -2 / 20), 3);
+    expect(player.getTargetGain('original')).toBe(1.0);
+    expect(player.snapshot().loudnessMatch).toBe(true);
+    expect(player.snapshot().gainOffsetDb).toBeCloseTo(-2.0, 3);
+
+    // Case 2: Cleaned is quieter by 3 dB (-21 LUFS vs -24 LUFS)
+    player.setLoudnessMatch(true, -21, -24);
+    expect(player.gainOffsetDb).toBeCloseTo(3.0, 3);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, 3 / 20), 3);
+
+    // Case 3: Extreme delta clamped to -12 dB
+    player.setLoudnessMatch(true, -30, -10);
+    expect(player.gainOffsetDb).toBe(-12);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, -12 / 20), 3);
+
+    // Case 4: Extreme delta clamped to +12 dB
+    player.setLoudnessMatch(true, -10, -30);
+    expect(player.gainOffsetDb).toBe(12);
+    expect(player.getTargetGain('cleaned')).toBeCloseTo(Math.pow(10, 12 / 20), 3);
+
+    // Case 5: Disabled -> unity gain (0 dB delta)
+    player.setLoudnessMatch(false, -20, -18);
+    expect(player.gainOffsetDb).toBe(0);
+    expect(player.getTargetGain('cleaned')).toBe(1.0);
+    expect(player.snapshot().loudnessMatch).toBe(false);
+
+    // Case 6: Missing or null LUFS -> unity gain (0 dB delta)
+    player.setLoudnessMatch(true, null, -18);
+    expect(player.gainOffsetDb).toBe(0);
+    expect(player.getTargetGain('cleaned')).toBe(1.0);
+  });
+});
+
+describe('common-region time bounding (D4.2)', () => {
+  it('bounds duration to the shorter deck when both are ready', async () => {
+    await bothReady();
+    Object.defineProperty(el('original'), 'duration', { configurable: true, value: 60 });
+    Object.defineProperty(el('cleaned'), 'duration', { configurable: true, value: 45 });
+
+    // Duration must never exceed the shorter deck during A/B comparison
+    expect(player.duration).toBeCloseTo(45, 3);
+
+    // Seeking past the shorter duration must be clamped to the common boundary
+    player.seek(55);
+    expect(el('original').currentTime).toBeCloseTo(45, 3);
+    expect(el('cleaned').currentTime).toBeCloseTo(45, 3);
+
+    // Switching active deck at the boundary clamps both decks
+    player.setActive('cleaned');
+    expect(el('cleaned').currentTime).toBeLessThanOrEqual(45);
+    expect(player.activeDeck).toBe('cleaned');
+  });
+
+  it('reports the active deck duration when only one deck is ready', async () => {
+    engine({ [OK]: 206 });
+    start();
+    player.load('original', OK);
+    await settle();
+    Object.defineProperty(el('original'), 'duration', { configurable: true, value: 32 });
+
+    expect(player.duration).toBeCloseTo(32, 3);
+  });
+});
+
+// --- Pro Audition Engine: Delta, Loop, Wet/Dry Mix, Live LUFS/Peak Meter ---
+
+interface MockGainNode {
+  gain: {
+    value: number;
+    lastTarget: number;
+    cancelScheduledValues: ReturnType<typeof vi.fn>;
+    setValueAtTime: ReturnType<typeof vi.fn>;
+    linearRampToValueAtTime: ReturnType<typeof vi.fn>;
+  };
+  connect: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+}
+
+function installMockWebAudio(timeDomainSamples?: Float32Array) {
+  const gainNodes: MockGainNode[] = [];
+  let samples = timeDomainSamples ?? new Float32Array(2048);
+
+  const analyser = {
+    fftSize: samples.length,
+    smoothingTimeConstant: 0.78,
+    minDecibels: -100,
+    maxDecibels: 0,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    getFloatTimeDomainData: vi.fn((target: Float32Array) => {
+      const n = Math.min(target.length, samples.length);
+      for (let i = 0; i < n; i++) target[i] = samples[i] ?? 0;
+      for (let i = n; i < target.length; i++) target[i] = 0;
+    }),
+  };
+
+  class MockAudioContext {
+    currentTime = 1.0;
+    sampleRate = 48000;
+    state: AudioContextState = 'running';
+    destination = {};
+    resume = vi.fn(async () => undefined);
+    close = vi.fn(async () => undefined);
+    createAnalyser = vi.fn(() => analyser);
+    createMediaElementSource = vi.fn(() => ({ connect: vi.fn(), disconnect: vi.fn() }));
+    createGain = vi.fn(() => {
+      const param = {
+        value: 1,
+        lastTarget: 1,
+        cancelScheduledValues: vi.fn(),
+        setValueAtTime: vi.fn((v: number) => {
+          param.value = v;
+        }),
+        linearRampToValueAtTime: vi.fn((v: number) => {
+          param.value = v;
+          param.lastTarget = v;
+        }),
+      };
+      const node: MockGainNode = {
+        gain: param,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      };
+      gainNodes.push(node);
+      return node;
+    });
+  }
+
+  vi.stubGlobal('AudioContext', MockAudioContext);
+  return {
+    gainNodes,
+    analyser,
+    setSamples(next: Float32Array) {
+      samples = next;
+    },
+  };
+}
+
+describe('pro audition engine — Delta ("Listen to Removed")', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('requires both decks ready and sums Original (+1) + Cleaned (-gainOffset) in WebAudio', async () => {
+    const audio = installMockWebAudio();
+    await bothReady(30);
+    player.setLoudnessMatch(true, -20, -18); // -2 dB on cleaned
+    await player.play();
+
+    // Gain nodes created in order: original, cleaned, deltaInverter (-1), deltaGain
+    expect(audio.gainNodes).toHaveLength(4);
+    const [origGain, cleanGain, deltaInverter, deltaGain] = audio.gainNodes;
+    expect(deltaInverter?.gain.value).toBe(-1);
+
+    player.setDeltaMode(true);
+    expect(player.snapshot().deltaMode).toBe(true);
+    expect(origGain?.gain.value).toBeCloseTo(1.0, 4);
+    expect(cleanGain?.gain.value).toBeCloseTo(0, 4);
+    expect(deltaGain?.gain.value).toBeCloseTo(Math.pow(10, -2 / 20), 4);
+
+    // Toggling off restores active deck ('original')
+    player.toggleDeltaMode();
+    expect(player.snapshot().deltaMode).toBe(false);
+    expect(origGain?.gain.value).toBeCloseTo(1.0, 4);
+    expect(deltaGain?.gain.value).toBeCloseTo(0, 4);
+  });
+
+  it('refuses Delta mode when only one deck is ready and auto-disables on deck retire', async () => {
+    engine({ [OK]: 206 });
+    start();
+    player.load('original', OK);
+    await settle();
+
+    player.setDeltaMode(true);
+    expect(player.snapshot().deltaMode).toBe(false);
+
+    // Load second deck -> delta works; retire second deck -> delta disables cleanly
+    engine({ [OK]: 206, [GONE]: 206 });
+    player.load('cleaned', GONE);
+    await settle();
+    player.setDeltaMode(true);
+    expect(player.snapshot().deltaMode).toBe(true);
+
+    player.load('cleaned', null);
+    expect(player.snapshot().deltaMode).toBe(false);
+  });
+
+  it('fails soft without throwing when WebAudio is unavailable', async () => {
+    expect(window.AudioContext).toBeUndefined();
+    await bothReady(30);
+    await player.play();
+    expect(() => player.setDeltaMode(true)).not.toThrow();
+    expect(player.snapshot().deltaMode).toBe(true);
+    expect(el('original').muted).toBe(false);
+    expect(el('cleaned').muted).toBe(true);
+  });
+});
+
+describe('pro audition engine — Loop Region playback', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('seeks both decks back to loopStart when playback reaches loopEnd', async () => {
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    await bothReady(30);
+    player.setLoopRange([4.5, 10.0]);
+    player.setLoopEnabled(true);
+    expect(player.snapshot().loopEnabled).toBe(true);
+    expect(player.snapshot().loopRange).toEqual([4.5, 10.0]);
+
+    await player.play();
+    // Play snaps inside loopRange if starting at 0
+    expect(el('original').currentTime).toBeCloseTo(4.5, 3);
+    expect(el('cleaned').currentTime).toBeCloseTo(4.5, 3);
+
+    // Advance past loopEnd and pump one animation frame
+    el('original').currentTime = 10.05;
+    el('cleaned').currentTime = 10.05;
+    const cb = rafQueue.shift();
+    cb?.(16);
+
+    expect(el('original').currentTime).toBeCloseTo(4.5, 3);
+    expect(el('cleaned').currentTime).toBeCloseTo(4.5, 3);
+    expect(player.playing).toBe(true);
+  });
+
+  it('loops full clip on ended when loopRange is null and sanitizes invalid ranges', async () => {
+    await bothReady(20);
+    player.setLoopRange([10, 5]); // invalid: end <= start
+    expect(player.snapshot().loopRange).toBeNull();
+
+    player.setLoopEnabled(true);
+    await player.play();
+    el('original').currentTime = 20;
+    el('cleaned').currentTime = 20;
+    el('original').dispatchEvent(new Event('ended'));
+
+    expect(el('original').currentTime).toBe(0);
+    expect(el('cleaned').currentTime).toBe(0);
+  });
+});
+
+describe('pro audition engine — Live Wet/Dry Mix Preview', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('blends Original (1 - mix) and Cleaned (mix * levelMatchGain) when on cleaned deck', async () => {
+    const audio = installMockWebAudio();
+    await bothReady(30);
+    player.setLoudnessMatch(true, -18, -24); // +6 dB on cleaned
+    const expectedGain = Math.pow(10, 6 / 20);
+    await player.play();
+
+    const [origGain, cleanGain, , deltaGain] = audio.gainNodes;
+    player.setActive('cleaned');
+    player.setWetDryMix(0.35);
+
+    expect(player.snapshot().wetDryMix).toBeCloseTo(0.35, 4);
+    expect(origGain?.gain.value).toBeCloseTo(0.65, 4);
+    expect(cleanGain?.gain.value).toBeCloseTo(0.35 * expectedGain, 4);
+    expect(deltaGain?.gain.value).toBe(0);
+
+    // Clamping outside [0, 1]
+    player.setWetDryMix(2.5);
+    expect(player.snapshot().wetDryMix).toBe(1);
+    player.setWetDryMix(-0.5);
+    expect(player.snapshot().wetDryMix).toBe(0);
+  });
+});
+
+describe('pro audition engine — Live LUFS + Peak Meter', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns clean finite floor when no AudioContext exists', async () => {
+    expect(window.AudioContext).toBeUndefined();
+    await bothReady(10);
+    const levels = player.getLiveMeterLevels();
+    expect(Number.isFinite(levels.momentaryLufs)).toBe(true);
+    expect(Number.isFinite(levels.shortTermLufs)).toBe(true);
+    expect(Number.isFinite(levels.peakDbfs)).toBe(true);
+    expect(Number.isFinite(levels.truePeakHoldDbfs)).toBe(true);
+    expect(levels.momentaryLufs).toBe(-70);
+    expect(levels.peakDbfs).toBe(-70);
+  });
+
+  it('computes LUFS, peak dBFS, and peak hold from AnalyserNode and resets peak hold', async () => {
+    // 1 kHz sine at 0.5 amplitude (-6.02 dBFS peak, mean square = 0.125 -> ~-9.72 LUFS)
+    const buf = new Float32Array(8192);
+    for (let i = 0; i < buf.length; i++) {
+      buf[i] = 0.5 * Math.sin((2 * Math.PI * 1000 * i) / 48000);
+    }
+    const audio = installMockWebAudio(buf);
+    await bothReady(10);
+    await player.play();
+
+    const loud = player.getLiveMeterLevels();
+    expect(loud.peakDbfs).toBeCloseTo(20 * Math.log10(0.5), 1);
+    expect(loud.momentaryLufs).toBeCloseTo(-0.691 + 10 * Math.log10(0.125), 1);
+    expect(loud.shortTermLufs).toBeCloseTo(-0.691 + 10 * Math.log10(0.125), 1);
+    expect(loud.truePeakHoldDbfs).toBeGreaterThanOrEqual(loud.peakDbfs - 0.05);
+
+    // Silence after loud frame: peak drops, peak hold stays latched
+    audio.setSamples(new Float32Array(8192));
+    const quiet = player.getLiveMeterLevels();
+    expect(quiet.peakDbfs).toBe(-70);
+    expect(quiet.truePeakHoldDbfs).toBeCloseTo(loud.truePeakHoldDbfs, 1);
+
+    // Resetting peak hold clears latch back to floor
+    player.resetPeakHold();
+    const reset = player.getLiveMeterLevels();
+    expect(reset.truePeakHoldDbfs).toBe(-70);
+  });
+});
+
+describe('active-deck reload continuity & region preview offset alignment', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('retains wantPlaying and seeks to pending position when reloading active cleaned deck', async () => {
+    await bothReady(30);
+    player.setActive('cleaned');
+    player.seek(5.5);
+    await player.play();
+    expect(player.playing).toBe(true);
+    expect(el('cleaned').currentTime).toBeCloseTo(5.5, 2);
+
+    // Reload active 'cleaned' deck with cache-busted re-stitched master URL
+    const RESTITCHED = 'http://127.0.0.1:8765/api/audio?path=/out/master.wav&v=abc';
+    engine({ [OK]: 206, [RESTITCHED]: 206 });
+    const cleanEl = el('cleaned');
+    const playSpy = vi.spyOn(cleanEl, 'play');
+
+    player.load('cleaned', RESTITCHED, 30);
+    // Immediate seek + play while deck is still 'loading' (as actions.ts does)
+    player.seek(5.5);
+    await player.play();
+
+    // Simulate browser resetting src to 0 & paused when setSrc runs, then wait for attach
+    await settle();
+
+    expect(player.isReady('cleaned')).toBe(true);
+    expect(player.activeDeck).toBe('cleaned');
+    expect(cleanEl.currentTime).toBeCloseTo(5.5, 2);
+    expect(playSpy).toHaveBeenCalled();
+    expect(player.playing).toBe(true);
+  });
+
+  it('keeps full duration, loop bounds, and A/B alignment when cleaned deck holds an offset region preview', async () => {
+    const rafQueue: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    const PREVIEW = 'http://127.0.0.1:8765/api/audio?path=/tmp/preview_9_12.wav';
+    engine({ [OK]: 206, [PREVIEW]: 206 });
+    start();
+    player.load('original', OK, 12);
+    await settle();
+    Object.defineProperty(el('original'), 'duration', { configurable: true, value: 12 });
+
+    // Load 3s preview of [9s, 12s] onto cleaned deck with regionOffsetS = 9
+    player.load('cleaned', PREVIEW, 3, 9);
+    player.setLoopRange([9, 12]);
+    player.setLoopEnabled(true);
+    player.seek(9);
+    player.setActive('cleaned');
+    await settle();
+    Object.defineProperty(el('cleaned'), 'duration', { configurable: true, value: 3 });
+
+    // Full timeline duration must NOT collapse to 3s
+    expect(player.duration).toBeCloseTo(12, 3);
+    expect(player.activeDeck).toBe('cleaned');
+    // Timeline t=9.0s maps to original=9.0s, cleaned=0.0s
+    expect(el('original').currentTime).toBeCloseTo(9.0, 2);
+    expect(el('cleaned').currentTime).toBeCloseTo(0.0, 2);
+    expect(player.time).toBeCloseTo(9.0, 2);
+
+    // Advance 1.5s into preview (cleaned=1.5 -> timeline=10.5) and switch to original
+    el('cleaned').currentTime = 1.5;
+    player.setActive('original');
+    expect(el('original').currentTime).toBeCloseTo(10.5, 2);
+
+    // Toggling Delta during an offset preview must preserve region-offset phase alignment
+    player.setActive('cleaned');
+    el('cleaned').currentTime = 1.5;
+    el('original').currentTime = 0; // force drift
+    player.setDeltaMode(true);
+    expect(el('original').currentTime).toBeCloseTo(10.5, 2);
+    expect(el('cleaned').currentTime).toBeCloseTo(1.5, 2);
+    player.setDeltaMode(false);
+
+    // Play and advance past loopEnd (12.0s) -> loops both decks back to 9.0 / 0.0
+    player.setActive('cleaned');
+    await player.play();
+    el('cleaned').currentTime = 3.05; // timeline 12.05 >= loopEnd 12.0
+    const cb = rafQueue.shift();
+    cb?.(16);
+    expect(el('original').currentTime).toBeCloseTo(9.0, 2);
+    expect(el('cleaned').currentTime).toBeCloseTo(0.0, 2);
+  });
+
+  it('applies real-time 24 dB/oct Butterworth HPF on Original audition and bypasses on Cleaned/Delta', async () => {
+    const biquads: { type: string; frequency: { value: number; setTargetAtTime: ReturnType<typeof vi.fn> }; Q: { value: number }; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[] = [];
+    const gains: { gain: { value: number; cancelScheduledValues: ReturnType<typeof vi.fn>; setValueAtTime: ReturnType<typeof vi.fn>; linearRampToValueAtTime: ReturnType<typeof vi.fn> }; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[] = [];
+    class MockCtxWithBiquad {
+      state = 'running';
+      currentTime = 0;
+      sampleRate = 48000;
+      destination = {};
+      resume = vi.fn(async () => undefined);
+      close = vi.fn(async () => { this.state = 'closed'; });
+      createGain() {
+        const g = {
+          gain: {
+            value: 1,
+            cancelScheduledValues: vi.fn(),
+            setValueAtTime: vi.fn(),
+            linearRampToValueAtTime: vi.fn((v: number) => { g.gain.value = v; }),
+          },
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        };
+        gains.push(g);
+        return g;
+      }
+      createBiquadFilter() {
+        const f = {
+          type: 'lowpass',
+          frequency: { value: 350, setTargetAtTime: vi.fn((v: number) => { f.frequency.value = v; }) },
+          gain: { value: 0 },
+          Q: { value: 1 },
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        };
+        biquads.push(f);
+        return f;
+      }
+      createAnalyser() {
+        return { fftSize: 2048, smoothingTimeConstant: 0.8, minDecibels: -100, maxDecibels: 0, connect: vi.fn(), disconnect: vi.fn(), getFloatTimeDomainData: vi.fn() };
+      }
+      createMediaElementSource() {
+        return { connect: vi.fn(), disconnect: vi.fn() };
+      }
+    }
+    vi.stubGlobal('AudioContext', MockCtxWithBiquad);
+    await bothReady(10);
+    await player.play();
+
+    // First two biquads are the cascaded 24 dB/oct Butterworth HPF stages (Q=0.5412, Q=1.3066)
+    expect(biquads.length).toBeGreaterThanOrEqual(2);
+    expect(biquads[0]?.type).toBe('highpass');
+    expect(biquads[1]?.type).toBe('highpass');
+
+    player.setLiveHpf(true, 120);
+    expect(biquads[0]?.frequency.value).toBe(120);
+    expect(biquads[1]?.frequency.value).toBe(120);
+
+    // Switching to Cleaned or Delta must automatically bypass the live HPF (dry=1, wet=0)
+    // gains order: [0]=original, [1]=cleaned, [2]=deltaInverter, [3]=deltaGain, [4]=hpfDry, [5]=hpfWet
+    expect(gains[4]?.gain.value).toBe(0);
+    expect(gains[5]?.gain.value).toBe(1);
+
+    player.setActive('cleaned');
+    expect(gains[4]?.gain.value).toBe(1);
+    expect(gains[5]?.gain.value).toBe(0);
+
+    player.setActive('original');
+    expect(gains[4]?.gain.value).toBe(0);
+    expect(gains[5]?.gain.value).toBe(1);
+
+    player.setDeltaMode(true);
+    expect(gains[4]?.gain.value).toBe(1);
+    expect(gains[5]?.gain.value).toBe(0);
+  });
+});

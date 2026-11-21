@@ -5,12 +5,12 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EngineClient, EngineError } from './client';
+import type { AudioPlan } from './types';
 
 const BASE = 'http://127.0.0.1:8765';
-const TOKEN = 'devtok';
 
 function client(baseUrl = `${BASE}/`): EngineClient {
-  return new EngineClient({ baseUrl, token: TOKEN });
+  return new EngineClient({ baseUrl });
 }
 
 /** A Response stand-in: only the four members the client actually touches. */
@@ -41,25 +41,106 @@ function lastHeaders(fn: ReturnType<typeof vi.fn>): Record<string, string> {
 
 describe('endpoint handling', () => {
   it('strips trailing slashes so no URL ever doubles up', () => {
-    expect(new EngineClient({ baseUrl: `${BASE}///`, token: TOKEN }).baseUrl).toBe(BASE);
-    expect(client().eventsUrl('j1').startsWith(`${BASE}/api/jobs/j1/events?`)).toBe(true);
+    expect(new EngineClient({ baseUrl: `${BASE}///` }).baseUrl).toBe(BASE);
+    expect(client().eventsUrl('j1')).toBe(`${BASE}/api/jobs/j1/events`);
   });
 });
 
-describe('the token travels as a header on API calls', () => {
-  it('sends X-Hawa-Token and JSON content type on a body call', async () => {
+describe('reviewable audio plans', () => {
+  const plan: AudioPlan = {
+    operation: 'extract', target: 'speech', cleanup_profile: 'studio', model_size: 'large',
+    quality: 'high', explanation: 'Keep the speech, then clean the dialogue.',
+    provider: 'ollama', needs_clarification: false,
+  };
+
+  it('posts text and bounded conversation to the planning endpoint without creating a job', async () => {
+    const fetchFn = mockFetch(res(200, JSON.stringify(plan)));
+    const ac = new AbortController();
+    const result = await client().planAudio({ message: 'Keep the voice', history: [], allow_cloud_text: false }, ac.signal);
+    expect(result).toEqual(plan);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/v1/assistant/plan`);
+    expect(lastInit(fetchFn).signal).toBe(ac.signal);
+    expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual({ message: 'Keep the voice', history: [], allow_cloud_text: false });
+  });
+
+  it.each([
+    { ...plan, operation: 'run_command' },
+    { ...plan, target: null },
+    { ...plan, target: '' },
+    { ...plan, cleanup_profile: 'unregistered' },
+    { ...plan, needs_clarification: true },
+    { ...plan, quality: 'fast' },
+    { ...plan, explanation: '' },
+    { ...plan, operation: 'clean', target: 'speech' },
+    { ...plan, operation: 'clean', target: null, cleanup_profile: null },
+    { ...plan, operation: 'restore', target: null, cleanup_profile: 'studio' },
+    { ...plan, strength: 0.05 },
+    { ...plan, strength: 1.5 },
+    { ...plan, time_range: { start_s: 20, end_s: 10 } },
+    { ...plan, operation: 'clarify', target: null, cleanup_profile: null, needs_clarification: true, time_range: { start_s: 1, end_s: 5 } },
+  ])('rejects an ambiguous or unsupported executable plan: %j', async (invalid) => {
+    mockFetch(res(200, JSON.stringify(invalid)));
+    await expect(client().planAudio({ message: 'Keep the voice', history: [], allow_cloud_text: false })).rejects.toMatchObject({ code: 'bad_plan' });
+  });
+
+  it('accepts studio_pro, restore, strength, and time_range plans', async () => {
+    const richPlan: AudioPlan = {
+      ...plan,
+      operation: 'clean',
+      target: null,
+      cleanup_profile: 'studio_pro',
+      strength: 0.75,
+      time_range: { start_s: 10, end_s: 25 },
+    };
+    mockFetch(res(200, JSON.stringify(richPlan)));
+    const got = await client().planAudio({
+      message: 'Clean from 0:10 to 0:25',
+      history: [],
+      allow_cloud_text: false,
+      acoustic_context: { duration_s: 60, noise_risk: 0.8, available_profiles: ['studio_pro'] },
+    });
+    expect(got).toEqual(richPlan);
+
+    const dereverbPlan: AudioPlan = {
+      ...plan,
+      operation: 'clean',
+      target: null,
+      cleanup_profile: 'dereverb',
+    };
+    mockFetch(res(200, JSON.stringify(dereverbPlan)));
+    const gotDereverb = await client().planAudio({
+      message: 'Remove room echo',
+      history: [],
+      allow_cloud_text: false,
+      acoustic_context: { duration_s: 60, reverberation_risk: 0.7, available_profiles: ['dereverb'] },
+    });
+    expect(gotDereverb).toEqual(dereverbPlan);
+  });
+
+  it('accepts a clarification without pretending there is an executable action', async () => {
+    mockFetch(res(200, JSON.stringify({ ...plan, operation: 'clarify', target: null, cleanup_profile: null, needs_clarification: true })));
+    expect((await client().planAudio({ message: 'Fix it', history: [], allow_cloud_text: false })).operation).toBe('clarify');
+  });
+});
+
+describe('renderer requests contain no authentication secret', () => {
+  it('leaves authentication to the shell and sends only JSON content type', async () => {
     const fetchFn = mockFetch(res(200, '{"path":"/a.wav"}'));
     await client().analyze('/a.wav', 1200);
     expect(fetchFn).toHaveBeenCalledWith(`${BASE}/api/analyze`, expect.anything());
-    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBe(TOKEN);
+    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBeUndefined();
+    expect(lastHeaders(fetchFn).Authorization).toBeUndefined();
     expect(lastHeaders(fetchFn)['Content-Type']).toBe('application/json');
+    expect(lastInit(fetchFn).credentials).toBe('same-origin');
     expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual({ path: '/a.wav', buckets: 1200 });
   });
 
   it('sends no content type on a GET, so no preflight is provoked', async () => {
     const fetchFn = mockFetch(res(200, '{"ok":true}'));
     await client().health();
-    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBe(TOKEN);
+    expect(lastHeaders(fetchFn)['X-Hawa-Token']).toBeUndefined();
+    expect(lastHeaders(fetchFn).Authorization).toBeUndefined();
     expect(lastHeaders(fetchFn)['Content-Type']).toBeUndefined();
   });
 
@@ -71,20 +152,19 @@ describe('the token travels as a header on API calls', () => {
   });
 });
 
-describe('the token travels as a query parameter where a header cannot go', () => {
-  it('puts path and token in the query for <audio src> and download anchors', () => {
+describe('media and SSE URLs are credential-free', () => {
+  it('puts only the path in the query for <audio src> and download anchors', () => {
     const url = new URL(client().fileUrl('/Users/me/My Clip #1.wav'));
     expect(url.origin + url.pathname).toBe(`${BASE}/api/audio`);
     expect(url.searchParams.get('path')).toBe('/Users/me/My Clip #1.wav');
-    expect(url.searchParams.get('token')).toBe(TOKEN);
+    expect([...url.searchParams.keys()]).toEqual(['path']);
   });
 
-  it('encodes the job id in the SSE path and the token in its query', () => {
+  it('encodes the job id in the SSE path and has no query', () => {
     const url = new URL(client().eventsUrl('job/with space'));
     expect(url.pathname).toBe('/api/jobs/job%2Fwith%20space/events');
-    expect(url.searchParams.get('token')).toBe(TOKEN);
+    expect(url.search).toBe('');
   });
-
 });
 
 describe('error shape parsing', () => {
@@ -243,10 +323,13 @@ describe('request bodies and paths', () => {
     expect(fetchFn.mock.calls[1]?.[0]).toBe(`${BASE}/api/jobs/a%20b%2Fc/cancel`);
   });
 
-  it('fetchText reads a served sidecar through the token-in-query URL', async () => {
+  it('fetchText reads a served sidecar through a credential-free URL', async () => {
     const fetchFn = mockFetch(res(200, 'HAWAVOCLEAN REPORT'));
     await expect(client().fetchText('/out/a.hawavoclean.txt')).resolves.toBe('HAWAVOCLEAN REPORT');
-    expect(String(fetchFn.mock.calls[0]?.[0])).toContain('token=devtok');
+    const url = new URL(String(fetchFn.mock.calls[0]?.[0]));
+    expect(url.searchParams.get('path')).toBe('/out/a.hawavoclean.txt');
+    expect(url.searchParams.has('token')).toBe(false);
+    expect(lastInit(fetchFn).credentials).toBe('same-origin');
   });
 
   it('fetchText reports a refused file as an EngineError', async () => {
@@ -320,12 +403,13 @@ describe('uploadWithProgress', () => {
     vi.stubGlobal('XMLHttpRequest', FakeXhr);
   });
 
-  it('opens a POST to /api/upload with the token header and a multipart body', () => {
+  it('opens a POST to /api/upload without renderer-owned auth and with a multipart body', () => {
     void client().uploadWithProgress(bigFile(8));
     const xhr = FakeXhr.last as FakeXhr;
     expect(xhr.method).toBe('POST');
     expect(xhr.url).toBe(`${BASE}/api/upload`);
-    expect(xhr.headers['X-Hawa-Token']).toBe(TOKEN);
+    expect(xhr.headers['X-Hawa-Token']).toBeUndefined();
+    expect(xhr.headers.Authorization).toBeUndefined();
     expect(xhr.body).toBeInstanceOf(FormData);
     expect(xhr.sent).toBe(true);
   });
@@ -482,5 +566,382 @@ describe('verify', () => {
     const err = (await client().verify('/out/a.wav').catch((e: unknown) => e)) as EngineError;
     expect(err).toBeInstanceOf(EngineError);
     expect(err.status).toBe(0);
+  });
+});
+
+describe('v1 capabilities and jobs (True-10 D4.11)', () => {
+  it('fetches and normalizes /api/v1/capabilities', async () => {
+    const fetchFn = mockFetch(
+      res(
+        200,
+        JSON.stringify({
+          schemaVersion: 1,
+          capabilities: [
+            {
+              capabilityId: 'smart_safe',
+              available: true,
+              maturity: 'qualified',
+              providers: ['cpu'],
+            },
+            {
+              capabilityId: 'restore_source',
+              available: false,
+              maturity: 'blocked',
+              reason: 'No qualified model pack',
+            },
+          ],
+        }),
+      ),
+    );
+    const caps = await client().capabilities();
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/v1/capabilities`);
+    expect(caps.capabilities).toEqual([
+      {
+        capability_id: 'smart_safe',
+        available: true,
+        maturity: 'qualified',
+        reason: null,
+        manifest_sha256: null,
+        providers: ['cpu'],
+      },
+      {
+        capability_id: 'restore_source',
+        available: false,
+        maturity: 'blocked',
+        reason: 'No qualified model pack',
+        manifest_sha256: null,
+        providers: [],
+      },
+    ]);
+  });
+
+  it('posts /api/v1/jobs and normalizes response', async () => {
+    const fetchFn = mockFetch(
+      res(
+        202,
+        JSON.stringify({
+          schemaVersion: 1,
+          jobs: [
+            {
+              jobId: 'j123',
+              sourceId: 'src456',
+              outputPath: '/out/a.wav',
+              reportPath: '/out/a.json',
+            },
+          ],
+        }),
+      ),
+    );
+    const result = await client().createV1Jobs({
+      schema_version: 1,
+      source_ids: ['src456'],
+      strategy: {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+      },
+      execution_policy: 'offline_only',
+      conflict_policy: 'unique',
+      record_bundle: false,
+      idempotency_key: 'test-key',
+    });
+    expect(fetchFn.mock.calls[0]?.[0]).toBe(`${BASE}/api/v1/jobs`);
+    expect(JSON.parse(String(lastInit(fetchFn).body))).toEqual(
+      expect.objectContaining({
+        schema_version: 1,
+        source_ids: ['src456'],
+        idempotency_key: 'test-key',
+      }),
+    );
+    expect(result.jobs).toEqual([
+      {
+        jobId: 'j123',
+        sourceId: 'src456',
+        outputPath: '/out/a.wav',
+        reportPath: '/out/a.json',
+      },
+    ]);
+  });
+
+  it('supports v1 job retrieval, cancellation, and events url', async () => {
+    const fetchFn = mockFetch(res(200, '{"job_id":"j123","state":"running"}'));
+    const status = await client().getV1Job('j123');
+    expect(fetchFn).toHaveBeenCalledWith(`${BASE}/api/v1/jobs/j123`, expect.objectContaining({ method: 'GET' }));
+    expect(status.state).toBe('running');
+
+    fetchFn.mockResolvedValueOnce(res(200, '{"ok":true}'));
+    const cancelRes = await client().cancelV1Job('j123');
+    expect(fetchFn).toHaveBeenCalledWith(`${BASE}/api/v1/jobs/j123/cancel`, expect.objectContaining({ method: 'POST' }));
+    expect(cancelRes.ok).toBe(true);
+
+    const url = new URL(client().v1EventsUrl('job/with space'));
+    expect(url.pathname).toBe('/api/v1/jobs/job%2Fwith%20space/events');
+    expect(url.search).toBe('');
+  });
+
+  it('normalizes camelCase v1 JobStatusResponseV1 states and paths into JobStatus', async () => {
+    const fetchFn = mockFetch(
+      res(
+        200,
+        JSON.stringify({
+          schemaVersion: 1,
+          jobId: 'j_v1_done',
+          state: 'completed',
+          stage: 'done',
+          progress: 1,
+          message: 'Finished',
+          outputPath: '/out/master.wav',
+          reportPath: '/out/master.hawavoclean.json',
+          startedAt: '2026-11-19T00:00:00Z',
+          finishedAt: '2026-11-19T00:00:05Z',
+        }),
+      ),
+    );
+    const done = await client().getV1Job('j_v1_done');
+    expect(done.job_id).toBe('j_v1_done');
+    expect(done.state).toBe('done');
+    expect(done.output_path).toBe('/out/master.wav');
+    expect(done.report_path).toBe('/out/master.hawavoclean.json');
+    expect(done.started_at).toBe('2026-11-19T00:00:00Z');
+    expect(done.finished_at).toBe('2026-11-19T00:00:05Z');
+
+    for (const v1Active of ['analyzing', 'rendering', 'guarding', 'publishing']) {
+      fetchFn.mockResolvedValueOnce(
+        res(200, JSON.stringify({ jobId: 'j_active', state: v1Active, stage: 'enhance', progress: 0.5 })),
+      );
+      const active = await client().getV1Job('j_active');
+      expect(active.job_id).toBe('j_active');
+      expect(active.state).toBe('running');
+    }
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          jobId: 'j_int',
+          state: 'interrupted',
+          stage: 'error',
+          progress: 0.4,
+          message: 'Interrupted on restart',
+          outputPath: '/out/m.wav',
+          reportPath: '/out/m.json',
+        }),
+      ),
+    );
+    const interrupted = await client().getV1Job('j_int');
+    expect(interrupted.job_id).toBe('j_int');
+    expect(interrupted.state).toBe('interrupted');
+    expect(interrupted.output_path).toBe('/out/m.wav');
+  });
+
+  it('calls Pro Studio v1 endpoints (spectrogram, preview, override, export, tracks/inspect)', async () => {
+    const fetchFn = mockFetch(
+      res(
+        200,
+        JSON.stringify({
+          start_s: 0,
+          end_s: 2,
+          sample_rate: 48000,
+          f_min_hz: 20,
+          f_max_hz: 24000,
+          n_bins: 2,
+          width_cols: 2,
+          scale: 'linear',
+          db_floor: -60,
+          db_ceil: 0,
+          data_b64: 'AQIDBA==',
+        }),
+      ),
+    );
+    const tile = await client().fetchSpectrogramTile({
+      path: '/a.wav',
+      cleanedPath: '/out/a.wav',
+      mode: 'delta',
+      startS: 0,
+      endS: 2,
+      widthCols: 2,
+      nBins: 2,
+      scale: 'linear',
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/spectrogram',
+      expect.objectContaining({ method: 'POST', credentials: 'same-origin' }),
+    );
+    expect(tile.n_bins).toBe(2);
+    expect(tile.data_b64).toBe('AQIDBA==');
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          previewPath: '/tmp/preview_1.wav',
+          audioUrl: '/api/audio?path=%2Ftmp%2Fpreview_1.wav',
+          renderMs: 142.5,
+          warmHit: true,
+          metricsBefore: { lufs: -22.0, noiseFloorDb: -40.0 },
+          metricsAfter: { lufs: -21.8, noiseFloorDb: -56.0 },
+          durationS: 3.0,
+        }),
+      ),
+    );
+    const preview = await client().renderRegionPreview({
+      path: '/a.wav',
+      startS: 1,
+      endS: 4,
+      profile: 'studio_pro',
+      strength: 0.8,
+      ambienceFloorDb: -45,
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/preview',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(preview.warmHit).toBe(true);
+    expect(preview.metricsAfter.noiseFloorDb).toBe(-56.0);
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          job_id: 'j1',
+          unit_index: 2,
+          unit_id: 2,
+          old_decision: 'enhanced',
+          new_decision: 'original_reverted',
+          override: 'force_original',
+          restitched: true,
+          restitchMs: 38.2,
+          masterSha256: 'abc123',
+        }),
+      ),
+    );
+    const ov = await client().overrideUnit('j1', { unitId: 2, decision: 'force_original' });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/jobs/j1/override',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(ov.restitched).toBe(true);
+    expect(ov.restitchMs).toBeCloseTo(38.2);
+    expect(ov.masterSha256).toBe('abc123');
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          outputPath: '/out/a_ebu.flac',
+          format: 'flac',
+          deliveryPreset: 'ebu_r128',
+          lraLu: 5.4,
+          integratedLufs: -23.0,
+          truePeakDbtp: -1.1,
+        }),
+      ),
+    );
+    const exp = await client().exportDelivery({
+      masterPath: '/out/a.wav',
+      format: 'flac',
+      deliveryPreset: 'ebu_r128',
+      preserveMetadata: true,
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/export',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(exp.outputPath).toBe('/out/a_ebu.flac');
+    expect(exp.integratedLufs).toBe(-23.0);
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          path: '/field/poly.wav',
+          trackCount: 2,
+          tracks: [
+            {
+              index: 0,
+              name: 'Boom',
+              sample_rate: 48000,
+              samples: 48000,
+              duration_s: 1.0,
+              rms_dbfs: -24.0,
+              peak_dbfs: -6.0,
+              speech_activity_ratio: 0.72,
+              likely_dialogue: true,
+            },
+          ],
+        }),
+      ),
+    );
+    const tracks = await client().inspectTracks('/field/poly.wav');
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/tracks/inspect',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(tracks.trackCount).toBe(2);
+    expect(tracks.tracks[0]?.name).toBe('Boom');
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          path: '/field/poly.wav',
+          outDir: '/work/extracted_tracks/poly_abc',
+          extractedPaths: ['/work/extracted_tracks/poly_abc/ch01_Boom.wav'],
+          sourceIds: ['src-poly-ch01'],
+        }),
+      ),
+    );
+    const extracted = await client().extractTracks('/field/poly.wav', [0]);
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/tracks/extract',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ path: '/field/poly.wav', trackIndices: [0] }),
+      }),
+    );
+    expect(extracted.sourceIds).toEqual(['src-poly-ch01']);
+    expect(extracted.extractedPaths).toEqual(['/work/extracted_tracks/poly_abc/ch01_Boom.wav']);
+
+    fetchFn.mockResolvedValueOnce(
+      res(
+        200,
+        JSON.stringify({
+          outputPath: '/work/repaired_box.wav',
+          audioUrl: '/api/audio?path=%2Fwork%2Frepaired_box.wav',
+          startS: 4.2,
+          endS: 6.1,
+          fLowHz: 140,
+          fHighHz: 220,
+          attenuationDb: 24,
+          renderMs: 62.4,
+        }),
+      ),
+    );
+    const repair = await client().repairSpectralBox({
+      path: '/a.wav',
+      startS: 4.2,
+      endS: 6.1,
+      fLowHz: 140,
+      fHighHz: 220,
+      attenuationDb: 24,
+    });
+    expect(fetchFn).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8765/api/v1/spectral-repair',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          path: '/a.wav',
+          startS: 4.2,
+          endS: 6.1,
+          fLowHz: 140,
+          fHighHz: 220,
+          attenuationDb: 24,
+        }),
+      }),
+    );
+    expect(repair.outputPath).toBe('/work/repaired_box.wav');
+    expect(repair.audioUrl).toBe('/api/audio?path=%2Fwork%2Frepaired_box.wav');
+    expect(repair.attenuationDb).toBe(24);
+    expect(repair.renderMs).toBeCloseTo(62.4);
   });
 });

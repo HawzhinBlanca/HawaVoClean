@@ -57,6 +57,8 @@ def test_no_workspace_leak_on_destination_exists_refusal(tmp_path: Path, monkeyp
 
 # 11. unwritable destination: clean error at preflight, no traceback, no leak ------
 def test_unwritable_destination_fails_at_preflight(tmp_path: Path, monkeypatch: Any) -> None:
+    if sys.platform == "win32":
+        pytest.skip("Read-only directory chmod is unsupported on Windows")
     work = tmp_path / "work"
     monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(work))
     ro = tmp_path / "ro"

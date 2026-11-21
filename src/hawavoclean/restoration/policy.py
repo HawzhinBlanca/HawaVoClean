@@ -6,7 +6,11 @@ import numpy as np
 
 from hawavoclean.logging import get_logger
 from hawavoclean.restoration.bandwidth import BandwidthEstimate
-from hawavoclean.restoration.base import RestorationCandidate, Restorer
+from hawavoclean.restoration.base import (
+    RestorationCandidate,
+    RestorationRenderResult,
+    Restorer,
+)
 from hawavoclean.restoration.config import RestorationConfig
 from hawavoclean.restoration.guard import GuardRResult, RestorationGuard
 from hawavoclean.restoration.profiles import SpeakerProfile
@@ -22,6 +26,7 @@ class SegmentRestorationDecision:
     applied_strength: float
     cutoff_hz: float
     guard_result: GuardRResult | None
+    render_result: RestorationRenderResult | None = None
     error_message: str | None = None
 
 
@@ -102,21 +107,114 @@ class RestorationPolicyManager:
                 guard_result=no_restore_res,
             )
 
-        # 2. Extract speaker embeddings if profile present
+        # 2. Extract speaker embeddings and F0 stats if profile present
         speaker_id = speaker_profile.speaker_id if speaker_profile else None
         speaker_emb = speaker_profile.embedding_vector if speaker_profile else None
+        speaker_var = speaker_profile.variance_vector if speaker_profile else None
+        f0_stats: dict[str, float] | None = None
+        if speaker_profile is not None and speaker_profile.f0_statistics is not None:
+            f0_stats = {
+                "median_hz": speaker_profile.f0_statistics.median_hz,
+                "p05_hz": speaker_profile.f0_statistics.p05_hz,
+                "p95_hz": speaker_profile.f0_statistics.p95_hz,
+            }
 
-        # 3. Generate candidate ladder
+        # 2b. Enrolled Mode Pre-flight Identity Gating (R2.7, R2.8):
+        # Verify selected enrollment against current input before rendering.
+        # Wrong or missing enrollment falls back before model execution.
+        if speaker_profile is not None:
+            if speaker_emb is None or speaker_emb.size == 0:
+                reason = (
+                    f"Missing or degenerate embedding in enrolled profile '{speaker_id}'; "
+                    "falling back before model execution"
+                )
+                logger.warning(reason)
+                fb_res = GuardRResult(
+                    verdict="NO_RESTORE",
+                    accepted_strength=0.0,
+                    reason=reason,
+                    protected_band={},
+                    ctc={},
+                    highband_events={},
+                    harmonic={},
+                    speaker={"status": "missing_enrollment_embedding"},
+                )
+                return natural_audio, SegmentRestorationDecision(
+                    action="bypassed",
+                    applied_strength=0.0,
+                    cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                    guard_result=fb_res,
+                )
+
+            if self.guard.speaker_extractor is not None and speaker_emb.shape == (
+                self.guard.speaker_extractor.embed_dim,
+            ):
+                input_emb = self.guard.speaker_extractor.extract(natural_audio)
+                norm_input = float(np.linalg.norm(input_emb))
+                norm_prof = float(np.linalg.norm(speaker_emb))
+                if norm_input > 1e-6 and norm_prof > 1e-6:
+                    sim = float(np.dot(input_emb, speaker_emb) / (norm_input * norm_prof))
+                    if sim < self.config.guard.speaker_threshold:
+                        reason = (
+                            f"Input audio does not match enrolled profile '{speaker_id}' "
+                            f"(similarity {sim:.3f} < {self.config.guard.speaker_threshold}); "
+                            "falling back before model execution"
+                        )
+                        logger.warning(reason)
+                        fb_res = GuardRResult(
+                            verdict="NO_RESTORE",
+                            accepted_strength=0.0,
+                            reason=reason,
+                            protected_band={},
+                            ctc={},
+                            highband_events={},
+                            harmonic={},
+                            speaker={
+                                "speaker_similarity": sim,
+                                "threshold": self.config.guard.speaker_threshold,
+                                "mode": "enrolled_preflight_rejected",
+                            },
+                        )
+                        return natural_audio, SegmentRestorationDecision(
+                            action="bypassed",
+                            applied_strength=0.0,
+                            cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                            guard_result=fb_res,
+                        )
+
+        # 3. Generate candidate ladder and render telemetry (R2.2)
         try:
-            candidates: list[RestorationCandidate] = self.restorer.restore(
-                audio_48k=natural_audio,
-                sample_rate=sample_rate,
-                effective_cutoff_hz=bandwidth_est.effective_cutoff_hz,
-                speaker_id=speaker_id,
-                speaker_embedding=speaker_emb,
-                strengths=self.config.strengths,
-                seed=segment_seed,
-            )
+            render_result: RestorationRenderResult
+            if hasattr(self.restorer, "render"):
+                render_result = self.restorer.render(
+                    audio_48k=natural_audio,
+                    sample_rate=sample_rate,
+                    effective_cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                    speaker_id=speaker_id,
+                    speaker_embedding=speaker_emb,
+                    strengths=self.config.strengths,
+                    seed=segment_seed,
+                )
+            else:
+                cands = self.restorer.restore(
+                    audio_48k=natural_audio,
+                    sample_rate=sample_rate,
+                    effective_cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                    speaker_id=speaker_id,
+                    speaker_embedding=speaker_emb,
+                    strengths=self.config.strengths,
+                    seed=segment_seed,
+                )
+                has_active = any(c.strength > 0.0 for c in cands)
+                render_result = RestorationRenderResult(
+                    success=has_active,
+                    fallback_status="none" if has_active else "no_active_candidates",
+                    model_name=getattr(self.restorer, "model_name", "unknown"),
+                    provider=getattr(self.restorer, "device", "unknown"),
+                    solver=getattr(self.restorer, "solver_name", "unknown"),
+                    candidates=cands,
+                )
+            candidates = render_result.candidates
         except Exception as e:
             logger.warning(
                 "Restoration model exception on segment; failing closed to Natural: %s", e
@@ -131,12 +229,56 @@ class RestorationPolicyManager:
                 harmonic={},
                 speaker={},
             )
+            err_render = RestorationRenderResult(
+                success=False,
+                fallback_status="runtime_error",
+                model_name=getattr(self.restorer, "model_name", "unknown"),
+                provider=getattr(self.restorer, "device", "unknown"),
+                solver=getattr(self.restorer, "solver_name", "unknown"),
+                candidates=[
+                    RestorationCandidate(
+                        strength=0.0,
+                        audio=natural_audio.copy(),
+                        cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                    )
+                ],
+                error_message=str(e),
+            )
             return natural_audio, SegmentRestorationDecision(
                 action="error",
                 applied_strength=0.0,
                 cutoff_hz=bandwidth_est.effective_cutoff_hz,
                 guard_result=err_res,
+                render_result=err_render,
                 error_message=str(e),
+            )
+
+        # 3b. Stop representing failure as active-strength passthrough candidates (R2.2)
+        # Injected solver/provider/manifest failures emit exact Natural, strength 0,
+        # zero restored regions, and an explicit reason; reports never say 'restored'.
+        if not render_result.success or not any(c.strength > 0.0 for c in candidates):
+            reason = (
+                f"Restorer fallback: {render_result.fallback_status}"
+                if not render_result.error_message
+                else f"Restorer fallback: {render_result.fallback_status} ({render_result.error_message})"
+            )
+            logger.info("Restoration bypassed due to restorer fallback: %s", reason)
+            fb_res = GuardRResult(
+                verdict="NO_RESTORE",
+                accepted_strength=0.0,
+                reason=reason,
+                protected_band={},
+                ctc={},
+                highband_events={},
+                harmonic={},
+                speaker={"fallback_status": render_result.fallback_status},
+            )
+            return natural_audio, SegmentRestorationDecision(
+                action="bypassed",
+                applied_strength=0.0,
+                cutoff_hz=bandwidth_est.effective_cutoff_hz,
+                guard_result=fb_res,
+                render_result=render_result,
             )
 
         # 4. Guard R Candidate Selection
@@ -147,8 +289,11 @@ class RestorationPolicyManager:
                 cutoff_hz=bandwidth_est.effective_cutoff_hz,
                 speaker_embedding=speaker_emb,
                 canonical_embedding=speaker_emb,
+                variance_vector=speaker_var,
                 speech_mask=speech_mask,
+                f0_statistics=f0_stats,
             )
+
         except Exception as e:
             logger.warning("Guard R exception on segment; failing closed to Natural: %s", e)
             err_res = GuardRResult(
@@ -166,6 +311,7 @@ class RestorationPolicyManager:
                 applied_strength=0.0,
                 cutoff_hz=bandwidth_est.effective_cutoff_hz,
                 guard_result=err_res,
+                render_result=render_result,
                 error_message=str(e),
             )
 
@@ -185,4 +331,5 @@ class RestorationPolicyManager:
             applied_strength=guard_res.accepted_strength,
             cutoff_hz=bandwidth_est.effective_cutoff_hz,
             guard_result=guard_res,
+            render_result=render_result,
         )

@@ -1,5 +1,6 @@
 """Acoustic defect and imbalance detectors for deterministic local finishing."""
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,29 +79,50 @@ def detect_defects(
     # 2048-point analysis above there are only ~3 bins between 30-100 Hz at
     # 48 kHz, so "hum bin > 4x the mean of the band" was mathematically
     # impossible and de-hum never ran on real inputs. Here: 16384-point
-    # (~2.9 Hz bins at 48 kHz) and the hum bin is compared against the
-    # MEDIAN of the 30-150 Hz band EXCLUDING its own neighbourhood.
+    # (~2.9 Hz bins at 48 kHz) scanned across up to 3 windows spanning the
+    # clip, compared against the MEDIAN of the 30-150 Hz band EXCLUDING its
+    # own neighbourhood. Detected peaks are refined via log-magnitude quadratic
+    # parabolic interpolation and snapped within ±0.5 Hz of exact 50.0/60.0 Hz
+    # so 3rd-8th harmonics land dead-center inside Q=30 notches.
     has_hum = False
     hum_freq = 0.0
     n_hum_fft = 16384
     if len(waveform) >= n_hum_fft:
-        hum_frames = max(1, min(16, (len(waveform) - n_hum_fft) // (n_hum_fft // 2) + 1))
+        hop_hum = n_hum_fft // 2
+        total_hum_frames = (len(waveform) - n_hum_fft) // hop_hum + 1
+        if total_hum_frames <= 16:
+            hum_frame_starts = [i * hop_hum for i in range(total_hum_frames)]
+        else:
+            # Scan 3 windows (start, middle, end) across long clips (up to 16 frames total).
+            win_counts = (6, 5, 5)
+            mid_anchor = max(0, (total_hum_frames - win_counts[1]) // 2)
+            end_anchor = max(0, total_hum_frames - win_counts[2])
+            seen_idx: set[int] = set()
+            hum_frame_starts = []
+            for anchor, count in zip((0, mid_anchor, end_anchor), win_counts, strict=True):
+                for offset in range(count):
+                    fi = min(total_hum_frames - 1, anchor + offset)
+                    if fi not in seen_idx:
+                        seen_idx.add(fi)
+                        hum_frame_starts.append(fi * hop_hum)
         hum_win = np.hanning(n_hum_fft)
         hum_mag = np.zeros(n_hum_fft // 2 + 1, dtype=np.float64)
-        for i in range(hum_frames):
-            start = i * (n_hum_fft // 2)
+        for start in hum_frame_starts:
             hum_mag += np.abs(
                 np.fft.rfft(waveform[start : start + n_hum_fft] * hum_win, n=n_hum_fft)
             )
-        hum_mag /= hum_frames
+        hum_mag /= float(len(hum_frame_starts))
         hum_freqs = np.fft.rfftfreq(n_hum_fft, d=1.0 / sample_rate)
+        bin_hz = float(sample_rate) / float(n_hum_fft)
         band = (hum_freqs >= 30.0) & (hum_freqs <= 150.0)
         best_ratio = 0.0
         for target in (50.0, 60.0):
             idx = int(np.argmin(np.abs(hum_freqs - target)))
             lo = max(0, idx - 2)
             hi = min(len(hum_mag), idx + 3)
-            peak = float(np.max(hum_mag[lo:hi]))
+            local_argmax = int(np.argmax(hum_mag[lo:hi]))
+            peak_idx = lo + local_argmax
+            peak = float(hum_mag[peak_idx])
             neighbourhood = np.zeros_like(band)
             neighbourhood[lo:hi] = True
             ref_bins = band & ~neighbourhood
@@ -109,7 +131,19 @@ def detect_defects(
             if ratio > 8.0 and ratio > best_ratio:
                 best_ratio = ratio
                 has_hum = True
-                hum_freq = float(hum_freqs[lo + int(np.argmax(hum_mag[lo:hi]))])
+                if 0 < peak_idx < len(hum_mag) - 1:
+                    y_m1 = math.log(float(hum_mag[peak_idx - 1]) + 1e-12)
+                    y_0 = math.log(float(hum_mag[peak_idx]) + 1e-12)
+                    y_p1 = math.log(float(hum_mag[peak_idx + 1]) + 1e-12)
+                    denom = y_m1 - 2.0 * y_0 + y_p1
+                    delta = 0.5 * (y_m1 - y_p1) / denom if abs(denom) > 1e-12 else 0.0
+                    delta = float(np.clip(delta, -0.5, 0.5))
+                else:
+                    delta = 0.0
+                interp_hz = (float(peak_idx) + delta) * bin_hz
+                if abs(interp_hz - target) <= 0.5:
+                    interp_hz = target
+                hum_freq = float(interp_hz)
 
     # 3. Click / Transient spike detection
     diff = np.abs(np.diff(waveform))

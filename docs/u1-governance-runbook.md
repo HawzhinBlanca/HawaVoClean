@@ -257,6 +257,48 @@ The general lesson is the one this checkpoint keeps teaching: a governance
 contract is a claim about a live system, and a claim nobody has executed is a
 guess with a hash on it.
 
+### The environment's branch policy made `main` unmergeable
+
+*Found by applying the ruleset, which is the only thing that could have found
+it. 2026-08-26.*
+
+Three clauses of the approved design cannot all hold:
+
+- `exact-release-gate` triggers on `pull_request`;
+- it deploys to `release-candidate`, whose contracted
+  `deployment_branch_policy` was `protected_branches_only`;
+- `required` depends on that job and is the required check for merging to
+  `main`.
+
+A pull-request merge ref is never a protected branch. GitHub matches branch and
+tag *names*, and `refs/pull/N/merge` is neither, so no custom pattern can admit
+it either.
+
+The rule had been inert since the environment was created, because the
+repository had no protected branch for it to measure anything against — the gate
+ran on pull requests #1 through #6 without complaint. Minutes after the ruleset
+was applied, the T3.3 proof run failed in one second with no steps:
+
+```
+Branch "refs/pull/7/merge" is not allowed to deploy to release-candidate
+due to environment protection rules.
+```
+
+`main` was unmergeable at that moment: every pull request needs `required`,
+`required` needs the gate, and the gate could no longer start.
+
+This is the fourth control found tonight that passed because there was nothing
+for it to check — after a signal disposition that could not be delivered, an
+SBOM inherited from another scan's cache, and a required status context that
+could never report. The shape is always the same, and only running the thing
+exposes it.
+
+The branch policy is removed. The required reviewer is unchanged and is the
+control that was actually doing the work; fork pull requests remain excluded by
+the job's own `if:` condition and by the all-external-contributors approval
+policy. `release_environment.deployment_branch_policy` in the contract records
+both the new value and why.
+
 ### Recorded deviation: the runner account
 
 `docs/operations.md` asks for the runner to be registered "under a dedicated
@@ -319,7 +361,8 @@ Order matters here:
    `required` status check.
 4. ~~Create `release-candidate` with the owner as required reviewer and a
    protected-branches-only deployment policy.~~ Done: the environment exists and
-   carries `required_reviewers` and `branch_policy`.
+   carries `required_reviewers`. The branch policy was **removed on 2026-08-26**
+   — see below; it and the rest of this contract could not both hold.
 5. ~~Set `HAWAVOCLEAN_RELEASE_EVIDENCE_ROOT`.~~ Done 2026-08-26. **This had to
    happen before step 3**, for the reason recorded there: the gate refuses to
    hydrate without it, so the `required` context cannot report success

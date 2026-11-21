@@ -11,6 +11,7 @@ import json
 import shutil
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from hawavoclean.config import HawaVoCleanConfig
 from hawavoclean.errors import PreflightError
@@ -60,6 +61,10 @@ class JobWorkspace:
         self.root = Path(tempfile.mkdtemp(prefix=f"{self.job_id}-", dir=base_work_dir)).resolve()
         self.journal_path = self.root / "journal.jsonl"
         self.job_meta_path = self.root / "job.json"
+        # Pipeline-owned resources that must be closed before Windows can
+        # remove the scratch directory. Kept generic so JobWorkspace does not
+        # import numpy or own DSP lifecycle policy.
+        self.pipeline_disk_mappings: list[Any] = []
 
         self._init_workspace()
         self.journal = JobJournal(self.journal_path)
@@ -107,6 +112,7 @@ class JobWorkspace:
         json_report_str: str,
         txt_summary_str: str,
         overwrite: bool = False,
+        clean_only: bool = False,
     ) -> tuple[Path, Path, Path]:
         """Publish output audio, JSON report, and TXT as one committed generation.
 
@@ -115,10 +121,8 @@ class JobWorkspace:
         three artifacts together; immutable prior generations remain available
         for recovery. See ADR 0005.
 
-        A staticmethod on purpose: it touches no workspace state, and the
-        multi-pass orchestrator publishes its amended final report through
-        this exact code path rather than a second implementation of the
-        atomic-publish discipline.
+        If clean_only is True, emits only the destination .wav master file without
+        creating public sidecars or hidden bundle directories.
         """
         return publish_output_generation(
             temp_audio_path=temp_audio_path,
@@ -126,11 +130,15 @@ class JobWorkspace:
             json_report_str=json_report_str,
             txt_summary_str=txt_summary_str,
             overwrite=overwrite,
+            clean_only=clean_only,
         )
 
     def cleanup(self) -> None:
         """Remove the scratch workspace. Called on successful completion."""
         import contextlib
 
+        from hawavoclean.source_pin import remove_source_snapshot_tree
+
+        remove_source_snapshot_tree(self.root / "source-snapshot")
         with contextlib.suppress(Exception):
             shutil.rmtree(self.root)

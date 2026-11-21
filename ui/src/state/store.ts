@@ -2,18 +2,72 @@ import { create } from 'zustand';
 import type { EngineClient } from '../api/client';
 import type {
   AudioAnalysis,
+  BatchSummary,
+  CapabilityStatusV1,
   HawaVoCleanReport,
   JobMode,
   JobStatus,
   Profile,
   UnitDecisionRecord,
 } from '../api/types';
+import type { TakeSnapshot } from '../components/TakeSwitcher';
 import { waveView, type ViewWindow } from '../render/viewWindow';
 import type { HawaHost } from '../bridge/types';
+import {
+  DEFAULT_NAMING_TEMPLATE,
+  DEFAULT_STUDIO_RACK_SETTINGS,
+  type StudioRackSettings,
+} from './presets';
+import { shellOverlayReducer, type ShellOverlay } from './machines';
+import { createUndoStack, shallowRecordEqual, type UndoStack } from './undoStack';
+
+export type UnitOverrideMapValue = 'auto' | 'force_original' | 'force_enhanced';
+export type UnitOverrideMap = Record<number, UnitOverrideMapValue>;
+
+export interface SpectralSelectionBox {
+  startS: number;
+  endS: number;
+  fLowHz: number;
+  fHighHz: number;
+}
 
 export type EngineStatus = 'connecting' | 'ready' | 'offline';
 export type SourceOrigin = 'resolve' | 'file' | 'drop' | 'upload';
 export type AbMode = 'original' | 'cleaned';
+export type WorkspaceMode = 'simple' | 'pro';
+
+export interface ToastItem {
+  id: string;
+  text: string;
+  kind: 'info' | 'ok' | 'err';
+}
+
+const WORKSPACE_MODE_KEY = 'hawavoclean.workspaceMode';
+const LIVE_PREVIEW_KEY = 'hawavoclean.livePreview';
+
+function loadWorkspaceMode(): WorkspaceMode {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(WORKSPACE_MODE_KEY) : null;
+    if (raw === 'pro' || raw === 'simple') return raw;
+  } catch {
+    // ignore storage errors
+  }
+  return 'simple';
+}
+
+function loadLivePreview(): boolean {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(LIVE_PREVIEW_KEY) : null;
+    if (raw === 'false') return false;
+    if (raw === 'true') return true;
+  } catch {
+    // ignore storage errors
+  }
+  return true;
+}
+
+let toastSeq = 0;
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
  * What the engine can still serve of the run that is on screen.
@@ -62,13 +116,15 @@ export interface SourceInfo {
   path: string;
   name: string;
   origin: SourceOrigin;
-  mediaId?: string;
+  mediaId?: string | undefined;
+  sourceId?: string | undefined;
 }
 
 export interface JobInfo {
   id: string;
   outputPath: string;
   reportPath: string;
+  bundlePath?: string;
   status: JobStatus | null;
   streamConnected: boolean;
 }
@@ -89,7 +145,7 @@ export function jobInFlight(job: JobInfo | null | undefined): boolean {
   if (!job) return false;
   if (!job.status) return true;
   const s = job.status.state;
-  return s !== 'done' && s !== 'failed' && s !== 'cancelled';
+  return s !== 'done' && s !== 'failed' && s !== 'cancelled' && s !== 'interrupted';
 }
 
 export interface HoverUnit {
@@ -205,6 +261,15 @@ export interface AppState {
   speakers: string[];
   restoreAvailable: boolean;
   /**
+   * Versioned runtime capabilities from `GET /api/v1/capabilities` (True-10 D4.11).
+   * Governs truthful route qualification, blocked reasons, and runtime providers.
+   */
+  capabilities: CapabilityStatusV1[] | null;
+  /**
+   * Explicit user consent required for generative reconstruction (HawaRestore-KD).
+   */
+  reconstructionConsent: boolean;
+  /**
    * The next run's mode and its restore parameters. Like `profile` these are
    * a control setting, not a property of any one run: they survive a new
    * source and are read once at submit time. Invariant the control and
@@ -218,8 +283,16 @@ export interface AppState {
   job: JobInfo | null;
   report: HawaVoCleanReport | null;
   cleanedPath: string | null;
+  /** True while the cleaned deck holds an ephemeral warm region preview rather than the full master. */
+  previewActive: boolean;
 
   abMode: AbMode;
+  /** Whether loudness-matched A/B comparison is active (D4.2). */
+  loudnessMatch: boolean;
+  /** Current gain offset in dB applied to Cleaned deck during level-matched A/B. */
+  gainOffsetDb: number;
+  /** Whether the advanced controls drawer/disclosure is expanded (D4.2). */
+  advancedOpen: boolean;
   /**
    * A deck that could not be played, and what is playing instead. Set from the
    * player's fault event, cleared when a deck is asked for again.
@@ -256,6 +329,14 @@ export interface AppState {
    * a new report or a new source clears it.
    */
   selectedUnit: UnitDecisionRecord | null;
+
+  /**
+   * D2 · Click-drag selection range in seconds. `null` = no active selection.
+   * Set by click-drag on the waveform; cleared by Escape or a new source.
+   * `I` sets in-point, `O` sets out-point (NLE convention).
+   */
+  selectionRange: { start: number; end: number } | null;
+
   /** Keyboard-map overlay (`?`). */
   shortcutsOpen: boolean;
 
@@ -280,6 +361,35 @@ export interface AppState {
    */
   errorLabel: string | null;
   dragOver: boolean;
+  batch: BatchSummary | null;
+  activeInspectJobId: string | null;
+
+  // Pro Studio state (Wave 2)
+  rackSettings: StudioRackSettings;
+  rackDirty: boolean;
+  rackUndo: UndoStack<StudioRackSettings>;
+  takes: TakeSnapshot[];
+  activeTakeId: string | null;
+  unitOverrides: UnitOverrideMap;
+  overrideUndo: UndoStack<UnitOverrideMap>;
+  spectralUndo: UndoStack<string | null>;
+  lastUndoDomain: 'override' | 'rack' | 'spectral' | null;
+  spectralSelection: SpectralSelectionBox | null;
+  videoPreviewCollapsed: boolean;
+  batchNamingTemplate: string;
+
+  // Studio 4.0 workspace & non-technical UX state
+  workspaceMode: WorkspaceMode;
+  livePreviewEnabled: boolean;
+  /** Single mutually exclusive shell overlay/drawer state machine. */
+  activeOverlay: ShellOverlay;
+  assistantDrawerOpen: boolean;
+  pendingChatPrompt: string | null;
+  batchDrawerOpen: boolean;
+  modelsDrawerOpen: boolean;
+  activeGoalId: string | null;
+  stageBlend: number;
+  toasts: ToastItem[];
 
   // actions
   setHost(host: HawaHost): void;
@@ -289,8 +399,11 @@ export interface AppState {
   setAnalyzing(v: boolean): void;
   setOriginal(a: AudioAnalysis | null): void;
   setCleaned(a: AudioAnalysis | null, path: string | null): void;
+  setPreviewActive(active: boolean): void;
   setProfile(p: Profile): void;
   setCapabilities(speakers: string[], restoreAvailable: boolean): void;
+  setCapabilitiesV1(capabilities: CapabilityStatusV1[]): void;
+  setReconstructionConsent(consent: boolean): void;
   setMode(m: JobMode): void;
   setSpeakerId(id: string | null): void;
   setCutoffHz(hz: number | null): void;
@@ -298,6 +411,9 @@ export interface AppState {
   patchJob(patch: Partial<JobInfo>): void;
   setReport(r: HawaVoCleanReport | null): void;
   setAbMode(m: AbMode): void;
+  setLoudnessMatch(v: boolean): void;
+  setGainOffsetDb(v: number): void;
+  setAdvancedOpen(v: boolean): void;
   setDeckFault(f: DeckFaultInfo | null): void;
   setArtifacts(a: ArtifactState | null): void;
   setPlaying(v: boolean): void;
@@ -308,6 +424,7 @@ export interface AppState {
   setHoverUnit(h: HoverUnit | null): void;
   setHighlight(r: { start: number; end: number; channel?: number } | null): void;
   setSelectedUnit(u: UnitDecisionRecord | null): void;
+  setSelectionRange(r: { start: number; end: number } | null): void;
   setShortcutsOpen(v: boolean): void;
   setStatus(line: string): void;
   setError(msg: string | null, label?: string): void;
@@ -317,6 +434,33 @@ export interface AppState {
   pushHistory(entry: HistoryEntry): void;
   patchHistory(jobId: string, patch: Partial<HistoryEntry>): void;
   setCurrentRun(jobId: string | null): void;
+  setBatch(b: BatchSummary | null): void;
+  patchBatch(patch: Partial<BatchSummary>): void;
+  setActiveInspectJobId(id: string | null): void;
+  setRackSettings(
+    settings: StudioRackSettings,
+    undo?: UndoStack<StudioRackSettings>,
+    dirty?: boolean,
+  ): void;
+  setTakes(takes: TakeSnapshot[], activeTakeId?: string | null): void;
+  setActiveTakeId(id: string | null): void;
+  setUnitOverrides(overrides: UnitOverrideMap, undo?: UndoStack<UnitOverrideMap>): void;
+  setSpectralUndo(undo: UndoStack<string | null>): void;
+  setLastUndoDomain(domain: 'override' | 'rack' | 'spectral' | null): void;
+  setSpectralSelection(sel: SpectralSelectionBox | null): void;
+  setVideoPreviewCollapsed(collapsed: boolean): void;
+  setBatchNamingTemplate(template: string): void;
+  setWorkspaceMode(mode: WorkspaceMode): void;
+  setLivePreviewEnabled(enabled: boolean): void;
+  setActiveOverlay(overlay: ShellOverlay): void;
+  setAssistantDrawerOpen(open: boolean): void;
+  setPendingChatPrompt(prompt: string | null): void;
+  setBatchDrawerOpen(open: boolean): void;
+  setModelsDrawerOpen(open: boolean): void;
+  setActiveGoalId(goalId: string | null): void;
+  setStageBlend(blend: number): void;
+  pushToast(text: string, kind?: ToastItem['kind'], durationMs?: number): void;
+  dismissToast(id: string): void;
   resetForNewSource(): void;
 }
 
@@ -335,17 +479,23 @@ export const useStore = create<AppState>((set) => ({
   original: null,
   cleaned: null,
 
-  profile: 'studio',
+  profile: 'production',
   speakers: [],
   restoreAvailable: false,
+  capabilities: null,
+  reconstructionConsent: false,
   mode: 'natural',
   speakerId: null,
   cutoffHz: null,
   job: null,
   report: null,
   cleanedPath: null,
+  previewActive: false,
 
   abMode: 'original',
+  loudnessMatch: true,
+  gainOffsetDb: 0,
+  advancedOpen: false,
   deckFault: null,
   artifacts: null,
   playing: false,
@@ -358,6 +508,7 @@ export const useStore = create<AppState>((set) => ({
   highlightRange: null,
 
   selectedUnit: null,
+  selectionRange: null,
   shortcutsOpen: false,
 
   upload: null,
@@ -370,6 +521,35 @@ export const useStore = create<AppState>((set) => ({
   error: null,
   errorLabel: null,
   dragOver: false,
+  batch: null,
+  activeInspectJobId: null,
+
+  rackSettings: { ...DEFAULT_STUDIO_RACK_SETTINGS },
+  rackDirty: false,
+  rackUndo: createUndoStack<StudioRackSettings>(
+    { ...DEFAULT_STUDIO_RACK_SETTINGS },
+    { equals: shallowRecordEqual },
+  ),
+  takes: [],
+  activeTakeId: null,
+  unitOverrides: {},
+  overrideUndo: createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }),
+  spectralUndo: createUndoStack<string | null>(null),
+  lastUndoDomain: null,
+  spectralSelection: null,
+  videoPreviewCollapsed: false,
+  batchNamingTemplate: DEFAULT_NAMING_TEMPLATE,
+
+  workspaceMode: loadWorkspaceMode(),
+  livePreviewEnabled: loadLivePreview(),
+  activeOverlay: 'none',
+  assistantDrawerOpen: false,
+  pendingChatPrompt: null,
+  batchDrawerOpen: false,
+  modelsDrawerOpen: false,
+  activeGoalId: null,
+  stageBlend: 0,
+  toasts: [],
 
   setHost: (host) => set({ host }),
   // Losing the engine must not lose anything else: the client object is a URL
@@ -390,7 +570,8 @@ export const useStore = create<AppState>((set) => ({
   setAnalyzing: (analyzing) => set({ analyzing }),
   setOriginal: (original) =>
     set({ original, duration: original ? original.duration_s : 0 }),
-  setCleaned: (cleaned, cleanedPath) => set({ cleaned, cleanedPath }),
+  setCleaned: (cleaned, cleanedPath) => set({ cleaned, cleanedPath, previewActive: false }),
+  setPreviewActive: (previewActive) => set({ previewActive }),
   setProfile: (profile) => set({ profile }),
   // Capabilities can change under a made selection, so this reconciles rather
   // than just stores: a speaker the engine no longer offers cannot stay
@@ -407,6 +588,23 @@ export const useStore = create<AppState>((set) => ({
           : (speakers[0] ?? null),
       mode: restoreAvailable ? s.mode : 'natural',
     })),
+  setCapabilitiesV1: (capabilities) =>
+    set((s) => {
+      const activeRestoreId = s.speakerId ? 'restore_enrolled' : 'restore_source';
+      const restoreCap =
+        capabilities.find((c) => c.capability_id === activeRestoreId) ??
+        capabilities.find(
+          (c) => c.capability_id === 'restore_enrolled' || c.capability_id === 'restore_source',
+        );
+      const isRestoreBlocked = restoreCap
+        ? restoreCap.maturity === 'blocked' || !restoreCap.available
+        : false;
+      return {
+        capabilities,
+        mode: isRestoreBlocked && s.mode === 'restore' ? 'natural' : s.mode,
+      };
+    }),
+  setReconstructionConsent: (reconstructionConsent) => set({ reconstructionConsent }),
   setMode: (mode) => set({ mode }),
   setSpeakerId: (speakerId) => set({ speakerId }),
   setCutoffHz: (cutoffHz) => set({ cutoffHz }),
@@ -416,6 +614,9 @@ export const useStore = create<AppState>((set) => ({
   // A new report invalidates any selection made against the previous one.
   setReport: (report) => set({ report, selectedUnit: null, highlightRange: null }),
   setAbMode: (abMode) => set({ abMode }),
+  setLoudnessMatch: (loudnessMatch) => set({ loudnessMatch }),
+  setGainOffsetDb: (gainOffsetDb) => set({ gainOffsetDb }),
+  setAdvancedOpen: (advancedOpen) => set({ advancedOpen }),
   setDeckFault: (deckFault) => set({ deckFault }),
   setArtifacts: (artifacts) => set({ artifacts }),
   setPlaying: (playing) => set({ playing }),
@@ -440,7 +641,21 @@ export const useStore = create<AppState>((set) => ({
         ? { start: selectedUnit.start_time_s, end: selectedUnit.end_time_s }
         : null,
     }),
-  setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
+  setSelectionRange: (selectionRange) => set({ selectionRange }),
+  setShortcutsOpen: (shortcutsOpen) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        shortcutsOpen ? { type: 'OPEN', overlay: 'shortcuts' } : { type: 'CLOSE_IF', overlay: 'shortcuts' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
   setStatus: (statusLine) => set({ statusLine }),
   setError: (error, label) => set({ error, errorLabel: error ? (label ?? null) : null }),
   setDragOver: (dragOver) => set({ dragOver }),
@@ -476,14 +691,144 @@ export const useStore = create<AppState>((set) => ({
       history: s.history.map((h) => (h.jobId === jobId ? { ...h, ...patch } : h)),
     })),
   setCurrentRun: (currentRunId) => set({ currentRunId }),
+  setBatch: (batch) => set({ batch }),
+  patchBatch: (patch) =>
+    set((s) => ({
+      batch: s.batch ? { ...s.batch, ...patch } : null,
+    })),
+  setActiveInspectJobId: (activeInspectJobId) => set({ activeInspectJobId }),
+  setRackSettings: (rackSettings, rackUndo, rackDirty) =>
+    set((s) => ({
+      rackSettings,
+      ...(rackUndo !== undefined ? { rackUndo } : {}),
+      ...(rackDirty !== undefined ? { rackDirty } : {}),
+      ...(rackSettings.namingTemplate !== undefined
+        ? { batchNamingTemplate: rackSettings.namingTemplate }
+        : {}),
+      ...(rackUndo === undefined && rackDirty === undefined
+        ? { rackDirty: s.rackDirty || !shallowRecordEqual(rackSettings, DEFAULT_STUDIO_RACK_SETTINGS) }
+        : {}),
+    })),
+  setTakes: (takes, activeTakeId) =>
+    set((s) => ({
+      takes,
+      activeTakeId: activeTakeId !== undefined ? activeTakeId : s.activeTakeId,
+    })),
+  setActiveTakeId: (activeTakeId) => set({ activeTakeId }),
+  setUnitOverrides: (unitOverrides, overrideUndo) =>
+    set(() => ({
+      unitOverrides,
+      ...(overrideUndo !== undefined ? { overrideUndo } : {}),
+    })),
+  setSpectralUndo: (spectralUndo) => set({ spectralUndo }),
+  setLastUndoDomain: (lastUndoDomain) => set({ lastUndoDomain }),
+  setSpectralSelection: (spectralSelection) => set({ spectralSelection }),
+  setVideoPreviewCollapsed: (videoPreviewCollapsed) => set({ videoPreviewCollapsed }),
+  setBatchNamingTemplate: (batchNamingTemplate) =>
+    set((s) => ({
+      batchNamingTemplate,
+      rackSettings: { ...s.rackSettings, namingTemplate: batchNamingTemplate },
+    })),
+  setWorkspaceMode: (workspaceMode) => {
+    try {
+      if (typeof window !== 'undefined') window.localStorage.setItem(WORKSPACE_MODE_KEY, workspaceMode);
+    } catch {
+      // ignore storage errors
+    }
+    set({ workspaceMode });
+  },
+  setLivePreviewEnabled: (livePreviewEnabled) => {
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(LIVE_PREVIEW_KEY, livePreviewEnabled ? 'true' : 'false');
+      }
+    } catch {
+      // ignore storage errors
+    }
+    set({ livePreviewEnabled });
+  },
+  setActiveOverlay: (next) =>
+    set({
+      activeOverlay: next,
+      assistantDrawerOpen: next === 'assistant',
+      batchDrawerOpen: next === 'batch',
+      modelsDrawerOpen: next === 'models',
+      shortcutsOpen: next === 'shortcuts',
+    }),
+  setAssistantDrawerOpen: (open) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        open ? { type: 'OPEN', overlay: 'assistant' } : { type: 'CLOSE_IF', overlay: 'assistant' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
+  setPendingChatPrompt: (pendingChatPrompt) => set({ pendingChatPrompt }),
+  setBatchDrawerOpen: (open) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        open ? { type: 'OPEN', overlay: 'batch' } : { type: 'CLOSE_IF', overlay: 'batch' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
+  setModelsDrawerOpen: (open) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        open ? { type: 'OPEN', overlay: 'models' } : { type: 'CLOSE_IF', overlay: 'models' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
+  setActiveGoalId: (activeGoalId) => set({ activeGoalId }),
+  setStageBlend: (blend) => set({ stageBlend: Math.min(1, Math.max(0, Number.isFinite(blend) ? blend : 0)) }),
+  pushToast: (text, kind = 'info', durationMs = 4200) => {
+    const id = `toast-${++toastSeq}`;
+    set((s) => ({ toasts: [...s.toasts.slice(-2), { id, text, kind }] }));
+    if (durationMs > 0) {
+      const timer = setTimeout(() => {
+        toastTimers.delete(id);
+        set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+      }, durationMs);
+      toastTimers.set(id, timer);
+    }
+  },
+  dismissToast: (id) => {
+    const timer = toastTimers.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      toastTimers.delete(id);
+    }
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+  },
   resetForNewSource: () =>
     set({
       original: null,
       cleaned: null,
       cleanedPath: null,
+      previewActive: false,
       job: null,
       report: null,
       abMode: 'original',
+      gainOffsetDb: 0,
       deckFault: null,
       artifacts: null,
       playing: false,
@@ -492,14 +837,69 @@ export const useStore = create<AppState>((set) => ({
       hoverUnit: null,
       highlightRange: null,
       selectedUnit: null,
+      selectionRange: null,
+      takes: [],
+      activeTakeId: null,
+      unitOverrides: {},
+      overrideUndo: createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }),
+      spectralUndo: createUndoStack<string | null>(null),
+      lastUndoDomain: null,
+      spectralSelection: null,
       error: null,
       errorLabel: null,
+      reconstructionConsent: false,
       view: { start: 0, end: 0 },
       // The run list survives a new clip — it is the session's memory — but
       // nothing in it is on screen any more.
       currentRunId: null,
     }),
 }));
+
+export const OPTIONAL_CLEANUP_PROFILES = new Set<string>(['studio_pro', 'dereverb']);
+
+/** Fail-closed check: true unless capabilities explicitly advertise route as available and unblocked. */
+export function isRouteUnavailable(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): boolean {
+  return !capabilities?.some(
+    (c) => c.capability_id === routeOrCapId && c.available && c.maturity !== 'blocked',
+  );
+}
+
+/** Fail-closed for optional neural profiles (`studio_pro`, `dereverb`); explicit-block check for baseline routes. */
+export function isProfileUnavailable(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  profile: string,
+): boolean {
+  if (OPTIONAL_CLEANUP_PROFILES.has(profile)) {
+    return isRouteUnavailable(capabilities, profile);
+  }
+  return isRouteBlocked(capabilities, profile);
+}
+
+export function isRouteBlocked(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): boolean {
+  if (!capabilities) return false;
+  const cap = capabilities.find((c) => c.capability_id === routeOrCapId);
+  if (!cap) return false;
+  return cap.maturity === 'blocked' || !cap.available;
+}
+
+export function getRouteBlockedReason(
+  capabilities: CapabilityStatusV1[] | null | undefined,
+  routeOrCapId: string,
+): string | null {
+  if (!capabilities) return null;
+  const cap = capabilities.find((c) => c.capability_id === routeOrCapId);
+  if (!cap) return null;
+  if (cap.maturity === 'blocked' || !cap.available) {
+    return cap.reason ?? `Capability ${routeOrCapId} is blocked`;
+  }
+  return null;
+}
 
 // Keep the store's `view` in step with the imperative controller without
 // re-rendering on every wheel event: one trailing update per burst.

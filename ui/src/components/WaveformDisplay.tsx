@@ -15,7 +15,13 @@ import { chooseStep, formatSeconds, formatTime, tickLabel, timeTicksIn } from '.
 import { waveView } from '../render/viewWindow';
 import type { WaveKind } from '../render/waveformProtocol';
 import '../render/waveZoom.css';
-import { seekTo } from '../state/actions';
+import {
+  clearSelectionRange,
+  markSelectionEnd,
+  markSelectionStart,
+  seekTo,
+} from '../state/actions';
+import { useI18n } from '../state/i18n';
 import { channelName, reportChannels } from '../state/selection';
 import { getState, useStore } from '../state/store';
 import { VerdictStrip } from './VerdictStrip';
@@ -75,6 +81,7 @@ interface DetailKey {
 }
 
 export function WaveformDisplay() {
+  const { t, locale } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const displayRef = useRef<HTMLDivElement | null>(null);
@@ -90,8 +97,13 @@ export function WaveformDisplay() {
   const ovCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const ovWinRef = useRef<HTMLDivElement | null>(null);
   const ovRef = useRef<HTMLDivElement | null>(null);
+  const selOverlayRef = useRef<HTMLDivElement | null>(null);
 
-  const dragging = useRef(false);
+  const dragRef = useRef<
+    | { readonly mode: 'idle' }
+    | { readonly mode: 'seeking'; readonly pointerId: number }
+    | { readonly mode: 'selecting'; readonly pointerId: number; readonly anchorS: number }
+  >({ mode: 'idle' });
   const panBase = useRef<{ x: number; start: number; end: number } | null>(null);
   const ovGrab = useRef<{ offset: number } | null>(null);
   const bucketsRef = useRef(1200);
@@ -111,6 +123,7 @@ export function WaveformDisplay() {
   const highlight = useStore((s) => s.highlightRange);
   const analyzing = useStore((s) => s.analyzing);
   const source = useStore((s) => s.source);
+  const selectionRange = useStore((s) => s.selectionRange);
   const setError = useStore((s) => s.setError);
 
   // A7/B4 · which channels this report decided on. A split-speakers run emits
@@ -304,6 +317,27 @@ export function WaveformDisplay() {
       }
     }
     syncSelTag();
+
+    // D2: position selection overlay
+    const selOv = selOverlayRef.current;
+    if (selOv) {
+      const sel = getState().selectionRange;
+      if (sel && sel.end > sel.start && dur > 0 && span > 0) {
+        const left = ((sel.start - v.start) / span) * 100;
+        const right = ((sel.end - v.start) / span) * 100;
+        if (right <= 0 || left >= 100) {
+          selOv.style.display = 'none';
+        } else {
+          const clampedLeft = Math.max(0, left);
+          const clampedRight = Math.min(100, right);
+          selOv.style.display = '';
+          selOv.style.left = `${clampedLeft}%`;
+          selOv.style.width = `${Math.max(0, clampedRight - clampedLeft)}%`;
+        }
+      } else {
+        selOv.style.display = 'none';
+      }
+    }
   }, [syncSelTag]);
 
   // ------------------------------------------------------------ detail fetch
@@ -580,6 +614,11 @@ export function WaveformDisplay() {
     host.setUnits(arr);
   }, [report]);
 
+  // D2: re-sync selection overlay when the range changes
+  useEffect(() => {
+    updateChrome();
+  }, [selectionRange, updateChrome]);
+
   // Width changes move the deepest useful zoom (one bucket per device column).
   //
   // This used to be a `useEffect` on a `width` useState that the JSX never
@@ -662,16 +701,25 @@ export function WaveformDisplay() {
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
 
+  // D2 · Shift-drag starts/extends a selection range instead of seeking.
+  const setSelectionRange = useStore((s) => s.setSelectionRange);
+
   const onPointerDown = useCallback(
     (e: PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
       const t = timeAt(e.clientX);
       if (t === null) return;
-      dragging.current = true;
       capture(e.currentTarget, e.pointerId);
-      seekTo(t);
+
+      if (e.shiftKey) {
+        dragRef.current = { mode: 'selecting', pointerId: e.pointerId, anchorS: t };
+        setSelectionRange({ start: t, end: t });
+      } else {
+        dragRef.current = { mode: 'seeking', pointerId: e.pointerId };
+        seekTo(t);
+      }
     },
-    [timeAt],
+    [timeAt, setSelectionRange],
   );
 
   const onPointerMove = useCallback(
@@ -682,20 +730,36 @@ export function WaveformDisplay() {
       const x = e.clientX - r.left;
       if (x >= 0 && x <= r.width) hostRef.current?.setHover(x);
       else hostRef.current?.setHover(null);
-      if (dragging.current) {
-        const t = timeAt(e.clientX);
-        if (t !== null) seekTo(t);
+
+      const drag = dragRef.current;
+      if (drag.mode === 'idle' || drag.pointerId !== e.pointerId) return;
+      const t = timeAt(e.clientX);
+      if (t === null) return;
+
+      if (drag.mode === 'selecting') {
+        setSelectionRange({ start: Math.min(drag.anchorS, t), end: Math.max(drag.anchorS, t) });
+      } else {
+        seekTo(t);
       }
     },
-    [timeAt],
+    [timeAt, setSelectionRange],
   );
 
-  const onPointerUp = useCallback((e: PointerEvent<HTMLDivElement>) => {
-    if (dragging.current) {
-      dragging.current = false;
+  const onPointerUp = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      const drag = dragRef.current;
+      if (drag.mode === 'idle' || drag.pointerId !== e.pointerId) return;
+      dragRef.current = { mode: 'idle' };
+      if (drag.mode === 'selecting') {
+        const sel = getState().selectionRange;
+        if (sel && sel.end - sel.start < 0.05) {
+          setSelectionRange(null);
+        }
+      }
       release(e.currentTarget, e.pointerId);
-    }
-  }, []);
+    },
+    [setSelectionRange],
+  );
 
   const onPointerLeave = useCallback(() => {
     hostRef.current?.setHover(null);
@@ -749,6 +813,22 @@ export function WaveformDisplay() {
           break;
         case 'PageDown':
           panBy(1);
+          break;
+        case 'Escape':
+          // D2: clear selection range only when one is active; otherwise let
+          // the global keyboard map handle Escape (e.g. cancelling a running job).
+          if (!getState().selectionRange) return;
+          clearSelectionRange();
+          break;
+        case 'i':
+        case 'I':
+          // D2: NLE in-point — set selection start to live playhead time
+          markSelectionStart();
+          break;
+        case 'o':
+        case 'O':
+          // D2: NLE out-point — set selection end to live playhead time
+          markSelectionEnd();
           break;
         default:
           return;
@@ -871,20 +951,55 @@ export function WaveformDisplay() {
   }, []);
 
   const hasData = Boolean(original);
+  const hasSelection = Boolean(selectionRange && selectionRange.end > selectionRange.start);
 
   return (
     <section className="panel wavepanel" ref={panelRef} aria-label="Waveform">
       <p className="sr-only" id="wave-view-help">
         Plus and minus zoom about the centre, zero fits the whole clip, Page Up
         and Page Down move one windowful, Home and End go to the start and the
-        end. Left and right arrows seek the transport.
+        end. Left and right arrows seek the transport. Shift plus drag, or I and
+        O, select a time region; Escape clears it.
       </p>
       <div className="panel-head">
         <h2 className="panel-title">
-          <span>Waveform</span>
+          <span>{locale === 'ckb' ? 'شەپۆلی دەنگ' : 'Waveform'}</span>
           {source ? <span className="sub">· {source.name}</span> : null}
         </h2>
         <div className="wave-legend-head">
+          <span className="wave-region" role="group" aria-label="Waveform region picker">
+            <button
+              type="button"
+              className="wave-fit wave-mark"
+              onClick={markSelectionStart}
+              disabled={!hasData}
+              aria-label={`${t.markStart} — mark region start at playhead`}
+              title="Mark region start (I) · or Shift+drag on waveform"
+            >
+              {t.markStart}
+            </button>
+            <button
+              type="button"
+              className="wave-fit wave-mark"
+              onClick={markSelectionEnd}
+              disabled={!hasData}
+              aria-label={`${t.markEnd} — mark region end at playhead`}
+              title="Mark region end (O) · or Shift+drag on waveform"
+            >
+              {t.markEnd}
+            </button>
+            {hasSelection ? (
+              <button
+                type="button"
+                className="wave-fit wave-mark-clear"
+                onClick={clearSelectionRange}
+                aria-label={`${t.clearRegion} selected region`}
+                title="Clear selected region (Esc)"
+              >
+                {t.clearRegion}
+              </button>
+            ) : null}
+          </span>
           <span className="wave-zoom">
             <span className="range" ref={rangeRef} data-testid="zoom-range">
               No clip
@@ -892,6 +1007,32 @@ export function WaveformDisplay() {
             <span className="mag" ref={magRef} data-testid="zoom-mag">
               1.0×
             </span>
+            <button
+              type="button"
+              className="wave-fit wave-zoom-btn"
+              onClick={() => {
+                if (!(waveView.duration > 0)) return;
+                waveView.zoomAt(waveView.start_s + waveView.span / 2, 1 / 1.6);
+              }}
+              disabled={!hasData}
+              aria-label="Zoom out"
+              title="Zoom out (−)"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="wave-fit wave-zoom-btn"
+              onClick={() => {
+                if (!(waveView.duration > 0)) return;
+                waveView.zoomAt(waveView.start_s + waveView.span / 2, 1.6);
+              }}
+              disabled={!hasData}
+              aria-label="Zoom in"
+              title="Zoom in (+)"
+            >
+              +
+            </button>
             <button
               type="button"
               className="wave-fit"
@@ -948,6 +1089,13 @@ export function WaveformDisplay() {
                 <span ref={timeRef} className="wave-time">
                   00:00.000
                 </span>
+                {/* D2: selection range overlay */}
+                <div
+                  ref={selOverlayRef}
+                  className="wave-sel-overlay"
+                  style={{ display: 'none' }}
+                  aria-hidden="true"
+                />
                 {selName ? (
                   /* A7/B4 · the selection band is channel-scoped on a
                      multi-channel report, and this is what says so in words.
@@ -982,11 +1130,23 @@ export function WaveformDisplay() {
               </>
             ) : (
               <div className="wave-empty">
-                <span className="big">{analyzing ? 'Analyzing clip' : 'No clip loaded'}</span>
+                <span className="big">
+                  {analyzing
+                    ? locale === 'ckb'
+                      ? 'شیکردنەوەی کلیپ…'
+                      : 'Analyzing clip'
+                    : locale === 'ckb'
+                      ? 'هیچ کلیپێک بارنەکراوە'
+                      : 'No clip loaded'}
+                </span>
                 <span>
                   {analyzing
-                    ? 'Decoding and measuring peaks, spectrum and loudness'
-                    : 'Open a file or drop one above to begin'}
+                    ? locale === 'ckb'
+                      ? 'خوێندنەوەی شەپۆل، شەبەنگ و بەرزی دەنگ'
+                      : 'Decoding and measuring peaks, spectrum and loudness'
+                    : locale === 'ckb'
+                      ? 'فایلێک بکەرەوە یان لێرە دایبنێ بۆ دەستپێکردن'
+                      : 'Open a file or drop one above to begin'}
                 </span>
               </div>
             )}

@@ -49,6 +49,16 @@ function Row({
     entry.enhanced !== null && entry.unitsTotal !== null
       ? `${entry.enhanced}/${entry.unitsTotal}`
       : '—';
+  const separation = entry.report?.separation;
+  const profileDisplay =
+    entry.profile === 'studio_pro'
+      ? 'Studio Pro'
+      : entry.profile === 'dereverb'
+        ? 'Dereverb'
+        : entry.profile;
+  const processingLabel = separation
+    ? (separation.operation === 'extract' ? 'Extract' : 'Remove')
+    : entry.status?.mode === 'separate' ? 'Separation' : profileDisplay;
   // D1 · a row draws seven fragments across two lines; read one after another
   // they are unintelligible ("Flute 09.m4a.mp4 ON SCREEN studio 5/5 units +3.2
   // LUFS Δ 4.2 s took 06:37:31"). The row is a button, so it gets one name
@@ -74,11 +84,11 @@ function Row({
   const say = [
     entry.inputName || 'clip',
     current ? 'currently on screen' : null,
-    entry.profile,
+    separation ? `${processingLabel} ${separation.prompt}` : processingLabel,
     entry.outcome === 'done'
       ? `${
           entry.enhanced !== null && entry.unitsTotal !== null
-            ? unitsEnhanced(entry.enhanced, entry.unitsTotal)
+            ? separation ? 'separated sound; listen to assess quality' : unitsEnhanced(entry.enhanced, entry.unitsTotal)
             : 'units not counted'
         }, LUFS change ${lufsDelta(entry)}, took ${fmtRuntime(entry.durationMs)}`
       : entry.outcome === 'failed'
@@ -126,12 +136,12 @@ function Row({
         {flag ? <span className="hist-flag">{flag}</span> : null}
       </span>
       <span className="hist-line2">
-        <span className="hist-profile">{entry.profile}</span>
+        <span className="hist-profile">{processingLabel}</span>
         {entry.outcome === 'done' ? (
           <>
             <span className="hist-kv">
-              <span className="hist-v mono">{units}</span>
-              <span className="hist-k">{unitNoun(entry.unitsTotal ?? 0)}</span>
+              <span className="hist-v mono">{separation ? 'stem' : units}</span>
+              <span className="hist-k">{separation ? 'selected' : unitNoun(entry.unitsTotal ?? 0)}</span>
             </span>
             <span className="hist-kv">
               <span className="hist-v mono">{lufsDelta(entry)}</span>

@@ -24,17 +24,25 @@ def remove_electrical_hum(
     waveform: np.ndarray[Any, np.dtype[np.float32]],
     sample_rate: int,
     hum_freq_hz: float = 50.0,
-    num_harmonics: int = 4,
+    num_harmonics: int = 8,
     q_factor: float = 30.0,
 ) -> np.ndarray[Any, np.dtype[np.float32]]:
-    """Apply narrow IIR notch filters at hum fundamental and harmonic frequencies."""
-    if len(waveform) < 64:
+    """Apply narrow zero-phase IIR notch filters at hum fundamental and harmonics."""
+    if len(waveform) < 64 or hum_freq_hz <= 0.0:
         return waveform.copy()
 
-    current = waveform.copy()
+    # Snap near-standard mains fundamentals (within ±0.5 Hz of 50/60 Hz) so
+    # higher harmonics (3rd-8th) remain dead-center inside Q=30 notches.
+    effective_freq = float(hum_freq_hz)
+    for nominal in (50.0, 60.0):
+        if abs(effective_freq - nominal) <= 0.5:
+            effective_freq = nominal
+            break
+
+    current = waveform.astype(np.float64, copy=True)
     for h in range(1, num_harmonics + 1):
-        f_notch = hum_freq_hz * h
-        if f_notch >= (sample_rate / 2.0) - 50:
+        f_notch = effective_freq * h
+        if f_notch >= (sample_rate / 2.0) - 50.0:
             break
         b, a = scipy.signal.iirnotch(f_notch, q_factor, fs=sample_rate)
         current = scipy.signal.filtfilt(b, a, current)

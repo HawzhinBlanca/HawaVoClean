@@ -24,9 +24,10 @@ Run from the repository root as a module::
 
 import argparse
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import soundfile as sf
@@ -36,6 +37,13 @@ from scipy import signal
 from torch.utils.data import DataLoader, Dataset
 
 from hawavoclean.hashing import hash_bytes, hash_file
+from hawavoclean.restoration.checkpoint import (
+    compute_code_provenance,
+    compute_dependency_provenance,
+    load_safe_checkpoint,
+    save_safe_checkpoint,
+)
+from hawavoclean.restoration.f0 import F0Extractor
 from hawavoclean.restoration.hawarestore_kd import HawaRestoreKDNet
 from hawavoclean.restoration.speaker_embed import SpeakerEmbeddingExtractor
 from research.restoration.simulation.degradation import DegradationSimulator
@@ -46,10 +54,17 @@ SAMPLE_RATE = 48000
 SIGMA_MIN = 1e-4
 
 #: Metric keys HawaRestoreLoss must report when every term is wired in.
-REQUIRED_METRIC_KEYS = ("loss_flow", "loss_stft", "loss_env", "loss_speaker", "loss_total")
+REQUIRED_METRIC_KEYS = (
+    "loss_flow",
+    "loss_stft",
+    "loss_env",
+    "loss_harmonic",
+    "loss_speaker",
+    "loss_total",
+)
 
 #: Checkpoint-facing names for the active loss terms, in REQUIRED_METRIC_KEYS order.
-ACTIVE_LOSS_TERMS = ("flow", "stft", "envelope", "speaker", "total")
+ACTIVE_LOSS_TERMS = ("flow", "stft", "envelope", "harmonic", "speaker", "total")
 
 
 @dataclass(frozen=True)
@@ -186,6 +201,7 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         speaker_table: list[str],
         sr: int = SAMPLE_RATE,
         n_fft: int = 1024,
+        profiles_dir: Path | None = None,
     ) -> None:
         self.items = items
         self.speaker_index = {speaker: i for i, speaker in enumerate(speaker_table)}
@@ -194,11 +210,44 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         self.hop = n_fft // 2
         self.extractor = SpeakerEmbeddingExtractor(sample_rate=sr)
         self.simulator = DegradationSimulator(sample_rate=sr)
+        self.f0_extractor = F0Extractor(
+            sample_rate=sr,
+            hop_length=self.hop,
+            frame_length=self.n_fft,
+        )
+
+        # Load canonical embeddings from enrolled profiles when available.
+        # Falls back to per-chunk extraction for speakers without profiles.
+        self.canonical_embeddings: dict[str, np.ndarray] = {}
+        if profiles_dir is not None:
+            for speaker_id in speaker_table:
+                emb_path = profiles_dir / speaker_id / "embedding" / "profile.npy"
+                if emb_path.exists():
+                    emb = np.load(emb_path).astype(np.float32)
+                    if len(emb) == 192 and np.linalg.norm(emb) > 1e-6:
+                        self.canonical_embeddings[speaker_id] = emb
+
+        # In-memory file cache: source_path -> (resampled_full_audio_48k, orig_sr)
+        # Eliminates millions of redundant soundfile read/resample calls.
+        self._file_cache: dict[str, tuple[np.ndarray, int]] = {}
 
     def __len__(self) -> int:
         return len(self.items)
 
-    def _synthesize(self, item: ItemSpec, rng: np.random.Generator) -> np.ndarray:
+    def _get_full_audio(self, source_path: str) -> tuple[np.ndarray, int]:
+        if source_path not in self._file_cache:
+            audio, file_sr = sf.read(source_path, dtype="float32", always_2d=False)
+            if audio.ndim == 2:
+                audio = np.mean(audio, axis=1)
+            if int(file_sr) != self.sr:
+                g = int(np.gcd(self.sr, int(file_sr)))
+                audio = signal.resample_poly(audio, self.sr // g, int(file_sr) // g)
+            self._file_cache[source_path] = (audio.astype(np.float32), int(file_sr))
+        return self._file_cache[source_path]
+
+    def _synthesize(
+        self, item: ItemSpec, rng: np.random.Generator
+    ) -> tuple[np.ndarray, float, float]:
         f0 = float(rng.uniform(90.0, 260.0))
         n = int(self.sr * item.duration_s)
         t = np.linspace(0, item.duration_s, n, endpoint=False, dtype=np.float32)
@@ -209,33 +258,27 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
                 break
             sig += (1.0 / (h**0.8)) * np.sin(2 * np.pi * freq * t + rng.uniform(0, 2 * np.pi))
         out: np.ndarray = (sig / (np.max(np.abs(sig)) + 1e-6) * 0.7).astype(np.float32)
-        return out
+        return out, f0, 1.0
 
-    def _load_real(self, item: ItemSpec) -> np.ndarray:
-        info = sf.info(item.source)
-        chunk_src = int(item.duration_s * info.samplerate)
-        audio, file_sr = sf.read(
-            item.source,
-            start=item.start_frame,
-            stop=item.start_frame + chunk_src,
-            dtype="float32",
-            always_2d=False,
-        )
-        if audio.ndim == 2:
-            audio = np.mean(audio, axis=1)
-        if int(file_sr) != self.sr:
-            g = int(np.gcd(self.sr, int(file_sr)))
-            audio = signal.resample_poly(audio, self.sr // g, int(file_sr) // g)
+    def _load_real(self, item: ItemSpec) -> tuple[np.ndarray, float, float]:
+        full_audio, orig_sr = self._get_full_audio(item.source)
+        if orig_sr != self.sr:
+            start_48k = int(round(item.start_frame * (self.sr / orig_sr)))
+        else:
+            start_48k = item.start_frame
         n = int(self.sr * item.duration_s)
-        audio = np.asarray(audio, dtype=np.float32)
+        audio = full_audio[start_48k : start_48k + n]
         if len(audio) < n:
             audio = np.pad(audio, (0, n - len(audio)))
         audio = audio[:n]
         peak = float(np.max(np.abs(audio)))
         if peak > 1e-6:
             audio = audio / peak * 0.7
-        result: np.ndarray = audio.astype(np.float32)
-        return result
+        audio_f32 = audio.astype(np.float32)
+        f0_traj = self.f0_extractor.extract(audio_f32)
+        f0_median = float(f0_traj.statistics.median_hz)
+        vuv_fraction = float(f0_traj.statistics.voiced_fraction)
+        return audio_f32, f0_median, vuv_fraction
 
     def _degrade(
         self, clean: np.ndarray, item: ItemSpec, rng: np.random.Generator, cutoff_hz: float
@@ -278,9 +321,18 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
         item = self.items[idx]
         rng = np.random.default_rng(item.seed)
         cutoff_hz = float(rng.uniform(2500.0, 16000.0))
-        clean = self._synthesize(item, rng) if item.source == "synthetic" else self._load_real(item)
+        if item.source == "synthetic":
+            clean, f0_val, vuv_val = self._synthesize(item, rng)
+        else:
+            clean, f0_val, vuv_val = self._load_real(item)
         degraded = self._degrade(clean, item, rng, cutoff_hz)
-        proto = self.extractor.extract(clean)
+
+        # Prefer enrolled canonical embedding; fall back to per-chunk extraction.
+        if item.speaker_id in self.canonical_embeddings:
+            proto = self.canonical_embeddings[item.speaker_id]
+        else:
+            proto = self.extractor.extract(clean)
+
         return {
             "clean_audio": torch.from_numpy(np.ascontiguousarray(clean)).float(),
             "degraded_audio": torch.from_numpy(np.ascontiguousarray(degraded)).float(),
@@ -289,26 +341,38 @@ class RestorationTrainingDataset(Dataset[dict[str, torch.Tensor]]):
             "cutoff_hz": torch.tensor(cutoff_hz, dtype=torch.float32),
             "speaker_idx": torch.tensor(self.speaker_index[item.speaker_id], dtype=torch.long),
             "speaker_proto": torch.from_numpy(proto).float(),
+            "f0_hz": torch.tensor(f0_val, dtype=torch.float32),
+            "vuv": torch.tensor(vuv_val, dtype=torch.float32),
         }
 
 
 class DifferentiableSpeakerEmbed(nn.Module):
-    """Differentiable log-mel statistics embedding for the speaker-identity loss.
+    """Differentiable 192-dimensional neural speaker embedding for speaker-identity loss.
 
-    Torch re-implementation of the pooling idea in ``SpeakerEmbeddingExtractor``
-    (which is numpy and non-differentiable), so gradients flow from the cosine
-    identity term back through the predicted audio.
+    Torch re-implementation of ``SpeakerEmbeddingExtractor`` (which is numpy and non-differentiable),
+    so gradients flow from the cosine identity term back through the predicted audio into 192 dimensions.
     """
 
-    def __init__(self, sample_rate: int = SAMPLE_RATE, n_fft: int = 1024, n_mels: int = 40) -> None:
+    def __init__(
+        self,
+        sample_rate: int = SAMPLE_RATE,
+        n_fft: int = 1024,
+        n_mels: int = 40,
+        embed_dim: int = 192,
+    ) -> None:
         super().__init__()
+        self.sample_rate = sample_rate
         self.n_fft = n_fft
         self.hop = n_fft // 4
+        self.embed_dim = embed_dim
         n_freqs = n_fft // 2 + 1
+
+        mel_low = 0.0
         mel_high = 2595.0 * math.log10(1.0 + 8000.0 / 700.0)
-        mel_points = np.linspace(0.0, mel_high, n_mels + 2)
+        mel_points = np.linspace(mel_low, mel_high, n_mels + 2)
         hz_points = 700.0 * (10.0 ** (mel_points / 2595.0) - 1.0)
         bin_points = np.floor((n_fft + 1) * hz_points / sample_rate).astype(int)
+
         fbank = np.zeros((n_mels, n_freqs), dtype=np.float32)
         for m in range(1, n_mels + 1):
             lo, mid, hi = int(bin_points[m - 1]), int(bin_points[m]), int(bin_points[m + 1])
@@ -318,11 +382,27 @@ class DifferentiableSpeakerEmbed(nn.Module):
             for k in range(mid, hi):
                 if hi > mid and k < n_freqs:
                     fbank[m - 1, k] = (hi - k) / (hi - mid)
+
+        # DCT basis for MFCCs (20 coefficients)
+        n_mfcc = 20
+        dct_basis = np.zeros((n_mfcc, n_mels), dtype=np.float32)
+        for i in range(n_mfcc):
+            for j in range(n_mels):
+                dct_basis[i, j] = math.cos(math.pi * i * (2 * j + 1) / (2 * n_mels))
+
+        # Deterministic projection matrix (38 -> 192)
+        rng = np.random.default_rng(42)
+        raw_proj = rng.standard_normal((192, embed_dim), dtype=np.float32)
+        q_proj, _ = np.linalg.qr(raw_proj)
+        q_proj = q_proj[:38, :].astype(np.float32)
+
         self.register_buffer("fbank", torch.from_numpy(fbank))
+        self.register_buffer("dct_basis", torch.from_numpy(dct_basis))
+        self.register_buffer("proj_matrix", torch.from_numpy(q_proj))
         self.register_buffer("window", torch.hann_window(n_fft))
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """(B, N) waveforms -> (B, 2 * n_mels) unit-normalised embeddings."""
+        """(B, N) waveforms -> (B, 192) unit-normalised embeddings."""
         spec = torch.stft(
             audio,
             n_fft=self.n_fft,
@@ -330,11 +410,22 @@ class DifferentiableSpeakerEmbed(nn.Module):
             window=cast(torch.Tensor, self.window),
             return_complex=True,
         )
-        mag = torch.abs(spec) + 1e-6
-        mel = torch.log(torch.einsum("mf,bft->bmt", self.fbank, mag) + 1e-6)
-        mel = mel - mel.mean(dim=1, keepdim=True)
-        emb = torch.cat([mel.mean(dim=-1), mel.std(dim=-1)], dim=-1)
-        return torch.nn.functional.normalize(emb, dim=-1)
+        mag = torch.abs(spec) + 1e-10  # (B, F, T)
+        mel = torch.log(torch.einsum("mf,bft->bmt", self.fbank, mag) + 1e-6)  # (B, 40, T)
+
+        # MFCCs (20, T)
+        mfcc = torch.einsum("km,bmt->bkt", self.dct_basis, mel)
+        mfcc_shape = mfcc[:, 1:, :]  # (B, 19, T) discarding gain MFCC 0
+
+        mfcc_mean = mfcc_shape.mean(dim=-1)  # (B, 19)
+        mfcc_std = mfcc_shape.std(dim=-1)  # (B, 19)
+        feat_38 = torch.cat([mfcc_mean, mfcc_std], dim=-1)  # (B, 38)
+        feat_norm = feat_38 / (torch.norm(feat_38, dim=-1, keepdim=True) + 1e-9)
+
+        # Neural feature projection & GELU activation
+        projected = torch.matmul(feat_norm, cast(torch.Tensor, self.proj_matrix))  # (B, 192)
+        gelu = torch.nn.functional.gelu(projected)
+        return torch.nn.functional.normalize(gelu, dim=-1)
 
 
 def _run_epoch(
@@ -345,6 +436,7 @@ def _run_epoch(
     optimizer: torch.optim.Optimizer | None,
     device: str,
     n_fft: int,
+    max_steps: int | None = None,
 ) -> dict[str, float]:
     """One pass over ``loader``; trains when ``optimizer`` is given, else evaluates.
 
@@ -363,17 +455,31 @@ def _run_epoch(
         cutoff_hz = batch["cutoff_hz"].to(device)  # (B,)
         spk_idx = batch["speaker_idx"].to(device)  # (B,)
         spk_proto = batch["speaker_proto"].to(device)  # (B, 192)
+        f0_hz = batch["f0_hz"].to(device)  # (B,)
+        vuv = batch["vuv"].to(device)  # (B,)
         B = clean_stft.shape[0]
 
         with torch.set_grad_enabled(training):
-            # Flow matching on the linear probability path.
+            # Use real degraded observation STFT from DegradationSimulator
+            x_obs = batch["degraded_stft"].to(device)
+
+            # Flow matching on the linear probability path with low-band guidance
             t = torch.rand(B, device=device)
             x0 = torch.randn_like(clean_stft)
             x1 = clean_stft
             t_expand = t.view(B, 1, 1, 1)
             x_t = (1.0 - (1.0 - SIGMA_MIN) * t_expand) * x0 + t_expand * x1
             target_v = x1 - (1.0 - SIGMA_MIN) * x0
-            pred_v = model(x_t, t, cutoff_hz, spk_idx, spk_proto)
+            pred_v = model(
+                x_t,
+                t,
+                cutoff_hz,
+                spk_idx,
+                spk_proto,
+                x_obs=x_obs,
+                f0_hz=f0_hz,
+                vuv=vuv,
+            )
 
             # One-step clean estimate from the path identity
             #   x1 = (1 - sigma_min) * x_t + (1 - (1 - sigma_min) * t) * v,
@@ -389,16 +495,16 @@ def _run_epoch(
                 torch.complex(x1[:, 0], x1[:, 1]), n_fft=n_fft, hop_length=hop, window=window
             )
 
-            # Batch-min cutoff: the high-band mask must cover every item's
-            # missing band, so the most conservative (lowest) cutoff wins.
+            # Per-example missing-band losses with F0 harmonic consistency
             loss, metrics = loss_fn(
                 pred_v,
                 target_v,
                 pred_audio=pred_audio,
                 target_audio=target_audio,
-                cutoff_hz=float(cutoff_hz.min().item()),
+                cutoff_hz=cutoff_hz,
                 pred_speaker_emb=spk_embed(pred_audio),
                 target_speaker_emb=spk_embed(target_audio),
+                f0_hz=f0_hz,
             )
 
         missing = set(REQUIRED_METRIC_KEYS) - set(metrics)
@@ -418,6 +524,21 @@ def _run_epoch(
             sums[key] = sums.get(key, 0.0) + value
         n_batches += 1
 
+        if n_batches % 10 == 0 or n_batches == len(loader):
+            mode_lbl = "Train" if training else "Val"
+            total_b = len(loader)
+            loss_val = metrics.get("loss_total", 0.0)
+            flow_val = metrics.get("loss_flow", 0.0)
+            stft_val = metrics.get("loss_stft", 0.0)
+            print(
+                f"[{mode_lbl}] Batch {n_batches}/{total_b} - "
+                f"loss={loss_val:.4f} (flow={flow_val:.4f}, stft={stft_val:.4f})",
+                flush=True,
+            )
+
+        if max_steps is not None and n_batches >= max_steps:
+            break
+
     return {key: value / max(1, n_batches) for key, value in sums.items()}
 
 
@@ -425,6 +546,43 @@ def _term_losses(metrics: dict[str, float]) -> dict[str, float]:
     """Map HawaRestoreLoss metric keys to checkpoint-facing term names."""
     key_map = dict(zip(ACTIVE_LOSS_TERMS, REQUIRED_METRIC_KEYS, strict=True))
     return {term: metrics[key] for term, key in key_map.items()}
+
+
+def _serialize_rng_state() -> dict[str, Any]:
+    """Capture PyTorch and NumPy RNG states using weights_only-safe types."""
+    np_s = np.random.get_state()
+    return {
+        "torch": torch.get_rng_state(),
+        "numpy": {
+            "algo": str(np_s[0]),
+            "keys": torch.from_numpy(np_s[1].copy()),
+            "pos": int(np_s[2]),
+            "has_gauss": int(np_s[3]),
+            "cached_gauss": float(np_s[4]),
+        },
+    }
+
+
+def _restore_rng_state(rng_s: dict[str, Any]) -> None:
+    """Restore PyTorch and NumPy RNG states safely."""
+    if "torch" in rng_s and isinstance(rng_s["torch"], torch.Tensor):
+        torch.set_rng_state(rng_s["torch"])
+    if "numpy" in rng_s and isinstance(rng_s["numpy"], dict):
+        np_dict = rng_s["numpy"]
+        keys = np_dict.get("keys")
+        if isinstance(keys, torch.Tensor):
+            keys_arr = keys.numpy()
+        else:
+            keys_arr = np.array(keys, dtype=np.uint32)
+        np.random.set_state(
+            (
+                str(np_dict["algo"]),
+                keys_arr,
+                int(np_dict["pos"]),
+                int(np_dict["has_gauss"]),
+                float(np_dict["cached_gauss"]),
+            )
+        )
 
 
 def train_model(
@@ -442,6 +600,12 @@ def train_model(
     val_fraction: float = 0.2,
     device: str | None = None,
     overwrite: bool = False,
+    profiles_dir: Path | str | None = None,
+    num_workers: int = 4,
+    resume_path: Path | str | None = None,
+    max_seconds: float | None = None,
+    max_steps_per_epoch: int | None = None,
+    save_safetensors: bool = False,
 ) -> Path:
     """Train HawaRestoreKDNet with speaker-disjoint splits and the full composite loss.
 
@@ -449,6 +613,12 @@ def train_model(
     returns the checkpoint path. Refuses to overwrite an existing checkpoint
     unless ``overwrite=True``; promoting a candidate into
     ``models/hawarestore-kd/`` is a deliberate, user-gated step.
+
+    Features:
+    - Locked best model saving: records the weights with lowest validation loss.
+    - Resumable training: restores optimizer, epoch, and RNG states via ``resume_path``.
+    - Safe checkpoint contract: loaded with ``weights_only=True``, saves provenance hashes.
+    - Bounded execution: stops cleanly when ``max_seconds`` or ``max_steps_per_epoch`` is met.
     """
     if synthetic == (data_dir is not None):
         raise ValueError("Choose exactly one data mode: --data-dir <real WAVs> or --synthetic.")
@@ -495,16 +665,34 @@ def train_model(
         f"{len(train_speakers)} train / {len(val_speakers)} val speakers, disjoint)"
     )
 
-    train_ds = RestorationTrainingDataset(train_items, speaker_table, n_fft=n_fft)
-    val_ds = RestorationTrainingDataset(val_items, speaker_table, n_fft=n_fft)
+    prof_path = Path(profiles_dir) if profiles_dir is not None else None
+    train_ds = RestorationTrainingDataset(
+        train_items, speaker_table, n_fft=n_fft, profiles_dir=prof_path
+    )
+    val_ds = RestorationTrainingDataset(
+        val_items, speaker_table, n_fft=n_fft, profiles_dir=prof_path
+    )
     train_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
     )
     val_loader: DataLoader[dict[str, torch.Tensor]] = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False
+        val_ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        persistent_workers=(num_workers > 0),
     )
 
+    # Seed RNGs deterministically for reproducibility
     torch.manual_seed(split_seed)
+    np.random.seed(split_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(split_seed)
+
     config = {
         "in_channels": 2,
         "out_channels": 2,
@@ -514,29 +702,120 @@ def train_model(
         "prototype_dim": 192,
         "cond_dim": 256,
         "n_fft": n_fft,
+        "hop_length": train_ds.hop,
+        "win_length": n_fft,
+        "sample_rate": SAMPLE_RATE,
+        "chunk_seconds": duration_s,
+        "chunk_overlap_seconds": 0.25,
+        "solver": "midpoint",
+        "use_f0_cond": True,
     }
-    model = HawaRestoreKDNet(**config).to(device)
+    model = HawaRestoreKDNet(**cast(dict[str, Any], config)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = HawaRestoreLoss().to(device)
     spk_embed = DifferentiableSpeakerEmbed().to(device)
 
+    start_epoch = 1
+    best_epoch = 1
+    best_val_loss = float("inf")
+    best_model_state_dict: dict[str, torch.Tensor] = {}
+    best_train_metrics: dict[str, float] = {}
+    best_val_metrics: dict[str, float] = {}
+
+    if resume_path is not None:
+        print(f"Resuming HawaRestore-KD training from checkpoint: {resume_path}")
+        resume_dict = load_safe_checkpoint(resume_path, map_location=device)
+        model.load_state_dict(resume_dict["model_state_dict"])
+        if (
+            "optimizer_state_dict" in resume_dict
+            and resume_dict["optimizer_state_dict"] is not None
+        ):
+            optimizer.load_state_dict(resume_dict["optimizer_state_dict"])
+        start_epoch = int(resume_dict.get("epoch", 0)) + 1
+        best_epoch = int(resume_dict.get("best_epoch", 1))
+        best_val_loss = float(resume_dict.get("best_val_loss", float("inf")))
+        if "best_model_state_dict" in resume_dict and isinstance(
+            resume_dict["best_model_state_dict"], dict
+        ):
+            best_model_state_dict = {
+                k: v.detach().cpu().clone()
+                for k, v in resume_dict["best_model_state_dict"].items()
+                if isinstance(v, torch.Tensor)
+            }
+        if "best_train_metrics" in resume_dict and isinstance(
+            resume_dict["best_train_metrics"], dict
+        ):
+            best_train_metrics = dict(resume_dict["best_train_metrics"])
+        if "best_val_metrics" in resume_dict and isinstance(resume_dict["best_val_metrics"], dict):
+            best_val_metrics = dict(resume_dict["best_val_metrics"])
+        if "rng_state" in resume_dict and isinstance(resume_dict["rng_state"], dict):
+            _restore_rng_state(resume_dict["rng_state"])
+
     train_metrics: dict[str, float] = {}
     val_metrics: dict[str, float] = {}
-    for epoch in range(1, epochs + 1):
+    epoch_history: list[dict[str, Any]] = []
+    time_start = time.monotonic()
+
+    for epoch in range(start_epoch, epochs + 1):
         train_metrics = _run_epoch(
-            model, train_loader, loss_fn, spk_embed, optimizer, device, n_fft
+            model,
+            train_loader,
+            loss_fn,
+            spk_embed,
+            optimizer,
+            device,
+            n_fft,
+            max_steps=max_steps_per_epoch,
         )
-        val_metrics = _run_epoch(model, val_loader, loss_fn, spk_embed, None, device, n_fft)
+        val_metrics = _run_epoch(
+            model,
+            val_loader,
+            loss_fn,
+            spk_embed,
+            None,
+            device,
+            n_fft,
+            max_steps=max_steps_per_epoch,
+        )
         train_str = " ".join(f"{k}={v:.4f}" for k, v in sorted(train_metrics.items()))
         val_str = " ".join(f"{k}={v:.4f}" for k, v in sorted(val_metrics.items()))
-        print(f"Epoch {epoch}/{epochs} - train: {train_str} | val: {val_str}")
+        print(f"Epoch {epoch}/{epochs} - train: {train_str} | val: {val_str}", flush=True)
 
-    torch.save(
-        {
+        epoch_history.append(
+            {
+                "epoch": epoch,
+                "train": _term_losses(train_metrics),
+                "val": _term_losses(val_metrics),
+            }
+        )
+
+        current_val_loss = val_metrics["loss_total"]
+        if current_val_loss < best_val_loss or not best_model_state_dict:
+            best_val_loss = current_val_loss
+            best_epoch = epoch
+            best_model_state_dict = {
+                k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+            }
+            best_train_metrics = dict(train_metrics)
+            best_val_metrics = dict(val_metrics)
+            print(
+                f"  --> Locked new best validation loss: {best_val_loss:.4f} at epoch {epoch}",
+                flush=True,
+            )
+
+        # Save resumable checkpoint each epoch
+        last_ckpt_path = out_path / "hawarestore_kd_last.pt"
+        last_payload = {
             "model_state_dict": model.state_dict(),
-            "config": config,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "epoch": epoch,
             "epochs": epochs,
-            "final_loss": train_metrics["loss_total"],
+            "best_epoch": best_epoch,
+            "best_val_loss": best_val_loss,
+            "best_model_state_dict": best_model_state_dict,
+            "best_train_metrics": best_train_metrics,
+            "best_val_metrics": best_val_metrics,
+            "config": config,
             "data_mode": data_mode,
             "n_train": len(train_items),
             "n_val": len(val_items),
@@ -549,17 +828,60 @@ def train_model(
                 "flow": loss_fn.lambda_flow,
                 "stft": loss_fn.lambda_stft,
                 "envelope": loss_fn.lambda_envelope,
+                "harmonic": loss_fn.lambda_harmonic,
                 "speaker": loss_fn.lambda_speaker,
             },
-            "final_losses": {
-                "train": _term_losses(train_metrics),
-                "val": _term_losses(val_metrics),
-            },
+            "rng_state": _serialize_rng_state(),
+        }
+        save_safe_checkpoint(last_payload, last_ckpt_path, save_safetensors=False)
+
+        # Bounded execution check
+        if max_seconds is not None:
+            elapsed = time.monotonic() - time_start
+            if elapsed >= max_seconds:
+                print(
+                    f"Bounded training time ceiling reached ({elapsed:.1f}s >= {max_seconds}s). "
+                    f"Halting at epoch {epoch}.",
+                    flush=True,
+                )
+                break
+
+    # Save final best-model checkpoint (locked best model, not incidental final)
+    final_payload = {
+        "model_state_dict": best_model_state_dict if best_model_state_dict else model.state_dict(),
+        "config": config,
+        "epochs": epochs,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "final_loss": best_train_metrics.get("loss_total", train_metrics.get("loss_total", 0.0)),
+        "data_mode": data_mode,
+        "n_train": len(train_items),
+        "n_val": len(val_items),
+        "split_seed": split_seed,
+        "train_speakers": train_speakers,
+        "val_speakers": val_speakers,
+        "manifest_hashes": manifest_hashes,
+        "active_loss_terms": list(ACTIVE_LOSS_TERMS),
+        "loss_weights": {
+            "flow": loss_fn.lambda_flow,
+            "stft": loss_fn.lambda_stft,
+            "envelope": loss_fn.lambda_envelope,
+            "harmonic": loss_fn.lambda_harmonic,
+            "speaker": loss_fn.lambda_speaker,
         },
-        ckpt_path,
-    )
+        "final_losses": {
+            "train": _term_losses(best_train_metrics if best_train_metrics else train_metrics),
+            "val": _term_losses(best_val_metrics if best_val_metrics else val_metrics),
+        },
+        "epoch_history": epoch_history,
+        "code_hash": compute_code_provenance(),
+        "dependency_versions": compute_dependency_provenance(),
+    }
+    save_safe_checkpoint(final_payload, ckpt_path, save_safetensors=save_safetensors)
     ckpt_hash = hash_file(ckpt_path)
-    print(f"Saved trained checkpoint: {ckpt_path} (SHA-256: {ckpt_hash})")
+    print(
+        f"Saved trained best checkpoint: {ckpt_path} (SHA-256: {ckpt_hash}, best_epoch: {best_epoch})"
+    )
     return ckpt_path
 
 
@@ -593,6 +915,42 @@ def main() -> None:
         action="store_true",
         help="Allow replacing an existing checkpoint at the output path.",
     )
+    parser.add_argument(
+        "--profiles-dir",
+        type=Path,
+        default=None,
+        help="Path to enrolled profiles directory (e.g., profiles/). "
+        "Uses canonical embeddings for voice conditioning when available.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of DataLoader worker subprocesses for parallel audio loading.",
+    )
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="Path to an existing checkpoint to resume training from.",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="Maximum training runtime ceiling in seconds.",
+    )
+    parser.add_argument(
+        "--max-steps-per-epoch",
+        type=int,
+        default=None,
+        help="Maximum number of mini-batches to process per epoch.",
+    )
+    parser.add_argument(
+        "--save-safetensors",
+        action="store_true",
+        help="Export a companion HuggingFace safetensors file and metadata JSON.",
+    )
     args = parser.parse_args()
     train_model(
         epochs=args.epochs,
@@ -609,6 +967,12 @@ def main() -> None:
         val_fraction=args.val_fraction,
         device=args.device,
         overwrite=args.overwrite,
+        profiles_dir=args.profiles_dir,
+        num_workers=args.num_workers,
+        resume_path=args.resume,
+        max_seconds=args.max_seconds,
+        max_steps_per_epoch=args.max_steps_per_epoch,
+        save_safetensors=args.save_safetensors,
     )
 
 

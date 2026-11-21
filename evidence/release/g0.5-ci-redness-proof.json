@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "task_id": "G0.5",
+  "recorded_on": "2026-09-05",
+  "source_commit": "b35b840e5f15d7f3e117afb2dce00e87da96b4a3",
+  "claim": "A deliberate failing UI test in a disposable remote branch proves that both the UI leaf ('web, desktop, and Resolve shell') and the aggregate required check ('required') turn red in GitHub Actions, mechanically proving that frontend test failures block release candidate progression.",
+  "disposable_pull_request": {
+    "number": 11,
+    "url": "https://github.com/HawzhinBlanca/HawaVoClean/pull/11",
+    "head_sha": "b35b840e5f15d7f3e117afb2dce00e87da96b4a3",
+    "branch": "disposable/g05-ui-defect-probe",
+    "title": "[DISPOSABLE PROBE] G0.5 Deliberate UI Failure Injection",
+    "injected_defect_file": "ui/src/deliberateFailureG05.test.ts",
+    "injected_defect_assertion": "expect(true).toBe(false)",
+    "disposition": "reverted in commit 8612ac2284e9d564bb373f1d3a5a1f6a152ba851; PR closed without merge; branch deleted"
+  },
+  "observed_check_results": {
+    "workflow_run_id": 33956544409,
+    "workflow_run_url": "https://github.com/HawzhinBlanca/HawaVoClean/actions/runs/33956544409",
+    "leaf_check": {
+      "name": "web, desktop, and Resolve shell",
+      "job_id": 101280799020,
+      "status": "completed",
+      "conclusion": "failure",
+      "exit_code": 1,
+      "failing_step": "Run UI test suite (vitest)",
+      "failure_message": "AssertionError: expected true to be false in src/deliberateFailureG05.test.ts:8:18"
+    },
+    "aggregate_check": {
+      "name": "required",
+      "job_id": 101280799026,
+      "status": "completed",
+      "conclusion": "failure",
+      "exit_code": 1,
+      "failing_step": "Require every shipped-surface gate",
+      "failing_condition": "test \"$WEB_RESOLVE\" = success failed with WEB_RESOLVE: failure"
+    }
+  },
+  "cleanup_verification": {
+    "revert_commit": "8612ac2284e9d564bb373f1d3a5a1f6a152ba851",
+    "pr_closed": true,
+    "remote_branch_deleted": true,
+    "local_branch_deleted": true
+  }
+}

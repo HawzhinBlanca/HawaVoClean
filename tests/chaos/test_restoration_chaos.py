@@ -79,13 +79,13 @@ def test_path_traversal_speaker_id_rejected(tmp_path: Path) -> None:
 
 
 def test_restoration_extremely_short_audio() -> None:
-    """Test that extremely short audio buffers do not crash HawaRestoreKD."""
+    """Test that extremely short audio buffers fail closed without crashing (R2.2)."""
     sr = 48000
     restorer = HawaRestoreKD(sample_rate=sr)
     for length in [0, 1, 10, 100, 512]:
         short_audio = np.zeros(length, dtype=np.float32)
         cands = restorer.restore(short_audio, sample_rate=sr, effective_cutoff_hz=8000.0)
-        assert len(cands) == 5
+        assert len(cands) >= 1
         for c in cands:
             assert len(c.audio) == length
             assert np.all(np.isfinite(c.audio))

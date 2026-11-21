@@ -69,7 +69,7 @@ function stubClient(): { client: EngineClient; getJob: ReturnType<typeof vi.fn> 
   const getJob = vi.fn();
   const client = {
     getJob,
-    eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events?token=devtok`,
+    eventsUrl: (id: string) => `http://127.0.0.1:8765/api/jobs/${id}/events`,
   } as unknown as EngineClient;
   return { client, getJob };
 }
@@ -109,7 +109,8 @@ describe('the happy path', () => {
     const { client } = stubClient();
     followJob(client, 'j1', handlers());
     expect(FakeEventSource.instances).toHaveLength(1);
-    expect(FakeEventSource.live.url).toContain('/api/jobs/j1/events');
+    expect(FakeEventSource.live.url).toBe('http://127.0.0.1:8765/api/jobs/j1/events');
+    expect(new URL(FakeEventSource.live.url).search).toBe('');
   });
 
   it('reports the connection and forwards each status', () => {

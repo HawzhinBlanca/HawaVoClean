@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "calibration_id": "d34b976b4581c08a57f5160effc24ce8e785e1b229fdace37d0736a94af35ee5",
+  "guard_id": "spectral-guard-v1",
+  "probe_id": "spectral-signature-v1",
+  "provenance": "Studio Pro thresholds, chosen 2026-11-19 against measured Guard A scores on real 48 kHz Sorani Kurdish speech (sherko_01_10, malaka_01_101/102, sherko_01_100) processed by studio-mossformer2-48k-v1 (MossFormer2_SE_48K native 48 kHz Apache-2.0): clean controls measure mean_js=0.000-0.004, hole=0.000, cons_ret=0.972-0.987, env_corr=1.000; broadband noisy speech (+8/+12/+18 dB pink noise & +10 dB white noise, boosting NISQA MOS from 1.47-2.58 to 4.18-4.88) legitimately suppresses fullband noise >26 dB across up to 87.7% of active bins (mean_js=0.181-0.310, hole=0.284-0.877, cons_ret=0.279-0.788, env_corr=0.968-0.997, drift=0.0 ms, musical_noise=0.000-0.136). Setting max_posterior_js_div=0.38, spectral_hole_thresh=0.90, and min_hf_preservation_ratio=0.20 accepts legitimate fullband 48 kHz neural denoising while strictly rejecting all 8 measured corruption controls (0.02x collapse, 50% dead segment, 120 ms timing shift, 1 kHz lowpass, 2-8 kHz band wipe, all-zero collapse, random hallucination, and newly introduced clipping).",
+  "thresholds": {
+    "min_anchor_confidence": 0.5,
+    "max_posterior_js_div": 0.38,
+    "max_peak_js_div": 0.9,
+    "max_timing_drift_ms": 75.0,
+    "spectral_hole_thresh": 0.9,
+    "musical_noise_thresh": 0.3,
+    "min_hf_preservation_ratio": 0.2
+  }
+}

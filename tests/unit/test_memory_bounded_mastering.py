@@ -15,18 +15,18 @@ import sys
 import pytest
 
 _SCRIPT = r"""
-import resource, sys
+import sys
 import numpy as np
 from hawavoclean.finishing.limiter import apply_lookahead_limiter
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks
+from hawavoclean.runtime import process_peak_rss_bytes
 SR = 48000; MINUTES = 8
 n = SR * 60 * MINUTES
 x = (0.4 * np.sin(2 * np.pi * 180 * np.arange(n) / SR)).astype(np.float32)
 x[::SR] += 1.2
 x = x[None, :]
 def rss():
-    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return r / 1e6 if sys.platform == "darwin" else r / 1e3
+    return process_peak_rss_bytes() / 1e6
 before = rss()
 m = measure_loudness_and_peaks(x, SR)
 res = apply_lookahead_limiter(x, SR, ceiling_dbtp=-1.0)

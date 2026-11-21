@@ -5,13 +5,30 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getBridge } from '../bridge';
 import {
   artifactsFor,
+  cleanTrackWithMarkersInResolve,
   copyReportSummary,
+  downloadQcCertificate,
+  exportWithDelivery,
   importToResolve,
   replaceInResolve,
   revealOutput,
+  saveCleanedMaster,
+  saveProcessingRecord,
+  updateRackSettings,
 } from '../state/actions';
+import { useI18n } from '../state/i18n';
+import type { ExportFormatId } from '../state/presets';
 import { useStore } from '../state/store';
 import { IconCheck, IconImport, IconReplace, IconReveal } from './Icons';
+import { sourceHasVideo } from './VideoPreview';
+
+const EXPORT_FORMAT_LABEL: Record<ExportFormatId, string> = {
+  wav24: 'WAV 24-bit',
+  wav32f: 'WAV 32f',
+  flac: 'FLAC',
+  aac: 'AAC',
+  video_mux: 'Mux Video',
+};
 
 /**
  * `download` is ignored across origins, so the anchors also carry
@@ -59,6 +76,8 @@ function ArtifactLink({
 
 /** Copies the one-line summary and says so, on the button itself. */
 function CopySummary() {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const report = useStore((s) => s.report);
   const source = useStore((s) => s.source);
   const [copied, setCopied] = useState(false);
@@ -89,12 +108,127 @@ function CopySummary() {
       title="Copy a one-line summary of this run to the clipboard"
     >
       {copied ? <IconCheck size={14} /> : <IconReveal size={14} />}
-      <span>{copied ? 'Copied' : 'Copy summary'}</span>
+      <span>{copied ? (isCkb ? 'کۆپیکرا' : 'Copied') : isCkb ? 'کۆپیکردنی پوختە' : 'Copy summary'}</span>
+    </button>
+  );
+}
+
+/** Compact Delivery / Format Export button (Mux Video for video sources, or target format/preset). */
+function ExportDeliveryButton({
+  masterServed,
+  engineReady,
+}: {
+  masterServed: boolean;
+  engineReady: boolean;
+}) {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
+  const source = useStore((s) => s.source);
+  const original = useStore((s) => s.original);
+  const rackSettings = useStore((s) => s.rackSettings);
+  const [exporting, setExporting] = useState(false);
+
+  const isVideo = sourceHasVideo(source?.path, original);
+  const targetFormat: ExportFormatId = isVideo
+    ? rackSettings.exportFormat === 'wav24'
+      ? 'video_mux'
+      : rackSettings.exportFormat
+    : rackSettings.exportFormat === 'video_mux'
+      ? 'wav24'
+      : rackSettings.exportFormat;
+  const label =
+    targetFormat === 'video_mux'
+      ? isCkb
+        ? 'ڤیدیۆ + دەنگ'
+        : 'Mux Video'
+      : `${isCkb ? 'هەناردەی' : 'Export'} ${EXPORT_FORMAT_LABEL[targetFormat] ?? targetFormat}`;
+  const enabled = masterServed && engineReady && !exporting;
+
+  const onExport = useCallback(() => {
+    if (!enabled) return;
+    setExporting(true);
+    void exportWithDelivery(targetFormat).finally(() => setExporting(false));
+  }, [enabled, targetFormat]);
+
+  return (
+    <span className="export-delivery-group" style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+      <select
+        className="btn small export-format-select"
+        aria-label={isCkb ? 'فۆرماتی هەناردە' : 'Export format'}
+        value={targetFormat}
+        disabled={exporting}
+        onChange={(e) => {
+          updateRackSettings({ ...rackSettings, exportFormat: e.target.value as ExportFormatId });
+        }}
+        style={{ paddingInline: '6px', maxWidth: '94px' }}
+      >
+        <option value="wav24">WAV 24</option>
+        <option value="wav32f">WAV 32f</option>
+        <option value="flac">FLAC</option>
+        <option value="aac">AAC</option>
+        {isVideo ? <option value="video_mux">{isCkb ? 'ڤیدیۆ' : 'Mux Video'}</option> : null}
+      </select>
+      <button
+        className="btn small export-delivery-btn"
+        type="button"
+        disabled={!enabled}
+        onClick={onExport}
+        title={
+          enabled
+            ? `${label} with ${rackSettings.deliveryPreset} loudness target`
+            : 'Available once a run has finished and the engine is ready'
+        }
+      >
+        <IconImport size={14} />
+        <span>{exporting ? (isCkb ? 'هەناردە…' : 'Exporting…') : label}</span>
+      </button>
+    </span>
+  );
+}
+
+/** Downloads a self-contained, print-ready HTML Broadcast Quality Certificate. */
+function QcCertificateButton({
+  masterServed,
+  engineReady,
+}: {
+  masterServed: boolean;
+  engineReady: boolean;
+}) {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
+  const job = useStore((s) => s.job);
+  const report = useStore((s) => s.report);
+  const [busy, setBusy] = useState(false);
+  const hasJob = Boolean(job?.id || report?.job_id);
+  const enabled = masterServed && engineReady && hasJob && !busy;
+
+  return (
+    <button
+      className="btn small qc-cert-btn"
+      type="button"
+      disabled={!enabled}
+      onClick={() => {
+        if (!enabled) return;
+        setBusy(true);
+        void downloadQcCertificate(isCkb ? 'ckb' : 'en').finally(() => setBusy(false));
+      }}
+      title={
+        enabled
+          ? isCkb
+            ? 'دابەزاندنی بڕوانامەی کوالێتی پەخش (HTML/PDF)'
+            : 'Download offline Broadcast Quality Certificate (printable HTML/PDF)'
+          : 'Available once a run has finished and the engine is ready'
+      }
+    >
+      <IconCheck size={14} />
+      <span>{busy ? (isCkb ? 'دروستکردن…' : 'Building…') : isCkb ? 'ڕاپۆرتی QC' : 'QC Report'}</span>
     </button>
   );
 }
 
 export function Actions() {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const bridge = getBridge();
   const hasResolve = Boolean(bridge.resolve);
   const isWeb = bridge.host === 'web';
@@ -126,7 +260,7 @@ export function Actions() {
         <ArtifactLink
           url={artifacts?.master.url ?? null}
           name={artifacts?.master.name ?? 'master.wav'}
-          label="Master WAV"
+          label={isCkb ? 'ماستەری WAV' : 'Master WAV'}
           title={
             artifacts
               ? (artifacts.master.note ?? `Download ${artifacts.master.name}`)
@@ -136,15 +270,17 @@ export function Actions() {
         <ArtifactLink
           url={artifacts?.json.url ?? null}
           name={artifacts?.json.name ?? 'report.json'}
-          label="JSON report"
+          label={isCkb ? 'ڕاپۆرتی JSON' : 'JSON report'}
           title={artifacts ? (artifacts.json.note ?? `Download ${artifacts.json.name}`) : note}
         />
         <ArtifactLink
           url={artifacts?.txt.url ?? null}
           name={artifacts?.txt.name ?? 'report.txt'}
-          label="Summary .txt"
+          label={isCkb ? 'پوختەی .txt' : 'Summary .txt'}
           title={artifacts ? (artifacts.txt.note ?? `Download ${artifacts.txt.name}`) : note}
         />
+        <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
+        <QcCertificateButton masterServed={masterServed} engineReady={engineReady} />
         <CopySummary />
       </div>
     );
@@ -190,8 +326,47 @@ export function Actions() {
             <IconReplace size={14} />
             <span>Replace clip</span>
           </button>
+          {bridge.resolve?.batchCleanTrack && masterServed ? (
+            <button
+              className="btn small resolve-batch-btn"
+              type="button"
+              onClick={() => {
+                void cleanTrackWithMarkersInResolve();
+              }}
+              title="Place cleaned clip(s) on a dedicated Resolve track and add Guard review markers"
+            >
+              <IconReplace size={14} />
+              <span>Clean Track + Markers</span>
+            </button>
+          ) : null}
         </>
       ) : null}
+      <button
+        className="btn small"
+        type="button"
+        aria-disabled={!masterServed || undefined}
+        onClick={() => {
+          if (!masterServed) return;
+          void saveCleanedMaster();
+        }}
+        title={masterServed ? 'Save or export the cleaned master audio file (.wav)' : cleanedPath ? goneNote : missingNote}
+      >
+        <IconImport size={14} />
+        <span>{isCkb ? 'پاشەکەوتی ماستەر' : 'Save Master'}</span>
+      </button>
+      <button
+        className="btn small"
+        type="button"
+        aria-disabled={!masterServed || undefined}
+        onClick={() => {
+          if (!masterServed) return;
+          void saveProcessingRecord();
+        }}
+        title={masterServed ? 'Save complete processing record archive (.zip) with master audio and verification report' : cleanedPath ? goneNote : missingNote}
+      >
+        <IconImport size={14} />
+        <span>{isCkb ? 'پاشەکەوتی تۆمار' : 'Save Record'}</span>
+      </button>
       <button
         className="btn small"
         type="button"
@@ -203,8 +378,10 @@ export function Actions() {
         title={masterServed ? 'Reveal the cleaned master in Finder' : cleanedPath ? goneNote : missingNote}
       >
         <IconReveal size={14} />
-        <span>Reveal in Finder</span>
+        <span>{isCkb ? 'نیشاندان لە فایندەر' : 'Reveal in Finder'}</span>
       </button>
+      <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
+      <QcCertificateButton masterServed={masterServed} engineReady={engineReady} />
       <CopySummary />
     </div>
   );

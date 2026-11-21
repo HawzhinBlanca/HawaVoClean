@@ -84,8 +84,8 @@ enabled = true
 preset = "gentle"
 dc_subsonic_cutoff_hz = 75.0
 dehum_50_60hz = true
-declick = true
-plosive_attenuation = true
+declick = false
+plosive_attenuation = false
 dynamic_eq = true
 # Measured tonal restoration: band levels against a speech-intelligibility
 # target, corrected by the bounded difference, or 0.0 dB when the voice is
@@ -93,14 +93,14 @@ dynamic_eq = true
 # filter bank, verified against its own measured response on every call.
 tonal_restoration = true
 max_tonal_gain_db = 12.0
-deess_band = true
+deess_band = false
 max_deess_gr_db = 4.0
-level_rider = true
+level_rider = false
 max_compression_gr_db = 3.0
 
 [loudness]
 target_lufs_stereo = -16.0
 target_lufs_mono = -19.0
 true_peak_ceiling_dbtp = -1.0
-max_limiter_reduction_db = 2.5
+max_limiter_reduction_db = 0.5
 dither = true

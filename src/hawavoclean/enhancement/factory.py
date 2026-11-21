@@ -8,10 +8,20 @@ provenance is verifiable in any install.
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from hawavoclean.enhancement.dereverb_neural import (
+    STUDIO_DEREVERB_CORE_ID,
+    NeuralDereverbCore,
+    studio_dereverb_params_hash,
+)
 from hawavoclean.enhancement.production import WienerSpectralEnhancer, wiener_params_hash
 from hawavoclean.enhancement.protocol import Enhancer
 from hawavoclean.enhancement.studio import StudioVoiceCore, studio_params_hash
 from hawavoclean.enhancement.studio_lowband import StudioLowBandCore, studio_lowband_params_hash
+from hawavoclean.enhancement.studio_pro import (
+    STUDIO_PRO_CORE_ID,
+    StudioProCore,
+    studio_pro_params_hash,
+)
 
 
 @dataclass(frozen=True)
@@ -22,10 +32,19 @@ class CoreRegistration:
     lock_filename: str
     implementation_params_hash: Callable[[], str]
     requires_modules: tuple[str, ...] = ()
+    #: ``module:function`` for a model-cold import/symbol contract.  The
+    #: readiness layer invokes it in an isolated interpreter so broken native
+    #: wheels cannot be advertised merely because import metadata exists.
+    dependency_probe: str | None = None
     #: Does this core's inference actually run on ``runtime.device``? A
     #: classical-DSP core is numpy on the CPU whatever the config asks for,
     #: and the report must name the device that ran, not the one requested.
     device_aware: bool = False
+    #: Compute device preference ladder honoured by ``runtime.resolve_device``
+    #: when ``requested == "auto"``. Legacy deterministic/DFN3 cores stay
+    #: ``("cpu",)`` so published hashes remain 100% bit-identical; heavy
+    #: neural cores measured faster on GPU opt into ``("mps", "cuda", "cpu")``.
+    preferred_devices: tuple[str, ...] = ("cpu",)
 
 
 CORE_REGISTRY: dict[str, CoreRegistration] = {
@@ -33,13 +52,16 @@ CORE_REGISTRY: dict[str, CoreRegistration] = {
         enhancer_class=WienerSpectralEnhancer,
         lock_filename="production-core.lock.toml",
         implementation_params_hash=wiener_params_hash,
+        preferred_devices=("cpu",),
     ),
     "studio-dfn3-48k-v1": CoreRegistration(
         enhancer_class=StudioVoiceCore,
         lock_filename="studio-core.lock.toml",
         implementation_params_hash=studio_params_hash,
         requires_modules=("df", "torch", "nara_wpe"),
+        dependency_probe=("hawavoclean.enhancement.dependency_probe:probe_studio_runtime_contract"),
         device_aware=True,
+        preferred_devices=("cpu",),
     ),
     # Shares the studio core's vendored DFN3 weights; no WPE, so nara_wpe is
     # not among its requirements.
@@ -48,7 +70,33 @@ CORE_REGISTRY: dict[str, CoreRegistration] = {
         lock_filename="studio-lowband-core.lock.toml",
         implementation_params_hash=studio_lowband_params_hash,
         requires_modules=("df", "torch"),
+        dependency_probe=(
+            "hawavoclean.enhancement.dependency_probe:probe_lowband_runtime_contract"
+        ),
         device_aware=True,
+        preferred_devices=("cpu",),
+    ),
+    STUDIO_PRO_CORE_ID: CoreRegistration(
+        enhancer_class=StudioProCore,
+        lock_filename="studio-pro-core.lock.toml",
+        implementation_params_hash=studio_pro_params_hash,
+        requires_modules=("torch", "torchaudio"),
+        dependency_probe=(
+            "hawavoclean.enhancement.dependency_probe:probe_studio_pro_runtime_contract"
+        ),
+        device_aware=True,
+        preferred_devices=("mps", "cuda", "cpu"),
+    ),
+    STUDIO_DEREVERB_CORE_ID: CoreRegistration(
+        enhancer_class=NeuralDereverbCore,
+        lock_filename="studio-dereverb-core.lock.toml",
+        implementation_params_hash=studio_dereverb_params_hash,
+        requires_modules=("torch", "torchaudio"),
+        dependency_probe=(
+            "hawavoclean.enhancement.dependency_probe:probe_dereverb_runtime_contract"
+        ),
+        device_aware=True,
+        preferred_devices=("mps", "cuda", "cpu"),
     ),
 }
 

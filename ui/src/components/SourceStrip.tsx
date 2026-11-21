@@ -1,4 +1,5 @@
-import { useCallback, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState, type DragEvent } from 'react';
+import type { TrackInfo } from '../api/types';
 import { getBridge } from '../bridge';
 import {
   ACCEPTED_EXTENSIONS,
@@ -6,13 +7,16 @@ import {
   cancelAnalysis,
   channelWarning,
   cancelUpload,
+  extractAndLoadTrack,
   ingestDataTransfer,
-  ingestFile,
+  ingestFiles,
   openFileDialog,
   rateWarning,
   sourceFailureLabel,
   useResolveClip,
 } from '../state/actions';
+import { useI18n } from '../state/i18n';
+import { INITIAL_TRACK_PICKER_STATE, trackPickerReducer } from '../state/machines';
 import { useStore, jobInFlight } from '../state/store';
 import { IconCancel, IconClip, IconDrop, IconFolder, IconWarn } from './Icons';
 
@@ -36,11 +40,7 @@ function fmtBytes(n: number): string {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
-const ACCEPT_ATTR = [
-  'audio/*',
-  'video/*',
-  ...ACCEPTED_EXTENSIONS.map((e) => `.${e}`),
-].join(',');
+const ACCEPT_ATTR = ACCEPTED_EXTENSIONS.map((extension) => `.${extension}`).join(',');
 
 /**
  * B2 · the transfer, while it is happening. An upload is the only thing in
@@ -179,6 +179,8 @@ function DropRejectionNote() {
 }
 
 export function SourceStrip() {
+  const { t, locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const bridge = getBridge();
   const hasResolve = Boolean(bridge.resolve);
   const isWeb = bridge.host === 'web';
@@ -193,14 +195,84 @@ export function SourceStrip() {
   // run.
   const running = useStore((s) => jobInFlight(s.job));
   const engineOffline = useStore((s) => s.engineStatus === 'offline');
+  const client = useStore((s) => s.client);
   // C5 · subscribing to `error` is what makes the clip-row failure chip
   // reactive: the classification behind `sourceFailureLabel()` is set on the
   // same beat as this string, so a change here is a change there.
   const error = useStore((s) => s.error);
   const [over, setOver] = useState(false);
+  const [trackPicker, dispatchTrackPicker] = useReducer(
+    trackPickerReducer,
+    INITIAL_TRACK_PICKER_STATE,
+  );
+  const trackInspectSeq = useRef(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const uploading = Boolean(upload);
   const disabled = !engineReady || running || uploading;
+  const sourcePath = source?.path ?? null;
+
+  const tracksOpen = trackPicker.phase !== 'closed';
+  const tracksLoading = trackPicker.phase === 'loading';
+  const tracksError = trackPicker.phase === 'error' ? trackPicker.message : null;
+  const tracks =
+    trackPicker.phase === 'ready' || trackPicker.phase === 'extracting'
+      ? trackPicker.tracks
+      : null;
+  const extractingTrack = trackPicker.phase === 'extracting' ? trackPicker.trackIndex : null;
+
+  useEffect(() => {
+    trackInspectSeq.current += 1;
+    dispatchTrackPicker({ type: 'RESET_SOURCE' });
+  }, [sourcePath]);
+
+  const handleToggleTracks = useCallback(async () => {
+    if (!source || !original || original.channels <= 2) return;
+    if (trackPicker.phase !== 'closed') {
+      trackInspectSeq.current += 1;
+      dispatchTrackPicker({ type: 'CLOSE' });
+      return;
+    }
+    if (trackPicker.cachedTracks !== null) {
+      dispatchTrackPicker({ type: 'OPEN_CACHED' });
+      return;
+    }
+    if (!client || !engineReady || typeof client.inspectTracks !== 'function') {
+      dispatchTrackPicker({
+        type: 'LOAD_FAILED',
+        message: 'Engine is offline — reconnect to inspect Poly-WAV tracks.',
+      });
+      return;
+    }
+    const seq = ++trackInspectSeq.current;
+    dispatchTrackPicker({ type: 'START_LOAD' });
+    try {
+      const res = await client.inspectTracks(source.path);
+      if (trackInspectSeq.current === seq) {
+        dispatchTrackPicker({ type: 'LOAD_SUCCESS', tracks: res.tracks });
+      }
+    } catch (e) {
+      if (trackInspectSeq.current === seq) {
+        dispatchTrackPicker({
+          type: 'LOAD_FAILED',
+          message: e instanceof Error ? e.message : 'Unable to inspect Poly-WAV tracks.',
+        });
+      }
+    }
+  }, [source, original, trackPicker, client, engineReady]);
+
+  const handleExtractTrack = useCallback(
+    async (track: TrackInfo) => {
+      if (!source || disabled || trackPicker.phase !== 'ready') return;
+      dispatchTrackPicker({ type: 'START_EXTRACT', trackIndex: track.index });
+      try {
+        const extracted = await extractAndLoadTrack(source.path, track.index, track.name);
+        dispatchTrackPicker({ type: extracted ? 'EXTRACT_SUCCESS' : 'EXTRACT_ABORTED' });
+      } catch {
+        dispatchTrackPicker({ type: 'EXTRACT_ABORTED' });
+      }
+    },
+    [source, disabled, trackPicker.phase],
+  );
   // B6 · every refusal in this strip names its own reason. `aria-disabled`
   // rather than `disabled` on the buttons, because a disabled control takes no
   // pointer events and would swallow the tooltip that carries the reason.
@@ -280,18 +352,31 @@ export function SourceStrip() {
       ) : (
         <span />
       )}
-      <button
-        className="btn"
-        type="button"
-        aria-disabled={disabled || undefined}
-        title={why ?? 'Choose an audio or video file to clean'}
-        onClick={() => {
-          if (!disabled) onOpen();
-        }}
-      >
-        <IconFolder />
-        <span>Open file…</span>
-      </button>
+      <div className="source-open-btns" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+        <button
+          className="btn"
+          type="button"
+          aria-disabled={disabled || undefined}
+          title={why ?? 'Choose an audio or video file to clean'}
+          onClick={() => {
+            if (!disabled) onOpen();
+          }}
+        >
+          <IconFolder />
+          <span>{isCkb ? 'کردنەوەی فایل…' : 'Open file…'}</span>
+        </button>
+        <button
+          className="btn btn-batch-pick"
+          type="button"
+          aria-disabled={disabled || undefined}
+          title={why ?? 'Select multiple audio or video files to process as a batch queue'}
+          onClick={() => {
+            if (!disabled) onOpen();
+          }}
+        >
+          <span>{t.batchBtn}</span>
+        </button>
+      </div>
       {uploading ? (
         <UploadProgress />
       ) : analyzing && source ? (
@@ -304,24 +389,40 @@ export function SourceStrip() {
           <span className="copy">
             <span className="hint">
               {over
-                ? 'Release to load'
+                ? isCkb
+                  ? 'بەربدە بۆ بارکردن'
+                  : 'Release to load'
                 : disabled
                   ? running
-                    ? 'Busy — finish or cancel the job first'
+                    ? isCkb
+                      ? 'سەرقاڵە — سەرەتا کارەکە تەواو بکە یان هەڵیوەشێنەوە'
+                      : 'Busy — finish or cancel the job first'
                     : uploading
-                      ? 'An upload is already in flight'
+                      ? isCkb
+                        ? 'بارکردنێک لە پرۆسەدایە'
+                        : 'An upload is already in flight'
                       : engineOffline
-                        ? 'Engine offline — reconnecting'
-                        : 'Waiting for the engine'
-                  : 'Drop an audio or video file here'}
+                        ? isCkb
+                          ? 'بزوێنەر دەرچووە — پەیوەندیدەکرێتەوە'
+                          : 'Engine offline — reconnecting'
+                        : isCkb
+                          ? 'چاوەڕێی بزوێنەرە'
+                          : 'Waiting for the engine'
+                  : isCkb
+                    ? 'فایلی دەنگ یان ڤیدیۆ لێرە دابنێ'
+                    : 'Drop an audio or video file here'}
             </span>
             <span className="types">
               {over
-                ? 'Analysis starts immediately'
+                ? isCkb
+                  ? 'شیکردنەوە دەستبەجێ دەستپێدەکات'
+                  : 'Analysis starts immediately'
                 : engineOffline
-                  ? 'Nothing already loaded is lost — this well opens again the moment the engine answers'
+                  ? isCkb
+                    ? 'هیچ شتێکی بارکراو لەدەست نەچووە — هەرکە بزوێنەر وەڵامی دایەوە دەکرێتەوە'
+                    : 'Nothing already loaded is lost — this well opens again the moment the engine answers'
                   : isWeb
-                    ? `or click to browse · ${ACCEPTED_SHORTLIST}`
+                    ? `${isCkb ? 'یان کرتە بکە بۆ هەڵبژاردن' : 'or click to browse'} · ${ACCEPTED_SHORTLIST}`
                     : ACCEPTED_SHORTLIST}
             </span>
           </span>
@@ -329,15 +430,16 @@ export function SourceStrip() {
             <input
               ref={inputRef}
               type="file"
+              multiple
               accept={ACCEPT_ATTR}
               disabled={disabled}
               // D1 · a `title` is not a label: the control had no accessible
               // name at all in the tree.
-              aria-label="Choose an audio or video file to clean"
-              title="Choose a file"
+              aria-label="Choose audio or video files to clean"
+              title="Choose one or more files"
               onChange={(e) => {
-                const f = e.currentTarget.files?.item(0);
-                if (f) void ingestFile(f);
+                const picked = e.currentTarget.files ? Array.from(e.currentTarget.files) : [];
+                if (picked.length > 0) void ingestFiles(picked);
                 e.currentTarget.value = '';
               }}
             />
@@ -378,6 +480,34 @@ export function SourceStrip() {
                     {chanNote ? <IconWarn size={10} /> : null}
                   </span>
                 </span>
+                {original.channels > 2 ? (
+                  <button
+                    type="button"
+                    className="btn small poly-tracks-btn"
+                    aria-expanded={tracksOpen}
+                    aria-controls="poly-track-picker"
+                    disabled={disabled || tracksLoading || extractingTrack !== null}
+                    title="Inspect and extract an individual channel from this multi-track poly-WAV"
+                    onClick={() => void handleToggleTracks()}
+                  >
+                    {tracksLoading ? 'Inspecting…' : `Tracks (${original.channels}ch)`}
+                  </button>
+                ) : null}
+                {source.name.toLowerCase().endsWith('.mp4') ? (
+                  <span
+                    className="kv mp4-tag"
+                    title={
+                      original.has_video === false
+                        ? 'Audio-only MP4 container (no video stream)'
+                        : 'Audio stream extracted directly from video container without video re-encoding'
+                    }
+                  >
+                    <span className="k">Container</span>
+                    <span className="v">
+                      {original.has_video === false ? 'MP4 (Audio Only)' : 'MP4 (Audio Isolated)'}
+                    </span>
+                  </span>
+                ) : null}
               </>
             ) : analyzing ? (
               <span className="kv">
@@ -405,9 +535,79 @@ export function SourceStrip() {
             )}
           </>
         ) : (
-          <span className="empty">No clip loaded</span>
+          <span className="empty">{isCkb ? 'هیچ کلیپێک بارنەکراوە' : 'No clip loaded'}</span>
         )}
       </div>
+      {tracksOpen && source && original && original.channels > 2 ? (
+        <div
+          id="poly-track-picker"
+          className="poly-track-picker"
+          role="region"
+          aria-label="Poly-WAV track selector"
+        >
+          <div className="ptp-head">
+            <span className="ptp-title">
+              Poly-WAV Tracks · <span className="mono">{original.channels}ch</span>
+            </span>
+            <button
+              type="button"
+              className="ptp-close"
+              aria-label="Close track selector"
+              onClick={() => {
+                trackInspectSeq.current += 1;
+                dispatchTrackPicker({ type: 'CLOSE' });
+              }}
+            >
+              <IconCancel size={11} />
+            </button>
+          </div>
+          {tracksLoading ? (
+            <p className="ptp-hint" role="status">
+              Inspecting tracks…
+            </p>
+          ) : tracksError ? (
+            <p className="ptp-error" role="alert">
+              {tracksError}
+            </p>
+          ) : tracks && tracks.length > 0 ? (
+            <ul className="ptp-list">
+              {tracks.map((track) => {
+                const rmsText = Number.isFinite(track.rms_dbfs)
+                  ? `${track.rms_dbfs.toFixed(1)} dB`
+                  : '—';
+                const speechPct = Math.round(
+                  Math.max(0, Math.min(1, track.speech_activity_ratio)) * 100,
+                );
+                const busyThis = extractingTrack === track.index;
+                return (
+                  <li className="ptp-row" key={track.index}>
+                    <span className="ptp-idx mono">#{track.index + 1}</span>
+                    <span className="ptp-name" title={track.name}>
+                      {track.name}
+                      {track.likely_dialogue ? (
+                        <span className="ptp-badge">Dialogue</span>
+                      ) : null}
+                    </span>
+                    <span className="ptp-meta mono">{rmsText} RMS</span>
+                    <span className="ptp-meta mono">{speechPct}% speech</span>
+                    <button
+                      type="button"
+                      className="btn small ptp-load-btn"
+                      disabled={disabled || extractingTrack !== null}
+                      aria-label={`Extract and load track ${track.index + 1}: ${track.name}`}
+                      onClick={() => void handleExtractTrack(track)}
+                    >
+                      {busyThis ? 'Loading…' : 'Load track'}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="ptp-hint">No individual tracks reported for this file.</p>
+          )}
+        </div>
+      ) : null}
       <DropRejectionNote />
     </section>
   );

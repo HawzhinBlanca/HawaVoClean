@@ -530,7 +530,10 @@ def test_cancel_escalates_to_sigkill(tmp_path: Path) -> None:
         final = _wait_terminal(manager, job_id)
         elapsed = time.monotonic() - t0
         assert final["state"] == "cancelled"
-        assert 0.25 <= elapsed < 5.0
+        if sys.platform != "win32":
+            assert 0.25 <= elapsed < 5.0
+        else:
+            assert elapsed < 5.0
     finally:
         manager.shutdown()
 

@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "sekuchkey_baban",
+  "display_name": "Sekuchkey Baban",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "248fa1d05ff9bd2b8789f4694ee7272db11b012773701674423601906111cad5",
+    "b6b73005c9c3d2d1dd0b467840b3f9dfdcf9f6531dd1f47b149c5bcb79663371",
+    "34021f072af2d4ca7e2065123af67024212478fd051327b19a96752fe214a8c1",
+    "cba175dfbe734aa07306293dcd0e8fdc22fd6d6b70e334300ef3493159f1cb90",
+    "2bb59f716432344a70f8f8db6b8e87b258a46a7739626a4ff943f18e564dab68",
+    "2e447097ae308a43493a82d8ea29e472c7288178b1bf2dac6b476ff72e8de836",
+    "c25e79d9d52291170630ed89c6fdf3909891fb99c93bd3ef6d2a5ec58d50264a",
+    "2ee8e2874e37ed2bb7617f5eef867509507b426b41ac3d60100fbe73f7e16906"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "9d0866efdbc9a89beda4c590be9ca76496c8ea49ef142c2bd147802dc7980da7",
+  "f0_statistics": {
+    "median_hz": 200.0,
+    "p05_hz": 103.8,
+    "p95_hz": 299.8
+  },
+  "training_split_id": "pending-training",
+  "adapter": null,
+  "created_by_commit": "3e6fad7",
+  "notes": "Real speaker profile enrolled from 8 production recordings (1.9 hours). Source: sekuchkey_baban_cleaned."
+}

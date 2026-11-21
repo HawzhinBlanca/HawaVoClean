@@ -24,6 +24,8 @@ from typing import Any
 import numpy as np
 import scipy.signal
 
+from hawavoclean.runtime import evict_memmap_pages
+
 CHUNK = 1 << 20  # 1,048,576 samples per chunk (~22 s at 48 kHz)
 EDGE = 4096  # overlap on each side; comfortably beyond resample_poly's FIR half-length
 MIN_CHUNK = 1 << 16  # never split so fine that the EDGE overlap dominates the work
@@ -51,12 +53,33 @@ def _plan(channels: int, samples: int, factor: int) -> tuple[int, int]:
 def _core_envelope(
     waveform: np.ndarray[Any, np.dtype[np.float32]],
     factor: int,
-    samples: int,
     start: int,
     end: int,
     out: np.ndarray[Any, np.dtype[np.float32]],
 ) -> None:
     """Fill ``out[start:end]`` from one overlapped chunk. Touches no other index."""
+    out[start:end] = oversampled_peak_envelope_window(waveform, factor, start, end)
+
+
+def oversampled_peak_envelope_window(
+    waveform: np.ndarray[Any, np.dtype[np.float32]],
+    factor: int,
+    start: int,
+    end: int,
+) -> np.ndarray[Any, np.dtype[np.float32]]:
+    """Return the whole-file envelope for exactly ``[start, end)``.
+
+    Real samples on both sides are included before oversampling, so a window at
+    an internal streaming boundary is identical to the corresponding slice of
+    :func:`oversampled_peak_envelope`. The returned allocation is proportional
+    to the requested window, never to the complete recording.
+    """
+    channels, samples = waveform.shape
+    del channels
+    if not 0 <= start <= end <= samples:
+        raise ValueError(f"Invalid true-peak window [{start}, {end}) for {samples} samples")
+    if start == end:
+        return np.empty(0, dtype=np.float32)
     lo = max(0, start - EDGE)
     hi = min(samples, end + EDGE)
     piece = waveform[:, lo:hi].astype(np.float32, copy=False)
@@ -70,7 +93,7 @@ def _core_envelope(
     pad = (-len(core)) % factor
     if pad:
         core = np.pad(core, (0, pad), mode="edge")
-    out[start:end] = core.reshape(-1, factor).max(axis=1)[: end - start]
+    return np.asarray(core.reshape(-1, factor).max(axis=1)[: end - start], dtype=np.float32)
 
 
 def oversampled_peak_envelope(
@@ -91,11 +114,11 @@ def oversampled_peak_envelope(
     bounds = [(s, min(samples, s + chunk)) for s in range(0, samples, chunk)]
     if workers <= 1 or len(bounds) <= 1:
         for start, end in bounds:
-            _core_envelope(waveform, factor, samples, start, end, out)
+            _core_envelope(waveform, factor, start, end, out)
         return out
 
     def run(span: tuple[int, int]) -> None:
-        _core_envelope(waveform, factor, samples, span[0], span[1], out)
+        _core_envelope(waveform, factor, span[0], span[1], out)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         # list() drains the iterator, so a worker exception is re-raised here
@@ -105,7 +128,26 @@ def oversampled_peak_envelope(
 
 
 def true_peak_linear(waveform: np.ndarray[Any, np.dtype[np.float32]], factor: int = 4) -> float:
-    """Scalar oversampled true peak (linear), memory-bounded."""
-    if waveform.size == 0:
+    """Scalar oversampled true peak with no file-length envelope allocation."""
+    channels, samples = waveform.shape
+    if samples == 0:
         return 0.0
-    return float(np.max(oversampled_peak_envelope(waveform, factor)))
+    chunk, workers = _plan(channels, samples, factor)
+    bounds = [(s, min(samples, s + chunk)) for s in range(0, samples, chunk)]
+    if workers <= 1 or len(bounds) <= 1:
+        peak = 0.0
+        for start, end in bounds:
+            envelope = oversampled_peak_envelope_window(waveform, factor, start, end)
+            if envelope.size:
+                peak = max(peak, float(np.max(envelope)))
+            evict_memmap_pages(waveform, start, end)
+        return peak
+
+    def run(span: tuple[int, int]) -> float:
+        envelope = oversampled_peak_envelope_window(waveform, factor, span[0], span[1])
+        val = float(np.max(envelope)) if envelope.size else 0.0
+        evict_memmap_pages(waveform, span[0], span[1])
+        return val
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return max(pool.map(run, bounds), default=0.0)

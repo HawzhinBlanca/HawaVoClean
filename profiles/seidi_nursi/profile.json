@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "speaker_id": "seidi_nursi",
+  "display_name": "Seidi Nursi",
+  "consent_record": "consent/consent.json",
+  "canonical_audio_manifest": "canonical/canonical.jsonl",
+  "canonical_audio_sha256": [
+    "428cbdce1425441b2b45ce22306f47c4a96ea86dd52d4fa9ea2ea781232051a0",
+    "2c66d3c6e029fc1da01350e3c00b0c9cc214703ff0ab243b11aae3a08e6a7edf",
+    "cd347af2b0b9b40bf137c2aec74a17fe24e35546008d96640e83ee488e31e055",
+    "171591e60345bd727a1d039e2ab42b9914e2d0da051763080febbcdf10411b98",
+    "668b6278b7b4e96e43cd623d3995ae5def0af1263ec3f240d156b8986ad0ffaa",
+    "86053340a1276907a200cdc4307edd489303c13917a04e4ed2f78ec34405af3c",
+    "8b4d190f09b9e9c0c92a6ae6a47f021fde7a8d0bb0b9b36c314714badd110cbc",
+    "db2419abf37991a0dc4deb538746c3f9616db7d6e739a3be4c8d1d7dce7d18d7",
+    "84ec8bcaa055a57bff969852495d2edae2e46b83f62d60bcf56bb73d1605fe35",
+    "6292be9afd95818bb0e20b03efe7045e6759d8fea4d68470c3b691056b8eeb99",
+    "aa711f152c69077958b948a36a63d5bc11d03d3be89f19fb437a59aa9b7b2f60",
+    "0d7bf26661de34abead11e6fbbd4cfa24aa1418929d7a841ad1854cdcb201132",
+    "bade6eb7249fc30144d46f98d505abb9bd8242f7bd01e4d8a7e8368b67e228f8",
+    "fad0918400ba21351deb68390e06addf3aec789bf6e85ada606942a8b5b4309b",
+    "9f14935f9a5ee68ca7360ee45390b3d0eb17f079edf43d0b16d51ff775b2a279",
+    "d44a51d790f2eb37002954cda22628ba951adbe431cbb7a55542c0a1fdbb9edf",
+    "0a9d5a7335f4d9ff34c1f4ea14be394e8e91f485e7ac123b56a97e3a18f06750",
+    "ffcfe2f16ef6f65b0bbdf5f6a926e017d7327b320a14b15545ab56d357fc3daf",
+    "46fa587148f339c09d11d40dd44cae57fbca81ad6e6a9551462bb40c7318b8a1",
+    "1a5429bef4651e1829d3a3ca6e44ae1d44a02964f0985edd133ec48de9fc6008"
+  ],
+  "profile_embedding_path": "embedding/profile.npy",
+  "profile_embedding_sha256": "535d50f7ca2e8c64979eb2b583bae7ac5d88db6f29aad540002415faee4cb652",
+  "f0_statistics": {
+    "median_hz": 123.7,
+    "p05_hz": 87.4,
+    "p95_hz": 343.2
+  },
+  "training_split_id": "pending-training",
+  "adapter": null,
+  "created_by_commit": "3e6fad7",
+  "notes": "Real speaker profile enrolled from 20 production recordings (9.0 hours). Source: seidi_nursi_cleaned."
+}

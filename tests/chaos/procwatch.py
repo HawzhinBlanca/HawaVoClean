@@ -29,6 +29,10 @@ import subprocess
 import time
 from pathlib import Path
 
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+SIGSTOP = getattr(signal, "SIGSTOP", None)
+SIGCONT = getattr(signal, "SIGCONT", None)
+
 
 def children_of(pid: int) -> list[int]:
     """Direct children of ``pid`` (empty if none, or if the pid is gone)."""
@@ -65,13 +69,15 @@ def wait_all_gone(pids: list[int], timeout_s: float) -> tuple[list[int], float]:
 
 def freeze(pid: int) -> None:
     """SIGSTOP: the process runs nothing until :func:`thaw`."""
-    os.kill(pid, signal.SIGSTOP)
+    if SIGSTOP is not None:
+        os.kill(pid, SIGSTOP)
 
 
 def thaw(pid: int) -> None:
     """SIGCONT, tolerating a process that has already died (e.g. SIGKILLed)."""
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.kill(pid, signal.SIGCONT)
+    if SIGCONT is not None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, SIGCONT)
 
 
 def descendants(pid: int) -> list[int]:
@@ -87,8 +93,9 @@ def kill_tree(pid: int) -> None:
     """Best-effort SIGKILL of a pid and everything under it. Never raises."""
     for victim in [*descendants(pid), pid]:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.kill(victim, signal.SIGCONT)  # a stopped process cannot die of SIGTERM
-            os.kill(victim, signal.SIGKILL)
+            if SIGCONT is not None:
+                os.kill(victim, SIGCONT)  # a stopped process cannot die of SIGTERM
+            os.kill(victim, SIGKILL)
 
 
 def contents(directory: Path) -> list[str]:

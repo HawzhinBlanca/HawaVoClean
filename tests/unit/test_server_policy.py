@@ -21,7 +21,7 @@ def test_allowed_roots_are_home_volumes_and_work_dir(
     monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path / "w"))
     roots = allowed_roots()
     assert Path.home().resolve() in roots
-    assert Path("/Volumes") in roots
+    assert Path("/Volumes").resolve() in roots
     assert (tmp_path / "w").resolve() in roots
     assert len(roots) == len(set(roots))
 
@@ -37,7 +37,13 @@ def test_relative_and_empty_paths_are_400() -> None:
 
 def test_outside_roots_is_403(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path / "w"))
-    for bad in ("/etc/passwd", "/", "/usr/bin/python3", str(tmp_path / "outside.wav")):
+    anchor = Path.cwd().anchor
+    for bad in (
+        str(Path(anchor) / "etc" / "passwd"),
+        anchor,
+        str(Path(anchor) / "usr" / "bin" / "python3"),
+        str(Path(anchor) / "outside_all_roots" / "file.wav"),
+    ):
         with pytest.raises(PathPolicyError) as exc:
             resolve_client_path(bad)
         assert exc.value.status == 403 and exc.value.code == "forbidden", bad
@@ -115,21 +121,27 @@ def test_other_control_characters_are_legal_in_a_posix_name(
         with pytest.raises(PathPolicyError) as exc:
             resolve_client_path(str(target), must_exist=True)
         assert exc.value.status == 404, name
-    real = tmp_path / 'it\'s a "take"\n01.wav'
-    real.write_bytes(b"RIFF")
-    assert resolve_client_path(str(real), must_exist=True) == real.resolve()
+    if os.name != "nt":
+        real = tmp_path / 'it\'s a "take"\n01.wav'
+        real.write_bytes(b"RIFF")
+        assert resolve_client_path(str(real), must_exist=True) == real.resolve()
 
 
 def test_dotdot_and_symlink_escapes_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "isolated_home")
     monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(tmp_path / "w"))
     (tmp_path / "w").mkdir()
+    (tmp_path / "isolated_home").mkdir()
     with pytest.raises(PathPolicyError) as exc:
-        resolve_client_path(str(tmp_path / "w" / ".." / ".." / ".." / "etc" / "passwd"))
+        resolve_client_path(str(tmp_path / "w" / ".." / "outside.wav"))
     assert exc.value.status == 403
     link = tmp_path / "w" / "escape"
-    os.symlink("/etc", link)
+    try:
+        os.symlink(str(Path(Path.cwd().anchor) / "etc"), link)
+    except OSError:
+        pytest.skip("Symlink creation requires privilege on this filesystem")
     with pytest.raises(PathPolicyError) as exc:
         resolve_client_path(str(link / "passwd"))
     assert exc.value.status == 403

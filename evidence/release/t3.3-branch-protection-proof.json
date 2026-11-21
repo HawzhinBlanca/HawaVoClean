@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "task_id": "T3.3",
+  "recorded_on": "2026-08-26",
+  "source_commit": "ccd0e6a7b2ecec5229076b14f2ff2bd70127c77a",
+  "claim": "A pull request carrying a failing test is mechanically prevented from merging into the protected main branch. Not declined by a reviewer, and not merely configured as required: refused by GitHub, naming the failing check.",
+  "protected_branch_as_applied": {
+    "branch": "main",
+    "required_status_contexts": [
+      "required"
+    ],
+    "strict_status_checks": true,
+    "enforce_admins": true,
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews": true,
+    "require_last_push_approval": true,
+    "required_linear_history": true,
+    "required_conversation_resolution": true,
+    "allow_force_pushes": false,
+    "allow_deletions": false,
+    "contract_fields_compared": 11,
+    "contract_mismatches": 0
+  },
+  "disposable_pull_request": {
+    "number": 7,
+    "head_sha": "ef1214cbd3970e08f26f871697dcdf468cdc5cad",
+    "branch": "t33/deliberate-failure",
+    "added_test": "tests/unit/test_t33_deliberate_failure.py::test_t33_deliberate_failure_must_block_the_merge",
+    "why_pytest_fail_not_assert_false": "flake8-bugbear B011 rejects `assert False`, so the branch would have failed at the linter. The file is deliberately ruff-clean and mypy --strict clean so that every gate before the test run lets it through and the thing which rejects it is the test result.",
+    "disposition": "closed without merging; branch deleted"
+  },
+  "observed_check_results": {
+    "failure": [
+      "core (ubuntu-24.04, py3.11)",
+      "core (ubuntu-24.04, py3.12)",
+      "core (ubuntu-24.04, py3.13)",
+      "core (ubuntu-24.04, py3.14)",
+      "core (macos-15, py3.11)",
+      "core (macos-15, py3.12)",
+      "core (macos-15, py3.13)",
+      "core (macos-15, py3.14)",
+      "exact Apple-silicon release gate",
+      "required"
+    ],
+    "success": [
+      "source contract",
+      "web and Resolve shell"
+    ],
+    "release_gate_failing_step": "default-tests-branch-coverage (pass 1, step 10 of 41)",
+    "release_gate_test_result": "1 failed, 1299 passed, 1 skipped, 41 deselected"
+  },
+  "merge_attempts": [
+    {
+      "method": "merge",
+      "http_status": 405,
+      "message": "Merge commits are not allowed on this repository.",
+      "blocked_by": "required_linear_history"
+    },
+    {
+      "method": "squash",
+      "http_status": 405,
+      "message": "New changes require approval from someone other than the last pusher. Required status check \"required\" is failing.",
+      "blocked_by": "required status check and require_last_push_approval"
+    }
+  ],
+  "main_head_unchanged": {
+    "before": "ccd0e6a7b2ecec5229076b14f2ff2bd70127c77a",
+    "after": "ccd0e6a7b2ecec5229076b14f2ff2bd70127c77a"
+  },
+  "known_limits": [
+    "The first squash attempt, made before the eight core jobs had re-reported, was refused with 'Required status check \"required\" is expected' rather than 'is failing'. Both refusals are recorded because the distinction matters: a check that has not reported blocks a merge for a different reason than a check that failed, and T3.3 is about the second.",
+    "prevent_self_review is false and the repository has one collaborator, so the approving-review requirement cannot be satisfied by anyone at present. That is a property of the repository, not of this proof: the refusal names the failing status check independently.",
+    "The release-candidate environment's deployment_branch_policy had to be removed for this proof to run at all; see the U1 runbook. Its protected_branches_only value was incompatible with a gate that triggers on pull_request."
+  ]
+}

@@ -92,8 +92,8 @@ def test_full_studio_pipeline_is_tonally_transparent_on_real_recording(tmp_path:
     (1-3 kHz normalised), excluding the deliberate <75 Hz rumble filter."""
     import soundfile as sf
 
-    from hawavoclean.guard.spectral_probe import FixedProbe
     from hawavoclean.pipeline import run_pipeline
+    from tests.support.stubs import FixedProbe
 
     src = tmp_path / "voice.wav"
     x = _natural_voice(seconds=8.0)

@@ -3,14 +3,17 @@
 #
 # Usage:
 #   resolve-plugin/install.sh --engine-bundle ABSOLUTE_PATH [options]
+#   resolve-plugin/install.sh --shared-desktop-engine [options]
 #
 # Options:
-#   --no-install          assemble and self-test only
-#   --skip-ui-build       reuse ui/dist, but still require and verify a complete UI
-#   --engine-bundle PATH  relocatable, manifest-bearing engine directory (required)
-#   --sdk-node PATH       WorkflowIntegration.node from the installed Resolve SDK
-#   --desktop-only        explicitly assemble without WorkflowIntegration.node
-#   --dest PATH           alternate Workflow Integration Plugins directory
+#   --no-install             assemble and self-test only
+#   --skip-ui-build          reuse ui/dist, but still require and verify a complete UI
+#   --engine-bundle PATH     relocatable, manifest-bearing engine directory
+#   --shared-desktop-engine  share /Applications/HawaVoClean.app engine instead of duplicating 1+ GB
+#   --desktop-app PATH       alternate HawaVoClean.app bundle path for --shared-desktop-engine
+#   --sdk-node PATH          WorkflowIntegration.node from the installed Resolve SDK
+#   --desktop-only           explicitly assemble without WorkflowIntegration.node
+#   --dest PATH              alternate Workflow Integration Plugins directory
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,8 +26,11 @@ TOOLCHAIN_DIR="$SCRIPT_DIR/toolchain"
 STAGES_DIR="$REPO_ROOT/build/resolve-plugin/stages"
 DEFAULT_DEST="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Workflow Integration Plugins"
 SDK_NODE_DEFAULT="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Workflow Integrations/Examples/SamplePlugin/WorkflowIntegration.node"
+DEFAULT_DESKTOP_APP="/Applications/HawaVoClean.app"
 
 ENGINE_BUNDLE=""
+SHARED_DESKTOP_ENGINE=0
+DESKTOP_APP="$DEFAULT_DESKTOP_APP"
 SDK_NODE="$SDK_NODE_DEFAULT"
 DEST="$DEFAULT_DEST"
 DO_INSTALL=1
@@ -88,6 +94,9 @@ while [ "$#" -gt 0 ]; do
     --no-install) DO_INSTALL=0 ;;
     --skip-ui-build) BUILD_UI=0 ;;
     --desktop-only) DESKTOP_ONLY=1 ;;
+    --shared-desktop-engine) SHARED_DESKTOP_ENGINE=1 ;;
+    --desktop-app) [ "$#" -ge 2 ] || die "--desktop-app needs a path"; DESKTOP_APP="$2"; shift ;;
+    --desktop-app=*) DESKTOP_APP="${1#--desktop-app=}" ;;
     --engine-bundle) [ "$#" -ge 2 ] || die "--engine-bundle needs a path"; ENGINE_BUNDLE="$2"; shift ;;
     --engine-bundle=*) ENGINE_BUNDLE="${1#--engine-bundle=}" ;;
     --sdk-node) [ "$#" -ge 2 ] || die "--sdk-node needs a path"; SDK_NODE="$2"; shift ;;
@@ -100,16 +109,30 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-[ -n "$ENGINE_BUNDLE" ] || die "--engine-bundle is required; repo-local virtual environments are not installable artifacts"
-case "$ENGINE_BUNDLE" in /*) ;; *) die "--engine-bundle must be absolute" ;; esac
-[ -d "$ENGINE_BUNDLE" ] && [ ! -L "$ENGINE_BUNDLE" ] || die "engine bundle is not a real directory: $ENGINE_BUNDLE"
-for rel in ENGINE-MANIFEST.json ENGINE-SHA256SUMS ENGINE-SYMLINKS hawavoclean-engine python/bin/python3.11 site-packages/hawavoclean; do
-  [ -e "$ENGINE_BUNDLE/$rel" ] || die "engine bundle is incomplete: missing $rel"
-done
-[ -x "$ENGINE_BUNDLE/hawavoclean-engine" ] || die "engine launcher is not executable"
-verify_engine_bundle "$ENGINE_BUNDLE"
+DESKTOP_ENGINE_BIN="$DESKTOP_APP/Contents/Resources/engine/hawavoclean-engine"
+if [ -n "$ENGINE_BUNDLE" ] && [ "$SHARED_DESKTOP_ENGINE" -eq 1 ]; then
+  die "--engine-bundle and --shared-desktop-engine are mutually exclusive"
+fi
+if [ -z "$ENGINE_BUNDLE" ] && [ "$SHARED_DESKTOP_ENGINE" -eq 0 ] && [ -x "$DESKTOP_ENGINE_BIN" ]; then
+  say "Detected installed Desktop engine at $DESKTOP_ENGINE_BIN; reusing it to avoid duplicating the engine bundle"
+  SHARED_DESKTOP_ENGINE=1
+fi
 
-for f in manifest.xml package.json main.js preload.js; do
+if [ "$SHARED_DESKTOP_ENGINE" -eq 1 ]; then
+  case "$DESKTOP_APP" in /*) ;; *) die "--desktop-app must be absolute" ;; esac
+  say "Shared Desktop engine mode enabled ($DESKTOP_ENGINE_BIN)"
+else
+  [ -n "$ENGINE_BUNDLE" ] || die "--engine-bundle is required (or install /Applications/HawaVoClean.app and pass --shared-desktop-engine); repo-local virtual environments are not installable artifacts"
+  case "$ENGINE_BUNDLE" in /*) ;; *) die "--engine-bundle must be absolute" ;; esac
+  [ -d "$ENGINE_BUNDLE" ] && [ ! -L "$ENGINE_BUNDLE" ] || die "engine bundle is not a real directory: $ENGINE_BUNDLE"
+  for rel in ENGINE-MANIFEST.json ENGINE-SHA256SUMS ENGINE-SYMLINKS hawavoclean-engine python/bin/python3.11 site-packages/hawavoclean; do
+    [ -e "$ENGINE_BUNDLE/$rel" ] || die "engine bundle is incomplete: missing $rel"
+  done
+  [ -x "$ENGINE_BUNDLE/hawavoclean-engine" ] || die "engine launcher is not executable"
+  verify_engine_bundle "$ENGINE_BUNDLE"
+fi
+
+for f in manifest.xml package.json main.js preload.js session-auth.js engine-discovery.js sdk-preflight.js timeline-transactions.js; do
   [ -f "$SRC_DIR/$f" ] || die "missing shell source $SRC_DIR/$f"
 done
 [ -f "$TOOLCHAIN_DIR/package-lock.json" ] || die "Resolve build-tool lock is missing"
@@ -157,10 +180,12 @@ cleanup_assembly() {
 trap cleanup_assembly EXIT
 
 say "Assembling a relocatable plugin"
-for f in manifest.xml package.json main.js preload.js; do cp "$SRC_DIR/$f" "$STAGE/$f"; done
+for f in manifest.xml package.json main.js preload.js session-auth.js engine-discovery.js sdk-preflight.js timeline-transactions.js; do cp "$SRC_DIR/$f" "$STAGE/$f"; done
 cp -R "$UI_DIR/dist/." "$STAGE/"
-cp -R "$ENGINE_BUNDLE" "$STAGE/engine"
-chmod a+rx "$STAGE/engine/hawavoclean-engine"
+if [ "$SHARED_DESKTOP_ENGINE" -eq 0 ]; then
+  cp -R "$ENGINE_BUNDLE" "$STAGE/engine"
+  chmod a+rx "$STAGE/engine/hawavoclean-engine"
+fi
 
 if [ "$DESKTOP_ONLY" -eq 0 ]; then
   [ -f "$SDK_NODE" ] || die "WorkflowIntegration.node not found at $SDK_NODE; pass --sdk-node or use --desktop-only explicitly"
@@ -169,25 +194,47 @@ else
   say "Desktop-only stage requested; Resolve native bridge intentionally omitted"
 fi
 
-cat > "$STAGE/engine.json" <<'EOF'
+if [ "$SHARED_DESKTOP_ENGINE" -eq 1 ]; then
+  node -e '
+    const cfg = {
+      command: [process.argv[1], "serve"],
+      cwd: ".",
+      env: { PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1" },
+    };
+    process.stdout.write(JSON.stringify(cfg, null, 2) + "\n");
+  ' "$DESKTOP_ENGINE_BIN" > "$STAGE/engine.json"
+  printf 'shared-desktop-engine\n' > "$STAGE/ENGINE_MODE"
+else
+  cat > "$STAGE/engine.json" <<'EOF'
 {
   "command": ["./engine/hawavoclean-engine", "serve"],
   "cwd": ".",
   "env": {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
 }
 EOF
+fi
 printf '%s\n' "$PLUGIN_ID" > "$STAGE/PLUGIN_ID"
 printf '%s\n' "$VERSION" > "$STAGE/VERSION"
 
-say "Running engine integrity and preflight checks"
-"$STAGE/engine/hawavoclean-engine" --version | grep -Fxq "hawavoclean $VERSION" || die "engine version does not match plugin version $VERSION"
-"$STAGE/engine/hawavoclean-engine" doctor >/dev/null || die "engine doctor preflight failed"
+if [ "$SHARED_DESKTOP_ENGINE" -eq 0 ]; then
+  say "Running engine integrity and preflight checks"
+  "$STAGE/engine/hawavoclean-engine" --version | grep -Fxq "hawavoclean $VERSION" || die "engine version does not match plugin version $VERSION"
+  "$STAGE/engine/hawavoclean-engine" doctor >/dev/null || die "engine doctor preflight failed"
+elif [ -x "$DESKTOP_ENGINE_BIN" ]; then
+  say "Running shared Desktop engine preflight checks"
+  "$DESKTOP_ENGINE_BIN" --version | grep -Fxq "hawavoclean $VERSION" || die "shared Desktop engine version does not match plugin version $VERSION"
+  "$DESKTOP_ENGINE_BIN" doctor >/dev/null || die "shared Desktop engine doctor preflight failed"
+else
+  say "Shared Desktop engine binary not installed on build host; deferring engine launch check to runtime"
+fi
 
 (cd "$STAGE" && find . -type l -print | LC_ALL=C sort | while IFS= read -r rel; do printf '%s\t%s\n' "$rel" "$(readlink "$rel")"; done) > "$STAGE/SYMLINKS"
 write_checksum_manifest "$STAGE" SHA256SUMS
 
-say "Running the real staged Electron → engine → health → shutdown self-test"
-"$SCRIPT_DIR/dev/stage-selftest.sh" "$STAGE"
+if [ "$SHARED_DESKTOP_ENGINE" -eq 0 ] || [ -x "$DESKTOP_ENGINE_BIN" ]; then
+  say "Running the real staged Electron → engine → health → shutdown self-test"
+  "$SCRIPT_DIR/dev/stage-selftest.sh" "$STAGE"
+fi
 
 STAGE_DIGEST="$(shasum -a 256 "$STAGE/SHA256SUMS" | awk '{print $1}')"
 FINAL_ROOT="$STAGES_DIR/${STAGE_DIGEST:0:20}"

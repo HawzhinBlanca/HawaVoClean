@@ -74,7 +74,7 @@ def test_every_generated_package_version_matches_the_canonical_identity() -> Non
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "5 generated mirrors agree" in result.stdout
+    assert "6 generated mirrors agree" in result.stdout
 
 
 @pytest.mark.parametrize(

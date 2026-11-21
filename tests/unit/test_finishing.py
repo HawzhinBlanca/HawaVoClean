@@ -11,8 +11,8 @@ from hawavoclean.finishing.repair import (
     repair_transient_clicks,
 )
 from hawavoclean.finishing.safe_finish import safe_finish_speech_unit
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.guard.verdict import GuardVerdict
+from tests.support.stubs import FixedProbe
 
 
 @pytest.mark.unit

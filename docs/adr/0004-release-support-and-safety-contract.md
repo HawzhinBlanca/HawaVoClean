@@ -4,6 +4,10 @@
 **Date:** 2026-08-21  
 **Deciders:** Hawzhin Mahmood and the HawaVoClean release implementation
 
+> 2026-08-27 amendment: the current `v3.3.0` support boundary below remains historical release scope.
+> ADR 0009 supersedes its POSIX-only publication mechanism for the high-end macOS/Windows product;
+> that implementation foundation does not itself qualify Windows as supported.
+
 ## Context
 
 HawaVoClean currently declares Python `>=3.11`, carries a stale CUDA Dockerfile, runs its Resolve
@@ -83,4 +87,3 @@ This option is accepted.
 - Matrix jobs install the built wheel and process/verify representative audio outside the repository.
 - Contract tests pin schema compatibility, fail-closed passthrough and offline/loopback boundaries.
 - Documentation consistency tests compare the published support table to the release manifest.
-

@@ -64,6 +64,26 @@
     },
     "notes": {
       "type": "string"
+    },
+    "profile_variance_path": {
+      "type": ["string", "null"]
+    },
+    "profile_variance_sha256": {
+      "type": ["string", "null"]
+    },
+    "embedding_dim": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "extractor_name": {
+      "type": "string"
+    },
+    "extractor_version": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "revoked", "deprecated"]
     }
   },
   "additionalProperties": false

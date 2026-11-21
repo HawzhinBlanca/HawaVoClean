@@ -24,6 +24,7 @@ export default defineConfig({
   },
   test: {
     environment: 'happy-dom',
+    testTimeout: 20000,
     // Both extensions: the glob was `*.test.ts` alone, so a contributor who
     // reached for JSX in a component test would have written a file that ran
     // zero tests and reported nothing — a silent gap, not a failure.

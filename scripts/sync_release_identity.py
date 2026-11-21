@@ -69,6 +69,7 @@ def _mirrors() -> dict[str, str]:
         "pyproject.toml": project_version,
         "uv.lock": _lock_version(ROOT / "uv.lock"),
         "ui/package.json": _json_version(ROOT / "ui" / "package.json"),
+        "desktop/package.json": _json_version(ROOT / "desktop" / "package.json"),
         "resolve-plugin/com.hawavoclean.resolve/package.json": _json_version(
             ROOT / "resolve-plugin" / "com.hawavoclean.resolve" / "package.json"
         ),
@@ -99,6 +100,7 @@ def _write_mirrors(version: str) -> None:
     )
     for relative in (
         "ui/package.json",
+        "desktop/package.json",
         "resolve-plugin/com.hawavoclean.resolve/package.json",
     ):
         path = ROOT / relative

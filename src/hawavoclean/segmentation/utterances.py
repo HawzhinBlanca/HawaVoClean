@@ -34,20 +34,20 @@ def find_lowest_energy_zero_crossing(
         min_idx = int(np.argmin(np.abs(region)))
         return start_search + min_idx
 
-    # Evaluate local RMS in 50ms window around each zero crossing
+    # Evaluate local RMS in 50ms window around each zero crossing in O(N) via cumulative sum.
     window_50ms = min(2400, search_window_samples // 4)
-    best_idx = zero_crossings[0]
-    min_rms = float("inf")
-
-    for zx in zero_crossings:
-        w_start = max(0, zx - window_50ms)
-        w_end = min(total_len, zx + window_50ms)
-        rms = float(np.sqrt(np.mean(waveform[w_start:w_end] ** 2)))
-        if rms < min_rms:
-            min_rms = rms
-            best_idx = zx
-
-    return int(best_idx)
+    w_starts = np.maximum(0, zero_crossings - window_50ms)
+    w_ends = np.minimum(total_len, zero_crossings + window_50ms)
+    span_lo = int(w_starts[0])
+    span_hi = int(w_ends[-1])
+    seg = waveform[span_lo:span_hi].astype(np.float64, copy=False)
+    cs = np.empty(seg.shape[0] + 1, dtype=np.float64)
+    cs[0] = 0.0
+    np.cumsum(seg * seg, out=cs[1:])
+    lengths = np.maximum(1, w_ends - w_starts)
+    mean_sq = np.maximum(0.0, cs[w_ends - span_lo] - cs[w_starts - span_lo]) / lengths
+    best_idx = int(zero_crossings[int(np.argmin(mean_sq))])
+    return best_idx
 
 
 def build_speech_units(
@@ -56,8 +56,17 @@ def build_speech_units(
     channel_id: int,
     config: SegmentationConfig,
     start_unit_id: int = 0,
+    *,
+    retain_speech_mask: bool = True,
 ) -> list[SpeechUnit]:
-    """Segment a single channel into seamless, contiguous SpeechUnits with context windows."""
+    """Segment a channel into seamless, contiguous speech units.
+
+    ``retain_speech_mask=False`` is the bounded-memory Natural rendering
+    contract. Natural guards consume the unit's ``is_speech`` decision, not a
+    per-sample mask; retaining one boolean for every source sample would cost
+    about 1.0 GiB on a three-hour stereo file. Restore and research callers
+    keep the historical mask by default.
+    """
     total_samples = len(channel_waveform)
     if total_samples == 0:
         return []
@@ -87,7 +96,11 @@ def build_speech_units(
                 context_end_sample=total_samples,
                 is_speech=False,
                 forced_boundary=False,
-                speech_mask=np.zeros(total_samples, dtype=np.bool_),
+                speech_mask=(
+                    np.zeros(total_samples, dtype=np.bool_)
+                    if retain_speech_mask
+                    else np.empty(0, dtype=np.bool_)
+                ),
                 input_sha256=u_hash,
             )
         ]
@@ -98,9 +111,16 @@ def build_speech_units(
     unit_counter = start_unit_id
 
     # Create a full timeline speech mask
-    full_mask = np.zeros(total_samples, dtype=np.bool_)
-    for iv in speech_intervals:
-        full_mask[iv.start_sample : iv.end_sample] = True
+    full_mask: np.ndarray[Any, np.dtype[np.bool_]] | None = None
+    if retain_speech_mask:
+        full_mask = np.zeros(total_samples, dtype=np.bool_)
+        for iv in speech_intervals:
+            full_mask[iv.start_sample : iv.end_sample] = True
+
+    def mask_for(start: int, end: int) -> np.ndarray[Any, np.dtype[np.bool_]]:
+        if full_mask is None:
+            return np.empty(0, dtype=np.bool_)
+        return full_mask[start:end]
 
     current_start = 0
     i = 0
@@ -124,7 +144,7 @@ def build_speech_units(
                         context_end_sample=min(total_samples, end_sample + context_samples),
                         is_speech=False,
                         forced_boundary=False,
-                        speech_mask=full_mask[current_start:end_sample],
+                        speech_mask=mask_for(current_start, end_sample),
                         input_sha256=hash_numpy(core),
                     )
                 )
@@ -150,7 +170,7 @@ def build_speech_units(
                     context_end_sample=total_samples,
                     is_speech=False,
                     forced_boundary=False,
-                    speech_mask=full_mask[current_start:end_sample],
+                    speech_mask=mask_for(current_start, end_sample),
                     input_sha256=hash_numpy(core),
                 )
             )
@@ -204,8 +224,13 @@ def build_speech_units(
             end_sample = min(total_samples, current_start + target_group_samples)
 
         core = channel_waveform[current_start:end_sample]
-        mask = full_mask[current_start:end_sample]
-        has_speech = bool(np.any(mask))
+        mask = mask_for(current_start, end_sample)
+        # This branch is reached only while at least one detected interval is
+        # being grouped into the unit; the leading/trailing no-speech branches
+        # above have already continued. Therefore the maskless answer is
+        # exactly True without rescanning every interval for every unit (which
+        # would turn a fragmented multi-hour recording into quadratic work).
+        has_speech = bool(np.any(mask)) if retain_speech_mask else True
 
         units.append(
             SpeechUnit(

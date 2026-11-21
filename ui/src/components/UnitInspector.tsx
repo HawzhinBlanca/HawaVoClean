@@ -12,6 +12,12 @@ import {
 } from '../api/types';
 import { formatTime } from '../render/ticks';
 import {
+  applyUnitOverride,
+  loopSelectedUnit,
+  redoAction,
+  undoAction,
+} from '../state/actions';
+import {
   channelName,
   clearSelection,
   orderedUnits,
@@ -267,14 +273,93 @@ function Detail({
   total: number;
   channels: number[];
 }) {
+  const unitOverrides = useStore((s) => s.unitOverrides);
+  const overrideUndo = useStore((s) => s.overrideUndo);
+  const rackUndo = useStore((s) => s.rackUndo);
+
   const cls = classifyDecision(unit.final_decision);
   const multi = channels.length > 1;
   const name = channelName(unit.channel, channels);
   const dur = unit.end_time_s - unit.start_time_s;
   const strength = typeof unit.chosen_strength === 'number' ? unit.chosen_strength : null;
   const actions = unit.finish_actions ?? [];
+  const activeOverride =
+    unitOverrides[unit.unit_id] ??
+    (unit.manual_override === 'force_original' || unit.manual_override === 'force_enhanced'
+      ? unit.manual_override
+      : 'auto');
+  const canUndo = overrideUndo.canUndo || rackUndo.canUndo;
+  const canRedo = overrideUndo.canRedo || rackUndo.canRedo;
+  const hasHistory = canUndo || canRedo;
+
   return (
-    <div className="insp-grid">
+    <div className="insp-detail-wrap">
+      <div className="insp-override-bar" role="group" aria-label="Unit actions">
+        <button
+          type="button"
+          className="insp-action-btn"
+          onClick={() => loopSelectedUnit(unit)}
+          aria-label={`Loop unit ${unit.unit_id}`}
+          title="Loop playback over this unit's time range"
+        >
+          Loop unit
+        </button>
+        <button
+          type="button"
+          className={`insp-action-btn${activeOverride === 'force_original' ? ' on' : ''}`}
+          aria-pressed={activeOverride === 'force_original'}
+          aria-label={`Keep original audio for unit ${unit.unit_id}`}
+          title="Force original audio for this unit"
+          onClick={() => void applyUnitOverride(unit.unit_id, 'force_original')}
+        >
+          Keep original
+        </button>
+        <button
+          type="button"
+          className={`insp-action-btn${activeOverride === 'force_enhanced' ? ' on' : ''}`}
+          aria-pressed={activeOverride === 'force_enhanced'}
+          aria-label={`Force cleaned audio for unit ${unit.unit_id}`}
+          title="Force enhanced audio for this unit"
+          onClick={() => void applyUnitOverride(unit.unit_id, 'force_enhanced')}
+        >
+          Force cleaned
+        </button>
+        <button
+          type="button"
+          className={`insp-action-btn${activeOverride === 'auto' ? ' on' : ''}`}
+          aria-pressed={activeOverride === 'auto'}
+          aria-label={`Reset auto — unit ${unit.unit_id} automatic guard decision`}
+          title="Restore automatic guard decision for this unit"
+          onClick={() => void applyUnitOverride(unit.unit_id, 'auto')}
+        >
+          Reset auto
+        </button>
+        {hasHistory ? (
+          <div className="insp-history-btns" role="group" aria-label="Undo and redo history">
+            <button
+              type="button"
+              className="insp-action-btn"
+              disabled={!canUndo}
+              onClick={undoAction}
+              aria-label="Undo last override or rack edit"
+              title="Undo (⌘Z / Ctrl+Z)"
+            >
+              Undo
+            </button>
+            <button
+              type="button"
+              className="insp-action-btn"
+              disabled={!canRedo}
+              onClick={redoAction}
+              aria-label="Redo last override or rack edit"
+              title="Redo (⌘⇧Z / Ctrl+Shift+Z)"
+            >
+              Redo
+            </button>
+          </div>
+        ) : null}
+      </div>
+      <div className="insp-grid">
       <div className="insp-col insp-ident">
         <div className="insp-idhead">
           {/* A7/B4 · on a multi-channel report the channel is not a detail —
@@ -355,6 +440,7 @@ function Detail({
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

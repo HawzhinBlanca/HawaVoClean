@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.pipeline import run_pipeline
 from hawavoclean.progress import (
     PROGRESS_DECODE,
@@ -22,6 +21,7 @@ from hawavoclean.progress import (
     emit_progress,
     unit_progress,
 )
+from tests.support.stubs import FixedProbe
 
 REPO = Path(__file__).resolve().parents[2]
 SPLIT_FIXTURE = REPO / "tests" / "fixtures" / "sample_split_speakers.wav"
@@ -67,6 +67,9 @@ def test_single_unit_run_emits_contract_sequence(tmp_path: Path) -> None:
         "segment",
         "enhance",
         "guard",
+        "finish",
+        "finish",
+        "finish",
         "finish",
         "finish",
         "publish",

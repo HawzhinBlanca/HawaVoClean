@@ -1,23 +1,84 @@
-import { useEffect, useState } from 'react';
-import { Actions } from './components/Actions';
+import { useEffect, useRef, useState } from 'react';
+import { getPlayer } from './audio/player';
+import { AudioAssistant } from './components/AudioAssistant';
+import { BatchQueue } from './components/BatchQueue';
 import { EngineBanner } from './components/EngineBanner';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
-import { JobHistory } from './components/JobHistory';
-import { MetricsTiles } from './components/MetricsTiles';
-import { ProcessButton } from './components/ProcessButton';
-import { ProfileControl } from './components/ProfileControl';
-import { RestoreControl } from './components/RestoreControl';
+import { ModelManagerDrawer } from './components/ModelManagerDrawer';
+import { ProWorkspace } from './components/ProWorkspace';
+import { QuickChatBar } from './components/QuickChatBar';
+import { SimpleWorkspace } from './components/SimpleWorkspace';
+import { SlideOverDrawer } from './components/SlideOverDrawer';
 import { ShortcutOverlay } from './components/ShortcutOverlay';
 import { SourceStrip } from './components/SourceStrip';
-import { SpectrumDisplay } from './components/SpectrumDisplay';
-import { Transport } from './components/Transport';
-import { UnitInspector } from './components/UnitInspector';
-import { WaveformDisplay } from './components/WaveformDisplay';
-import { connectEngine, ingestDataTransfer } from './state/actions';
+import { ToastStack } from './components/ToastStack';
+import { VideoPreview, sourceHasVideo } from './components/VideoPreview';
+import {
+  installRendererProofResponder,
+  RENDERER_PROOF_CONTRACT,
+} from './rendererProof';
+import {
+  connectEngine,
+  ingestDataTransfer,
+  seekTo,
+} from './state/actions';
 import { useJobAnnouncer } from './state/announcer';
+import { useI18n } from './state/i18n';
 import { useKeyboardMap } from './state/keymap';
-import { getState, jobInFlight, useStore } from './state/store';
+import { getState, jobInFlight, useStore, type AbMode } from './state/store';
+
+/**
+ * Single app-level player & loop synchronizer.
+ * Subscribes once to `getPlayer()` so BOTH Simple Studio and Pro Studio receive
+ * live `playing`, `abMode`, and `gainOffsetDb` updates, and keeps the player's
+ * loop range locked to the waveform selection range.
+ */
+export function usePlayerSync(): void {
+  const setPlaying = useStore((s) => s.setPlaying);
+  const setAbMode = useStore((s) => s.setAbMode);
+  const setGainOffsetDb = useStore((s) => s.setGainOffsetDb);
+  const selectionRange = useStore((s) => s.selectionRange);
+  const hpfEnabled = useStore((s) => s.rackSettings.hpfEnabled !== false);
+  const hpfCutoffHz = useStore((s) => s.rackSettings.hpfCutoffHz);
+  const hadSelectionRef = useRef(false);
+
+  useEffect(() => {
+    let lastPlaying: boolean | null = null;
+    let lastDeck: AbMode | null = null;
+    let lastGain: number | null = null;
+    const unsub = getPlayer().subscribe((snap) => {
+      if (snap.playing !== lastPlaying) {
+        lastPlaying = snap.playing;
+        setPlaying(snap.playing);
+      }
+      const deck = snap.pending ?? snap.active;
+      if (deck !== lastDeck) {
+        lastDeck = deck;
+        setAbMode(deck);
+      }
+      if (snap.gainOffsetDb !== undefined && snap.gainOffsetDb !== lastGain) {
+        lastGain = snap.gainOffsetDb;
+        setGainOffsetDb(snap.gainOffsetDb);
+      }
+    });
+    return unsub;
+  }, [setPlaying, setAbMode, setGainOffsetDb]);
+
+  useEffect(() => {
+    if (selectionRange && selectionRange.end > selectionRange.start) {
+      hadSelectionRef.current = true;
+      getPlayer().setLoopRange([selectionRange.start, selectionRange.end]);
+    } else if (hadSelectionRef.current) {
+      hadSelectionRef.current = false;
+      getPlayer().setLoopRange(null);
+    }
+  }, [selectionRange]);
+
+  useEffect(() => {
+    getPlayer().setLiveHpf?.(hpfEnabled, hpfCutoffHz);
+  }, [hpfEnabled, hpfCutoffHz]);
+}
 
 /** What the whole screen is doing, as one word the stylesheet can key on. */
 export type Phase = 'idle' | 'analyzing' | 'ready' | 'running' | 'done' | 'failed';
@@ -29,7 +90,7 @@ function usePhase(): Phase {
   const state = useStore((s) => s.job?.status?.state ?? (s.job ? 'queued' : null));
   if (state === 'running' || state === 'queued') return 'running';
   if (analyzing) return 'analyzing';
-  if (state === 'failed') return 'failed';
+  if (state === 'failed' || state === 'interrupted') return 'failed';
   if (state === 'done') return 'done';
   if (!source || !original) return 'idle';
   return 'ready';
@@ -75,22 +136,84 @@ function useDragWatch(): boolean {
   return over;
 }
 
+function SyncedVideoPreview() {
+  const source = useStore((s) => s.source);
+  const original = useStore((s) => s.original);
+  const client = useStore((s) => s.client);
+  const duration = useStore((s) => s.duration);
+  const collapsed = useStore((s) => s.videoPreviewCollapsed);
+  const setCollapsed = useStore((s) => s.setVideoPreviewCollapsed);
+  const [sync, setSync] = useState(() => {
+    const p = getPlayer();
+    return { time: p.time, playing: p.playing, duration: p.duration };
+  });
+
+  const isVideo = Boolean(source && sourceHasVideo(source.path, original));
+  const videoUrl = isVideo && source && client ? client.fileUrl(source.path) : null;
+
+  useEffect(() => {
+    if (!videoUrl) return;
+    return getPlayer().subscribe((snap) => {
+      setSync((prev) =>
+        Math.abs(prev.time - snap.time) > 0.02 ||
+        prev.playing !== snap.playing ||
+        prev.duration !== snap.duration
+          ? { time: snap.time, playing: snap.playing, duration: snap.duration }
+          : prev,
+      );
+    });
+  }, [videoUrl]);
+
+  if (!videoUrl || !source) return null;
+
+  return (
+    <div className="app-video-pip">
+      <VideoPreview
+        videoUrl={videoUrl}
+        currentTime={sync.time}
+        playing={sync.playing}
+        duration={sync.duration > 0 ? sync.duration : duration}
+        onSeek={seekTo}
+        collapsed={collapsed}
+        onToggleCollapse={() => setCollapsed(!collapsed)}
+        title={source.name}
+      />
+    </div>
+  );
+}
+
 export default function App() {
   useKeyboardMap();
+  usePlayerSync();
+  const { t } = useI18n();
   const phase = usePhase();
   const announcement = useJobAnnouncer();
   const dragOver = useDragWatch();
   const abMode = useStore((s) => s.abMode);
   const cleanedPath = useStore((s) => s.cleanedPath);
+  const previewActive = useStore((s) => s.previewActive);
   const engineStatus = useStore((s) => s.engineStatus);
   const offlineSince = useStore((s) => s.engineOfflineSince);
-  const deck = abMode === 'cleaned' && cleanedPath ? 'cleaned' : 'original';
+  const workspaceMode = useStore((s) => s.workspaceMode);
+  const assistantDrawerOpen = useStore((s) => s.assistantDrawerOpen);
+  const setAssistantDrawerOpen = useStore((s) => s.setAssistantDrawerOpen);
+  const batchDrawerOpen = useStore((s) => s.batchDrawerOpen);
+  const setBatchDrawerOpen = useStore((s) => s.setBatchDrawerOpen);
+  const modelsDrawerOpen = useStore((s) => s.modelsDrawerOpen);
+  const setModelsDrawerOpen = useStore((s) => s.setModelsDrawerOpen);
+  const deck = abMode === 'cleaned' && (cleanedPath || previewActive) ? 'cleaned' : 'original';
   // The banner is a *row* of the shell grid, never an overlay: a bar that
   // floats over the chassis is a bar that can cover a control, and the one
   // moment the user most needs to reach the controls is the moment something
   // has gone wrong.
   const offline =
     engineStatus === 'offline' || (engineStatus === 'connecting' && offlineSince !== null);
+
+  // The desktop release gate challenges this listener from the real packaged
+  // BrowserWindow.  A successful response proves that the production React
+  // bundle reached an App commit; loading index.html and preload alone is not
+  // enough release evidence.
+  useEffect(() => installRendererProofResponder(__UI_VERSION__), []);
 
   useEffect(() => {
     void connectEngine();
@@ -129,56 +252,49 @@ export default function App() {
   return (
     <div
       className="app"
+      data-hawa-renderer-contract={RENDERER_PROOF_CONTRACT}
+      data-hawa-ui-version={__UI_VERSION__}
       data-phase={phase}
       data-deck={deck}
       data-drag={dragOver ? 'true' : 'false'}
       data-engine={engineStatus}
       data-offline={offline ? 'true' : 'false'}
+      data-workspace={workspaceMode}
     >
       <Header />
       <EngineBanner />
       <SourceStrip />
+      <QuickChatBar />
       {/* The single place the app speaks. Polite: none of this is urgent
           enough to cut across what the user is already reading. */}
       <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {announcement}
       </p>
-      <main className="main">
-        <div className="left">
-          <WaveformDisplay />
-          {/* The inspector answers "why did this unit go that way"; the run
-              list answers "which pass am I looking at". They share the bottom
-              row because they are the same kind of question about the same
-              report, and neither needs the full width. */}
-          <div className="deskrow">
-            <UnitInspector />
-            <JobHistory />
-          </div>
-        </div>
-        <aside className="right" aria-label="Analysis and controls">
-          <section className="panel spectrum-panel" aria-label="Spectrum">
-            <SpectrumDisplay />
-            <MetricsTiles />
-          </section>
-          <section className="panel controls" aria-label="Processing controls">
-            {/* The only panel with no visible title, so it is the only one
-                with no heading to land on. It gets a hidden one rather than a
-                visible one, because the controls below name themselves and a
-                title here would be chrome for its own sake. `aria-label` on
-                the section stays: it names the landmark, which is a different
-                job from being a stop in the heading list. */}
-            <h2 className="sr-only">Processing controls</h2>
-            <ProfileControl />
-            {/* Renders nothing until the engine's health answer offers
-                speaker profiles (contract addendum 2). */}
-            <RestoreControl />
-            <ProcessButton />
-            <Transport />
-            <Actions />
-          </section>
-        </aside>
-      </main>
+      <SyncedVideoPreview />
+      {workspaceMode === 'simple' ? <SimpleWorkspace /> : <ProWorkspace />}
       <Footer />
+      <SlideOverDrawer
+        open={assistantDrawerOpen}
+        title={t.drawerAiTitle}
+        onClose={() => setAssistantDrawerOpen(false)}
+      >
+        <AudioAssistant />
+      </SlideOverDrawer>
+      <SlideOverDrawer
+        open={batchDrawerOpen}
+        title={t.drawerBatchTitle}
+        onClose={() => setBatchDrawerOpen(false)}
+      >
+        <BatchQueue />
+      </SlideOverDrawer>
+      <SlideOverDrawer
+        open={modelsDrawerOpen}
+        title="Neural Models"
+        onClose={() => setModelsDrawerOpen(false)}
+      >
+        <ModelManagerDrawer />
+      </SlideOverDrawer>
+      <ToastStack />
       <ShortcutOverlay />
     </div>
   );

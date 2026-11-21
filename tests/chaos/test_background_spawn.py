@@ -43,6 +43,16 @@ from tests.chaos.procwatch import (
     wait_all_gone,
 )
 
+SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+pytestmark = [
+    pytest.mark.chaos,
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process hierarchy tests (Windows covered by test_process_supervisor.py)",
+    ),
+]
+
 REPO = Path(__file__).resolve().parents[2]
 
 #: A dead parent must be noticed and acted on well inside this. The job
@@ -174,7 +184,7 @@ def test_sigkilled_background_batch_leaves_no_child_writing_files(
                 lost_races.append(contents(dest_dir))
                 continue
 
-            os.kill(batch_pid, signal.SIGKILL)  # no cleanup anywhere in the batch
+            os.kill(batch_pid, SIGKILL)  # no cleanup anywhere in the batch
             if handle.pid == batch_pid:
                 handle.wait(timeout=30)  # reap it: a zombie still answers kill(pid, 0)
             else:

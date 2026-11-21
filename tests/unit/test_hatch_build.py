@@ -43,10 +43,10 @@ hatch_build = _load_build_hook()
 
 
 def _detached_root(tmp_path: Path) -> Path:
-    (tmp_path / "uv.lock").write_text("locked\n", encoding="utf-8")
+    (tmp_path / "uv.lock").write_bytes(b"locked\n")
     release = tmp_path / "src" / "hawavoclean" / "release.json"
     release.parent.mkdir(parents=True)
-    release.write_text('{"version":"test"}\n', encoding="utf-8")
+    release.write_bytes(b'{"version":"test"}\n')
     return tmp_path
 
 

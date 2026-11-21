@@ -2,13 +2,35 @@
 // together. Components call these; nothing here renders.
 
 import { EngineClient, EngineError } from '../api/client';
-import { followJob, isTerminal } from '../api/sse';
-import type { AudioAnalysis, JobStatus, Profile } from '../api/types';
+import { followBatch, followJob, isTerminal } from '../api/sse';
+import type {
+  AudioAnalysis,
+  BatchItem,
+  BatchSummary,
+  DeliveryExportResponse,
+  ExportFormatId,
+  HawaVoCleanReport,
+  JobStatus,
+  ManualRoute,
+  ProcessingRequestV1,
+  ProcessingStrategyV1,
+  Profile,
+  RegionPreviewResponse,
+  SpectralRepairResponse,
+  UnitDecisionRecord,
+} from '../api/types';
 import { reportTxtPath } from '../api/types';
 import { getPlayer, type DeckFault } from '../audio/player';
-import { getBridge } from '../bridge';
+import { getBridge, type ResolveBatchCleanTrackResult } from '../bridge';
+import { addTakeSnapshot, type TakeSnapshot } from '../components/TakeSwitcher';
 import { waveView } from '../render/viewWindow';
+import { scheduleLivePreview } from './liveAudition';
 import { unitsEnhanced } from './plural';
+import {
+  DEFAULT_STUDIO_RACK_SETTINGS,
+  type StudioRackSettings,
+} from './presets';
+import { createUndoStack, shallowRecordEqual } from './undoStack';
 import {
   classifyFailure,
   failureSource,
@@ -17,7 +39,10 @@ import {
   type UiFailure,
 } from './errors';
 import {
+  getRouteBlockedReason,
   getState,
+  isProfileUnavailable,
+  isRouteBlocked,
   jobInFlight,
   useStore,
   type ArtifactState,
@@ -25,6 +50,8 @@ import {
   type HistoryEntry,
   type JobInfo,
   type SourceInfo,
+  type UnitOverrideMap,
+  type UnitOverrideMapValue,
 } from './store';
 
 /**
@@ -288,6 +315,21 @@ async function probeEngine(): Promise<void> {
     // up without a restart. A revision-1 engine sends neither field; that
     // reads as "no restore", which is exactly what such an engine can do.
     getState().setCapabilities(health.speakers ?? [], health.restore_available === true);
+
+    // True-10 D4.11: Probe versioned capabilities with its own live timeout
+    if (typeof client.capabilities === 'function') {
+      const capsTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
+      try {
+        const caps = await client.capabilities(capsTimeout.signal);
+        if (caps && Array.isArray(caps.capabilities)) {
+          getState().setCapabilitiesV1(caps.capabilities);
+        }
+      } catch {
+        /* Graceful fallback for mock engines / older versions */
+      } finally {
+        capsTimeout.done();
+      }
+    }
     if (!everConnected) {
       everConnected = true;
       getState().setStatus(`Engine ready · v${health.version}`);
@@ -302,6 +344,7 @@ async function probeEngine(): Promise<void> {
     }
     autoloadFromQuery();
     if (wasDown || restarted) await resumeAfterReconnect(client);
+    void rehydrateBatchQueue(client);
     scheduleProbe(HEALTH_OK_MS);
   } catch (e) {
     markOffline(describeError(e));
@@ -401,7 +444,9 @@ async function resumeAfterReconnect(client: EngineClient): Promise<void> {
     const resumeTimeout = timeoutSignal(HEALTH_TIMEOUT_MS);
     let status;
     try {
-      status = await client.getJob(job.id, resumeTimeout.signal);
+      status = typeof client.getV1Job === 'function'
+        ? await client.getV1Job(job.id, resumeTimeout.signal)
+        : await client.getJob(job.id, resumeTimeout.signal);
     } finally {
       resumeTimeout.done();
     }
@@ -806,6 +851,7 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   }
   stopFollow?.();
   stopFollow = null;
+  stopSelectionPlay();
   analyzeAbort?.abort();
   const player = getPlayer();
   player.pause();
@@ -817,8 +863,15 @@ export async function loadSource(source: SourceInfo): Promise<void> {
   // `player.time` reads it ungated, so the old clip's timecode would survive
   // the deck that produced it.
   player.seek(0);
+  if (typeof player.setLoopRange === 'function') player.setLoopRange(null);
+  if (typeof player.setLoopEnabled === 'function') player.setLoopEnabled(false);
   player.claimOnly('original', null);
   player.load('cleaned', null);
+  unitOverrideEpoch += 1;
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
+  extractTrackEpoch += 1;
+  takeAnalysisCache.clear();
   st.resetForNewSource();
   // A refusal is answered by the load that follows it. The multi-file note is
   // not a refusal — it explains *this* load ("3 files were dropped, the first
@@ -835,6 +888,7 @@ export async function loadSource(source: SourceInfo): Promise<void> {
     const analysis = await client.analyze(source.path, envelopeBuckets(), ac.signal);
     if (ac.signal.aborted) return;
     useStore.getState().setOriginal(analysis);
+    syncPlayerLoudnessMatch();
     // The engine has just decoded this file end to end, so its length is
     // known: a deck that opens far shorter than that is not this clip.
     player.load('original', client.fileUrl(source.path), analysis.duration_s);
@@ -902,6 +956,19 @@ export async function useResolveClip(): Promise<void> {
 export async function openFileDialog(): Promise<void> {
   const bridge = getBridge();
   try {
+    if (bridge.files.pickAudioFiles) {
+      const paths = await bridge.files.pickAudioFiles();
+      if (!paths || paths.length === 0) return;
+      if (paths.length > 1) {
+        await submitBatch([...paths]);
+        return;
+      }
+      const path = paths[0];
+      if (path) {
+        await loadSource({ path, name: baseName(path), origin: 'file' });
+      }
+      return;
+    }
     const path = await bridge.files.pickAudio();
     if (!path) return;
     await loadSource({ path, name: baseName(path), origin: 'file' });
@@ -921,26 +988,18 @@ export async function openFileDialog(): Promise<void> {
  */
 export const ACCEPTED_EXTENSIONS = [
   'wav',
-  'aiff',
+  'wave',
   'aif',
+  'aiff',
   'aifc',
-  'mp3',
   'flac',
+  'mp3',
   'm4a',
   'mp4',
-  'mov',
-  'aac',
-  'ogg',
-  'oga',
-  'opus',
-  'caf',
-  'w64',
-  'mkv',
-  'webm',
 ] as const;
 
 /** The short version, for the one line the drop well has room for. */
-export const ACCEPTED_SHORTLIST = 'wav · aiff · mp3 · flac · m4a · mp4 · mov';
+export const ACCEPTED_SHORTLIST = 'wav · aiff · flac · mp3 · m4a · mp4';
 
 export function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
@@ -949,9 +1008,7 @@ export function extensionOf(name: string): string {
 
 export function isAcceptedFile(file: File): boolean {
   const ext = extensionOf(file.name);
-  if ((ACCEPTED_EXTENSIONS as readonly string[]).includes(ext)) return true;
-  // A file with no extension but an honest media MIME type is still media.
-  return file.type.startsWith('audio/') || file.type.startsWith('video/');
+  return (ACCEPTED_EXTENSIONS as readonly string[]).includes(ext);
 }
 
 /**
@@ -984,8 +1041,8 @@ export async function ingestDataTransfer(dt: DataTransfer): Promise<void> {
       name: firstFolder,
       detail:
         folderNames.length > 1
-          ? `${folderNames.length} folders were dropped. Drop one audio or video file instead — batches are a job for the command line.`
-          : 'Folders are not opened here. Drop one audio or video file instead — batches are a job for the command line.',
+          ? `${folderNames.length} folders were dropped. Select multiple audio or video files directly to run a batch queue.`
+          : 'Folders are not opened directly. Drop one or more audio or video files to clean or queue as a batch.',
     });
     return;
   }
@@ -1006,6 +1063,38 @@ export async function ingestDataTransfer(dt: DataTransfer): Promise<void> {
     return;
   }
 
+  const acceptedFiles = files.filter(isAcceptedFile);
+  if (acceptedFiles.length > 1) {
+    const bridge = getBridge();
+    const sourcesToSubmit: Array<{ path: string; name: string; sourceId?: string }> = [];
+    for (const file of acceptedFiles) {
+      if (file.size === 0) continue;
+      let local: { sourceId: string; path: string } | string | null = null;
+      try {
+        local = bridge.files.registerDroppedFile
+          ? await bridge.files.registerDroppedFile(file)
+          : null;
+      } catch {
+        local = null;
+      }
+      if (local) {
+        if (typeof local === 'object' && local !== null) {
+          sourcesToSubmit.push({ path: local.path, name: file.name, sourceId: local.sourceId });
+        } else {
+          sourcesToSubmit.push({ path: local, name: file.name });
+        }
+      } else {
+        const client = requireClient();
+        const res = await client.upload(file);
+        sourcesToSubmit.push({ path: res.path, name: file.name });
+      }
+    }
+    if (sourcesToSubmit.length > 1) {
+      await submitBatch(sourcesToSubmit);
+      return;
+    }
+  }
+
   if (files.length > 1) {
     // Take the first one that can be opened, and say so rather than silently
     // dropping the rest on the floor.
@@ -1017,6 +1106,56 @@ export async function ingestDataTransfer(dt: DataTransfer): Promise<void> {
     });
   }
   await ingestFile(chosen);
+}
+
+/** Handles multi-file picks from `<input type="file" multiple>`: single file loads normally, 2+ accepted files queue a batch. */
+export async function ingestFiles(fileList: FileList | readonly File[]): Promise<void> {
+  const files = Array.from(fileList);
+  if (files.length === 0) return;
+  if (files.length === 1) {
+    await ingestFile(files[0]!);
+    return;
+  }
+  const acceptedFiles = files.filter(isAcceptedFile);
+  if (acceptedFiles.length <= 1) {
+    await ingestFile(acceptedFiles[0] ?? files[0]!);
+    return;
+  }
+  const bridge = getBridge();
+  const sourcesToSubmit: Array<{ path: string; name: string; sourceId?: string }> = [];
+  for (const file of acceptedFiles) {
+    if (file.size === 0) continue;
+    let local: { sourceId: string; path: string } | string | null = null;
+    try {
+      local = bridge.files.registerDroppedFile
+        ? await bridge.files.registerDroppedFile(file)
+        : null;
+    } catch {
+      local = null;
+    }
+    if (local) {
+      if (typeof local === 'object' && local !== null) {
+        sourcesToSubmit.push({ path: local.path, name: file.name, sourceId: local.sourceId });
+      } else {
+        sourcesToSubmit.push({ path: local, name: file.name });
+      }
+    } else {
+      const client = requireClient();
+      const res = await client.upload(file);
+      sourcesToSubmit.push({
+        path: res.path,
+        name: file.name,
+        ...(res.source_id ? { sourceId: res.source_id } : {}),
+      });
+    }
+  }
+  if (sourcesToSubmit.length > 1) {
+    await submitBatch(sourcesToSubmit);
+    return;
+  }
+  if (acceptedFiles[0]) {
+    await ingestFile(acceptedFiles[0]);
+  }
 }
 
 /** Handles both dropped files and <input type=file> picks. */
@@ -1039,9 +1178,26 @@ export async function ingestFile(file: File): Promise<void> {
     });
     return;
   }
-  const local = bridge.files.pathForFile(file);
+  // A native drop is not authority by itself. The preload asks main to bind
+  // its OS path through the broker's root-only registration route; if that
+  // cannot complete, send the File bytes through the managed upload path.
+  // A host without the registration bridge is not allowed to turn a raw
+  // renderer path into authority; it takes the same managed-upload fallback
+  // as a failed registration.
+  let local: { sourceId: string; path: string } | string | null = null;
+  try {
+    local = bridge.files.registerDroppedFile
+      ? await bridge.files.registerDroppedFile(file)
+      : null;
+  } catch {
+    local = null;
+  }
   if (local) {
-    await loadSource({ path: local, name: file.name, origin: 'drop' });
+    if (typeof local === 'object' && local !== null) {
+      await loadSource({ path: local.path, name: file.name, origin: 'drop', sourceId: local.sourceId });
+    } else {
+      await loadSource({ path: local, name: file.name, origin: 'drop' });
+    }
     return;
   }
   await uploadFile(file);
@@ -1072,7 +1228,7 @@ async function uploadFile(file: File): Promise<void> {
   st.setStatus(`Uploading ${file.name}`);
   try {
     const client = requireClient();
-    const { path } = await client.uploadWithProgress(file, {
+    const res = await client.uploadWithProgress(file, {
       onProgress: (loaded, total) => {
         const cur = getState();
         if (!cur.upload) return;
@@ -1089,7 +1245,12 @@ async function uploadFile(file: File): Promise<void> {
     });
     cancelUploadHandle = null;
     getState().setUpload(null);
-    await loadSource({ path, name: file.name, origin: 'upload' });
+    await loadSource({
+      path: res.path,
+      name: file.name,
+      origin: 'upload',
+      ...(res.source_id ? { sourceId: res.source_id } : {}),
+    });
   } catch (e) {
     cancelUploadHandle = null;
     getState().setUpload(null);
@@ -1178,17 +1339,26 @@ function onJobStatus(status: JobStatus): void {
     const unit = status.unit ? ` (${status.unit.index}/${status.unit.total})` : '';
     st.setStatus(`${status.message || status.stage}${unit}`);
   }
-  if (status.state === 'failed') {
+  if (status.state === 'failed' || status.state === 'interrupted') {
     // C5 · a run's own failure gets the same treatment as a call's. The
     // engine reports `INVALID_USER_INPUT` plus a message written for a log;
     // neither an enum nor a subprocess repr belongs in front of a person, so
     // the pair is re-classified through the same table as everything else.
+    const defaultCode = status.state === 'interrupted' ? 'ENGINE_RESTARTED' : 'job_failed';
+    const defaultMessage =
+      status.state === 'interrupted'
+        ? status.error?.message || status.message || 'The engine stopped while this run was in flight'
+        : jobFailureMessage(status);
     const f = classifyFailure(
-      new EngineError(400, status.error?.code ?? 'job_failed', jobFailureMessage(status)),
+      new EngineError(400, status.error?.code ?? defaultCode, defaultMessage),
       st.source?.name ?? baseName(status.input_path || ''),
     );
     st.setError(f.detail, failureSource(f));
-    st.setStatus(`Processing failed · ${f.headline}`);
+    st.setStatus(
+      status.state === 'interrupted'
+        ? `Processing interrupted · ${f.headline}`
+        : `Processing failed · ${f.headline}`,
+    );
     recordRun(status, 'failed');
   } else if (status.state === 'cancelled') {
     st.setStatus('Processing cancelled');
@@ -1199,6 +1369,7 @@ function onJobStatus(status: JobStatus): void {
     const out = status.output_path || st.job.outputPath;
     st.setStatus(`Done · ${baseName(out)}`);
     recordRun(status, 'done');
+    recordCompletedTake(status, out, report, null);
     void (async () => {
       try {
         const client = requireClient();
@@ -1228,8 +1399,13 @@ function onJobStatus(status: JobStatus): void {
           lufsOut: analysis?.loudness.integrated_lufs ?? null,
           noiseOut: analysis?.noise_floor_db ?? null,
         });
+        if (analysis) {
+          takeAnalysisCache.set(status.job_id, analysis);
+          updateTakeLufs(status.job_id, analysis.loudness.integrated_lufs ?? null);
+        }
         if (!cur.job || cur.job.id !== status.job_id) return;
         cur.setCleaned(analysis, out);
+        syncPlayerLoudnessMatch();
         const player = getPlayer();
         player.load(
           'cleaned',
@@ -1269,8 +1445,10 @@ function followFrom(client: EngineClient, jobId: string): void {
       if (cur.job && cur.job.id === jobId) {
         cur.patchJob({ streamConnected: false });
         if (!cur.job.status || !isTerminal(cur.job.status.state)) {
-          void client
-            .getJob(jobId)
+          const fetchStatus = typeof client.getV1Job === 'function'
+            ? client.getV1Job(jobId)
+            : client.getJob(jobId);
+          void fetchStatus
             .then(onJobStatus)
             .catch((e: unknown) => {
               // This `.catch` used to be `() => undefined`. If the stream ended
@@ -1377,10 +1555,171 @@ function uniqueOutputPath(inputPath: string, profile: Profile): string | null {
   return bumpOutputPath(prior.outputPath, new Set(done.map((h) => h.outputPath)));
 }
 
-export async function startJob(): Promise<void> {
+/**
+ * A run is being created right now, before any job id exists to look at.
+ *
+ * `jobInFlight(st.job)` cannot cover this window: `setJob` only happens after
+ * `createJob` has come back, so every press between the click and the response
+ * read the *previous* job — a terminal one — and passed the guard. Six presses
+ * in a burst posted six runs; the store kept the last and the other five ran to
+ * completion on the engine with nothing on screen referring to them and no id
+ * to cancel them by. On a real engine each is a full DSP pass publishing its
+ * own output generation, because `uniqueOutputPath` gives every one of them a
+ * private destination.
+ *
+ * Module scope rather than store state on purpose: this has to be readable and
+ * writable synchronously, in the same tick as the click, which a React state
+ * update is not.
+ */
+let creatingJob = false;
+
+const MANUAL_CLEANUP_ROUTES = new Set<string>([
+  'production',
+  'studio',
+  'studio_pro',
+  'dereverb',
+  'lowband',
+]);
+
+function unavailableProfileMessage(route: string): string {
+  if (route === 'studio_pro') return 'Studio Pro is unavailable on this machine.';
+  if (route === 'dereverb') return 'Dereverb is unavailable on this machine.';
+  return 'This cleanup option is unavailable.';
+}
+
+export interface RackOverridePayload {
+  strength: number;
+  ambienceFloorDb: number | null;
+  deliveryPreset: StudioRackSettings['deliveryPreset'];
+  stereoMode?: StudioRackSettings['stereoMode'];
+  hpfEnabled: boolean;
+  hpfCutoffHz: number;
+  proRepair: {
+    deplosive: boolean;
+    mouth_declick: boolean;
+    declip: boolean;
+    deess: boolean;
+    tonal_restoration: boolean;
+    level_rider: boolean;
+  };
+}
+
+export function buildRackOverrides(rs: StudioRackSettings): RackOverridePayload {
+  return {
+    strength: rs.strength,
+    ambienceFloorDb: rs.ambienceFloorDb,
+    deliveryPreset: rs.deliveryPreset,
+    ...(rs.stereoMode !== 'auto' ? { stereoMode: rs.stereoMode } : {}),
+    hpfEnabled: rs.hpfEnabled !== false,
+    hpfCutoffHz: rs.hpfCutoffHz,
+    proRepair: {
+      deplosive: rs.deplosive,
+      mouth_declick: rs.mouthDeclick,
+      declip: rs.declip,
+      deess: rs.deess,
+      tonal_restoration: rs.tonalRestoration,
+      level_rider: rs.levelRider,
+    },
+  };
+}
+
+export type BuildStrategyResult =
+  | { ok: true; strategy: ProcessingStrategyV1 }
+  | { ok: false; status: string; error: string; label: string };
+
+/**
+ * Single source of truth for building the engine ProcessingStrategyV1 from store state.
+ * Shared across `startJob()`, `submitBatch()`, and `previewRegion()` so every knob
+ * (including HPF, proRepair modules, deliveryPreset, stereoMode, strength, ambienceFloorDb)
+ * is forwarded consistently — including under `smart_safe` when the user adjusts dials.
+ */
+export function buildStrategyFromState(
+  st: ReturnType<typeof getState> = getState(),
+  profileOverride?: Profile,
+): BuildStrategyResult {
+  const rs = st.rackSettings;
+  const rackModified =
+    st.rackDirty || !shallowRecordEqual(rs, DEFAULT_STUDIO_RACK_SETTINGS);
+  const overrides = rackModified ? buildRackOverrides(rs) : {};
+
+  if (st.mode === 'smart_safe') {
+    if (isRouteBlocked(st.capabilities, 'smart_safe')) {
+      const reason = getRouteBlockedReason(st.capabilities, 'smart_safe');
+      return {
+        ok: false,
+        status: `Smart Safe is blocked: ${reason || 'unqualified'}`,
+        error: reason || 'Smart Safe capability is blocked',
+        label: 'Capability blocked',
+      };
+    }
+    return {
+      ok: true,
+      strategy: {
+        kind: 'smart_safe',
+        restore_policy: 'disabled',
+        allow_generative_reconstruction: false,
+        ...overrides,
+      },
+    };
+  }
+
+  if (st.mode === 'restore') {
+    const restoreCapId = st.speakerId ? 'restore_enrolled' : 'restore_source';
+    if (isRouteBlocked(st.capabilities, restoreCapId)) {
+      const reason = getRouteBlockedReason(st.capabilities, restoreCapId);
+      return {
+        ok: false,
+        status: `Restore is blocked: ${reason || 'unqualified'}`,
+        error: reason || 'Restore capability is blocked',
+        label: 'Capability blocked',
+      };
+    }
+    if (!st.reconstructionConsent) {
+      return {
+        ok: false,
+        status: 'Restore requires explicit generative reconstruction consent',
+        error: 'Acknowledge generative reconstruction consent to proceed with Restore',
+        label: 'Consent required',
+      };
+    }
+    return {
+      ok: true,
+      strategy: {
+        kind: 'manual',
+        route: restoreCapId as ManualRoute,
+        speaker_profile_id: st.speakerId,
+        expert_cutoff_hz: st.cutoffHz,
+        allow_generative_reconstruction: true,
+        ...overrides,
+      },
+    };
+  }
+
+  const profile = profileOverride ?? st.profile;
+  if (isProfileUnavailable(st.capabilities, profile)) {
+    const reason = getRouteBlockedReason(st.capabilities, profile);
+    return {
+      ok: false,
+      status: `Route ${profile} is blocked: ${reason || 'unqualified'}`,
+      error: reason || unavailableProfileMessage(profile),
+      label: 'Capability blocked',
+    };
+  }
+  return {
+    ok: true,
+    strategy: {
+      kind: 'manual',
+      route: profile as ManualRoute,
+      allow_generative_reconstruction: false,
+      ...overrides,
+    },
+  };
+}
+
+export async function startJob(strategyOverride?: ProcessingStrategyV1): Promise<void> {
   const st = getState();
   if (!st.source) return;
-  if (jobInFlight(st.job)) return;
+  if (creatingJob || jobInFlight(st.job)) return;
   // The engine has to be there before anything on screen is thrown away.
   // Without this, pressing PROCESS with the engine gone wiped the finished run
   // — report, cleaned deck, artefacts, the A/B — and *then* discovered there
@@ -1392,7 +1731,12 @@ export async function startJob(): Promise<void> {
     st.setStatus('Cannot start a run while the engine is offline — waiting for it to come back');
     return;
   }
-  const profile: Profile = st.profile;
+  const profile: Profile = strategyOverride?.kind === 'separate'
+    ? (strategyOverride.cleanup_profile ?? 'production')
+    : strategyOverride?.kind === 'manual' && MANUAL_CLEANUP_ROUTES.has(strategyOverride.route)
+      ? strategyOverride.route as Profile
+      : st.profile;
+  creatingJob = true;
   try {
     const client = requireClient();
     // B5 · a second run of the same profile must not land on the first run's
@@ -1400,36 +1744,130 @@ export async function startJob(): Promise<void> {
     // and the older history row then shows its own cached report beside
     // download links that hand over the newer run's bytes.
     const output = uniqueOutputPath(st.source.path, profile);
-    // Contract addendum 2: the engine pins this request `extra="forbid"` and
-    // natural mode must stay byte-compatible with revision 1, so the three
-    // restore fields are attached only when a restore run is actually being
-    // asked for — never as null placeholders. The speaker check is belt and
-    // braces: the store keeps a speaker selected whenever restore is offered,
-    // and a restore submit without one would only earn the engine's 422.
-    const restore =
-      st.mode === 'restore' && st.speakerId
-        ? {
-            mode: 'restore' as const,
-            speaker_id: st.speakerId,
-            ...(st.cutoffHz !== null ? { cutoff_hz: st.cutoffHz } : {}),
-          }
-        : {};
-    const res = await client.createJob({
-      input_path: st.source.path,
-      profile,
-      overwrite: true,
-      ...(output ? { output_path: output } : {}),
-      ...restore,
-    });
+
+    // Fail-closed capability & reconstruction consent checks (True-10 D4.11)
+    let strategy: ProcessingStrategyV1;
+    if (strategyOverride) {
+      if (strategyOverride.kind === 'separate') {
+        const cap = st.capabilities?.find((c) => c.capability_id === 'separate');
+        if (!cap?.available || cap.maturity === 'blocked') {
+          throw new EngineError(503, 'capability_blocked', cap?.reason || 'Sound separation is not installed yet.');
+        }
+        if (
+          strategyOverride.cleanup_profile &&
+          isProfileUnavailable(st.capabilities, strategyOverride.cleanup_profile)
+        ) {
+          const reason =
+            getRouteBlockedReason(st.capabilities, strategyOverride.cleanup_profile) ||
+            unavailableProfileMessage(strategyOverride.cleanup_profile);
+          st.setStatus(`Route ${strategyOverride.cleanup_profile} is blocked: ${reason}`);
+          st.setError(reason, 'Capability blocked');
+          return;
+        }
+        if (!st.original || !Number.isFinite(st.original.duration_s) || st.original.duration_s > 3600 || st.original.channels > 2) {
+          throw new EngineError(422, 'separation_limit', 'Sound separation currently supports recordings up to 60 minutes in mono or stereo.');
+        }
+      } else if (strategyOverride.kind === 'manual' && MANUAL_CLEANUP_ROUTES.has(strategyOverride.route)) {
+        if (isProfileUnavailable(st.capabilities, strategyOverride.route)) {
+          const reason =
+            getRouteBlockedReason(st.capabilities, strategyOverride.route) ||
+            unavailableProfileMessage(strategyOverride.route);
+          st.setStatus(`Route ${strategyOverride.route} is blocked: ${reason}`);
+          st.setError(reason, 'Capability blocked');
+          return;
+        }
+      } else if (strategyOverride.kind === 'manual' && strategyOverride.route === 'restore_source' && strategyOverride.allow_generative_reconstruction) {
+        const cap = st.capabilities?.find((c) => c.capability_id === 'restore_source');
+        if (!cap?.available || cap.maturity === 'blocked') {
+          const reason = cap?.reason || 'Bandwidth restoration is unavailable.';
+          st.setStatus(`Restore is blocked: ${reason}`);
+          st.setError(reason, 'Capability blocked');
+          return;
+        }
+      } else {
+        throw new EngineError(422, 'bad_request', 'This assistant plan is not a supported edit.');
+      }
+      if (typeof client.createV1Jobs !== 'function') {
+        throw new EngineError(503, 'capability_blocked', 'Update the audio engine to use the assistant.');
+      }
+      strategy = strategyOverride;
+    } else {
+      const built = buildStrategyFromState(st, profile);
+      if (!built.ok) {
+        st.setStatus(built.status);
+        st.setError(built.error, built.label);
+        return;
+      }
+      strategy = built.strategy;
+    }
+
+    const sourceId = st.source.sourceId || st.source.path;
+    const idempotencyKey = `v1-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    let jobItem: { jobId: string; outputPath: string; reportPath: string };
+
+    if (typeof client.createV1Jobs === 'function') {
+      const v1Req: ProcessingRequestV1 = {
+        schema_version: 1,
+        source_ids: [sourceId],
+        strategy,
+        execution_policy: 'offline_only',
+        conflict_policy: 'unique',
+        record_bundle: false,
+        idempotency_key: idempotencyKey,
+      };
+      const v1Res = await client.createV1Jobs(v1Req);
+      const item = v1Res.jobs[0];
+      if (!item) {
+        throw new EngineError(500, 'bad_response', 'The engine returned an empty job batch');
+      }
+      jobItem = { jobId: item.jobId, outputPath: item.outputPath, reportPath: item.reportPath };
+    } else {
+      // Contract addendum 2: the engine pins this request `extra="forbid"` and
+      // natural mode must stay byte-compatible with revision 1, so the three
+      // restore fields are attached only when a restore run is actually being
+      // asked for — never as null placeholders.
+      const restore =
+        st.mode === 'restore' && st.speakerId
+          ? {
+              mode: 'restore' as const,
+              speaker_id: st.speakerId,
+              ...(st.cutoffHz !== null ? { cutoff_hz: st.cutoffHz } : {}),
+            }
+          : {};
+      const res = await client.createJob({
+        input_path: st.source.path,
+        profile,
+        overwrite: true,
+        ...(output ? { output_path: output } : {}),
+        ...restore,
+      });
+      jobItem = { jobId: res.job_id, outputPath: res.output_path, reportPath: res.report_path };
+    }
+
+    // An assistant plan belongs to the recording it was reviewed against.
+    // A source swap while the server accepts the job must not attach that
+    // old recording's edit to the newly opened clip.
+    if (strategyOverride && getState().source !== st.source) {
+      if (typeof client.cancelV1Job === 'function') await client.cancelV1Job(jobItem.jobId);
+      throw new EngineError(409, 'source_changed', 'The recording changed. Review a new plan before applying it.');
+    }
+
     // Only now, with a job id in hand, is the previous run's result really
     // superseded. Doing this before `createJob` meant any refusal — a 4xx, a
     // dead socket, a path the engine will not take — destroyed a finished run
     // to start one that never began.
-    reconcileTries.delete(res.job_id);
+    reconcileTries.delete(jobItem.jobId);
+    unitOverrideEpoch += 1;
+    previewEpoch += 1;
+    spectralRepairEpoch += 1;
+    extractTrackEpoch += 1;
     const cur = useStore.getState();
     cur.setError(null);
     cur.setCleaned(null, null);
     cur.setReport(null);
+    cur.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+    if (cur.lastUndoDomain === 'override') cur.setLastUndoDomain(null);
     cur.setCurrentRun(null);
     cur.setDeckFault(null);
     cur.setArtifacts(null);
@@ -1437,18 +1875,22 @@ export async function startJob(): Promise<void> {
     getPlayer().setActive('original');
     cur.setAbMode('original');
     const job = {
-      id: res.job_id,
-      outputPath: res.output_path,
-      reportPath: res.report_path,
+      id: jobItem.jobId,
+      outputPath: jobItem.outputPath,
+      reportPath: jobItem.reportPath,
       status: null,
       streamConnected: false,
     };
     useStore.getState().setJob(job);
     useStore.getState().setStatus('Job queued');
-    followFrom(client, res.job_id);
+    followFrom(client, jobItem.jobId);
   } catch (e) {
     probeSoon(e);
     failed(e, st.source.name, 'Could not start');
+  } finally {
+    // Cleared on both paths. On success `jobInFlight` has taken over by now; on
+    // failure nothing was created, so the next press must be let through.
+    creatingJob = false;
   }
 }
 
@@ -1464,10 +1906,321 @@ export async function cancelJob(): Promise<void> {
   }
   try {
     st.setStatus('Cancelling');
-    await requireClient().cancelJob(st.job.id);
+    const c = requireClient();
+    if (typeof c.cancelV1Job === 'function') {
+      await c.cancelV1Job(st.job.id);
+    } else {
+      await c.cancelJob(st.job.id);
+    }
   } catch (e) {
     probeSoon(e);
     reportFailure(classifyFailure(e, st.source?.name), 'Cancel failed');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// True-10 D4.1 · Multi-file batch queue lifecycle & actions
+
+let stopBatchFollow: (() => void) | null = null;
+
+export function clearBatchSubscription(): void {
+  stopBatchFollow?.();
+  stopBatchFollow = null;
+}
+
+export function startBatchEventSubscription(batchId: string, client?: EngineClient): void {
+  const c = client ?? requireClient();
+  stopBatchFollow?.();
+  stopBatchFollow = followBatch(c, batchId, {
+    onBatchStatus: (summary) => {
+      const st = getState();
+      st.setBatch(summary);
+      const pct = Math.round(summary.progress * 100);
+      st.setStatus(
+        `Batch ${summary.state} · ${summary.completed_items}/${summary.total_items} complete (${pct}%)`,
+      );
+      if (st.activeInspectJobId) {
+        const item = summary.jobs.find((j) => j.job_id === st.activeInspectJobId);
+        if (item && item.state === 'done') {
+          const player = getPlayer();
+          if (!player.hasDeck('cleaned') && item.output_path) {
+            player.load('cleaned', c.fileUrl(item.output_path));
+          }
+        }
+      }
+    },
+    onEnd: () => {
+      stopBatchFollow = null;
+      void c
+        .getBatch(batchId)
+        .then((finalSummary) => {
+          getState().setBatch(finalSummary);
+          getState().setStatus(
+            `Batch ${finalSummary.state} · ${finalSummary.completed_items}/${finalSummary.total_items} complete`,
+          );
+        })
+        .catch(() => {});
+    },
+    onError: (err) => {
+      probeSoon(err);
+    },
+  });
+}
+
+export async function submitBatch(
+  sources: Array<{ path: string; name: string; sourceId?: string } | string>,
+): Promise<void> {
+  const st = getState();
+  if (sources.length === 0) return;
+  if (st.engineStatus !== 'ready') {
+    st.setStatus('Cannot start a batch while the engine is offline — waiting for it to come back');
+    return;
+  }
+  try {
+    const client = requireClient();
+    const built = buildStrategyFromState(st);
+    if (!built.ok) {
+      st.setStatus(built.status);
+      st.setError(built.error, built.label);
+      return;
+    }
+    const strategy = built.strategy;
+
+    const sourceIds = sources.map((s) => (typeof s === 'string' ? s : s.sourceId || s.path));
+    const idempotencyKey = `v1-batch-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    const v1Req: ProcessingRequestV1 = {
+      schema_version: 1,
+      source_ids: sourceIds,
+      strategy,
+      execution_policy: 'offline_only',
+      conflict_policy: 'unique',
+      record_bundle: false,
+      idempotency_key: idempotencyKey,
+    };
+
+    const res = await client.createV1Jobs(v1Req);
+    if (!res.batchId) {
+      throw new EngineError(500, 'bad_response', 'The engine did not return a batch identifier');
+    }
+
+    st.setStatus(`Batch queued · ${res.jobs.length} items`);
+    const initialSummary: BatchSummary = await client.getBatch(res.batchId).catch(() => ({
+      batch_id: res.batchId!,
+      state: 'queued',
+      total_items: res.jobs.length,
+      completed_items: 0,
+      failed_items: 0,
+      cancelled_items: 0,
+      running_items: 0,
+      queued_items: res.jobs.length,
+      progress: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      jobs: res.jobs.map((j, idx) => ({
+        job_id: j.jobId,
+        seq: idx + 1,
+        state: 'queued',
+        stage: 'queued',
+        progress: 0,
+        message: 'Queued',
+        input_path: sourceIds[idx] ?? '',
+        output_path: j.outputPath,
+        report_path: j.reportPath,
+        profile: st.profile,
+        mode: st.mode === 'restore' ? 'restore' : 'natural',
+        created_at: new Date().toISOString(),
+        started_at: null,
+        finished_at: null,
+      })),
+    }));
+
+    st.setBatch(initialSummary);
+    st.setBatchDrawerOpen(true);
+    startBatchEventSubscription(res.batchId, client);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Could not start batch');
+  }
+}
+
+export async function pauseCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.pauseBatch(st.batch.batch_id);
+    st.patchBatch({ state: 'paused' });
+    st.setStatus(`Batch paused · ${st.batch.completed_items}/${st.batch.total_items} complete`);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Pause batch');
+  }
+}
+
+export async function resumeCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.resumeBatch(st.batch.batch_id);
+    st.patchBatch({ state: 'running' });
+    st.setStatus(`Batch resumed · ${st.batch.completed_items}/${st.batch.total_items} complete`);
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Resume batch');
+  }
+}
+
+export async function cancelCurrentBatch(): Promise<void> {
+  const st = getState();
+  if (!st.batch) return;
+  try {
+    const client = requireClient();
+    await client.cancelBatch(st.batch.batch_id, false);
+    st.patchBatch({ state: 'cancelled' });
+    st.setStatus('Batch cancelled');
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Cancel batch');
+  }
+}
+
+export async function cancelBatchItem(jobId: string): Promise<void> {
+  try {
+    const client = requireClient();
+    if (typeof client.cancelV1Job === 'function') {
+      await client.cancelV1Job(jobId);
+    } else {
+      await client.cancelJob(jobId);
+    }
+    const st = getState();
+    if (st.batch) {
+      const updatedJobs = st.batch.jobs.map((j) =>
+        j.job_id === jobId ? { ...j, state: 'cancelled' as const, stage: 'cancelled' } : j,
+      );
+      st.patchBatch({ jobs: updatedJobs });
+    }
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Cancel item');
+  }
+}
+
+export async function retryBatchItem(jobId: string): Promise<void> {
+  try {
+    const client = requireClient();
+    await client.retryJob(jobId);
+    const st = getState();
+    if (st.batch) {
+      const updatedJobs = st.batch.jobs.map((j) =>
+        j.job_id === jobId ? { ...j, state: 'queued' as const, stage: 'queued', progress: 0 } : j,
+      );
+      st.patchBatch({ jobs: updatedJobs });
+      if (
+        st.batch.state === 'done' ||
+        st.batch.state === 'failed' ||
+        st.batch.state === 'cancelled'
+      ) {
+        startBatchEventSubscription(st.batch.batch_id, client);
+      }
+    }
+  } catch (e) {
+    probeSoon(e);
+    reportFailure(classifyFailure(e), 'Retry item');
+  }
+}
+
+export async function inspectBatchItem(item: BatchItem): Promise<void> {
+  const st = getState();
+  st.setActiveInspectJobId(item.job_id);
+  const client = requireClient();
+  const player = getPlayer();
+
+  unitOverrideEpoch += 1;
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
+  extractTrackEpoch += 1;
+  st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+  if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+  st.setSpectralSelection(null);
+  if (typeof player.setLoopRange === 'function') player.setLoopRange(null);
+  if (typeof player.setLoopEnabled === 'function') player.setLoopEnabled(false);
+
+  st.setSource({ path: item.input_path, name: baseName(item.input_path), origin: 'file' });
+
+  const originalUrl = client.fileUrl(item.input_path);
+  player.load('original', originalUrl);
+
+  if (item.state === 'done' && item.output_path) {
+    const cleanedUrl = client.fileUrl(item.output_path);
+    player.load('cleaned', cleanedUrl);
+    player.setActive('cleaned');
+    st.setAbMode('cleaned');
+    st.setCleaned(null, item.output_path);
+    void client
+      .analyze(item.output_path, envelopeBuckets())
+      .then((analysis) => {
+        if (getState().activeInspectJobId === item.job_id) {
+          getState().setCleaned(analysis, item.output_path);
+        }
+      })
+      .catch(() => {});
+  } else {
+    player.load('cleaned', null);
+    player.setActive('original');
+    st.setAbMode('original');
+    st.setCleaned(null, null);
+  }
+
+  if (item.report) {
+    st.setReport(item.report);
+  } else if (item.report_path && item.state === 'done') {
+    void fetch(client.fileUrl(item.report_path))
+      .then((res) => res.json())
+      .then((rep: HawaVoCleanReport) => {
+        if (getState().activeInspectJobId === item.job_id) {
+          getState().setReport(rep);
+        }
+      })
+      .catch(() => {});
+  }
+
+  try {
+    const analysis = await client.analyze(item.input_path, envelopeBuckets());
+    if (getState().activeInspectJobId === item.job_id) {
+      st.setOriginal(analysis);
+      syncPlayerLoudnessMatch();
+      st.setStatus(`Inspecting: ${baseName(item.input_path)} (${item.state})`);
+    }
+  } catch {
+    st.setStatus(`Inspecting: ${baseName(item.input_path)} (${item.state})`);
+  }
+}
+
+export async function rehydrateBatchQueue(client?: EngineClient): Promise<void> {
+  const c = client ?? getState().client;
+  if (!c) return;
+  try {
+    const res = await c.listBatches(5);
+    if (!res || !Array.isArray(res.batches) || res.batches.length === 0) return;
+    const active =
+      res.batches.find(
+        (b) => b.state === 'running' || b.state === 'queued' || b.state === 'paused',
+      ) ?? res.batches[0];
+    if (active) {
+      const summary = await c.getBatch(active.batch_id);
+      getState().setBatch(summary);
+      if (
+        summary.state === 'running' ||
+        summary.state === 'queued' ||
+        summary.state === 'paused'
+      ) {
+        startBatchEventSubscription(summary.batch_id, c);
+      }
+    }
+  } catch {
+    /* ignore if engine does not support batches */
   }
 }
 
@@ -1506,6 +2259,7 @@ export async function selectRun(jobId: string): Promise<void> {
   }
   stopFollow?.();
   stopFollow = null;
+  stopSelectionPlay();
   // An analysis in flight belongs to the clip the user was *leaving*. Without
   // this it keeps running, and when it lands it writes that clip's peaks,
   // spectrum, duration and loudness over the run just restored — clip B's
@@ -1515,10 +2269,19 @@ export async function selectRun(jobId: string): Promise<void> {
   analyzeAbort?.abort();
   analyzeAbort = null;
   st.setAnalyzing(false);
+  unitOverrideEpoch += 1;
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
+  extractTrackEpoch += 1;
   const player = getPlayer();
   player.pause();
+  if (typeof player.setLoopRange === 'function') player.setLoopRange(null);
+  if (typeof player.setLoopEnabled === 'function') player.setLoopEnabled(false);
   st.setError(null);
   st.setRejection(null);
+  st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+  if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+  st.setSpectralSelection(null);
   st.setSource({ path: entry.inputPath, name: entry.inputName, origin: 'file' });
   st.setJob({
     id: entry.jobId,
@@ -1563,6 +2326,7 @@ export async function selectRun(jobId: string): Promise<void> {
     'cleaned',
     client && doneRun ? client.fileUrl(entry.outputPath) : null,
   );
+  syncPlayerLoudnessMatch();
 
   // B5 · a cached analysis is not proof that the file behind it is still
   // there. Before this check a restore reported "RESULT Complete 5/5" with an
@@ -2058,6 +2822,52 @@ export async function replaceInResolve(): Promise<void> {
   }
 }
 
+/**
+ * Place cleaned clip(s) onto a dedicated non-destructive Resolve audio track
+ * and apply Guard review markers transactionally.
+ */
+export async function cleanTrackWithMarkersInResolve(): Promise<ResolveBatchCleanTrackResult | null> {
+  const bridge = getBridge();
+  const st = getState();
+  if (!bridge.resolve?.batchCleanTrack || !st.cleanedPath) return null;
+  const clipId = st.source?.mediaId || st.source?.sourceId || st.job?.id || 'clip-1';
+  try {
+    st.setStatus('Placing cleaned track and Guard markers in Resolve…');
+    const res = await bridge.resolve.batchCleanTrack({
+      clips: [
+        {
+          clipId,
+          mediaId: st.source?.mediaId ?? clipId,
+          startFrame: 0,
+        },
+      ],
+      cleanedByClipId: {
+        [clipId]: {
+          filePath: st.cleanedPath,
+          ...(st.report ? { report: st.report } : {}),
+          ...(st.job?.reportPath ? { reportPath: st.job.reportPath } : {}),
+        },
+      },
+      targetTrackName: 'HawaVoClean',
+      addGuardMarkers: true,
+    });
+    if (res.success) {
+      const clipsPlaced = res.clipsPlaced ?? 1;
+      const markersAdded = res.markersAdded ?? 0;
+      const trackName = res.trackName || 'HawaVoClean';
+      st.setStatus(
+        `Placed ${clipsPlaced} clip${clipsPlaced === 1 ? '' : 's'} on ${trackName} · ${markersAdded} guard marker${markersAdded === 1 ? '' : 's'}`,
+      );
+    } else {
+      st.setStatus('Resolve did not commit the cleaned track');
+    }
+    return res;
+  } catch (e) {
+    reportFailure(classifyFailure(e, st.source?.name), 'Resolve track clean failed');
+    return null;
+  }
+}
+
 export async function revealOutput(): Promise<void> {
   const bridge = getBridge();
   const st = getState();
@@ -2088,3 +2898,1157 @@ export function togglePlay(): void {
 export function seekTo(time: number): void {
   getPlayer().seek(time);
 }
+
+function currentPlayheadTime(): number {
+  const player = getPlayer();
+  const hasDeck =
+    typeof player.hasDeck === 'function' &&
+    (player.hasDeck('original') || player.hasDeck('cleaned'));
+  const raw = hasDeck && Number.isFinite(player.time) ? player.time : getState().currentTime;
+  const dur = getState().original?.duration_s ?? getState().duration ?? 0;
+  const clamped = Math.max(0, dur > 0 ? Math.min(dur, raw) : raw);
+  return Math.round(clamped * 100) / 100;
+}
+
+/** Mark the region start at the current playhead time (preserving a later end, else clip end). */
+export function markSelectionStart(): void {
+  const st = getState();
+  const dur = st.original?.duration_s ?? st.duration ?? 0;
+  if (!(dur > 0)) return;
+  const t = currentPlayheadTime();
+  const sel = st.selectionRange;
+  const end = sel && Number.isFinite(sel.end) && sel.end > t ? Math.min(dur, sel.end) : dur;
+  if (end <= t) return;
+  st.setSelectionRange({ start: t, end: Math.round(end * 100) / 100 });
+}
+
+/** Mark the region end at the current playhead time (preserving an earlier start, else 0). */
+export function markSelectionEnd(): void {
+  const st = getState();
+  const dur = st.original?.duration_s ?? st.duration ?? 0;
+  if (!(dur > 0)) return;
+  const t = currentPlayheadTime();
+  if (!(t > 0)) return;
+  const sel = st.selectionRange;
+  const start = sel && Number.isFinite(sel.start) && sel.start < t ? Math.max(0, sel.start) : 0;
+  if (t <= start) return;
+  st.setSelectionRange({ start: Math.round(start * 100) / 100, end: t });
+}
+
+/** Clear the active waveform time-range selection. */
+export function clearSelectionRange(): void {
+  getState().setSelectionRange(null);
+}
+
+let selectionPlayRaf = 0;
+
+function stopSelectionPlay(): void {
+  if (selectionPlayRaf) {
+    cancelAnimationFrame(selectionPlayRaf);
+    selectionPlayRaf = 0;
+  }
+}
+
+/** D2 · Plays only the current selection range. Auto-pauses at the end. */
+export function playSelection(loop = false): void {
+  const sel = getState().selectionRange;
+  if (!sel || sel.end <= sel.start) return;
+
+  stopSelectionPlay();
+  const player = getPlayer();
+  player.seek(sel.start);
+  void player.play();
+
+  // Poll transport time and stop/loop when we pass the end
+  const check = (): void => {
+    selectionPlayRaf = 0;
+    if (!getState().playing) {
+      return;
+    }
+    if (player.time >= sel.end) {
+      if (loop) {
+        player.seek(sel.start);
+      } else {
+        player.pause();
+        return;
+      }
+    }
+    selectionPlayRaf = requestAnimationFrame(check);
+  };
+  selectionPlayRaf = requestAnimationFrame(check);
+}
+
+// ---------------------------------------------------------------------------
+// D4.2 · Loudness-matched A/B & workflow helpers
+
+export function syncPlayerLoudnessMatch(): void {
+  const st = getState();
+  const lufsIn = st.original?.loudness?.integrated_lufs ?? null;
+  const lufsOut = st.cleaned?.loudness?.integrated_lufs ?? null;
+  const player = getPlayer();
+  if (player && typeof player.setLoudnessMatch === 'function') {
+    player.setLoudnessMatch(st.loudnessMatch, lufsIn, lufsOut);
+    st.setGainOffsetDb(player.gainOffsetDb ?? 0);
+  }
+}
+
+export function setLoudnessMatch(enabled: boolean): void {
+  getState().setLoudnessMatch(enabled);
+  syncPlayerLoudnessMatch();
+}
+
+export function toggleLoudnessMatch(): void {
+  const cur = getState().loudnessMatch;
+  setLoudnessMatch(!cur);
+}
+
+export function setAdvancedOpen(open: boolean): void {
+  getState().setAdvancedOpen(open);
+}
+
+export function toggleAdvancedOpen(): void {
+  const cur = getState().advancedOpen;
+  setAdvancedOpen(!cur);
+}
+
+export async function saveCleanedMaster(): Promise<void> {
+  const st = getState();
+  if (!st.cleanedPath) return;
+  const bridge = getBridge();
+  if (bridge.host === 'electron' && typeof bridge.files.chooseExportPath === 'function') {
+    try {
+      const suggested = baseName(st.cleanedPath);
+      const chosen = await bridge.files.chooseExportPath({
+        kind: 'master',
+        suggestedName: suggested,
+        sourcePath: st.cleanedPath,
+      });
+      if (chosen) {
+        st.setStatus(`Master exported: ${baseName(chosen)}`);
+      }
+      // `null` means the user cancelled the Save dialog; do not fall through to Finder.
+      return;
+    } catch {
+      /* fall back to reveal if native export fails */
+    }
+    await revealOutput();
+    return;
+  }
+  if (bridge.host === 'web') {
+    const client = requireClient();
+    const url = client.fileUrl(st.cleanedPath);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = baseName(st.cleanedPath);
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    st.setStatus(`Downloading master: ${baseName(st.cleanedPath)}`);
+    return;
+  }
+  await revealOutput();
+}
+
+export async function saveProcessingRecord(): Promise<void> {
+  const st = getState();
+  if (!st.cleanedPath) return;
+  const bridge = getBridge();
+  const reportPath = st.job?.reportPath;
+  const bundlePath = st.job?.bundlePath ?? (reportPath ? reportPath.replace(/\.json$/i, '.zip') : null);
+
+  if (!bundlePath) {
+    st.setStatus('No processing record bundle is available for this run');
+    return;
+  }
+
+  if (bridge.host === 'electron' && typeof bridge.files.chooseExportPath === 'function') {
+    try {
+      const suggested = baseName(bundlePath);
+      const chosen = await bridge.files.chooseExportPath({
+        kind: 'record_bundle',
+        suggestedName: suggested,
+        sourcePath: bundlePath,
+      });
+      if (chosen) {
+        st.setStatus(`Processing record exported: ${baseName(chosen)}`);
+      }
+      // `null` means the user cancelled the Save dialog; do not fall through to Finder.
+      return;
+    } catch {
+      /* fall back to reveal if native export fails */
+    }
+    await revealOutput();
+    return;
+  }
+  if (bridge.host === 'web') {
+    const client = requireClient();
+    const url = client.fileUrl(bundlePath);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = baseName(bundlePath);
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    st.setStatus(`Downloading processing record: ${baseName(bundlePath)}`);
+    return;
+  }
+  await revealOutput();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2 Pro Studio Actions: Rack Undo/Redo, Unit Overrides, Multi-Take, Delivery Export
+
+const takeAnalysisCache = new Map<string, AudioAnalysis>();
+
+function extractTakeMosDelta(report: HawaVoCleanReport | null): number | null {
+  const candidates = report?.restoration?.candidates;
+  if (!candidates || candidates.length === 0) return null;
+  const selected = candidates.find((c) => c.selected);
+  const preserve = candidates.find((c) => c.route === 'preserve');
+  if (
+    selected &&
+    preserve &&
+    Number.isFinite(selected.score) &&
+    Number.isFinite(preserve.score)
+  ) {
+    return selected.score - preserve.score;
+  }
+  return null;
+}
+
+function recordCompletedTake(
+  status: JobStatus,
+  outputPath: string,
+  report: HawaVoCleanReport | null,
+  analysis: AudioAnalysis | null,
+): void {
+  const st = getState();
+  if (!outputPath) return;
+  if (st.source && status.input_path && status.input_path !== st.source.path) return;
+  const profile = status.profile ?? st.profile;
+  const lufsOut =
+    analysis?.loudness.integrated_lufs ?? report?.output.integrated_lufs ?? null;
+  const snapshot: TakeSnapshot = {
+    id: status.job_id,
+    label: baseName(outputPath).replace(/\.[^.]+$/, ''),
+    profile,
+    cleanedPath: outputPath,
+    report,
+    mosDelta: extractTakeMosDelta(report),
+    lufsOut,
+    createdAt: status.finished_at ?? new Date().toISOString(),
+  };
+  if (analysis) {
+    takeAnalysisCache.set(snapshot.id, analysis);
+  }
+  const nextTakes = addTakeSnapshot(st.takes, snapshot);
+  st.setTakes(nextTakes, snapshot.id);
+  st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+}
+
+function updateTakeLufs(takeId: string, lufsOut: number | null): void {
+  if (lufsOut === null || !Number.isFinite(lufsOut)) return;
+  const st = getState();
+  if (!st.takes.some((t) => t.id === takeId)) return;
+  const updated = st.takes.map((t) => (t.id === takeId ? { ...t, lufsOut } : t));
+  st.setTakes(updated);
+}
+
+/** Update StudioRack settings and push a snapshot onto the undo stack. */
+export function updateRackSettings(next: StudioRackSettings): void {
+  const st = getState();
+  const nextUndo = st.rackUndo.push(next);
+  st.setRackSettings(next, nextUndo, true);
+  st.setLastUndoDomain('rack');
+}
+
+function applyLocalUnitDecision(
+  report: HawaVoCleanReport,
+  unitId: number,
+  decision: UnitOverrideMapValue,
+  overrideNewDecision?: string,
+): { report: HawaVoCleanReport; updatedUnit: UnitDecisionRecord | null } {
+  const units = report.units ?? [];
+  let updatedUnit: UnitDecisionRecord | null = null;
+  const nextUnits = units.map((u) => {
+    if (u.unit_id !== unitId) return u;
+    let finalDecision = overrideNewDecision ?? u.final_decision;
+    let manualOverride: string | null = decision === 'auto' ? null : decision;
+    let reason = u.decision_reason ?? '';
+    if (!overrideNewDecision) {
+      if (decision === 'force_original') {
+        finalDecision = 'original_reverted';
+        reason = `manual override: force_original (was ${u.final_decision})`;
+      } else if (decision === 'force_enhanced') {
+        finalDecision = 'enhanced';
+        reason = `manual override: force_enhanced (was ${u.final_decision})`;
+      } else {
+        const verdict = (u.guard_a_verdict ?? '').toUpperCase();
+        finalDecision = verdict.includes('PASS') ? 'enhanced' : 'original_reverted';
+        manualOverride = null;
+        reason = `guard ${u.guard_a_verdict} (auto restored)`;
+      }
+    }
+    updatedUnit = {
+      ...u,
+      final_decision: finalDecision,
+      manual_override: manualOverride,
+      decision_reason: reason,
+    };
+    return updatedUnit;
+  });
+
+  const enhancedCount = nextUnits.filter((u) => u.final_decision === 'enhanced').length;
+  const revertedCount = nextUnits.filter(
+    (u) => u.final_decision === 'reverted' || u.final_decision === 'original_reverted',
+  ).length;
+
+  return {
+    report: {
+      ...report,
+      units: nextUnits,
+      summary: {
+        ...report.summary,
+        enhanced: enhancedCount,
+        reverted: revertedCount,
+      },
+    },
+    updatedUnit,
+  };
+}
+
+function isActiveJobRunning(st: ReturnType<typeof getState>): boolean {
+  if (creatingJob) return true;
+  if (!st.job) return false;
+  if (!st.job.status) return st.report === null;
+  return jobInFlight(st.job);
+}
+
+async function syncOverrideMapDiff(prev: UnitOverrideMap, next: UnitOverrideMap): Promise<void> {
+  const start = getState();
+  const expectedSourcePath = start.source?.path ?? start.original?.path ?? null;
+  const expectedJobId = start.job?.id ?? start.report?.job_id ?? null;
+  const keys = new Set<number>([
+    ...Object.keys(prev).map(Number),
+    ...Object.keys(next).map(Number),
+  ]);
+  for (const unitId of keys) {
+    const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      isActiveJobRunning(cur) ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return;
+    }
+    const before = prev[unitId] ?? 'auto';
+    const after = next[unitId] ?? 'auto';
+    if (before !== after) {
+      await applyUnitOverrideInternal(unitId, after, false);
+    }
+  }
+}
+
+let unitOverrideEpoch = 0;
+
+async function applyUnitOverrideInternal(
+  unitId: number,
+  decision: UnitOverrideMapValue,
+  recordUndo: boolean,
+): Promise<void> {
+  const st = getState();
+  const nextOverrides: UnitOverrideMap = { ...st.unitOverrides };
+  if (decision === 'auto') {
+    delete nextOverrides[unitId];
+  } else {
+    nextOverrides[unitId] = decision;
+  }
+
+  if (recordUndo) {
+    const nextUndo = st.overrideUndo.push(nextOverrides);
+    st.setUnitOverrides(nextOverrides, nextUndo);
+    st.setLastUndoDomain('override');
+  } else {
+    st.setUnitOverrides(nextOverrides);
+  }
+
+  // Apply optimistically to the on-screen report while preserving selectedUnit.
+  if (st.report) {
+    const local = applyLocalUnitDecision(st.report, unitId, decision);
+    useStore.setState((cur) => ({
+      report: local.report,
+      selectedUnit:
+        cur.selectedUnit && cur.selectedUnit.unit_id === unitId && local.updatedUnit
+          ? local.updatedUnit
+          : cur.selectedUnit,
+    }));
+  }
+
+  const jobId = st.job?.id ?? st.report?.job_id ?? null;
+  const client = st.client;
+  if (
+    !jobId ||
+    !client ||
+    st.engineStatus !== 'ready' ||
+    typeof client.overrideUnit !== 'function'
+  ) {
+    st.setStatus(`Unit ${unitId} marked ${decision.replace(/_/g, ' ')} (offline preview)`);
+    return;
+  }
+
+  const myEpoch = ++unitOverrideEpoch;
+  const expectedSourcePath = st.source?.path ?? st.original?.path ?? null;
+
+  try {
+    const res = await client.overrideUnit(jobId, { unitId, decision });
+    const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== unitOverrideEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== jobId
+    ) {
+      return;
+    }
+    if (cur.report) {
+      let nextReport = cur.report;
+      let nextSelected = cur.selectedUnit;
+      if (Array.isArray(res.units) && res.units.length > 0) {
+        nextReport = {
+          ...cur.report,
+          units: res.units,
+          ...(res.summary ? { summary: { ...cur.report.summary, ...res.summary } } : {}),
+        };
+        if (nextSelected) {
+          nextSelected =
+            res.units.find((u) => u.unit_id === nextSelected?.unit_id) ?? nextSelected;
+        }
+      } else {
+        const merged = applyLocalUnitDecision(
+          cur.report,
+          unitId,
+          decision,
+          res.newDecision || undefined,
+        );
+        nextReport = res.summary
+          ? { ...merged.report, summary: { ...merged.report.summary, ...res.summary } }
+          : merged.report;
+        if (nextSelected && nextSelected.unit_id === unitId && merged.updatedUnit) {
+          nextSelected = merged.updatedUnit;
+        }
+      }
+      useStore.setState({ report: nextReport, selectedUnit: nextSelected });
+    }
+
+    if (res.restitched && cur.cleanedPath) {
+      const player = getPlayer();
+      const wasPlaying = player.playing;
+      const atTime = player.time;
+      const baseUrl = client.fileUrl(cur.cleanedPath);
+      const sep = baseUrl.includes('?') ? '&' : '?';
+      const versionTag = res.masterSha256 || String(Date.now());
+      const bustedUrl = `${baseUrl}${sep}v=${encodeURIComponent(versionTag)}`;
+      previewEpoch += 1;
+      cur.setPreviewActive(false);
+      player.load(
+        'cleaned',
+        bustedUrl,
+        cur.cleaned?.duration_s ?? cur.original?.duration_s ?? null,
+      );
+      if (Number.isFinite(atTime) && atTime > 0) {
+        player.seek(atTime);
+      }
+      if (wasPlaying) {
+        void player.play();
+      }
+      const ms = typeof res.restitchMs === 'number' ? ` in ${Math.round(res.restitchMs)} ms` : '';
+      cur.setStatus(`Unit ${unitId} updated · master re-stitched${ms}`);
+      // Best-effort refresh of cleaned audio metrics in background.
+      void analyzeCleaned(cur.cleanedPath)
+        .then((analysis) => {
+          const latest = getState();
+          const latestJobId = latest.job?.id ?? latest.report?.job_id ?? null;
+          if (
+            myEpoch === unitOverrideEpoch &&
+            latestJobId === jobId &&
+            latest.cleanedPath === cur.cleanedPath &&
+            analysis
+          ) {
+            latest.setCleaned(analysis, cur.cleanedPath);
+            syncPlayerLoudnessMatch();
+          }
+        })
+        .catch(() => undefined);
+    } else {
+      cur.setStatus(`Unit ${unitId} updated (${decision.replace(/_/g, ' ')})`);
+    }
+  } catch (e) {
+    const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== unitOverrideEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== jobId
+    ) {
+      return;
+    }
+    cur.setStatus(`Override recorded locally · ${describeError(e)}`);
+  }
+}
+
+/** Override a single speech unit decision, re-stitching the master when supported. */
+export async function applyUnitOverride(
+  unitId: number,
+  decision: UnitOverrideMapValue,
+): Promise<void> {
+  await applyUnitOverrideInternal(unitId, decision, true);
+}
+
+function applySpectralUndoPath(targetPath: string | null): void {
+  const st = getState();
+  const player = getPlayer();
+  const client = st.client;
+  if (targetPath && client) {
+    const wasPlaying = player.playing;
+    const atTime = player.time;
+    st.setCleaned(st.cleaned, targetPath);
+    player.load('cleaned', client.fileUrl(targetPath), st.cleaned?.duration_s ?? st.original?.duration_s ?? null);
+    if (Number.isFinite(atTime) && atTime > 0) player.seek(atTime);
+    player.setActive('cleaned');
+    st.setAbMode('cleaned');
+    if (wasPlaying) void player.play();
+  } else {
+    st.setCleaned(null, null);
+    player.load('cleaned', null);
+    player.setActive('original');
+    st.setAbMode('original');
+  }
+}
+
+/** Undo the most recent spectral repair, unit override, or StudioRack parameter change. */
+export function undoAction(): void {
+  const st = getState();
+  if (isActiveJobRunning(st)) return;
+
+  if (
+    (st.lastUndoDomain === 'spectral' && st.spectralUndo.canUndo) ||
+    (!st.overrideUndo.canUndo && !st.rackUndo.canUndo && st.spectralUndo.canUndo)
+  ) {
+    const nextStack = st.spectralUndo.undo();
+    st.setSpectralUndo(nextStack);
+    applySpectralUndoPath(nextStack.present);
+    st.setStatus('Undid spectral repair');
+    return;
+  }
+
+  const preferOverride =
+    st.lastUndoDomain === 'override'
+      ? st.overrideUndo.canUndo
+      : !st.rackUndo.canUndo && st.overrideUndo.canUndo;
+
+  if (preferOverride) {
+    if (!st.report && !st.job) {
+      st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+      if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+      return;
+    }
+    const prevMap = st.overrideUndo.present;
+    const nextStack = st.overrideUndo.undo();
+    st.setUnitOverrides(nextStack.present, nextStack);
+    st.setStatus('Undid unit override');
+    void syncOverrideMapDiff(prevMap, nextStack.present);
+    return;
+  }
+
+  if (st.rackUndo.canUndo) {
+    const nextStack = st.rackUndo.undo();
+    st.setRackSettings(
+      nextStack.present,
+      nextStack,
+      !shallowRecordEqual(nextStack.present, DEFAULT_STUDIO_RACK_SETTINGS),
+    );
+    st.setStatus('Undid Studio Rack change');
+    scheduleLivePreview();
+  }
+}
+
+/** Redo the most recently undone spectral repair, unit override, or StudioRack parameter change. */
+export function redoAction(): void {
+  const st = getState();
+  if (isActiveJobRunning(st)) return;
+
+  if (
+    (st.lastUndoDomain === 'spectral' && st.spectralUndo.canRedo) ||
+    (!st.overrideUndo.canRedo && !st.rackUndo.canRedo && st.spectralUndo.canRedo)
+  ) {
+    const nextStack = st.spectralUndo.redo();
+    st.setSpectralUndo(nextStack);
+    applySpectralUndoPath(nextStack.present);
+    st.setStatus('Redid spectral repair');
+    return;
+  }
+
+  const preferOverride =
+    st.lastUndoDomain === 'override'
+      ? st.overrideUndo.canRedo
+      : !st.rackUndo.canRedo && st.overrideUndo.canRedo;
+
+  if (preferOverride) {
+    if (!st.report && !st.job) {
+      st.setUnitOverrides({}, createUndoStack<UnitOverrideMap>({}, { equals: shallowRecordEqual }));
+      if (st.lastUndoDomain === 'override') st.setLastUndoDomain(null);
+      return;
+    }
+    const prevMap = st.overrideUndo.present;
+    const nextStack = st.overrideUndo.redo();
+    st.setUnitOverrides(nextStack.present, nextStack);
+    st.setStatus('Redid unit override');
+    void syncOverrideMapDiff(prevMap, nextStack.present);
+    return;
+  }
+
+  if (st.rackUndo.canRedo) {
+    const nextStack = st.rackUndo.redo();
+    st.setRackSettings(
+      nextStack.present,
+      nextStack,
+      !shallowRecordEqual(nextStack.present, DEFAULT_STUDIO_RACK_SETTINGS),
+    );
+    st.setStatus('Redid Studio Rack change');
+    scheduleLivePreview();
+  }
+}
+
+/** Loop playback over a selected unit's time range immediately. */
+export function loopSelectedUnit(unit: UnitDecisionRecord): void {
+  if (!Number.isFinite(unit.start_time_s) || !Number.isFinite(unit.end_time_s)) return;
+  if (unit.end_time_s <= unit.start_time_s) return;
+
+  const st = getState();
+  st.setSelectionRange({ start: unit.start_time_s, end: unit.end_time_s });
+
+  const player = getPlayer();
+  if (typeof player.setLoopRange === 'function') {
+    player.setLoopRange([unit.start_time_s, unit.end_time_s]);
+  }
+  if (typeof player.setLoopEnabled === 'function') {
+    player.setLoopEnabled(true);
+  }
+  player.seek(unit.start_time_s);
+  void player.play();
+}
+
+/** Switch the active comparison take, loading its cleaned deck and report immediately. */
+export function selectTake(takeId: string): void {
+  const st = getState();
+  if (takeId === 'original') {
+    st.setActiveTakeId('original');
+    setAb('original');
+    return;
+  }
+
+  const take = st.takes.find((t) => t.id === takeId);
+  if (!take) return;
+
+  previewEpoch += 1;
+  spectralRepairEpoch += 1;
+  const historyMatch = st.history.find((h) => h.jobId === take.id);
+  const cachedAnalysis = takeAnalysisCache.get(take.id) ?? historyMatch?.cleaned ?? null;
+  st.setActiveTakeId(take.id);
+  st.setCleaned(cachedAnalysis, take.cleanedPath);
+  if (take.report) {
+    st.setReport(take.report);
+  }
+  st.setDeckFault(null);
+  syncPlayerLoudnessMatch();
+
+  const player = getPlayer();
+  if (st.client && take.cleanedPath) {
+    player.load(
+      'cleaned',
+      st.client.fileUrl(take.cleanedPath),
+      cachedAnalysis?.duration_s ?? st.original?.duration_s ?? null,
+    );
+    player.setActive('cleaned');
+    st.setAbMode('cleaned');
+  }
+  st.setStatus(`Comparing ${take.label} (${take.profile})`);
+
+  if (!cachedAnalysis && st.client && st.engineStatus === 'ready' && take.cleanedPath) {
+    void analyzeCleaned(take.cleanedPath)
+      .then((analysis) => {
+        if (!analysis) return;
+        takeAnalysisCache.set(take.id, analysis);
+        updateTakeLufs(take.id, analysis.loudness.integrated_lufs ?? null);
+        const cur = getState();
+        if (cur.activeTakeId === take.id) {
+          cur.setCleaned(analysis, take.cleanedPath);
+          syncPlayerLoudnessMatch();
+        }
+      })
+      .catch(() => undefined);
+  }
+}
+
+/** Pin or unpin a take in the multi-take switcher so it is protected from eviction. */
+export function pinTake(takeId: string): void {
+  const st = getState();
+  const next = st.takes.map((t) => (t.id === takeId ? { ...t, pinned: !t.pinned } : t));
+  st.setTakes(next);
+}
+
+/** Remove an unpinned take from the multi-take switcher. */
+export function removeTake(takeId: string): void {
+  const st = getState();
+  const target = st.takes.find((t) => t.id === takeId);
+  if (!target || target.pinned) return;
+  const next = st.takes.filter((t) => t.id !== takeId);
+  takeAnalysisCache.delete(takeId);
+  const nextActive =
+    st.activeTakeId === takeId ? (next[next.length - 1]?.id ?? 'original') : st.activeTakeId;
+  st.setTakes(next, nextActive);
+  if (st.activeTakeId === takeId && nextActive) {
+    selectTake(nextActive);
+  }
+}
+
+/**
+ * Export the cleaned master with delivery loudness calibration and/or target
+ * container format (WAV 24/32f, FLAC, AAC, or lossless video mux-back).
+ */
+export async function exportWithDelivery(
+  format?: ExportFormatId,
+): Promise<DeliveryExportResponse | null> {
+  const st = getState();
+  if (!st.cleanedPath) return null;
+  const targetFormat: ExportFormatId = format ?? st.rackSettings.exportFormat;
+  const deliveryPreset = st.rackSettings.deliveryPreset;
+
+  if (targetFormat === 'wav24' && deliveryPreset === 'match_input') {
+    await saveCleanedMaster();
+    return null;
+  }
+
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.exportDelivery !== 'function') {
+    st.setStatus('Cannot export delivery format while the engine is offline');
+    return null;
+  }
+
+  st.setStatus(`Exporting ${targetFormat.toUpperCase()} (${deliveryPreset})…`);
+  try {
+    const res = await client.exportDelivery({
+      masterPath: st.cleanedPath,
+      format: targetFormat,
+      deliveryPreset,
+      ...(targetFormat === 'video_mux' && st.source?.path
+        ? { sourceMediaPath: st.source.path }
+        : {}),
+      preserveMetadata: true,
+    });
+    const lufsNote =
+      typeof res.integratedLufs === 'number' && Number.isFinite(res.integratedLufs)
+        ? ` · ${res.integratedLufs.toFixed(1)} LUFS`
+        : '';
+    st.setStatus(`Exported ${baseName(res.outputPath)} (${res.format.toUpperCase()}${lufsNote})`);
+
+    const bridge = getBridge();
+    if (bridge.host === 'web' && res.outputPath) {
+      const url = client.fileUrl(res.outputPath);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = baseName(res.outputPath);
+      a.target = '_blank';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    return res;
+  } catch (e) {
+    const msg = describeError(e);
+    st.setError(msg, 'Export error');
+    st.setStatus(`Export failed · ${msg}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Last-Mile Pro Bridges: Instant Warm Region Preview, 2D Spectral Box Repair,
+// Poly-WAV Single-Track Extraction
+
+const MAX_PREVIEW_WINDOW_S = 15.0;
+const DEFAULT_PREVIEW_WINDOW_S = 6.0;
+let previewEpoch = 0;
+let spectralRepairEpoch = 0;
+let extractTrackEpoch = 0;
+
+function resolveClientAudioUrl(
+  client: EngineClient,
+  audioUrl: string | null | undefined,
+  fallbackPath?: string | null,
+): string {
+  const raw = (audioUrl ?? '').trim();
+  if (raw) {
+    if (/^https?:\/\//i.test(raw) || raw.startsWith('blob:')) return raw;
+    if (raw.startsWith('/') && client.baseUrl) return `${client.baseUrl}${raw}`;
+    return raw;
+  }
+  if (fallbackPath) return client.fileUrl(fallbackPath);
+  return '';
+}
+
+/**
+ * Render an instant warm region preview (`POST /api/v1/preview`), load it onto
+ * the cleaned deck offset-aligned at `startS` without clobbering the full-master
+ * `cleanedPath`, enable looping over `[startS, endS]`, switch to the cleaned
+ * deck, and report render latency + warm-cache status.
+ */
+export async function previewRegion(
+  opts: { autoPlay?: boolean } = {},
+): Promise<RegionPreviewResponse | null> {
+  const st = getState();
+  if (!st.source || !st.original) return null;
+
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.renderRegionPreview !== 'function') {
+    st.setStatus('Preview unavailable — engine is offline');
+    return null;
+  }
+
+  const player = getPlayer();
+  const duration =
+    Number.isFinite(st.original.duration_s) && st.original.duration_s > 0
+      ? st.original.duration_s
+      : st.duration;
+
+  let startS: number;
+  let endS: number;
+  if (
+    st.selectionRange &&
+    Number.isFinite(st.selectionRange.start) &&
+    Number.isFinite(st.selectionRange.end) &&
+    st.selectionRange.end > st.selectionRange.start
+  ) {
+    startS = Math.max(0, st.selectionRange.start);
+    const boundedEnd =
+      duration > 0 ? Math.min(duration, st.selectionRange.end) : st.selectionRange.end;
+    endS = Math.min(boundedEnd, startS + MAX_PREVIEW_WINDOW_S);
+  } else {
+    const curTime = Number.isFinite(player.time) && player.time >= 0 ? player.time : 0;
+    if (duration > 0 && curTime >= duration) {
+      startS = Math.max(0, duration - DEFAULT_PREVIEW_WINDOW_S);
+      endS = duration;
+    } else {
+      startS = curTime;
+      const targetEnd = startS + DEFAULT_PREVIEW_WINDOW_S;
+      endS = duration > 0 ? Math.min(duration, targetEnd) : targetEnd;
+    }
+    if (endS - startS > MAX_PREVIEW_WINDOW_S) {
+      endS = startS + MAX_PREVIEW_WINDOW_S;
+    }
+  }
+
+  if (!(endS > startS)) return null;
+
+  const myEpoch = ++previewEpoch;
+  const expectedSourcePath = st.source.path;
+  const expectedJobId = st.job?.id ?? st.report?.job_id ?? null;
+
+  st.setStatus(`Rendering warm preview (${startS.toFixed(1)}s–${endS.toFixed(1)}s)…`);
+  try {
+    const overrides = buildRackOverrides(st.rackSettings);
+    const res = await client.renderRegionPreview({
+      path: st.source.path,
+      startS,
+      endS,
+      profile: st.profile,
+      strength: overrides.strength,
+      ambienceFloorDb: overrides.ambienceFloorDb,
+      hpfEnabled: overrides.hpfEnabled,
+      hpfCutoffHz: overrides.hpfCutoffHz,
+      deliveryPreset: overrides.deliveryPreset,
+      ...(overrides.stereoMode ? { stereoMode: overrides.stereoMode } : {}),
+      proRepair: overrides.proRepair,
+    });
+    const cur = getState();
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== previewEpoch ||
+      cur.source?.path !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
+    const audioUrl = resolveClientAudioUrl(client, res.audioUrl, res.previewPath);
+    if (!audioUrl) {
+      cur.setStatus('Preview finished with no playable audio URL');
+      return res;
+    }
+    const previewDur = res.durationS > 0 ? res.durationS : endS - startS;
+    const boundedEndS = startS + previewDur;
+    cur.setDeckFault(null);
+    // Keep full-master `cleanedPath` intact so Save/Export never exports a short region preview.
+    cur.setPreviewActive(true);
+    player.load('cleaned', audioUrl, previewDur, startS);
+    if (typeof player.setLoopRange === 'function') {
+      player.setLoopRange([startS, boundedEndS]);
+    }
+    if (typeof player.setLoopEnabled === 'function') {
+      player.setLoopEnabled(true);
+    }
+    player.seek(startS);
+    player.setActive('cleaned');
+    cur.setAbMode('cleaned');
+    if (opts.autoPlay && typeof player.play === 'function') {
+      void player.play();
+    }
+    const ms = Math.round(res.renderMs);
+    const cacheTag = res.warmHit ? 'warm hit' : 'cold render';
+    cur.setStatus(
+      `Preview ready · ${ms} ms (${cacheTag}) · loop ${startS.toFixed(1)}s–${boundedEndS.toFixed(1)}s`,
+    );
+    return res;
+  } catch (e) {
+    const cur = getState();
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== previewEpoch ||
+      cur.source?.path !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
+    const msg = describeError(e);
+    cur.setError(msg, 'Preview error');
+    cur.setStatus(`Preview failed · ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Surgically attenuate the active 2D spectrogram box selection via
+ * `POST /api/v1/spectral-repair` and load the repaired audio onto the cleaned deck.
+ */
+export async function applySpectralBoxRepair(
+  attenuationDb = 24,
+): Promise<SpectralRepairResponse | null> {
+  const st = getState();
+  const box = st.spectralSelection;
+  if (!box) return null;
+
+  const activePath =
+    st.abMode === 'cleaned' && st.cleanedPath
+      ? st.cleanedPath
+      : (st.source?.path ?? st.original?.path ?? st.cleanedPath);
+  if (!activePath) return null;
+
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.repairSpectralBox !== 'function') {
+    st.setStatus('Spectral repair unavailable — engine is offline');
+    return null;
+  }
+
+  const myEpoch = ++spectralRepairEpoch;
+  const expectedSourcePath = st.source?.path ?? st.original?.path ?? null;
+  const expectedJobId = st.job?.id ?? st.report?.job_id ?? null;
+
+  st.setStatus(
+    `Attenuating ${Math.round(box.fLowHz)}–${Math.round(box.fHighHz)} Hz (${box.startS.toFixed(1)}s–${box.endS.toFixed(1)}s)…`,
+  );
+  try {
+    const res = await client.repairSpectralBox({
+      path: activePath,
+      startS: box.startS,
+      endS: box.endS,
+      fLowHz: box.fLowHz,
+      fHighHz: box.fHighHz,
+      attenuationDb,
+    });
+    const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== spectralRepairEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
+    const audioUrl = resolveClientAudioUrl(client, res.audioUrl, res.outputPath);
+    cur.setDeckFault(null);
+    if (res.outputPath) {
+      const baseStack =
+        cur.spectralUndo.present === cur.cleanedPath
+          ? cur.spectralUndo
+          : createUndoStack<string | null>(cur.cleanedPath);
+      const nextSpectralUndo = baseStack.push(res.outputPath);
+      cur.setSpectralUndo(nextSpectralUndo);
+      cur.setLastUndoDomain('spectral');
+      cur.setCleaned(cur.cleaned, res.outputPath);
+    } else if (audioUrl) {
+      cur.setPreviewActive(false);
+    }
+    if (audioUrl) {
+      previewEpoch += 1;
+      const player = getPlayer();
+      const wasPlaying = player.playing;
+      const atTime = player.time;
+      player.load(
+        'cleaned',
+        audioUrl,
+        cur.cleaned?.duration_s ?? cur.original?.duration_s ?? null,
+      );
+      if (Number.isFinite(atTime) && atTime > 0) {
+        player.seek(atTime);
+      }
+      player.setActive('cleaned');
+      cur.setAbMode('cleaned');
+      if (wasPlaying) {
+        void player.play();
+      }
+    }
+    const ms = Math.round(res.renderMs);
+    cur.setStatus(
+      `Attenuated ${Math.round(res.fLowHz)}–${Math.round(res.fHighHz)} Hz by ${Math.round(res.attenuationDb)} dB · ${ms} ms`,
+    );
+    if (res.outputPath && typeof client.analyze === 'function') {
+      void analyzeCleaned(res.outputPath)
+        .then((analysis) => {
+          const latest = getState();
+          const latestSourcePath = latest.source?.path ?? latest.original?.path ?? null;
+          if (
+            myEpoch === spectralRepairEpoch &&
+            latestSourcePath === expectedSourcePath &&
+            latest.cleanedPath === res.outputPath &&
+            analysis
+          ) {
+            latest.setCleaned(analysis, res.outputPath);
+            syncPlayerLoudnessMatch();
+          }
+        })
+        .catch(() => undefined);
+    }
+    return res;
+  } catch (e) {
+    const cur = getState();
+    const curSourcePath = cur.source?.path ?? cur.original?.path ?? null;
+    const curJobId = cur.job?.id ?? cur.report?.job_id ?? null;
+    if (
+      myEpoch !== spectralRepairEpoch ||
+      curSourcePath !== expectedSourcePath ||
+      curJobId !== expectedJobId
+    ) {
+      return null;
+    }
+    const msg = describeError(e);
+    cur.setError(msg, 'Spectral repair error');
+    cur.setStatus(`Spectral repair failed · ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Extract a single 0-based track from a Poly-WAV file via `POST /api/v1/tracks/extract`
+ * and load the resulting mono WAV onto the main deck.
+ */
+export async function extractAndLoadTrack(
+  path: string,
+  trackIndex: number,
+  trackName?: string,
+): Promise<string | null> {
+  const st = getState();
+  const client = st.client;
+  if (!client || st.engineStatus !== 'ready' || typeof client.extractTracks !== 'function') {
+    st.setStatus('Track extraction unavailable — engine is offline');
+    return null;
+  }
+  const myEpoch = ++extractTrackEpoch;
+  const expectedSourcePath = st.source?.path ?? null;
+  const label = trackName ? `${trackName} (ch ${trackIndex + 1})` : `track ${trackIndex + 1}`;
+  st.setStatus(`Extracting ${label}…`);
+  try {
+    const res = await client.extractTracks(path, [trackIndex]);
+    const cur = getState();
+    if (
+      myEpoch !== extractTrackEpoch ||
+      (expectedSourcePath !== null && cur.source?.path !== expectedSourcePath)
+    ) {
+      return null;
+    }
+    const extractedPath = res.extractedPaths[0];
+    if (!extractedPath) {
+      cur.setError('No audio file was produced for the selected track.', 'Track extract failed');
+      cur.setStatus('Track extraction produced no output');
+      return null;
+    }
+    const extractedSourceId = res.sourceIds?.[0] || undefined;
+    await loadSource({
+      path: extractedPath,
+      name: baseName(extractedPath),
+      origin: 'file',
+      ...(extractedSourceId ? { sourceId: extractedSourceId } : {}),
+    });
+    return extractedPath;
+  } catch (e) {
+    const cur = getState();
+    if (
+      myEpoch !== extractTrackEpoch ||
+      (expectedSourcePath !== null && cur.source?.path !== expectedSourcePath)
+    ) {
+      return null;
+    }
+    const msg = describeError(e);
+    cur.setError(msg, 'Track extract failed');
+    cur.setStatus(`Track extraction failed · ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Download a self-contained, print-ready Broadcast Quality Certificate (HTML)
+ * for the currently inspected or completed job.
+ */
+export async function downloadQcCertificate(lang: 'en' | 'ckb' = 'en'): Promise<boolean> {
+  const st = getState();
+  const client = st.client;
+  const jobId = st.job?.id ?? st.report?.job_id ?? st.currentRunId ?? null;
+  if (!client || st.engineStatus !== 'ready' || !jobId || typeof client.fetchJobCertificate !== 'function') {
+    st.setStatus('QC certificate unavailable — finish a run while engine is ready');
+    return false;
+  }
+  try {
+    const html = await client.fetchJobCertificate(jobId, lang);
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const stem = (st.source?.name ?? 'hawavoclean')
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^A-Za-z0-9._-]+/g, '_')
+      .slice(0, 48);
+    a.download = `${stem || 'hawavoclean'}-qc-certificate.html`;
+    a.rel = 'noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    st.pushToast(
+      lang === 'ckb' ? 'بڕوانامەی کوالێتی QC دابەزێنرا' : 'Downloaded Broadcast QC Certificate (.html)',
+      'ok',
+    );
+    return true;
+  } catch (e) {
+    const msg = describeError(e);
+    st.setError(msg, 'QC certificate failed');
+    st.setStatus(`QC certificate failed · ${msg}`);
+    return false;
+  }
+}
+
+

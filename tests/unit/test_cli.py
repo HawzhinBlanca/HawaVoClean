@@ -19,8 +19,8 @@ from hawavoclean.cli import (
     cmd_verify,
 )
 from hawavoclean.errors import ExitCode
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.pipeline import run_pipeline
+from tests.support.stubs import FixedProbe
 
 
 @pytest.mark.unit
@@ -89,7 +89,6 @@ def test_cli_calibrate_command() -> None:
             manifest="data/calibration/manifest.json",
             output=str(tmp / "guard-calib-test.json"),
             corruption_profile="standard",
-            fixed_probe=True,
         )
         ret = cmd_calibrate(args)
         assert ret == int(ExitCode.SUCCESS)

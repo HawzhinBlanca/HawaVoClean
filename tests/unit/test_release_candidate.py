@@ -33,6 +33,15 @@ def test_candidate_cli_direct_entrypoint_matches_the_runbook() -> None:
     assert "assemble,verify,smoke" in completed.stdout
 
 
+def test_candidate_smoke_launches_the_reconstructed_packaged_app(tmp_path: Path) -> None:
+    app = tmp_path / "HawaVoClean.app"
+    assert candidate._packaged_desktop_selftest_command(app) == [
+        "node",
+        os.fspath(ROOT / "desktop" / "scripts" / "packaged-selftest.cjs"),
+        os.fspath(app),
+    ]
+
+
 def _write_gate_proof(root: Path) -> tuple[Path, Path]:
     assets = root / "retained-assets"
     assets.mkdir()
@@ -147,6 +156,8 @@ def test_unsigned_candidate_requires_explicit_acceptance_and_proof_binding(tmp_p
     output = tmp_path / "candidate"
     manifest = candidate.assemble_candidate(proof, assets, output)
     assert manifest["status"] == "unsigned_pending_signing"
+    assert manifest["schema_version"] == 2
+    assert "unsigned qualification evidence" in manifest["distribution_boundary"]["desktop-proof"]
     with pytest.raises(candidate.CandidateError, match="explicit --allow-unsigned"):
         candidate.verify_candidate(output, proof_path=proof)
     verified = candidate.verify_candidate(output, proof_path=proof, allow_unsigned=True)

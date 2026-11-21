@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -11,6 +10,7 @@ from importlib import metadata, resources
 from pathlib import Path
 from typing import Any
 
+from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.release import RELEASE_IDENTITY
 
 BUILD_FIELDS = {
@@ -29,10 +29,6 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 
 class ProvenanceError(RuntimeError):
     """Build provenance is absent, malformed, or inconsistent."""
-
-
-def _canonical(value: dict[str, Any]) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _git(root: Path, *args: str) -> str:
@@ -69,7 +65,7 @@ def _validate_build_identity(value: Any) -> dict[str, Any]:
         if not isinstance(value[field], str) or not HEX64.fullmatch(value[field]):
             raise ProvenanceError(f"build provenance {field} is not a SHA-256")
     base = {key: item for key, item in value.items() if key != "build_id"}
-    expected = hashlib.sha256(_canonical(base)).hexdigest()
+    expected = hash_json_canonical(base)
     if value["build_id"] != expected:
         raise ProvenanceError("build provenance ID does not recompute from its fields")
     if value["release_identity_sha256"] != RELEASE_IDENTITY.identity_sha256:
@@ -91,10 +87,10 @@ def _source_tree_identity() -> dict[str, Any]:
         "source_revision": _git(root, "rev-parse", "HEAD"),
         "source_date_epoch": int(_git(root, "show", "-s", "--format=%ct", "HEAD")),
         "source_dirty": bool(_git(root, "status", "--porcelain", "--untracked-files=normal")),
-        "dependency_lock_sha256": hashlib.sha256(lock_path.read_bytes()).hexdigest(),
-        "release_identity_sha256": hashlib.sha256(release_path.read_bytes()).hexdigest(),
+        "dependency_lock_sha256": hash_file(lock_path),
+        "release_identity_sha256": hash_file(release_path),
     }
-    base["build_id"] = hashlib.sha256(_canonical(base)).hexdigest()
+    base["build_id"] = hash_json_canonical(base)
     return _validate_build_identity(base)
 
 
@@ -123,7 +119,7 @@ def distribution_record_sha256() -> str | None:
         if str(entry).endswith(".dist-info/RECORD"):
             try:
                 record_path = Path(str(distribution.locate_file(entry)))
-                return hashlib.sha256(record_path.read_bytes()).hexdigest()
+                return hash_file(record_path)
             except OSError as exc:
                 raise ProvenanceError(f"cannot read installed distribution RECORD: {exc}") from exc
     return None
@@ -201,8 +197,12 @@ def runtime_versions() -> dict[str, str]:
         result["libsndfile"] = str(soundfile.__libsndfile_version__)
     except (ImportError, AttributeError):
         result["libsndfile"] = "unavailable"
-    result["ffmpeg"] = _command_version("ffmpeg")
-    result["ffprobe"] = _command_version("ffprobe")
+    from hawavoclean.paths import ffmpeg_bin_path, ffprobe_bin_path
+
+    ff_bin = ffmpeg_bin_path()
+    result["ffmpeg"] = _command_version(ff_bin) if ff_bin else "unavailable (not found)"
+    fp_bin = ffprobe_bin_path()
+    result["ffprobe"] = _command_version(fp_bin) if fp_bin else "unavailable (not found)"
     return dict(sorted(result.items()))
 
 

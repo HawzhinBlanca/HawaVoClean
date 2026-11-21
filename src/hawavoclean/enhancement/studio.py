@@ -21,15 +21,14 @@ It is NOT part of ``STUDIO_PARAMS``: the lockfile pins what the model is, and
 that is the same model on every device.
 """
 
-import sys
 import time
-import types
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from hawavoclean.audio.resample import resample_audio
+from hawavoclean.enhancement.dependency_probe import install_torchaudio_compat
 from hawavoclean.enhancement.protocol import EnhancementResult, Enhancer, EnhancerMetadata
 from hawavoclean.hashing import hash_file, hash_json_canonical
 from hawavoclean.logging import get_logger
@@ -44,7 +43,7 @@ _MODEL_DIR = Path(__file__).resolve().parents[1] / "resources" / "models" / "dee
 STUDIO_PARAMS: dict[str, float | int | bool | str] = {
     "model": "DeepFilterNet3",
     "internal_sample_rate": 48000,
-    "wpe_dereverb": True,
+    "wpe_dereverb": False,
     "wpe_n_fft": 1024,
     "wpe_hop": 256,
     "wpe_taps": 10,
@@ -57,7 +56,7 @@ STUDIO_PARAMS: dict[str, float | int | bool | str] = {
     # phrase tails -5.6 dB @50 ms / -7.5 dB @100 ms, voice tonality unchanged.
     # Hotter settings (rt60 0.5 / floor -15) scored 0.14 and the continuity
     # rule then cascaded the whole take back to original.
-    "tail_suppress": True,
+    "tail_suppress": False,
     "tail_rt60_s": 0.4,
     "tail_floor_db": -10.0,
     "tail_onset_protect_db": 3.0,
@@ -83,33 +82,13 @@ def studio_weight_digests() -> dict[str, str]:
     return digests
 
 
-def _install_torchaudio_compat() -> None:
-    """deepfilternet 0.5.6 imports torchaudio.backend.common.AudioMetaData,
-    removed in torchaudio >= 2.2. It is used only as a type annotation in a
-    module we never call; provide the symbol so the import succeeds."""
-    if "torchaudio.backend.common" in sys.modules:
-        return
-    import torchaudio  # type: ignore[import-untyped]
-
-    common = types.ModuleType("torchaudio.backend.common")
-
-    class AudioMetaData:  # annotation-only stand-in
-        pass
-
-    common.AudioMetaData = getattr(torchaudio, "AudioMetaData", AudioMetaData)  # type: ignore[attr-defined]
-    backend = types.ModuleType("torchaudio.backend")
-    backend.common = common  # type: ignore[attr-defined]
-    sys.modules["torchaudio.backend"] = backend
-    sys.modules["torchaudio.backend.common"] = common
-
-
 def load_deepfilternet3(device: str) -> tuple[Any, Any]:
     """Initialise DeepFilterNet3 from the vendored, hash-locked weights.
 
     Every core that runs DFN3 loads it through here, so ``_MODEL_DIR`` — the
     directory whose digests the lockfiles pin — is named exactly once.
     """
-    _install_torchaudio_compat()
+    install_torchaudio_compat()
     import torch
     from df.config import config as df_config
     from df.enhance import init_df
@@ -291,6 +270,9 @@ class StudioVoiceCore(Enhancer):
         enhanced_out = resample_audio(
             enhanced_48k, self._sample_rate, sample_rate, target_samples=orig_len
         )
+        peak = float(np.max(np.abs(enhanced_out))) if len(enhanced_out) > 0 else 0.0
+        if peak > 0.99:
+            enhanced_out = np.ascontiguousarray(enhanced_out * (0.99 / peak), dtype=np.float32)
         t_elapsed_ms = (time.perf_counter() - t_start) * 1000.0
         return EnhancementResult(
             waveform=enhanced_out,

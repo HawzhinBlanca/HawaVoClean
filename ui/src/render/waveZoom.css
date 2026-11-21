@@ -20,6 +20,17 @@
 }
 
 /* ------------------------------------------------------------- zoom readout */
+.wave-region {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 6px;
+}
+
+.wave-mark-clear {
+  color: var(--cyan-2);
+}
+
 .wave-zoom {
   display: inline-flex;
   align-items: center;
@@ -54,6 +65,11 @@
 }
 
 .wave-fit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
   font-family: var(--font-ui);
   font-size: var(--fs-xs);
   font-weight: 700;
@@ -387,3 +403,23 @@
     display: none;
   }
 }
+
+/* --------------------------------------------------- D2: selection overlay */
+.wave-sel-overlay {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(57, 208, 255, 0.16);
+  border-left: 1.5px solid rgba(57, 208, 255, 0.75);
+  border-right: 1.5px solid rgba(57, 208, 255, 0.75);
+  pointer-events: none;
+  z-index: 2;
+  transition: opacity 0.15s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wave-sel-overlay {
+    transition: none;
+  }
+}
+

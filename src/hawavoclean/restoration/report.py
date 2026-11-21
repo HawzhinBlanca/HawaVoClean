@@ -28,6 +28,7 @@ class RestorationReport:
     segments: RestorationSegmentCounts
     guard_r: dict[str, Any]
     review_timecodes: list[dict[str, Any]]
+    post_mastering_verification: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert report to serializable dictionary."""

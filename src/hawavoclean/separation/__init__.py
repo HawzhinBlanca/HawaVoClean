@@ -1,0 +1,53 @@
+"""Optional, isolated hybrid sound separation (MLX RoFormer + AudioGhost SAM-Audio)."""
+
+from hawavoclean.separation.roformer import (
+    ROFORMER_CONFIG_FILENAME,
+    ROFORMER_ENGINE_ID,
+    ROFORMER_LICENSE,
+    ROFORMER_MODEL_DIR_ENV,
+    ROFORMER_MODEL_FILENAME,
+    ROFORMER_PYTHON_ENV,
+    classify_vocal_music_prompt,
+    probe_roformer_runtime,
+    separate_roformer,
+)
+from hawavoclean.separation.runtime import (
+    AUDIOGHOST_COMMIT,
+    MAX_DURATION_S,
+    MAX_FILE_SIZE_BYTES,
+    WORKER_MAX_DURATION_S,
+    RuntimeStatus,
+    SeparationCancelledError,
+    SeparationError,
+    probe_any_separation_runtime,
+    probe_audioghost_runtime,
+    probe_runtime,
+    probe_separation_capabilities,
+    resolve_separation_device,
+    separate_audio,
+)
+
+__all__ = [
+    "AUDIOGHOST_COMMIT",
+    "MAX_DURATION_S",
+    "MAX_FILE_SIZE_BYTES",
+    "ROFORMER_CONFIG_FILENAME",
+    "ROFORMER_ENGINE_ID",
+    "ROFORMER_LICENSE",
+    "ROFORMER_MODEL_DIR_ENV",
+    "ROFORMER_MODEL_FILENAME",
+    "ROFORMER_PYTHON_ENV",
+    "WORKER_MAX_DURATION_S",
+    "RuntimeStatus",
+    "SeparationCancelledError",
+    "SeparationError",
+    "classify_vocal_music_prompt",
+    "probe_any_separation_runtime",
+    "probe_audioghost_runtime",
+    "probe_roformer_runtime",
+    "probe_runtime",
+    "probe_separation_capabilities",
+    "resolve_separation_device",
+    "separate_audio",
+    "separate_roformer",
+]

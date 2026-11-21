@@ -68,8 +68,8 @@ class F0Extractor:
             np.arange(n_frames) * self.hop_length + self.frame_length / 2.0
         ) / self.sample_rate
 
-        min_lag = int(self.sample_rate / self.f0_max_hz)
-        max_lag = int(self.sample_rate / self.f0_min_hz)
+        min_lag = max(1, int(self.sample_rate / self.f0_max_hz))
+        max_lag = min(int(self.sample_rate / self.f0_min_hz), self.frame_length - 1)
 
         # Center-clipped autocorrelation / normalized cross-correlation
         window = np.hanning(self.frame_length).astype(np.float32)
@@ -100,7 +100,7 @@ class F0Extractor:
             peak_val = corr[peak_idx]
 
             # Parabolic interpolation for fine frequency resolution
-            if min_lag < peak_idx < max_lag - 1:
+            if min_lag < peak_idx < min(max_lag - 1, len(corr) - 1):
                 alpha = corr[peak_idx - 1]
                 beta = corr[peak_idx]
                 gamma = corr[peak_idx + 1]

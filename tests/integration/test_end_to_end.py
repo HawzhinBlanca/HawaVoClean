@@ -8,8 +8,8 @@ import pytest
 from hawavoclean.audio.decode import decode_audio
 from hawavoclean.audio.probe import probe_audio
 from hawavoclean.finishing.loudness import measure_loudness_and_peaks
-from hawavoclean.guard.spectral_probe import FixedProbe
 from hawavoclean.pipeline import run_pipeline
+from tests.support.stubs import FixedProbe
 
 
 @pytest.mark.integration

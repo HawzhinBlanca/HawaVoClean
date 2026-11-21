@@ -10,10 +10,13 @@ import {
   cancelJob,
   cancelUpload,
   isAnalyzing,
+  previewRegion,
+  redoAction,
   seekTo,
   setAb,
   startJob,
   togglePlay,
+  undoAction,
 } from './actions';
 import { clearSelection, stepUnit } from './selection';
 import { getState } from './store';
@@ -45,9 +48,23 @@ export function isActivatable(target: EventTarget | null): boolean {
  */
 export function handleKeyDown(e: KeyboardEvent): void {
   if (e.defaultPrevented) return;
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (isEditable(e.target)) return;
   const st = getState();
+
+  // Cmd/Ctrl+Z (Undo), Cmd/Ctrl+Shift+Z (Redo), and Cmd/Ctrl+K (AI Assistant drawer).
+  if ((e.metaKey || e.ctrlKey) && !e.altKey) {
+    const k = e.key.toLowerCase();
+    if (!st.shortcutsOpen && k === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redoAction();
+      else undoAction();
+    } else if (!st.shortcutsOpen && k === 'k') {
+      e.preventDefault();
+      st.setAssistantDrawerOpen(!st.assistantDrawerOpen);
+    }
+    return;
+  }
+  if (e.altKey) return;
 
   if (e.key === '?') {
     e.preventDefault();
@@ -66,11 +83,14 @@ export function handleKeyDown(e: KeyboardEvent): void {
       e.preventDefault();
       // Esc means "stop the thing that is happening", innermost first:
       // an upload in flight, then an analysis, then a running job, then the selection.
-      if (st.upload) cancelUpload();
+      if (st.assistantDrawerOpen) st.setAssistantDrawerOpen(false);
+      else if (st.batchDrawerOpen) st.setBatchDrawerOpen(false);
+      else if (st.upload) cancelUpload();
       else if (isAnalyzing()) cancelAnalysis();
       else if (running) void cancelJob();
       else if (st.rejection) st.setRejection(null);
       else if (st.selectedUnit) clearSelection();
+      else if (st.selectionRange) st.setSelectionRange(null);
       return;
     }
     case 'ArrowLeft':
@@ -113,16 +133,53 @@ export function handleKeyDown(e: KeyboardEvent): void {
       // Same condition the A/B control draws itself with: a path is not a deck,
       // and a master the engine can no longer serve is not switchable to by
       // keyboard either.
-      if (st.cleanedPath && st.artifacts?.master !== false && st.deckFault?.deck !== 'cleaned') {
+      if (
+        ((st.cleanedPath && st.artifacts?.master !== false) || st.previewActive) &&
+        st.deckFault?.deck !== 'cleaned'
+      ) {
         setAb('cleaned');
       }
       break;
-    case 'p': {
-      const canStart =
-        st.engineStatus === 'ready' && !!st.source && !!st.original && !st.analyzing && !running;
-      if (canStart) void startJob();
+    case 'd': {
+      // Toggle Delta ("Listen to Removed") audition when cleaned deck is ready.
+      const cleanedReady =
+        hasAudio &&
+        ((Boolean(st.cleanedPath) && st.artifacts?.master !== false) || st.previewActive) &&
+        st.deckFault?.deck !== 'cleaned';
+      if (cleanedReady) {
+        e.preventDefault();
+        const player = getPlayer();
+        if (typeof player.toggleDeltaMode === 'function') {
+          player.toggleDeltaMode();
+        }
+      }
       break;
     }
+    case 'p': {
+      const canAct =
+        st.engineStatus === 'ready' && !!st.source && !!st.original && !st.analyzing && !running;
+      if (canAct) {
+        e.preventDefault();
+        if (e.shiftKey) void startJob();
+        else void previewRegion({ autoPlay: true });
+      }
+      break;
+    }
+    case 'l':
+      // Toggle Region / Clip Loop on DualPlayer.
+      if (hasAudio) {
+        e.preventDefault();
+        const player = getPlayer();
+        if (st.selectionRange && st.selectionRange.end > st.selectionRange.start) {
+          if (typeof player.setLoopRange === 'function') {
+            player.setLoopRange([st.selectionRange.start, st.selectionRange.end]);
+          }
+        }
+        if (typeof player.toggleLoop === 'function') {
+          player.toggleLoop();
+        }
+      }
+      break;
     default:
       break;
   }

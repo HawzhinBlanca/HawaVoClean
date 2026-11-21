@@ -154,4 +154,41 @@ describe('RestorationCard', () => {
     expect(host.querySelector('.rest-card')?.getAttribute('data-verdict')).toBe('passthrough');
     expect(host.textContent).toContain('preserved Natural audio');
   });
+
+  it('renders Smart Safe routing decision card with candidates and fallback (True-10 D4.11)', async () => {
+    await render(
+      section({
+        mode: 'smart_safe',
+        selected_route: 'production',
+        confidence: 0.94,
+        fallback_route: 'production',
+        reason: 'Production Wiener filter selected with high confidence',
+        candidates: [
+          {
+            route: 'production',
+            status: 'accepted',
+            score: 0.94,
+            confidence: 0.94,
+            rank: 1,
+            selected: true,
+            rejection_reason: null,
+          },
+          {
+            route: 'studio',
+            status: 'rejected',
+            score: 0.72,
+            confidence: 0.72,
+            rank: 2,
+            selected: false,
+            rejection_reason: 'Phase coherence margin lower than production',
+          },
+        ],
+      }),
+    );
+    expect(host.textContent).toContain('Smart Safe Decision');
+    expect(host.textContent).toContain('PRODUCTION');
+    expect(host.textContent).toContain('94.0%');
+    expect(host.textContent).toContain('Candidate Evaluation');
+    expect(host.textContent).toContain('Phase coherence margin lower than production');
+  });
 });

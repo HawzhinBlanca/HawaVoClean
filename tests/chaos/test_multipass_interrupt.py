@@ -80,7 +80,15 @@ def _multipass_litter(work_dir: Path) -> list[str]:
     return sorted(p.name for p in work_dir.glob("multipass-*"))
 
 
-@pytest.mark.chaos
+pytestmark = [
+    pytest.mark.chaos,
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX process hierarchy tests (Windows covered by test_process_supervisor.py)",
+    ),
+]
+
+
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
 def test_multipass_interrupt_leaves_no_partials_and_no_litter(
     sig: signal.Signals, long_input: Path, tmp_path: Path

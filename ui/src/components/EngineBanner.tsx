@@ -7,9 +7,9 @@
 // nothing else.
 
 import { useEffect, useState } from 'react';
-import { isTerminal } from '../api/sse';
 import { retryEngineNow } from '../state/actions';
-import { useStore } from '../state/store';
+import { deriveEnginePhase } from '../state/machines';
+import { jobInFlight, useStore } from '../state/store';
 import { IconWarn } from './Icons';
 
 /** m:ss, or "a moment" for the first second of an outage. */
@@ -37,19 +37,29 @@ function useTick(active: boolean): number {
 
 export function EngineBanner() {
   const engineStatus = useStore((s) => s.engineStatus);
-  const offlineSince = useStore((s) => s.engineOfflineSince);
-  const nextProbeAt = useStore((s) => s.engineNextProbeAt);
-  const probing = useStore((s) => s.engineProbing);
+  const engineVersion = useStore((s) => s.engineVersion);
+  const engineOfflineSince = useStore((s) => s.engineOfflineSince);
+  const engineNextProbeAt = useStore((s) => s.engineNextProbeAt);
+  const engineProbing = useStore((s) => s.engineProbing);
   const job = useStore((s) => s.job);
   const source = useStore((s) => s.source);
   const report = useStore((s) => s.report);
   const history = useStore((s) => s.history);
 
-  const down = engineStatus === 'offline' || (engineStatus === 'connecting' && offlineSince !== null);
+  const engine = deriveEnginePhase({
+    engineStatus,
+    engineVersion,
+    engineOfflineSince,
+    engineNextProbeAt,
+    engineProbing,
+  });
+  const down = engine.phase === 'offline_waiting' || engine.phase === 'offline_probing';
   const now = useTick(down);
   if (!down) return null;
 
-  const inflight = Boolean(job) && (!job?.status || !isTerminal(job.status.state));
+  const { offlineSince, nextProbeAt } = engine;
+  const probing = engine.phase === 'offline_probing';
+  const inflight = jobInFlight(job);
   const wait = nextProbeAt === null ? 0 : Math.max(0, nextProbeAt - now);
   const nextIn = (wait / 1000).toFixed(1);
 

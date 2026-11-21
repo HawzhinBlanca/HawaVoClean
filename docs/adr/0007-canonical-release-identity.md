@@ -11,8 +11,8 @@ an internally inconsistent release.
 
 `src/hawavoclean/release.json` is the single authored identity. It names the product version and the
 current report schema. Python reads those exact packaged bytes at runtime. The packaging manifests
-are generated mirrors; `scripts/sync_release_identity.py --check` rejects any drift and `--write`
-updates all five mirrors.
+are generated mirrors; `scripts/sync_release_identity.py` rejects any drift and `--write`
+updates all six mirrors, including the standalone desktop package.
 
 Schema-v2 reports embed the product, release version, report-schema version and SHA-256 of those exact
 identity bytes. The strict report model rejects a missing, altered or internally inconsistent v2

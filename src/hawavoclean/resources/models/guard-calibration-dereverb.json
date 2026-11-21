@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "calibration_id": "57bd2eb8c92826a9f81dddea2e428c2dbd92bd0257cd0a363f5e1a72597a2bdf",
+  "guard_id": "spectral-guard-v1",
+  "probe_id": "spectral-signature-v1",
+  "provenance": "Dereverb-profile thresholds, chosen 2026-11-19 against measured Guard A scores on real 48 kHz Sorani Kurdish speech processed by studio-dereverb-48k-v1 (pure discriminative GAP-URGENet Predictor TF-GridNetV3, enable_bwe=false): heavy RT60=1.1s dereverberation (sherko reverb_heavy: hole=0.1141, hf_preservation=0.5131, musical_noise=0.0002; malaka reverb_heavy: hole=0.2100, hf_preservation=0.4561, musical_noise=0.0000) legitimately removes smeared reverberant energy that exceeds studio denoising bounds (0.10 / 0.50), while clean controls measure hole=0.0001-0.0002, hf_preservation=0.804-0.970, musical_noise=0.0000. Setting spectral_hole_thresh=0.30 and min_hf_preservation_ratio=0.30 accepts legitimate mono room dereverberation while keeping timing, envelope, musical-noise, and collapse protections strictly enforced in integrity mode.",
+  "thresholds": {
+    "min_anchor_confidence": 0.5,
+    "max_posterior_js_div": 0.3,
+    "max_peak_js_div": 0.9,
+    "max_timing_drift_ms": 75.0,
+    "spectral_hole_thresh": 0.3,
+    "musical_noise_thresh": 0.3,
+    "min_hf_preservation_ratio": 0.3
+  }
+}

@@ -1,5 +1,10 @@
 # HawaVoClean 3.3 system architecture
 
+The expanded macOS/Windows/Resolve/cloud production topology and its truthful implementation boundary
+are tracked in [high-end-production-implementation.md](high-end-production-implementation.md). The
+security trust boundaries and open release blockers are tracked in
+[security-threat-model.md](security-threat-model.md).
+
 HawaVoClean is an offline dialogue-restoration engine with three product surfaces: CLI/batch,
 loopback web UI, and a DaVinci Resolve workflow plugin. All three call the same Python processing
 engine and publish the same schema-v2 report/output contract.
@@ -98,7 +103,7 @@ fault and recovery contract is [the publication state machine](publication-state
 
 | Surface | Boundary | Important behavior |
 |---|---|---|
-| CLI | Current process + isolated enhancement workers | `process`, `batch`, `verify`, diagnostics and evaluation tooling |
+| CLI | Current process + isolated enhancement workers | `process` can create a verified record in its supervised child; `batch`, loose-output `verify`, portable `record create/verify`, diagnostics and evaluation tooling |
 | Batch | Long-lived child plus per-file deadlines | One failed/hung input cannot abort later files; non-zero summary on any failure |
 | Web UI | Token-authenticated engine on exactly `127.0.0.1` | Bounded FIFO jobs, bounded uploads/retention, path policy, range audio, SSE progress |
 | Resolve plugin | Sandboxed Electron renderer → validated preload IPC → main → loopback engine | Transactional install/rollback; local checksum-covered UI; all foreign navigation/popups denied |
@@ -137,6 +142,10 @@ user explicitly exports them.
    authoritative.
 8. Network processing is loopback-only and every API request requires a fresh token.
 9. The tested artifact identity and the reported artifact identity must match before release.
+10. A Full Processing Record job is complete only after the broker resolves/repairs the authoritative
+    immutable generation, independently verifies the ZIP, binds every export hash, and durably
+    records the terminal transition. An interrupted replace job is never promoted from path contents
+    alone because those paths may belong to a prior generation.
 
 ## Related decisions
 

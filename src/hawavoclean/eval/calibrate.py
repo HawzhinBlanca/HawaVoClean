@@ -22,7 +22,7 @@ from hawavoclean.eval.corruption import (
     corrupt_spectral_holes,
     corrupt_syllable_deletion,
 )
-from hawavoclean.guard.spectral_probe import FixedProbe, SpectralSignatureProbe
+from hawavoclean.guard.spectral_probe import SpectralSignatureProbe
 from hawavoclean.guard.verdict import GuardVerdict, evaluate_guard_pass
 from hawavoclean.hashing import hash_json_canonical
 
@@ -71,7 +71,6 @@ def run_calibration(
     manifest_path: Path | str,
     output_calibration_path: Path | str,
     corruption_profile: str = "standard",
-    use_fixed_probe: bool = False,
 ) -> dict[str, Any]:
     """Measure guard accept/revert rates over the corpus and write the artifact."""
     if corruption_profile not in CORRUPTION_PROFILES:
@@ -80,7 +79,7 @@ def run_calibration(
             f"choose from {sorted(CORRUPTION_PROFILES)}"
         )
     manifest = load_corpus_manifest(manifest_path)
-    probe = FixedProbe() if use_fixed_probe else SpectralSignatureProbe()
+    probe = SpectralSignatureProbe()
 
     guard_cfg = GuardConfig()
     thresholds = {

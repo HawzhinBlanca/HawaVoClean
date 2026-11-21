@@ -699,3 +699,70 @@ def test_masked_wav_bytes_masks_only_the_peak_timestamp(tmp_path: Path) -> None:
     assert masked_wav_bytes(bytes(tampered)) != masked_wav_bytes(raw)
     # Non-RIFF payloads pass through untouched.
     assert masked_wav_bytes(b"not a wav") == b"not a wav"
+
+
+@pytest.mark.unit
+def test_cumulative_consonant_retention_identity() -> None:
+    rng = np.random.default_rng(42)
+    sig = rng.standard_normal(48000).astype(np.float64)
+    retention = multipass.cumulative_consonant_retention(sig, sig, sample_rate=48000)
+    assert retention == pytest.approx(1.0, abs=1e-3)
+
+
+@pytest.mark.unit
+def test_cumulative_consonant_retention_short_and_silence() -> None:
+    zero = np.zeros(100, dtype=np.float64)
+    assert multipass.cumulative_consonant_retention(zero, zero) == 1.0
+    silence = np.zeros(48000, dtype=np.float64)
+    assert multipass.cumulative_consonant_retention(silence, silence) == 1.0
+
+
+@pytest.mark.unit
+def test_cumulative_consonant_retention_attenuated() -> None:
+    t = np.arange(48000) / 48000.0
+    # Original has loud 4 kHz consonant tone + 500 Hz vowel
+    orig = np.sin(2 * np.pi * 500 * t) + np.sin(2 * np.pi * 4000 * t)
+    # Candidate wiped the 4 kHz consonant tone
+    cand = np.sin(2 * np.pi * 500 * t)
+    retention = multipass.cumulative_consonant_retention(orig, cand, sample_rate=48000)
+    assert retention < multipass.MIN_CUMULATIVE_CONSONANT_RETENTION
+
+
+@pytest.mark.unit
+def test_auto_discards_on_consonant_attenuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = _StubPipeline([20.0, 26.0])
+    _install_stub(monkeypatch, stub)
+
+    # Force candidate consonant retention to be severely attenuated on pass 2
+    monkeypatch.setattr(
+        multipass,
+        "cumulative_consonant_retention",
+        lambda _orig, _cand, **_kwargs: 0.65,
+    )
+    out = tmp_path / "out.wav"
+    report = run_multipass(input_path=_src_wav(tmp_path), output_path=out, passes="auto")
+
+    assert len(report.passes) == 2
+    assert report.passes[1].discarded is True
+    assert report.passes[1].discard_reason is not None
+    assert "consonant retention" in report.passes[1].discard_reason.lower()
+    # Output must be pass 1
+    assert report.output.sha256 == report.passes[0].output_sha256
+
+
+@pytest.mark.unit
+def test_auto_studio_profile_caps_at_two_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Everything improves continuously
+    stub = _StubPipeline([10.0, 15.0, 20.0, 25.0])
+    _install_stub(monkeypatch, stub)
+    out = tmp_path / "out.wav"
+    report = run_multipass(
+        input_path=_src_wav(tmp_path), output_path=out, profile="studio", passes="auto"
+    )
+    assert len(stub.calls) == 2, "studio auto mode must cap at 2 passes"
+    assert len(report.passes) == 2
+    assert not any(p.discarded for p in report.passes)

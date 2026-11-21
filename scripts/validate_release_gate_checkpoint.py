@@ -24,7 +24,7 @@ COVERAGE = re.compile(r"Total coverage: (?P<coverage>\d+(?:\.\d+)?)%")
 FUZZ_SUMMARY = re.compile(r"(?P<passed>\d+) passed in")
 MUTATION_SUMMARY = re.compile(r"(?P<caught>\d+)/(?P<total>\d+) caught")
 UI_SUMMARY = re.compile(r"Tests\s+(?P<passed>\d+) passed")
-ARTIFACTS = {
+ARTIFACTS_V1 = {
     "audio-regression",
     "container-audio",
     "container-image",
@@ -35,6 +35,24 @@ ARTIFACTS = {
     "ui",
     "wheel",
     "wheel-smoke-audio",
+}
+ARTIFACTS_V2 = {
+    *ARTIFACTS_V1,
+    "desktop-app",
+    "desktop-engine-smoke-audio",
+}
+DESKTOP_RUNTIME_STEPS_V2 = {
+    "desktop-audit",
+    "desktop-source-shell-self-test",
+    "desktop-source-hard-crash-self-test",
+    "desktop-package-unsigned-proof",
+    "desktop-package-integrity-pre-smoke",
+    "desktop-packaged-app-self-test",
+    "desktop-packaged-engine-version",
+    "desktop-packaged-engine-doctor",
+    "desktop-packaged-engine-process",
+    "desktop-packaged-engine-verify",
+    "desktop-package-integrity-post-smoke",
 }
 
 
@@ -101,7 +119,8 @@ def validate_checkpoint(path: Path = DEFAULT_CHECKPOINT) -> dict[str, Any]:
         "toolchain",
         "known_limits",
     }
-    if set(checkpoint) != expected_top or checkpoint.get("schema_version") != 1:
+    schema_version = checkpoint.get("schema_version")
+    if set(checkpoint) != expected_top or schema_version not in {1, 2}:
         raise CheckpointError("release-gate checkpoint top-level contract differs")
     if checkpoint.get("task_id") != "T3.1" or checkpoint.get("command") != (
         "bash scripts/run_release_checks.sh"
@@ -132,8 +151,12 @@ def validate_checkpoint(path: Path = DEFAULT_CHECKPOINT) -> dict[str, Any]:
         "generated_identity_schema_status_and_design_drift",
         "tracked_tree_drift",
     }
+    if schema_version == 2:
+        expected_result.add("desktop")
     if set(result) != expected_result:
-        raise CheckpointError("checkpoint result fields differ from the version-1 contract")
+        raise CheckpointError(
+            f"checkpoint result fields differ from the version-{schema_version} contract"
+        )
     if result.get("status") != "passed":
         raise CheckpointError("checkpoint result is not passing")
     passes = _integer(result.get("isolated_clean_checkout_passes"), "checkout passes", minimum=2)
@@ -179,6 +202,16 @@ def validate_checkpoint(path: Path = DEFAULT_CHECKPOINT) -> dict[str, Any]:
         raise CheckpointError("dependency audits are not recorded clean")
     if result.get("resolve_staged_lifecycle_self_test") != "passed in both checkouts":
         raise CheckpointError("Resolve staged lifecycle is not recorded passing")
+    if schema_version == 2:
+        desktop = _object(result.get("desktop"), "desktop result")
+        if desktop != {
+            "packaged_app": "unsigned macos-arm64 proof in both checkouts",
+            "source_shell_lifecycle": "passed in both checkouts",
+            "hard_crash_process_tree": "passed in both checkouts",
+            "package_integrity_app_runtime_and_engine_smoke": "passed in both checkouts",
+            "signing_notarization": "pending native release gate",
+        }:
+            raise CheckpointError("desktop result differs from the version-2 proof contract")
     for field in ("generated_identity_schema_status_and_design_drift", "tracked_tree_drift"):
         if result.get(field) != 0:
             raise CheckpointError(f"checkpoint records non-zero {field}")
@@ -213,7 +246,8 @@ def validate_checkpoint(path: Path = DEFAULT_CHECKPOINT) -> dict[str, Any]:
     if reproducibility.get("status") != "passed":
         raise CheckpointError("artifact reproducibility is not passing")
     artifacts = _object(reproducibility.get("artifact_sha256"), "artifact identities")
-    if set(artifacts) != ARTIFACTS:
+    promised_artifacts = ARTIFACTS_V2 if schema_version == 2 else ARTIFACTS_V1
+    if set(artifacts) != promised_artifacts:
         raise CheckpointError("artifact identity set differs from the promised set")
     for name, digest in artifacts.items():
         _hex(digest, HEX64, f"artifact {name}")
@@ -398,7 +432,10 @@ def _verify_logged_metrics(logs: dict[str, str], result: dict[str, Any]) -> None
     ui = _match(UI_SUMMARY, logs["ui-tests"], "UI tests")
     if int(ui.group("passed")) != result["ui_tests_per_pass"]:
         raise CheckpointError("UI test count differs from the retained log")
-    for name in ("ui-audit", "plugin-audit", "toolchain-audit", "python-audit"):
+    audits = ["ui-audit", "plugin-audit", "toolchain-audit", "python-audit"]
+    if "desktop-audit" in logs:
+        audits.append("desktop-audit")
+    for name in audits:
         _zero_vulnerabilities(logs[name], name)
 
 
@@ -416,6 +453,8 @@ def validate_full_proof(checkpoint: dict[str, Any], proof_path: Path) -> dict[st
         raise CheckpointError("retained proof canonical digest does not recompute")
     if proof.get("status") != "passed" or proof.get("source_commit") != checkpoint["source_commit"]:
         raise CheckpointError("retained proof status/source differs from the checkpoint")
+    if proof.get("schema_version") != checkpoint.get("schema_version"):
+        raise CheckpointError("retained proof schema differs from the checkpoint")
     if (
         _canonical_sha256(proof.get("external_inputs"))
         != integrity["external_input_inventory_canonical_sha256"]
@@ -490,6 +529,8 @@ def validate_full_proof(checkpoint: dict[str, Any], proof_path: Path) -> dict[st
             "container-vulnerability-scan",
             "container-configuration-scan",
         }
+        if checkpoint.get("schema_version") == 2:
+            required.update(DESKTOP_RUNTIME_STEPS_V2)
         if not required.issubset(logs):
             raise CheckpointError("retained proof omits a required runtime/security step")
     raw_repro = _object(proof.get("reproducibility"), "raw reproducibility")

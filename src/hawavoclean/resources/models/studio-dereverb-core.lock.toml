@@ -1,0 +1,47 @@
+# Neural Mono Dereverberation Core Lock (GAP-URGENet Predictor TF-GridNetV3)
+#
+# Pins Xiaobin-Rong/gap-urgenet Predictor.pt (MIT License, 88.5 MB) parameters
+# and external checkpoint SHA-256 digest. Executed natively in pure PyTorch via
+# the in-tree Apache-2.0 TF-GridNetV3 module hawavoclean.enhancement.dereverb_neural
+# in strictly discriminative Natural mode (enable_bwe = false; zero generative
+# spectral synthesis). Unlike the smaller DeepFilterNet3 checkpoint, the 88.5 MB
+# Predictor.pt file is not vendored inside git; its SHA-256 is pinned inside
+# [params].checkpoint_sha256 and enforced by both probe_dereverb_runtime_contract()
+# (model-cold preflight / capabilities) and load_dereverb_model() prior to
+# torch.load(..., weights_only=True).
+
+schema_version = 2
+core_id = "studio-dereverb-48k-v1"
+version = "1.0.0"
+algorithm = "GAP-URGENet Predictor TF-GridNetV3 pure discriminative mono dereverberation (MIT/Apache-2.0, hash-locked weights)"
+implementation = "hawavoclean.enhancement.dereverb_neural.NeuralDereverbCore"
+code_license = "Proprietary / All Rights Reserved"
+model_upstream = "https://huggingface.co/Xiaobin-Rong/gap-urgenet"
+model_license = "MIT"
+expected_sample_rates = [48000]
+phase_coherent = false
+params_hash = "ed33e5a05eba17604991c31c3d54e4085665d1deb7e046fd8078d55aa928d3fc"
+
+[params]
+core_id = "studio-dereverb-48k-v1"
+model_id = "gap-urgenet-predictor-tfgridnet-v1"
+model_license = "MIT"
+arch_license = "Apache-2.0"
+internal_sample_rate = 16000
+output_sample_rate = 48000
+fft_len_s = 0.032
+hop_len_s = 0.016
+win_len_s = 0.032
+n_layers = 10
+lstm_hidden_units = 200
+attn_n_head = 8
+attn_qk_output_channel = 4
+emb_dim = 96
+emb_ks = 4
+emb_hs = 1
+chunk_duration_s = 12.0
+overlap_duration_s = 1.5
+enable_bwe = false
+bwe_cutoff_hz = 7200.0
+checkpoint_file = "Predictor.pt"
+checkpoint_sha256 = "1e58c270c12ab953e4df32a34e4b580f780d016bee9bf5580684d6c982f77866"

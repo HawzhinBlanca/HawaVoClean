@@ -1,0 +1,32 @@
+services:
+  hawavoclean:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      # Generate with: openssl rand -hex 32
+      HAWAVOCLEAN_WEB_TOKEN: "${HAWAVOCLEAN_WEB_TOKEN:-change-me-before-production}"
+      HAWAVOCLEAN_WEB_PUBLIC: "1"
+      # Comma-separated explicit HTTPS origins when embedded on a separate domain
+      HAWAVOCLEAN_CORS_ORIGINS: "${HAWAVOCLEAN_CORS_ORIGINS:-}"
+      HAWAVOCLEAN_MAX_UPLOAD_BYTES: "${HAWAVOCLEAN_MAX_UPLOAD_BYTES:-536870912}"
+    volumes:
+      - hawavoclean_work:/var/lib/hawavoclean/work
+      - hawavoclean_data:/var/lib/hawavoclean/data
+    expose:
+      - "8000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - hawavoclean
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  hawavoclean_work:
+  hawavoclean_data:
