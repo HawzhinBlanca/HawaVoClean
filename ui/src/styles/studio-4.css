@@ -56,12 +56,10 @@
   border-radius: var(--r-sm);
   border: 1px solid color-mix(in oklab, var(--cyan) 28%, var(--hair));
   background:
-    linear-gradient(
-      90deg,
+    linear-gradient(90deg,
       color-mix(in oklab, var(--cyan) 9%, var(--panel)) 0%,
       var(--panel) 32%,
-      var(--panel) 100%
-    );
+      var(--panel) 100%);
   box-shadow: inset 0 1px 0 var(--hair-hi);
   min-width: 0;
 }
@@ -553,7 +551,7 @@
   min-height: 0;
 }
 
-.simple-flow > .right.simple-dock {
+.simple-flow>.right.simple-dock {
   flex: 0 0 auto;
   display: flex;
   flex-direction: row;
@@ -613,9 +611,9 @@ button.sd-clean-btn.process.running {
   overflow: hidden;
 }
 
-.simple-stage-card > .wavepanel {
+.simple-stage-card>.wavepanel {
   flex: 1 1 0;
-  min-height: 110px;
+  min-height: 136px;
   overflow: hidden;
 }
 
@@ -913,7 +911,7 @@ button.sd-clean-btn.process.running {
   padding: 12px 20px;
 }
 
-.panel > .neural-halo-canvas,
+.panel>.neural-halo-canvas,
 .neural-halo-canvas {
   position: absolute;
   inset: 0;
@@ -924,8 +922,8 @@ button.sd-clean-btn.process.running {
   opacity: 0.92;
 }
 
-.hero-console > .hc-side,
-.hero-console > .hc-center {
+.hero-console>.hc-side,
+.hero-console>.hc-center {
   position: relative;
   z-index: 1;
 }
@@ -1180,7 +1178,7 @@ button.sd-clean-btn.process.running {
   transition: opacity 90ms linear;
 }
 
-.as-wave-layer > .wavepanel {
+.as-wave-layer>.wavepanel {
   flex: 1 1 0;
   min-height: 0;
 }
@@ -1195,14 +1193,14 @@ button.sd-clean-btn.process.running {
   transition: opacity 90ms linear;
 }
 
-.as-spec-layer > .spectrogram-panel {
+.as-spec-layer>.spectrogram-panel {
   flex: 1 1 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.as-stack[data-blended='blend'] .as-spec-layer > .spectrogram-panel {
+.as-stack[data-blended='blend'] .as-spec-layer>.spectrogram-panel {
   background: transparent;
   box-shadow: none;
 }
@@ -1397,7 +1395,7 @@ button.sd-clean-btn.process.running {
 .main.pro-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(180px, 1.25fr) minmax(150px, 0.8fr) auto;
+  grid-template-rows: minmax(194px, 1.26fr) minmax(150px, 0.82fr) auto;
   gap: 8px;
   min-height: 0;
   overflow: hidden;
@@ -1413,7 +1411,7 @@ button.sd-clean-btn.process.running {
 .pro-spectrum-row {
   display: flex;
   flex-direction: column;
-  padding: 10px 14px 8px;
+  padding: 8px 14px 6px;
   min-height: 0;
 }
 
@@ -1426,7 +1424,33 @@ button.sd-clean-btn.process.running {
 
 .pro-spectrum-row .spectrum-display {
   flex: 1 1 0;
-  min-height: 112px;
+  min-height: 76px;
+}
+
+.spec-hover-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in oklab, var(--cyan) 65%, transparent);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.spec-hover-pill {
+  position: absolute;
+  transform: translate(-50%, -120%);
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--cyan) 55%, transparent);
+  background: rgba(7, 10, 16, 0.92);
+  color: var(--cyan-2);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 5;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.65);
 }
 
 /* FabFilter-style Butterworth HPF SVG + active repair band shading */
@@ -1480,13 +1504,11 @@ button.sd-clean-btn.process.running {
   margin-top: 2px;
   border-radius: 3px;
   background:
-    repeating-linear-gradient(
-      90deg,
+    repeating-linear-gradient(90deg,
       rgba(255, 255, 255, 0.06) 0px,
       rgba(255, 255, 255, 0.06) 6px,
       rgba(0, 0, 0, 0.5) 6px,
-      rgba(0, 0, 0, 0.5) 10px
-    ),
+      rgba(0, 0, 0, 0.5) 10px),
     var(--display);
   border: 1px solid var(--hair);
   overflow: hidden;
@@ -1533,7 +1555,7 @@ button.sd-clean-btn.process.running {
 }
 
 /* Full-width horizontal Pro Studio Console (replaces cramped 360px sidebar) */
-.pro-main > .right.pro-console {
+.pro-main>.right.pro-console {
   display: grid;
   grid-template-columns: minmax(270px, 1.05fr) minmax(380px, 1.65fr) minmax(260px, 1fr);
   align-items: center;
@@ -1543,7 +1565,7 @@ button.sd-clean-btn.process.running {
 }
 
 @media (max-width: 1180px) {
-  .pro-main > .right.pro-console {
+  .pro-main>.right.pro-console {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 }
@@ -1551,10 +1573,14 @@ button.sd-clean-btn.process.running {
 @media (max-height: 830px) {
   .main.pro-main {
     gap: 6px;
-    grid-template-rows: minmax(126px, 1fr) minmax(104px, 0.5fr) auto;
+    grid-template-rows: minmax(168px, 1.18fr) minmax(130px, 0.82fr) auto;
   }
 
-  .pro-main > .right.pro-console {
+  .spec-piano-ruler {
+    display: none;
+  }
+
+  .pro-main>.right.pro-console {
     padding: 6px 10px;
     gap: 8px;
   }
@@ -1711,6 +1737,7 @@ button.sd-clean-btn.process.running {
 
 /* ----------------------------------------------------- forced-colors accessibility */
 @media (forced-colors: active) {
+
   .panel,
   .quick-chat-bar,
   .goal-card,

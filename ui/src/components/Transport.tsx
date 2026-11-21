@@ -9,7 +9,8 @@ import { LiveMeter } from './LiveMeter';
 import { Segmented } from './Segmented';
 
 export function Transport() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const abMode = useStore((s) => s.abMode);
   const loudnessMatch = useStore((s) => s.loudnessMatch);
   const gainOffsetDb = useStore((s) => s.gainOffsetDb);
@@ -106,11 +107,11 @@ export function Transport() {
         value={abMode}
         onChange={setAb}
         options={[
-          { value: 'original', label: 'Original', className: 'orig', disabled: !hasAudio },
-          { value: 'cleaned', label: 'Cleaned', className: 'clean', disabled: !masterServed },
+          { value: 'original', label: isCkb ? 'سەرەکی' : 'Original', className: 'orig', disabled: !hasAudio },
+          { value: 'cleaned', label: isCkb ? 'پاککراوە' : 'Cleaned', className: 'clean', disabled: !masterServed },
         ]}
       />
-      <span className="timecode">
+      <span className="timecode" dir="ltr">
         {clock.t}
         <span className="dim dur"> / {clock.d}</span>
       </span>
@@ -139,9 +140,9 @@ export function Transport() {
           }
           style={{ minHeight: '28px', height: '28px', padding: '0 8px' }}
         >
-          <span className="lm-label">Level Match</span>
+          <span className="lm-label">{isCkb ? 'هاوتا' : 'Level Match'}</span>
           {masterServed && Number.isFinite(gainOffsetDb) && Math.abs(gainOffsetDb) > 0.05 ? (
-            <span className="lm-badge mono" aria-hidden="true">
+            <span className="lm-badge mono" dir="ltr" aria-hidden="true">
               {gainOffsetDb > 0 ? `+${gainOffsetDb.toFixed(1)}` : gainOffsetDb.toFixed(1)} dB
             </span>
           ) : null}
@@ -187,7 +188,7 @@ export function Transport() {
           style={{ minHeight: '28px', height: '28px', padding: '0 8px' }}
         >
           <span aria-hidden="true">Δ</span>
-          <span>Removed</span>
+          <span>{isCkb ? 'لابراو' : 'Removed'}</span>
         </button>
 
         <button
@@ -200,7 +201,7 @@ export function Transport() {
           title="Loop selection or clip (L)"
           style={{ minHeight: '28px', height: '28px', padding: '0 8px' }}
         >
-          <span>Loop</span>
+          <span>{isCkb ? 'دووبارە' : 'Loop'}</span>
         </button>
 
         {masterServed ? (
@@ -228,7 +229,7 @@ export function Transport() {
                 fontWeight: 500,
               }}
             >
-              Mix
+              {isCkb ? 'تێکەڵ' : 'Mix'}
             </span>
             <input
               type="range"

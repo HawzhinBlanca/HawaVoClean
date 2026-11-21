@@ -98,6 +98,13 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
   const rackSettings = useStore((s) => s.rackSettings);
   const [removedCoverage, setRemovedCoverage] = useState(0);
   const [draggingHpf, setDraggingHpf] = useState(false);
+  const [hoverInfo, setHoverInfo] = useState<{
+    leftPct: number;
+    topPct: number;
+    hz: number;
+    db: number;
+    note: string;
+  } | null>(null);
   const displayRef = useRef<HTMLDivElement | null>(null);
   const plotOverlayRef = useRef<HTMLDivElement | null>(null);
   const insets = SPECTRUM_PLOT_INSETS ?? FALLBACK_PLOT_INSETS;
@@ -222,6 +229,38 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
     }
   };
 
+  const onPlotPointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    const plotRect = plotOverlayRef.current?.getBoundingClientRect();
+    if (!plotRect || plotRect.width <= 0 || plotRect.height <= 0) return;
+    const normX = (e.clientX - plotRect.left) / plotRect.width;
+    const normY = (e.clientY - plotRect.top) / plotRect.height;
+    if (normX < 0 || normX > 1 || normY < 0 || normY > 1) {
+      if (hoverInfo) setHoverInfo(null);
+      return;
+    }
+    const hz = SPEC_F_MIN * Math.pow(2, normX * SPEC_LOG_SPAN);
+    const db = -(normY * 96);
+    setHoverInfo({
+      leftPct: normX * 100,
+      topPct: normY * 100,
+      hz,
+      db,
+      note: hzToMusicalNote(hz),
+    });
+  };
+
+  const onPlotDoubleClick = (e: React.MouseEvent<HTMLDivElement>): void => {
+    const plotRect = plotOverlayRef.current?.getBoundingClientRect();
+    if (!plotRect || plotRect.width <= 0) return;
+    const normX = (e.clientX - plotRect.left) / plotRect.width;
+    const rawHz = SPEC_F_MIN * Math.pow(2, Math.min(1, Math.max(0, normX)) * SPEC_LOG_SPAN);
+    if (rawHz <= HPF_MAX_HZ + 40) {
+      const snapped = normXToHpfHz(normX);
+      updateRackSettings({ ...rackSettings, hpfEnabled: true, hpfCutoffHz: snapped });
+      scheduleLivePreview();
+    }
+  };
+
   return (
     <>
       <div className="panel-head">
@@ -271,6 +310,9 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
           ref={displayRef}
           className="display spectrum-display"
           style={{ position: 'relative' }}
+          onPointerMove={onPlotPointerMove}
+          onPointerLeave={() => setHoverInfo(null)}
+          onDoubleClick={onPlotDoubleClick}
         >
           {/* D1 · a canvas with no role is an unlabelled graphic. The plot
               is not interactive — it is a picture of the two spectra — so it
@@ -357,6 +399,29 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
                   vectorEffect="non-scaling-stroke"
                 />
               </svg>
+            ) : null}
+            {hoverInfo ? (
+              <>
+                <div
+                  className="spec-hover-line"
+                  aria-hidden="true"
+                  style={{ left: `${hoverInfo.leftPct.toFixed(2)}%` }}
+                />
+                <div
+                  className="spec-hover-pill mono"
+                  dir="ltr"
+                  aria-hidden="true"
+                  style={{
+                    left: `${Math.min(82, Math.max(8, hoverInfo.leftPct)).toFixed(2)}%`,
+                    top: `${Math.min(78, Math.max(10, hoverInfo.topPct)).toFixed(2)}%`,
+                  }}
+                >
+                  {hoverInfo.hz >= 1000
+                    ? `${(hoverInfo.hz / 1000).toFixed(2)} kHz`
+                    : `${Math.round(hoverInfo.hz)} Hz`}{' '}
+                  · {hoverInfo.note} · {hoverInfo.db.toFixed(0)} dB
+                </div>
+              </>
             ) : null}
             <button
               type="button"
