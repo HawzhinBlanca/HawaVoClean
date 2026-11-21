@@ -1,9 +1,20 @@
 import { previewRegion } from './actions';
+import {
+  INITIAL_LIVE_AUDITION_STATE,
+  liveAuditionReducer,
+  type LiveAuditionState,
+} from './machines';
 import { getState, jobInFlight } from './store';
 
 const DEFAULT_DEBOUNCE_MS = 380;
 
 let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+let auditionState: LiveAuditionState = INITIAL_LIVE_AUDITION_STATE;
+
+/** Inspect the explicit debounced live-preview state machine (`idle | debouncing | rendering`). */
+export function getLiveAuditionState(): LiveAuditionState {
+  return auditionState;
+}
 
 /** Cancel any queued live-knob auto-preview timer. */
 export function cancelScheduledLivePreview(): void {
@@ -11,6 +22,7 @@ export function cancelScheduledLivePreview(): void {
     clearTimeout(pendingTimer);
     pendingTimer = null;
   }
+  auditionState = liveAuditionReducer(auditionState, { type: 'CANCEL' });
 }
 
 /**
@@ -27,12 +39,32 @@ export function scheduleLivePreview(debounceMs = DEFAULT_DEBOUNCE_MS): void {
   if (!(st.original.duration_s >= 0.5)) return;
 
   const expectedPath = st.source.path;
+  auditionState = liveAuditionReducer(auditionState, {
+    type: 'SCHEDULE',
+    sourcePath: expectedPath,
+    now: Date.now(),
+  });
   pendingTimer = setTimeout(() => {
     pendingTimer = null;
     const cur = getState();
-    if (!cur.livePreviewEnabled) return;
-    if (cur.engineStatus !== 'ready' || !cur.source || !cur.original || cur.analyzing) return;
-    if (cur.source.path !== expectedPath || jobInFlight(cur.job)) return;
-    void previewRegion();
+    if (
+      !cur.livePreviewEnabled ||
+      cur.engineStatus !== 'ready' ||
+      !cur.source ||
+      !cur.original ||
+      cur.analyzing ||
+      cur.source.path !== expectedPath ||
+      jobInFlight(cur.job)
+    ) {
+      auditionState = liveAuditionReducer(auditionState, { type: 'CANCEL' });
+      return;
+    }
+    auditionState = liveAuditionReducer(auditionState, {
+      type: 'FIRE',
+      sourcePath: expectedPath,
+    });
+    void Promise.resolve(previewRegion()).finally(() => {
+      auditionState = liveAuditionReducer(auditionState, { type: 'SETTLE' });
+    });
   }, debounceMs);
 }

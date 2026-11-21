@@ -1,4 +1,11 @@
-import type { AudioPlan, CapabilityStatusV1, JobMode, Profile } from '../api/types';
+import type {
+  AudioPlan,
+  CapabilityStatusV1,
+  JobMode,
+  ModelStatusV1,
+  Profile,
+  TrackInfo,
+} from '../api/types';
 import {
   getRouteBlockedReason,
   isProfileUnavailable,
@@ -290,3 +297,409 @@ export function assistantReducer(state: AssistantState, event: AssistantEvent): 
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// 4. Shell overlay / drawer coordinator (mutually exclusive drawers & modal)
+
+export type ShellOverlay = 'none' | 'assistant' | 'batch' | 'models' | 'shortcuts';
+
+export type ShellOverlayEvent =
+  | { readonly type: 'OPEN'; readonly overlay: Exclude<ShellOverlay, 'none'> }
+  | { readonly type: 'CLOSE' }
+  | { readonly type: 'CLOSE_IF'; readonly overlay: Exclude<ShellOverlay, 'none'> }
+  | { readonly type: 'TOGGLE'; readonly overlay: Exclude<ShellOverlay, 'none'> };
+
+export const SHELL_OVERLAY_TRANSITIONS: Readonly<
+  Record<ShellOverlay, readonly ShellOverlay[]>
+> = Object.freeze({
+  none: Object.freeze(['assistant', 'batch', 'models', 'shortcuts'] as const),
+  assistant: Object.freeze(['none', 'batch', 'models', 'shortcuts'] as const),
+  batch: Object.freeze(['none', 'assistant', 'models', 'shortcuts'] as const),
+  models: Object.freeze(['none', 'assistant', 'batch', 'shortcuts'] as const),
+  shortcuts: Object.freeze(['none', 'assistant', 'batch', 'models'] as const),
+});
+
+export function shellOverlayReducer(state: ShellOverlay, event: ShellOverlayEvent): ShellOverlay {
+  switch (event.type) {
+    case 'OPEN':
+      return event.overlay;
+    case 'CLOSE':
+      return 'none';
+    case 'CLOSE_IF':
+      return state === event.overlay ? 'none' : state;
+    case 'TOGGLE':
+      return state === event.overlay ? 'none' : event.overlay;
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return state;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. DualPlayer audition mode (single source of truth for audio routing + HPF)
+
+export type AuditionMode = 'original' | 'cleaned' | 'delta_removed' | 'wet_dry_blend';
+
+export const AUDITION_MODE_TRANSITIONS: Readonly<
+  Record<AuditionMode, readonly AuditionMode[]>
+> = Object.freeze({
+  original: Object.freeze(['cleaned', 'delta_removed', 'wet_dry_blend'] as const),
+  cleaned: Object.freeze(['original', 'delta_removed', 'wet_dry_blend'] as const),
+  delta_removed: Object.freeze(['original', 'cleaned', 'wet_dry_blend'] as const),
+  wet_dry_blend: Object.freeze(['original', 'cleaned', 'delta_removed'] as const),
+});
+
+export interface AuditionModeInput {
+  readonly active: 'original' | 'cleaned';
+  readonly bothDecksReady: boolean;
+  readonly deltaMode: boolean;
+  readonly wetDryMix: number;
+}
+
+/**
+ * Derive the single active audition mode from player controls.
+ * Live HPF audition is ONLY active in `'original'` mode so Cleaned masters,
+ * Wet/Dry blending, and phase-cancelled Δ Removed nulling stay 100% pure.
+ */
+export function deriveAuditionMode(input: AuditionModeInput): AuditionMode {
+  if (input.deltaMode && input.bothDecksReady) return 'delta_removed';
+  if (input.active === 'cleaned' && input.bothDecksReady && input.wetDryMix > 0 && input.wetDryMix < 1) {
+    return 'wet_dry_blend';
+  }
+  return input.active === 'cleaned' ? 'cleaned' : 'original';
+}
+
+// ---------------------------------------------------------------------------
+// 6. Live debounced auto-preview scheduler
+
+export type LiveAuditionPhase = 'idle' | 'debouncing' | 'rendering';
+
+export type LiveAuditionState =
+  | { readonly phase: 'idle' }
+  | { readonly phase: 'debouncing'; readonly sourcePath: string; readonly scheduledAt: number }
+  | { readonly phase: 'rendering'; readonly sourcePath: string };
+
+export type LiveAuditionEvent =
+  | { readonly type: 'SCHEDULE'; readonly sourcePath: string; readonly now: number }
+  | { readonly type: 'FIRE'; readonly sourcePath: string }
+  | { readonly type: 'SETTLE' }
+  | { readonly type: 'CANCEL' };
+
+export const LIVE_AUDITION_TRANSITIONS: Readonly<
+  Record<LiveAuditionPhase, readonly LiveAuditionPhase[]>
+> = Object.freeze({
+  idle: Object.freeze(['debouncing'] as const),
+  debouncing: Object.freeze(['debouncing', 'rendering', 'idle'] as const),
+  rendering: Object.freeze(['debouncing', 'idle'] as const),
+});
+
+export const INITIAL_LIVE_AUDITION_STATE: LiveAuditionState = Object.freeze({ phase: 'idle' });
+
+export function liveAuditionReducer(
+  state: LiveAuditionState,
+  event: LiveAuditionEvent,
+): LiveAuditionState {
+  switch (event.type) {
+    case 'SCHEDULE':
+      return { phase: 'debouncing', sourcePath: event.sourcePath, scheduledAt: event.now };
+    case 'FIRE':
+      return state.phase === 'debouncing' && state.sourcePath === event.sourcePath
+        ? { phase: 'rendering', sourcePath: event.sourcePath }
+        : state;
+    case 'SETTLE':
+      return state.phase === 'rendering' ? INITIAL_LIVE_AUDITION_STATE : state;
+    case 'CANCEL':
+      return INITIAL_LIVE_AUDITION_STATE;
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return state;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Poly-WAV track picker (replaces 5 independent useState flags)
+
+export type TrackPickerPhase = 'closed' | 'loading' | 'ready' | 'extracting' | 'error';
+
+export type TrackPickerState =
+  | { readonly phase: 'closed'; readonly cachedTracks: readonly TrackInfo[] | null }
+  | { readonly phase: 'loading'; readonly cachedTracks: readonly TrackInfo[] | null }
+  | { readonly phase: 'ready'; readonly tracks: readonly TrackInfo[] }
+  | {
+      readonly phase: 'extracting';
+      readonly tracks: readonly TrackInfo[];
+      readonly trackIndex: number;
+    }
+  | { readonly phase: 'error'; readonly message: string };
+
+export type TrackPickerEvent =
+  | { readonly type: 'OPEN_CACHED' }
+  | { readonly type: 'START_LOAD' }
+  | { readonly type: 'LOAD_SUCCESS'; readonly tracks: readonly TrackInfo[] }
+  | { readonly type: 'LOAD_FAILED'; readonly message: string }
+  | { readonly type: 'START_EXTRACT'; readonly trackIndex: number }
+  | { readonly type: 'EXTRACT_SUCCESS' }
+  | { readonly type: 'EXTRACT_ABORTED' }
+  | { readonly type: 'CLOSE' }
+  | { readonly type: 'RESET_SOURCE' };
+
+export const TRACK_PICKER_TRANSITIONS: Readonly<
+  Record<TrackPickerPhase, readonly TrackPickerPhase[]>
+> = Object.freeze({
+  closed: Object.freeze(['loading', 'ready', 'error'] as const),
+  loading: Object.freeze(['ready', 'error', 'closed'] as const),
+  ready: Object.freeze(['extracting', 'closed'] as const),
+  extracting: Object.freeze(['closed', 'ready'] as const),
+  error: Object.freeze(['loading', 'closed'] as const),
+});
+
+export const INITIAL_TRACK_PICKER_STATE: TrackPickerState = Object.freeze({
+  phase: 'closed',
+  cachedTracks: null,
+});
+
+export function trackPickerReducer(
+  state: TrackPickerState,
+  event: TrackPickerEvent,
+): TrackPickerState {
+  switch (event.type) {
+    case 'RESET_SOURCE':
+      return INITIAL_TRACK_PICKER_STATE;
+    case 'CLOSE': {
+      const cached =
+        state.phase === 'ready' || state.phase === 'extracting'
+          ? state.tracks
+          : state.phase === 'closed' || state.phase === 'loading'
+            ? state.cachedTracks
+            : null;
+      return { phase: 'closed', cachedTracks: cached };
+    }
+    case 'OPEN_CACHED':
+      if (state.phase === 'closed' && state.cachedTracks !== null) {
+        return { phase: 'ready', tracks: state.cachedTracks };
+      }
+      return state;
+    case 'START_LOAD':
+      return {
+        phase: 'loading',
+        cachedTracks:
+          state.phase === 'closed' || state.phase === 'loading' ? state.cachedTracks : null,
+      };
+    case 'LOAD_SUCCESS':
+      return state.phase === 'loading' ? { phase: 'ready', tracks: event.tracks } : state;
+    case 'LOAD_FAILED':
+      return state.phase === 'loading' || state.phase === 'closed'
+        ? { phase: 'error', message: event.message }
+        : state;
+    case 'START_EXTRACT':
+      return state.phase === 'ready'
+        ? { phase: 'extracting', tracks: state.tracks, trackIndex: event.trackIndex }
+        : state;
+    case 'EXTRACT_SUCCESS':
+      return state.phase === 'extracting' ? INITIAL_TRACK_PICKER_STATE : state;
+    case 'EXTRACT_ABORTED':
+      return state.phase === 'extracting' ? { phase: 'ready', tracks: state.tracks } : state;
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return state;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 8. Neural Model Manager drawer (replaces 5 independent useState hooks)
+
+export type ModelManagerPhase = 'idle' | 'loading' | 'ready' | 'installing' | 'error';
+
+export type ModelFeedbackMap = Readonly<Record<string, { readonly kind: 'ok' | 'err'; readonly text: string }>>;
+
+export type ModelManagerState =
+  | { readonly phase: 'idle'; readonly models: readonly ModelStatusV1[]; readonly feedbackById: ModelFeedbackMap }
+  | { readonly phase: 'loading'; readonly models: readonly ModelStatusV1[]; readonly feedbackById: ModelFeedbackMap }
+  | { readonly phase: 'ready'; readonly models: readonly ModelStatusV1[]; readonly feedbackById: ModelFeedbackMap }
+  | {
+      readonly phase: 'installing';
+      readonly models: readonly ModelStatusV1[];
+      readonly modelId: string;
+      readonly feedbackById: ModelFeedbackMap;
+    }
+  | {
+      readonly phase: 'error';
+      readonly models: readonly ModelStatusV1[];
+      readonly message: string;
+      readonly feedbackById: ModelFeedbackMap;
+    };
+
+export type ModelManagerEvent =
+  | { readonly type: 'LOAD_START' }
+  | { readonly type: 'LOAD_SUCCESS'; readonly models: readonly ModelStatusV1[] }
+  | { readonly type: 'LOAD_FAILED'; readonly message: string }
+  | { readonly type: 'INSTALL_START'; readonly modelId: string }
+  | {
+      readonly type: 'INSTALL_SUCCESS';
+      readonly modelId: string;
+      readonly message: string;
+      readonly models?: readonly ModelStatusV1[];
+    }
+  | { readonly type: 'INSTALL_FAILED'; readonly modelId: string; readonly message: string };
+
+export const MODEL_MANAGER_TRANSITIONS: Readonly<
+  Record<ModelManagerPhase, readonly ModelManagerPhase[]>
+> = Object.freeze({
+  idle: Object.freeze(['loading'] as const),
+  loading: Object.freeze(['ready', 'error'] as const),
+  ready: Object.freeze(['loading', 'installing'] as const),
+  installing: Object.freeze(['ready', 'loading'] as const),
+  error: Object.freeze(['loading', 'installing'] as const),
+});
+
+export const INITIAL_MODEL_MANAGER_STATE: ModelManagerState = Object.freeze({
+  phase: 'idle',
+  models: Object.freeze([]),
+  feedbackById: Object.freeze({}),
+});
+
+export function modelManagerReducer(
+  state: ModelManagerState,
+  event: ModelManagerEvent,
+): ModelManagerState {
+  switch (event.type) {
+    case 'LOAD_START':
+      if (state.phase === 'installing') return state;
+      return { phase: 'loading', models: state.models, feedbackById: state.feedbackById };
+    case 'LOAD_SUCCESS':
+      if (state.phase === 'installing') {
+        return { ...state, models: event.models };
+      }
+      return { phase: 'ready', models: event.models, feedbackById: state.feedbackById };
+    case 'LOAD_FAILED':
+      if (state.phase === 'installing') return state;
+      return {
+        phase: 'error',
+        models: state.models,
+        message: event.message,
+        feedbackById: state.feedbackById,
+      };
+    case 'INSTALL_START': {
+      if (state.phase === 'installing') return state;
+      const nextFeedback = { ...state.feedbackById };
+      delete nextFeedback[event.modelId];
+      return {
+        phase: 'installing',
+        models: state.models,
+        modelId: event.modelId,
+        feedbackById: nextFeedback,
+      };
+    }
+    case 'INSTALL_SUCCESS': {
+      if (state.phase !== 'installing' || state.modelId !== event.modelId) return state;
+      return {
+        phase: 'ready',
+        models: event.models && event.models.length > 0 ? event.models : state.models,
+        feedbackById: {
+          ...state.feedbackById,
+          [event.modelId]: { kind: 'ok', text: event.message },
+        },
+      };
+    }
+    case 'INSTALL_FAILED': {
+      if (state.phase !== 'installing' || state.modelId !== event.modelId) return state;
+      return {
+        phase: 'ready',
+        models: state.models,
+        feedbackById: {
+          ...state.feedbackById,
+          [event.modelId]: { kind: 'err', text: event.message },
+        },
+      };
+    }
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return state;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 9. Microphone test recorder (eliminates double-click permission stream leaks)
+
+export type MicTestPhase = 'idle' | 'requesting_permission' | 'recording' | 'encoding' | 'error';
+
+export type MicTestState =
+  | { readonly phase: 'idle' }
+  | { readonly phase: 'requesting_permission' }
+  | { readonly phase: 'recording'; readonly remainingS: number }
+  | { readonly phase: 'encoding' }
+  | { readonly phase: 'error'; readonly notice: string };
+
+export type MicTestEvent =
+  | { readonly type: 'REQUEST_PERMISSION' }
+  | { readonly type: 'START_RECORDING'; readonly durationS: number }
+  | { readonly type: 'TICK'; readonly remainingS: number }
+  | { readonly type: 'START_ENCODING' }
+  | { readonly type: 'COMPLETE' }
+  | { readonly type: 'FAIL'; readonly notice: string }
+  | { readonly type: 'RESET' };
+
+export const MIC_TEST_TRANSITIONS: Readonly<
+  Record<MicTestPhase, readonly MicTestPhase[]>
+> = Object.freeze({
+  idle: Object.freeze(['requesting_permission', 'error'] as const),
+  requesting_permission: Object.freeze(['recording', 'error', 'idle'] as const),
+  recording: Object.freeze(['recording', 'encoding', 'error', 'idle'] as const),
+  encoding: Object.freeze(['idle', 'error'] as const),
+  error: Object.freeze(['requesting_permission', 'idle'] as const),
+});
+
+export const INITIAL_MIC_TEST_STATE: MicTestState = Object.freeze({ phase: 'idle' });
+
+export function micTestReducer(state: MicTestState, event: MicTestEvent): MicTestState {
+  switch (event.type) {
+    case 'RESET':
+      return INITIAL_MIC_TEST_STATE;
+    case 'REQUEST_PERMISSION':
+      return state.phase === 'idle' || state.phase === 'error'
+        ? { phase: 'requesting_permission' }
+        : state;
+    case 'START_RECORDING':
+      return state.phase === 'requesting_permission'
+        ? { phase: 'recording', remainingS: event.durationS }
+        : state;
+    case 'TICK':
+      return state.phase === 'recording'
+        ? { phase: 'recording', remainingS: Math.max(1, event.remainingS) }
+        : state;
+    case 'START_ENCODING':
+      return state.phase === 'recording' ? { phase: 'encoding' } : state;
+    case 'COMPLETE':
+      return state.phase === 'encoding' ? INITIAL_MIC_TEST_STATE : state;
+    case 'FAIL':
+      return { phase: 'error', notice: event.notice };
+    default: {
+      const _exhaustive: never = event;
+      void _exhaustive;
+      return state;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 10. Unified State Machine Registry (AX / DX single-file inspection catalog)
+
+export const APP_STATE_MACHINES = Object.freeze({
+  engine: ENGINE_PHASE_TRANSITIONS,
+  workspace: WORKSPACE_PHASE_TRANSITIONS,
+  assistant: ALLOWED_ASSISTANT_TRANSITIONS,
+  overlay: SHELL_OVERLAY_TRANSITIONS,
+  audition: AUDITION_MODE_TRANSITIONS,
+  liveAudition: LIVE_AUDITION_TRANSITIONS,
+  trackPicker: TRACK_PICKER_TRANSITIONS,
+  modelManager: MODEL_MANAGER_TRANSITIONS,
+  micTest: MIC_TEST_TRANSITIONS,
+});

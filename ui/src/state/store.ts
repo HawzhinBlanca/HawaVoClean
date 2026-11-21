@@ -18,6 +18,7 @@ import {
   DEFAULT_STUDIO_RACK_SETTINGS,
   type StudioRackSettings,
 } from './presets';
+import { shellOverlayReducer, type ShellOverlay } from './machines';
 import { createUndoStack, shallowRecordEqual, type UndoStack } from './undoStack';
 
 export type UnitOverrideMapValue = 'auto' | 'force_original' | 'force_enhanced';
@@ -380,6 +381,8 @@ export interface AppState {
   // Studio 4.0 workspace & non-technical UX state
   workspaceMode: WorkspaceMode;
   livePreviewEnabled: boolean;
+  /** Single mutually exclusive shell overlay/drawer state machine. */
+  activeOverlay: ShellOverlay;
   assistantDrawerOpen: boolean;
   pendingChatPrompt: string | null;
   batchDrawerOpen: boolean;
@@ -449,6 +452,7 @@ export interface AppState {
   setBatchNamingTemplate(template: string): void;
   setWorkspaceMode(mode: WorkspaceMode): void;
   setLivePreviewEnabled(enabled: boolean): void;
+  setActiveOverlay(overlay: ShellOverlay): void;
   setAssistantDrawerOpen(open: boolean): void;
   setPendingChatPrompt(prompt: string | null): void;
   setBatchDrawerOpen(open: boolean): void;
@@ -538,6 +542,7 @@ export const useStore = create<AppState>((set) => ({
 
   workspaceMode: loadWorkspaceMode(),
   livePreviewEnabled: loadLivePreview(),
+  activeOverlay: 'none',
   assistantDrawerOpen: false,
   pendingChatPrompt: null,
   batchDrawerOpen: false,
@@ -637,7 +642,20 @@ export const useStore = create<AppState>((set) => ({
         : null,
     }),
   setSelectionRange: (selectionRange) => set({ selectionRange }),
-  setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
+  setShortcutsOpen: (shortcutsOpen) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        shortcutsOpen ? { type: 'OPEN', overlay: 'shortcuts' } : { type: 'CLOSE_IF', overlay: 'shortcuts' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
   setStatus: (statusLine) => set({ statusLine }),
   setError: (error, label) => set({ error, errorLabel: error ? (label ?? null) : null }),
   setDragOver: (dragOver) => set({ dragOver }),
@@ -729,10 +747,57 @@ export const useStore = create<AppState>((set) => ({
     }
     set({ livePreviewEnabled });
   },
-  setAssistantDrawerOpen: (assistantDrawerOpen) => set({ assistantDrawerOpen }),
+  setActiveOverlay: (next) =>
+    set({
+      activeOverlay: next,
+      assistantDrawerOpen: next === 'assistant',
+      batchDrawerOpen: next === 'batch',
+      modelsDrawerOpen: next === 'models',
+      shortcutsOpen: next === 'shortcuts',
+    }),
+  setAssistantDrawerOpen: (open) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        open ? { type: 'OPEN', overlay: 'assistant' } : { type: 'CLOSE_IF', overlay: 'assistant' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
   setPendingChatPrompt: (pendingChatPrompt) => set({ pendingChatPrompt }),
-  setBatchDrawerOpen: (batchDrawerOpen) => set({ batchDrawerOpen }),
-  setModelsDrawerOpen: (modelsDrawerOpen) => set({ modelsDrawerOpen }),
+  setBatchDrawerOpen: (open) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        open ? { type: 'OPEN', overlay: 'batch' } : { type: 'CLOSE_IF', overlay: 'batch' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
+  setModelsDrawerOpen: (open) =>
+    set((s) => {
+      const next = shellOverlayReducer(
+        s.activeOverlay,
+        open ? { type: 'OPEN', overlay: 'models' } : { type: 'CLOSE_IF', overlay: 'models' },
+      );
+      return {
+        activeOverlay: next,
+        assistantDrawerOpen: next === 'assistant',
+        batchDrawerOpen: next === 'batch',
+        modelsDrawerOpen: next === 'models',
+        shortcutsOpen: next === 'shortcuts',
+      };
+    }),
   setActiveGoalId: (activeGoalId) => set({ activeGoalId }),
   setStageBlend: (blend) => set({ stageBlend: Math.min(1, Math.max(0, Number.isFinite(blend) ? blend : 0)) }),
   pushToast: (text, kind = 'info', durationMs = 4200) => {

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useReducer } from 'react';
 import type { ModelStatusV1 } from '../api/types';
+import { INITIAL_MODEL_MANAGER_STATE, modelManagerReducer } from '../state/machines';
 import { getState, useStore } from '../state/store';
 
 const USED_BY_LABEL: Readonly<Record<string, string>> = Object.freeze({
@@ -45,31 +46,28 @@ export function ModelManagerDrawer() {
   const setCapabilitiesV1 = useStore((s) => s.setCapabilitiesV1);
   const pushToast = useStore((s) => s.pushToast);
 
-  const [models, setModels] = useState<ModelStatusV1[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [installingId, setInstallingId] = useState<string | null>(null);
-  const [feedbackById, setFeedbackById] = useState<
-    Record<string, { kind: 'ok' | 'err'; text: string }>
-  >({});
+  const [machine, dispatch] = useReducer(modelManagerReducer, INITIAL_MODEL_MANAGER_STATE);
+  const models = machine.models;
+  const loading = machine.phase === 'loading';
+  const loadError = machine.phase === 'error' ? machine.message : null;
+  const installingId = machine.phase === 'installing' ? machine.modelId : null;
+  const feedbackById = machine.feedbackById;
 
   const loadModels = useCallback(
     async (signal?: AbortSignal) => {
       if (!client || engineStatus !== 'ready') return;
-      setLoading(true);
-      setLoadError(null);
+      dispatch({ type: 'LOAD_START' });
       try {
         const res = await client.getModels(signal);
         if (!signal?.aborted) {
-          setModels(res.models);
+          dispatch({ type: 'LOAD_SUCCESS', models: res.models });
         }
       } catch (err) {
         if (!signal?.aborted) {
-          setLoadError(err instanceof Error ? err.message : 'Failed to inspect local neural models.');
-        }
-      } finally {
-        if (!signal?.aborted) {
-          setLoading(false);
+          dispatch({
+            type: 'LOAD_FAILED',
+            message: err instanceof Error ? err.message : 'Failed to inspect local neural models.',
+          });
         }
       }
     },
@@ -85,41 +83,36 @@ export function ModelManagerDrawer() {
 
   const handleInstall = async (model: ModelStatusV1): Promise<void> => {
     if (!client || installingId !== null) return;
-    setInstallingId(model.model_id);
-    setFeedbackById((prev) => {
-      const next = { ...prev };
-      delete next[model.model_id];
-      return next;
-    });
+    dispatch({ type: 'INSTALL_START', modelId: model.model_id });
     try {
       const res = await client.installModel(model.model_id);
-      if (Array.isArray(res.models) && res.models.length > 0) {
-        setModels(res.models);
-      } else {
-        await loadModels();
-      }
       if (Array.isArray(res.capabilities) && res.capabilities.length > 0) {
         setCapabilitiesV1(res.capabilities);
       }
       await refreshCapabilities();
       const msg = res.result.message || `${model.display_name} downloaded and SHA-256 verified.`;
-      setFeedbackById((prev) => ({
-        ...prev,
-        [model.model_id]: { kind: 'ok', text: msg },
-      }));
+      const updatedModels = Array.isArray(res.models) && res.models.length > 0 ? res.models : undefined;
+      dispatch({
+        type: 'INSTALL_SUCCESS',
+        modelId: model.model_id,
+        message: msg,
+        ...(updatedModels ? { models: updatedModels } : {}),
+      });
+      if (!updatedModels) {
+        await loadModels();
+      }
       pushToast(msg, 'ok');
     } catch (err) {
       const msg =
         err instanceof Error
           ? err.message
           : `Failed to download and verify ${model.display_name}.`;
-      setFeedbackById((prev) => ({
-        ...prev,
-        [model.model_id]: { kind: 'err', text: msg },
-      }));
+      dispatch({
+        type: 'INSTALL_FAILED',
+        modelId: model.model_id,
+        message: msg,
+      });
       pushToast(msg, 'err');
-    } finally {
-      setInstallingId(null);
     }
   };
 

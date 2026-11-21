@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { ingestFile } from '../../state/actions';
 import { useI18n } from '../../state/i18n';
+import { INITIAL_MIC_TEST_STATE, micTestReducer, type MicTestPhase } from '../../state/machines';
 import { jobInFlight, useStore } from '../../state/store';
 
 const RECORD_DURATION_S = 5;
@@ -72,9 +73,16 @@ export function MicTestButton({ onRecorded }: MicTestButtonProps = {}) {
   const busy = useStore((s) => jobInFlight(s.job) || s.analyzing || Boolean(s.upload));
   const pushToast = useStore((s) => s.pushToast);
 
-  const [recording, setRecording] = useState(false);
-  const [remainingS, setRemainingS] = useState(RECORD_DURATION_S);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [micState, dispatch] = useReducer(micTestReducer, INITIAL_MIC_TEST_STATE);
+  const phaseRef = useRef<MicTestPhase>(micState.phase);
+  phaseRef.current = micState.phase;
+  const unmountedRef = useRef(false);
+
+  const recording = micState.phase === 'recording';
+  const requesting = micState.phase === 'requesting_permission';
+  const encoding = micState.phase === 'encoding';
+  const remainingS = micState.phase === 'recording' ? micState.remainingS : RECORD_DURATION_S;
+  const notice = micState.phase === 'error' ? micState.notice : null;
 
   const chunksRef = useRef<Float32Array[]>([]);
   const sampleRateRef = useRef(48000);
@@ -83,7 +91,6 @@ export function MicTestButton({ onRecorded }: MicTestButtonProps = {}) {
   const procRef = useRef<ScriptProcessorNode | null>(null);
   const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const activeRef = useRef(false);
 
   const cleanupMedia = useCallback(() => {
     if (stopTimerRef.current !== null) {
@@ -123,69 +130,96 @@ export function MicTestButton({ onRecorded }: MicTestButtonProps = {}) {
   }, []);
 
   const finishRecording = useCallback(async () => {
-    if (!activeRef.current) return;
-    activeRef.current = false;
-    setRecording(false);
-    setRemainingS(RECORD_DURATION_S);
+    if (phaseRef.current !== 'recording') return;
+    phaseRef.current = 'encoding';
+    dispatch({ type: 'START_ENCODING' });
     const sr = sampleRateRef.current;
     const chunks = chunksRef.current;
     chunksRef.current = [];
     cleanupMedia();
 
-    let pcm = concatChunks(chunks);
-    if (pcm.length === 0) {
-      // Ensure non-empty valid 0.5s silent WAV fallback if browser emitted no frames before early stop.
-      pcm = new Float32Array(Math.round(sr * 0.5));
+    try {
+      let pcm = concatChunks(chunks);
+      if (pcm.length === 0) {
+        // Ensure non-empty valid 0.5s silent WAV fallback if browser emitted no frames before early stop.
+        pcm = new Float32Array(Math.round(sr * 0.5));
+      }
+      const wavBuf = encodeWavPcm16(pcm, sr);
+      const file = new File([wavBuf], 'mic-test-5s.wav', { type: 'audio/wav' });
+      if (onRecorded) {
+        await onRecorded(file);
+      } else {
+        await ingestFile(file);
+      }
+      if (!unmountedRef.current) {
+        phaseRef.current = 'idle';
+        dispatch({ type: 'COMPLETE' });
+      }
+    } catch {
+      if (!unmountedRef.current) {
+        phaseRef.current = 'error';
+        dispatch({ type: 'FAIL', notice: t.micUnavailable });
+        pushToast(t.micUnavailable, 'err');
+      }
     }
-    const wavBuf = encodeWavPcm16(pcm, sr);
-    const file = new File([wavBuf], 'mic-test-5s.wav', { type: 'audio/wav' });
-    if (onRecorded) {
-      await onRecorded(file);
-    } else {
-      await ingestFile(file);
-    }
-  }, [cleanupMedia, onRecorded]);
+  }, [cleanupMedia, onRecorded, pushToast, t.micUnavailable]);
 
   useEffect(() => {
+    unmountedRef.current = false;
     return () => {
-      activeRef.current = false;
+      unmountedRef.current = true;
+      phaseRef.current = 'idle';
       cleanupMedia();
     };
   }, [cleanupMedia]);
 
   const handleClick = async (): Promise<void> => {
-    if (recording) {
+    if (phaseRef.current === 'recording') {
       void finishRecording();
       return;
     }
+    if (phaseRef.current === 'requesting_permission' || phaseRef.current === 'encoding') {
+      return;
+    }
     if (!engineReady || busy) return;
-    setNotice(null);
 
     const mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
     if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') {
-      setNotice(t.micUnavailable);
+      phaseRef.current = 'error';
+      dispatch({ type: 'FAIL', notice: t.micUnavailable });
       pushToast(t.micUnavailable, 'err');
       return;
     }
+
+    phaseRef.current = 'requesting_permission';
+    dispatch({ type: 'REQUEST_PERMISSION' });
 
     let stream: MediaStream;
     try {
       stream = await mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
+      if (unmountedRef.current) return;
       const name = e instanceof Error ? e.name : '';
       const msg =
         name === 'NotAllowedError' || name === 'PermissionDeniedError'
           ? t.micDenied
           : t.micUnavailable;
-      setNotice(msg);
+      phaseRef.current = 'error';
+      dispatch({ type: 'FAIL', notice: msg });
       pushToast(msg, 'err');
+      return;
+    }
+
+    if (unmountedRef.current) {
+      for (const track of stream.getTracks()) track.stop();
       return;
     }
 
     const AudioCtx = typeof window !== 'undefined' ? window.AudioContext : undefined;
     if (!AudioCtx) {
       for (const track of stream.getTracks()) track.stop();
-      setNotice(t.micUnavailable);
+      phaseRef.current = 'error';
+      dispatch({ type: 'FAIL', notice: t.micUnavailable });
       pushToast(t.micUnavailable, 'err');
       return;
     }
@@ -204,7 +238,7 @@ export function MicTestButton({ onRecorded }: MicTestButtonProps = {}) {
       if (typeof ctx.createScriptProcessor === 'function') {
         const proc = ctx.createScriptProcessor(4096, 1, 1);
         proc.onaudioprocess = (ev: AudioProcessingEvent) => {
-          if (!activeRef.current) return;
+          if (phaseRef.current !== 'recording') return;
           const ch = ev.inputBuffer.getChannelData(0);
           if (ch && ch.length > 0) {
             chunksRef.current.push(new Float32Array(ch));
@@ -216,14 +250,13 @@ export function MicTestButton({ onRecorded }: MicTestButtonProps = {}) {
         procRef.current = proc;
       }
 
-      activeRef.current = true;
-      setRecording(true);
-      setRemainingS(RECORD_DURATION_S);
+      phaseRef.current = 'recording';
+      dispatch({ type: 'START_RECORDING', durationS: RECORD_DURATION_S });
 
       const startedAt = Date.now();
       tickTimerRef.current = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-        setRemainingS(Math.max(1, RECORD_DURATION_S - elapsed));
+        dispatch({ type: 'TICK', remainingS: Math.max(1, RECORD_DURATION_S - elapsed) });
       }, 250);
 
       stopTimerRef.current = setTimeout(() => {
@@ -231,7 +264,8 @@ export function MicTestButton({ onRecorded }: MicTestButtonProps = {}) {
       }, RECORD_DURATION_S * 1000);
     } catch {
       cleanupMedia();
-      setNotice(t.micUnavailable);
+      phaseRef.current = 'error';
+      dispatch({ type: 'FAIL', notice: t.micUnavailable });
       pushToast(t.micUnavailable, 'err');
     }
   };
@@ -241,14 +275,19 @@ export function MicTestButton({ onRecorded }: MicTestButtonProps = {}) {
       <button
         type="button"
         className={`sw-mic-btn${recording ? ' recording' : ''}`}
-        disabled={(!engineReady || busy) && !recording}
+        disabled={((!engineReady || busy) && !recording) || requesting || encoding}
         aria-pressed={recording}
+        aria-busy={requesting || encoding || undefined}
         onClick={() => void handleClick()}
         title={recording ? t.micStopEarly : t.micTestBtn}
       >
         <span className="sw-mic-dot" aria-hidden="true" />
         <span>
-          {recording ? `${t.micRecordingPrefix} ${remainingS}s` : t.micTestBtn}
+          {recording
+            ? `${t.micRecordingPrefix} ${remainingS}s`
+            : requesting || encoding
+              ? '…'
+              : t.micTestBtn}
         </span>
       </button>
       {notice ? (

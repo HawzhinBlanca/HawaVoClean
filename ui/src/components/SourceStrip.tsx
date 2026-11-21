@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState, type DragEvent } from 'react';
 import type { TrackInfo } from '../api/types';
 import { getBridge } from '../bridge';
 import {
@@ -16,6 +16,7 @@ import {
   useResolveClip,
 } from '../state/actions';
 import { useI18n } from '../state/i18n';
+import { INITIAL_TRACK_PICKER_STATE, trackPickerReducer } from '../state/machines';
 import { useStore, jobInFlight } from '../state/store';
 import { IconCancel, IconClip, IconDrop, IconFolder, IconWarn } from './Icons';
 
@@ -200,62 +201,77 @@ export function SourceStrip() {
   // same beat as this string, so a change here is a change there.
   const error = useStore((s) => s.error);
   const [over, setOver] = useState(false);
-  const [tracksOpen, setTracksOpen] = useState(false);
-  const [tracksLoading, setTracksLoading] = useState(false);
-  const [tracksError, setTracksError] = useState<string | null>(null);
-  const [tracks, setTracks] = useState<TrackInfo[] | null>(null);
-  const [extractingTrack, setExtractingTrack] = useState<number | null>(null);
+  const [trackPicker, dispatchTrackPicker] = useReducer(
+    trackPickerReducer,
+    INITIAL_TRACK_PICKER_STATE,
+  );
+  const trackInspectSeq = useRef(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const uploading = Boolean(upload);
   const disabled = !engineReady || running || uploading;
   const sourcePath = source?.path ?? null;
 
+  const tracksOpen = trackPicker.phase !== 'closed';
+  const tracksLoading = trackPicker.phase === 'loading';
+  const tracksError = trackPicker.phase === 'error' ? trackPicker.message : null;
+  const tracks =
+    trackPicker.phase === 'ready' || trackPicker.phase === 'extracting'
+      ? trackPicker.tracks
+      : null;
+  const extractingTrack = trackPicker.phase === 'extracting' ? trackPicker.trackIndex : null;
+
   useEffect(() => {
-    setTracksOpen(false);
-    setTracksLoading(false);
-    setTracksError(null);
-    setTracks(null);
-    setExtractingTrack(null);
+    trackInspectSeq.current += 1;
+    dispatchTrackPicker({ type: 'RESET_SOURCE' });
   }, [sourcePath]);
 
   const handleToggleTracks = useCallback(async () => {
     if (!source || !original || original.channels <= 2) return;
-    if (tracksOpen) {
-      setTracksOpen(false);
+    if (trackPicker.phase !== 'closed') {
+      trackInspectSeq.current += 1;
+      dispatchTrackPicker({ type: 'CLOSE' });
       return;
     }
-    setTracksOpen(true);
-    if (tracks !== null && !tracksError) return;
+    if (trackPicker.cachedTracks !== null) {
+      dispatchTrackPicker({ type: 'OPEN_CACHED' });
+      return;
+    }
     if (!client || !engineReady || typeof client.inspectTracks !== 'function') {
-      setTracksError('Engine is offline — reconnect to inspect Poly-WAV tracks.');
+      dispatchTrackPicker({
+        type: 'LOAD_FAILED',
+        message: 'Engine is offline — reconnect to inspect Poly-WAV tracks.',
+      });
       return;
     }
-    setTracksLoading(true);
-    setTracksError(null);
+    const seq = ++trackInspectSeq.current;
+    dispatchTrackPicker({ type: 'START_LOAD' });
     try {
       const res = await client.inspectTracks(source.path);
-      setTracks(res.tracks);
+      if (trackInspectSeq.current === seq) {
+        dispatchTrackPicker({ type: 'LOAD_SUCCESS', tracks: res.tracks });
+      }
     } catch (e) {
-      setTracksError(e instanceof Error ? e.message : 'Unable to inspect Poly-WAV tracks.');
-    } finally {
-      setTracksLoading(false);
+      if (trackInspectSeq.current === seq) {
+        dispatchTrackPicker({
+          type: 'LOAD_FAILED',
+          message: e instanceof Error ? e.message : 'Unable to inspect Poly-WAV tracks.',
+        });
+      }
     }
-  }, [source, original, tracksOpen, tracks, tracksError, client, engineReady]);
+  }, [source, original, trackPicker, client, engineReady]);
 
   const handleExtractTrack = useCallback(
     async (track: TrackInfo) => {
-      if (!source || disabled || extractingTrack !== null) return;
-      setExtractingTrack(track.index);
+      if (!source || disabled || trackPicker.phase !== 'ready') return;
+      dispatchTrackPicker({ type: 'START_EXTRACT', trackIndex: track.index });
       try {
         const extracted = await extractAndLoadTrack(source.path, track.index, track.name);
-        if (extracted) {
-          setTracksOpen(false);
-        }
-      } finally {
-        setExtractingTrack(null);
+        dispatchTrackPicker({ type: extracted ? 'EXTRACT_SUCCESS' : 'EXTRACT_ABORTED' });
+      } catch {
+        dispatchTrackPicker({ type: 'EXTRACT_ABORTED' });
       }
     },
-    [source, disabled, extractingTrack],
+    [source, disabled, trackPicker.phase],
   );
   // B6 · every refusal in this strip names its own reason. `aria-disabled`
   // rather than `disabled` on the buttons, because a disabled control takes no
@@ -537,7 +553,10 @@ export function SourceStrip() {
               type="button"
               className="ptp-close"
               aria-label="Close track selector"
-              onClick={() => setTracksOpen(false)}
+              onClick={() => {
+                trackInspectSeq.current += 1;
+                dispatchTrackPicker({ type: 'CLOSE' });
+              }}
             >
               <IconCancel size={11} />
             </button>

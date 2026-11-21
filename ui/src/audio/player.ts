@@ -30,6 +30,8 @@
 //     arrives for that deck.
 //   * a superseded in-flight fetch is dropped by epoch check, never aborted.
 
+import { deriveAuditionMode, type AuditionMode } from '../state/machines';
+
 export type Deck = 'original' | 'cleaned';
 
 export interface PlayerSnapshot {
@@ -52,6 +54,8 @@ export interface PlayerSnapshot {
   loopRange: [number, number] | null;
   /** Wet/dry mix in [0, 1] when active deck is cleaned (1.0 = 100% cleaned). */
   wetDryMix: number;
+  /** Single derived audition mode across A/B, Δ Removed, and Wet/Dry Blend. */
+  auditionMode: AuditionMode;
 }
 
 export interface LiveMeterLevels {
@@ -760,19 +764,29 @@ export class DualPlayer {
    *  - `cleaned`: positive Cleaned deck gain
    *  - `delta`: gain feeding the -1 inverter on Cleaned (Original - Cleaned)
    */
+  get auditionMode(): AuditionMode {
+    return deriveAuditionMode({
+      active: this.active,
+      bothDecksReady: this.bothDecksReady(),
+      deltaMode: this.deltaModeEnabled,
+      wetDryMix: this.wetDryMixValue,
+    });
+  }
+
   private computeBranchGains(): { original: number; cleaned: number; delta: number } {
     const cleanTarget = this.getTargetGain('cleaned');
-    if (this.deltaModeEnabled && this.bothDecksReady()) {
-      return { original: 1.0, cleaned: 0, delta: cleanTarget };
-    }
-    if (this.active === 'cleaned') {
-      if (this.bothDecksReady()) {
+    switch (this.auditionMode) {
+      case 'delta_removed':
+        return { original: 1.0, cleaned: 0, delta: cleanTarget };
+      case 'wet_dry_blend': {
         const mix = this.wetDryMixValue;
         return { original: 1 - mix, cleaned: mix * cleanTarget, delta: 0 };
       }
-      return { original: 0, cleaned: cleanTarget, delta: 0 };
+      case 'cleaned':
+        return { original: 0, cleaned: cleanTarget, delta: 0 };
+      case 'original':
+        return { original: 1.0, cleaned: 0, delta: 0 };
     }
-    return { original: 1.0, cleaned: 0, delta: 0 };
   }
 
   private rampParam(param: AudioParam, target: number, now: number, immediate: boolean): void {
@@ -827,9 +841,7 @@ export class DualPlayer {
   private applyLiveHpf(immediate = false): void {
     if (!this.ctx || this.ctx.state === 'closed') return;
     if (!this.hpfStage1 || !this.hpfStage2 || !this.hpfDryGain || !this.hpfWetGain) return;
-    const isBlended = this.wetDryMixValue > 0 && this.wetDryMixValue < 1 && this.bothDecksReady();
-    const activeHpf =
-      this.liveHpfEnabled && this.active === 'original' && !this.deltaModeEnabled && !isBlended;
+    const activeHpf = this.liveHpfEnabled && this.auditionMode === 'original';
     try {
       const now = this.ctx.currentTime;
       for (const stage of [this.hpfStage1, this.hpfStage2]) {
@@ -1965,6 +1977,7 @@ export class DualPlayer {
       loopEnabled: this.loopEnabledFlag,
       loopRange: this.loopRange,
       wetDryMix: this.wetDryMixValue,
+      auditionMode: this.auditionMode,
     };
   }
 
