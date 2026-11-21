@@ -104,6 +104,10 @@ describe('AudioAssistant', () => {
           integrated_lufs: -20.2,
           available_profiles: ['production', 'studio', 'studio_pro'],
           separation_available: true,
+          current_profile: 'production',
+          current_strength: 0.75,
+          current_hpf_hz: 80,
+          current_delivery_preset: 'ebu_r128',
         },
       },
       expect.any(AbortSignal),
@@ -776,5 +780,34 @@ describe('AudioAssistant', () => {
     expect(host.textContent).toContain('Output -16.1 LUFS');
     expect(host.textContent).toContain('Peak -1.0 dBTP');
     expect(host.textContent).toContain('9/10 units enhanced');
+
+    // 4. Clickable 1-click follow-up chip dispatches immediately + sends stateful context, and Clear resets transcript
+    const chip = host.querySelector('.aa-followup-chip') as HTMLButtonElement;
+    expect(chip).not.toBeNull();
+    planAudio.mockResolvedValueOnce({
+      operation: 'ui_action',
+      target: null,
+      cleanup_profile: null,
+      model_size: 'large',
+      quality: 'high',
+      ui_action: 'diagnose',
+      explanation: 'Measured clip with last run.',
+      provider: 'rules',
+      needs_clarification: false,
+    });
+    await act(async () => {
+      chip.click();
+    });
+    const lastReq = planAudio.mock.calls[planAudio.mock.calls.length - 1]?.[0];
+    expect(lastReq?.acoustic_context?.output_lufs).toBe(-16.1);
+    expect(lastReq?.acoustic_context?.units_enhanced).toBe(9);
+    expect(lastReq?.acoustic_context?.current_hpf_hz).toBeGreaterThanOrEqual(20);
+
+    const clearBtn = host.querySelector('.aa-clear-btn') as HTMLButtonElement;
+    expect(clearBtn).not.toBeNull();
+    await act(async () => {
+      clearBtn.click();
+    });
+    expect(host.querySelector('.aa-messages')).toBeNull();
   });
 });

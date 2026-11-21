@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { classifyDecision, decisionLabel, type UnitDecisionRecord } from '../api/types';
 import { formatTime } from '../render/ticks';
+import { useI18n } from '../state/i18n';
 import { waveView } from '../render/viewWindow';
 import { unitNoun } from '../state/plural';
 import { channelName, highlightFor, reportChannels, selectUnit, unitKey } from '../state/selection';
@@ -87,6 +88,8 @@ type LaneStyle = CSSProperties & { '--lane': number };
 type TrackStyle = CSSProperties & { '--lanes': number };
 
 export function VerdictStrip() {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const report = useStore((s) => s.report);
   const duration = useStore((s) => s.duration);
   const setHighlight = useStore((s) => s.setHighlight);
@@ -251,9 +254,13 @@ export function VerdictStrip() {
   return (
     <div className="verdict">
       <div className="label">
-        <span className="caps">Verdicts</span>
+        <span className="caps">{isCkb ? 'بڕیارەکان' : 'Verdicts'}</span>
         <span className="count">
-          {units.length ? `${units.length} ${unitNoun(units.length)} · ${enhanced} enhanced` : '—'}
+          {units.length
+            ? isCkb
+              ? `${units.length} یەکە · ${enhanced} باشترکراو`
+              : `${units.length} ${unitNoun(units.length)} · ${enhanced} enhanced`
+            : '—'}
         </span>
       </div>
       <div
@@ -309,22 +316,28 @@ export function VerdictStrip() {
           )
         ) : (
           <div className="verdict-empty">
-            {report ? 'Report has no units' : 'Per-unit guard decisions appear here after processing'}
+            {report
+              ? isCkb
+                ? 'ڕاپۆرتەکە هیچ یەکەیەکی تێدا نییە'
+                : 'Report has no units'
+              : isCkb
+                ? 'بڕیارەکانی پاسەوانی هەر یەکە لێرە دەردەکەون پاش پرۆسەکردن'
+                : 'Per-unit guard decisions appear here after processing'}
           </div>
         )}
       </div>
       <div className="verdict-legend" aria-hidden="true">
         <span>
-          <i className="verdict-seg enhanced" /> Enhanced
+          <i className="verdict-seg enhanced" /> {isCkb ? 'باشترکراو' : 'Enhanced'}
         </span>
         <span>
-          <i className="verdict-seg reverted" /> Reverted
+          <i className="verdict-seg reverted" /> {isCkb ? 'گەڕێنراوە' : 'Reverted'}
         </span>
         <span>
-          <i className="verdict-seg passthrough" /> Bypass
+          <i className="verdict-seg passthrough" /> {isCkb ? 'بێدەستکاری' : 'Bypass'}
         </span>
         <span>
-          <i className="verdict-seg error" /> Error
+          <i className="verdict-seg error" /> {isCkb ? 'هەڵە' : 'Error'}
         </span>
       </div>
       {hover ? (

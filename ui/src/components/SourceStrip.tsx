@@ -178,7 +178,8 @@ function DropRejectionNote() {
 }
 
 export function SourceStrip() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const bridge = getBridge();
   const hasResolve = Boolean(bridge.resolve);
   const isWeb = bridge.host === 'web';
@@ -346,7 +347,7 @@ export function SourceStrip() {
           }}
         >
           <IconFolder />
-          <span>Open file…</span>
+          <span>{isCkb ? 'کردنەوەی فایل…' : 'Open file…'}</span>
         </button>
         <button
           className="btn btn-batch-pick"
@@ -372,24 +373,40 @@ export function SourceStrip() {
           <span className="copy">
             <span className="hint">
               {over
-                ? 'Release to load'
+                ? isCkb
+                  ? 'بەربدە بۆ بارکردن'
+                  : 'Release to load'
                 : disabled
                   ? running
-                    ? 'Busy — finish or cancel the job first'
+                    ? isCkb
+                      ? 'سەرقاڵە — سەرەتا کارەکە تەواو بکە یان هەڵیوەشێنەوە'
+                      : 'Busy — finish or cancel the job first'
                     : uploading
-                      ? 'An upload is already in flight'
+                      ? isCkb
+                        ? 'بارکردنێک لە پرۆسەدایە'
+                        : 'An upload is already in flight'
                       : engineOffline
-                        ? 'Engine offline — reconnecting'
-                        : 'Waiting for the engine'
-                  : 'Drop an audio or video file here'}
+                        ? isCkb
+                          ? 'بزوێنەر دەرچووە — پەیوەندیدەکرێتەوە'
+                          : 'Engine offline — reconnecting'
+                        : isCkb
+                          ? 'چاوەڕێی بزوێنەرە'
+                          : 'Waiting for the engine'
+                  : isCkb
+                    ? 'فایلی دەنگ یان ڤیدیۆ لێرە دابنێ'
+                    : 'Drop an audio or video file here'}
             </span>
             <span className="types">
               {over
-                ? 'Analysis starts immediately'
+                ? isCkb
+                  ? 'شیکردنەوە دەستبەجێ دەستپێدەکات'
+                  : 'Analysis starts immediately'
                 : engineOffline
-                  ? 'Nothing already loaded is lost — this well opens again the moment the engine answers'
+                  ? isCkb
+                    ? 'هیچ شتێکی بارکراو لەدەست نەچووە — هەرکە بزوێنەر وەڵامی دایەوە دەکرێتەوە'
+                    : 'Nothing already loaded is lost — this well opens again the moment the engine answers'
                   : isWeb
-                    ? `or click to browse · ${ACCEPTED_SHORTLIST}`
+                    ? `${isCkb ? 'یان کرتە بکە بۆ هەڵبژاردن' : 'or click to browse'} · ${ACCEPTED_SHORTLIST}`
                     : ACCEPTED_SHORTLIST}
             </span>
           </span>
@@ -502,7 +519,7 @@ export function SourceStrip() {
             )}
           </>
         ) : (
-          <span className="empty">No clip loaded</span>
+          <span className="empty">{isCkb ? 'هیچ کلیپێک بارنەکراوە' : 'No clip loaded'}</span>
         )}
       </div>
       {tracksOpen && source && original && original.channels > 2 ? (

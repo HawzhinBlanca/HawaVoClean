@@ -39,6 +39,8 @@ export function usePlayerSync(): void {
   const setAbMode = useStore((s) => s.setAbMode);
   const setGainOffsetDb = useStore((s) => s.setGainOffsetDb);
   const selectionRange = useStore((s) => s.selectionRange);
+  const hpfEnabled = useStore((s) => s.rackSettings.hpfEnabled !== false);
+  const hpfCutoffHz = useStore((s) => s.rackSettings.hpfCutoffHz);
   const hadSelectionRef = useRef(false);
 
   useEffect(() => {
@@ -72,6 +74,10 @@ export function usePlayerSync(): void {
       getPlayer().setLoopRange(null);
     }
   }, [selectionRange]);
+
+  useEffect(() => {
+    getPlayer().setLiveHpf?.(hpfEnabled, hpfCutoffHz);
+  }, [hpfEnabled, hpfCutoffHz]);
 }
 
 /** What the whole screen is doing, as one word the stylesheet can key on. */

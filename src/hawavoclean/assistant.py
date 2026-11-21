@@ -146,6 +146,16 @@ class AcousticContext(_ClosedModel):
     integrated_lufs: float | None = Field(default=None, ge=-120.0, le=24.0, allow_inf_nan=False)
     available_profiles: list[CleanupProfile] = Field(default_factory=list, max_length=8)
     separation_available: bool | None = Field(default=None, strict=True)
+    current_profile: CleanupProfile | None = None
+    current_strength: float | None = Field(default=None, ge=0.1, le=1.0, allow_inf_nan=False)
+    current_hpf_hz: float | None = Field(default=None, ge=20.0, le=250.0, allow_inf_nan=False)
+    current_delivery_preset: DeliveryPresetPlan | None = None
+    output_lufs: float | None = Field(default=None, ge=-120.0, le=24.0, allow_inf_nan=False)
+    output_true_peak_dbtp: float | None = Field(
+        default=None, ge=-120.0, le=24.0, allow_inf_nan=False
+    )
+    units_enhanced: int | None = Field(default=None, ge=0, le=100000, strict=True)
+    units_reverted: int | None = Field(default=None, ge=0, le=100000, strict=True)
 
     @field_validator(
         "duration_s",
@@ -158,6 +168,10 @@ class AcousticContext(_ClosedModel):
         "estimated_cutoff_hz",
         "noise_floor_db",
         "integrated_lufs",
+        "current_strength",
+        "current_hpf_hz",
+        "output_lufs",
+        "output_true_peak_dbtp",
         mode="before",
     )
     @classmethod
@@ -503,6 +517,22 @@ def _format_acoustic_context(ctx: AcousticContext) -> str:
         lines.append(f"- available_profiles: {', '.join(ctx.available_profiles)}")
     if ctx.separation_available is not None:
         lines.append(f"- separation_available: {'true' if ctx.separation_available else 'false'}")
+    if ctx.current_profile is not None:
+        lines.append(f"- current_profile: {ctx.current_profile}")
+    if ctx.current_strength is not None:
+        lines.append(f"- current_strength: {ctx.current_strength:.2f}")
+    if ctx.current_hpf_hz is not None:
+        lines.append(f"- current_hpf_hz: {ctx.current_hpf_hz:.0f}")
+    if ctx.current_delivery_preset is not None:
+        lines.append(f"- current_delivery_preset: {ctx.current_delivery_preset}")
+    if ctx.output_lufs is not None:
+        lines.append(f"- last_output_lufs: {ctx.output_lufs:.1f}")
+    if ctx.output_true_peak_dbtp is not None:
+        lines.append(f"- last_output_true_peak_dbtp: {ctx.output_true_peak_dbtp:.1f}")
+    if ctx.units_enhanced is not None:
+        lines.append(f"- last_units_enhanced: {ctx.units_enhanced}")
+    if ctx.units_reverted is not None:
+        lines.append(f"- last_units_reverted: {ctx.units_reverted}")
     return "\n".join(lines)
 
 
@@ -1476,16 +1506,26 @@ def _build_acoustic_diagnosis(ctx: AcousticContext | None, *, kurdish: bool = Fa
         flags.append("narrowband high-frequency rolloff")
 
     summary = ", ".join(parts) if parts else "loaded clip"
+    run_parts: list[str] = []
+    if ctx.output_lufs is not None:
+        run_parts.append(f"{ctx.output_lufs:.1f} LUFS")
+    if ctx.output_true_peak_dbtp is not None:
+        run_parts.append(f"{ctx.output_true_peak_dbtp:.1f} dBTP")
+    if ctx.units_enhanced is not None:
+        run_parts.append(f"{ctx.units_enhanced} enhanced")
+    if ctx.units_reverted is not None and ctx.units_reverted > 0:
+        run_parts.append(f"{ctx.units_reverted} reverted")
+    run_note = f" Last run: {', '.join(run_parts)}." if run_parts else ""
     if kurdish:
         issues = f" کێشە دۆزراوەکان: {', '.join(flags)}." if flags else " تۆمارەکە پاکە."
-        return f"پشکنینی تۆمار ({summary}).{issues} بڵێ 'پاککردنەوە' یان 'پۆدکاست' بۆ جێبەجێکردن."
+        return f"پشکنینی تۆمار ({summary}).{issues}{run_note} بڵێ 'پاککردنەوە' یان 'پۆدکاست' بۆ جێبەجێکردن."
     if flags:
         return (
-            f"Measured clip ({summary}): detected {', '.join(flags)}. "
+            f"Measured clip ({summary}): detected {', '.join(flags)}.{run_note} "
             "Say 'clean this' or 'Auto Smart Safe' to fix automatically."
         )
     return (
-        f"Measured clip ({summary}): signal looks clean with low noise risk. "
+        f"Measured clip ({summary}): signal looks clean with low noise risk.{run_note} "
         "Say 'master for Podcast' or 'gentle finishing' if you want broadcast polish."
     )
 
@@ -1825,15 +1865,20 @@ def _rules_plan(request: AudioPlanRequest) -> PlanPayload:
         r"\b(dial\s+it\s+back|less\s+aggressive|too\s+processed|sounds?\s+robotic|more\s+gentle|tone\s+it\s+down)\b",
         text,
     ):
+        refined_strength = (
+            max(0.25, round(ctx.current_strength - 0.20, 2))
+            if ctx is not None and ctx.current_strength is not None
+            else 0.55
+        )
         refined_mods = {"ambience_floor_db": -48.0, **studio_mods}
         return PlanPayload(
             operation="clean",
             cleanup_profile="studio",
-            strength=0.55,
+            strength=refined_strength,
             time_range=time_range,
             **refined_mods,
             explanation=(
-                "Dialing back intensity to 55% with subtle room tone (-48 dB) so the voice stays natural."
+                f"Dialing back intensity to {round(refined_strength * 100)}% with subtle room tone (-48 dB) so the voice stays natural."
             ),
         )
     if re.search(

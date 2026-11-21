@@ -36,7 +36,7 @@ import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
@@ -3892,6 +3892,39 @@ def create_app(
         raise ApiError(404, "not_found", f"no such endpoint: /api/{rest}")
 
     if ui_dir is not None and (ui_dir / "index.html").is_file():
+        if is_web_public:
+            index_file = ui_dir / "index.html"
+
+            @app.get("/")
+            @app.get("/index.html")
+            async def _serve_web_public_index(request: Request) -> Response:
+                response = FileResponse(
+                    index_file,
+                    media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+                )
+                existing_cookie = request.cookies.get(SESSION_COOKIE)
+                if not existing_cookie or not sessions.valid(existing_cookie):
+                    session_token, max_age = sessions.issue()
+                    is_https = (
+                        request.url.scheme == "https"
+                        or (request.headers.get("x-forwarded-proto") or "")
+                        .split(",")[0]
+                        .strip()
+                        .lower()
+                        == "https"
+                    )
+                    response.set_cookie(
+                        SESSION_COOKIE,
+                        session_token,
+                        max_age=max_age,
+                        httponly=True,
+                        secure=is_https,
+                        samesite="strict",
+                        path="/api",
+                    )
+                return response
+
         app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
     else:
         if ui_dir is not None:

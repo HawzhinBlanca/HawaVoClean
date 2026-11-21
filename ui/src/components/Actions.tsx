@@ -14,6 +14,7 @@ import {
   saveCleanedMaster,
   saveProcessingRecord,
 } from '../state/actions';
+import { useI18n } from '../state/i18n';
 import type { ExportFormatId } from '../state/presets';
 import { useStore } from '../state/store';
 import { IconCheck, IconImport, IconReplace, IconReveal } from './Icons';
@@ -73,6 +74,8 @@ function ArtifactLink({
 
 /** Copies the one-line summary and says so, on the button itself. */
 function CopySummary() {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const report = useStore((s) => s.report);
   const source = useStore((s) => s.source);
   const [copied, setCopied] = useState(false);
@@ -103,7 +106,7 @@ function CopySummary() {
       title="Copy a one-line summary of this run to the clipboard"
     >
       {copied ? <IconCheck size={14} /> : <IconReveal size={14} />}
-      <span>{copied ? 'Copied' : 'Copy summary'}</span>
+      <span>{copied ? (isCkb ? 'کۆپیکرا' : 'Copied') : isCkb ? 'کۆپیکردنی پوختە' : 'Copy summary'}</span>
     </button>
   );
 }
@@ -116,6 +119,8 @@ function ExportDeliveryButton({
   masterServed: boolean;
   engineReady: boolean;
 }) {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const source = useStore((s) => s.source);
   const original = useStore((s) => s.original);
   const rackSettings = useStore((s) => s.rackSettings);
@@ -131,8 +136,10 @@ function ExportDeliveryButton({
       : rackSettings.exportFormat;
   const label =
     targetFormat === 'video_mux'
-      ? 'Mux Video'
-      : `Export ${EXPORT_FORMAT_LABEL[targetFormat] ?? targetFormat}`;
+      ? isCkb
+        ? 'ڤیدیۆ + دەنگ'
+        : 'Mux Video'
+      : `${isCkb ? 'هەناردەی' : 'Export'} ${EXPORT_FORMAT_LABEL[targetFormat] ?? targetFormat}`;
   const enabled = masterServed && engineReady && !exporting;
 
   const onExport = useCallback(() => {
@@ -160,6 +167,8 @@ function ExportDeliveryButton({
 }
 
 export function Actions() {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const bridge = getBridge();
   const hasResolve = Boolean(bridge.resolve);
   const isWeb = bridge.host === 'web';
@@ -191,7 +200,7 @@ export function Actions() {
         <ArtifactLink
           url={artifacts?.master.url ?? null}
           name={artifacts?.master.name ?? 'master.wav'}
-          label="Master WAV"
+          label={isCkb ? 'ماستەری WAV' : 'Master WAV'}
           title={
             artifacts
               ? (artifacts.master.note ?? `Download ${artifacts.master.name}`)
@@ -201,13 +210,13 @@ export function Actions() {
         <ArtifactLink
           url={artifacts?.json.url ?? null}
           name={artifacts?.json.name ?? 'report.json'}
-          label="JSON report"
+          label={isCkb ? 'ڕاپۆرتی JSON' : 'JSON report'}
           title={artifacts ? (artifacts.json.note ?? `Download ${artifacts.json.name}`) : note}
         />
         <ArtifactLink
           url={artifacts?.txt.url ?? null}
           name={artifacts?.txt.name ?? 'report.txt'}
-          label="Summary .txt"
+          label={isCkb ? 'پوختەی .txt' : 'Summary .txt'}
           title={artifacts ? (artifacts.txt.note ?? `Download ${artifacts.txt.name}`) : note}
         />
         <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
@@ -282,7 +291,7 @@ export function Actions() {
         title={masterServed ? 'Save or export the cleaned master audio file (.wav)' : cleanedPath ? goneNote : missingNote}
       >
         <IconImport size={14} />
-        <span>Save Master</span>
+        <span>{isCkb ? 'پاشەکەوتی ماستەر' : 'Save Master'}</span>
       </button>
       <button
         className="btn small"
@@ -295,7 +304,7 @@ export function Actions() {
         title={masterServed ? 'Save complete processing record archive (.zip) with master audio and verification report' : cleanedPath ? goneNote : missingNote}
       >
         <IconImport size={14} />
-        <span>Save Record</span>
+        <span>{isCkb ? 'پاشەکەوتی تۆمار' : 'Save Record'}</span>
       </button>
       <button
         className="btn small"
@@ -308,7 +317,7 @@ export function Actions() {
         title={masterServed ? 'Reveal the cleaned master in Finder' : cleanedPath ? goneNote : missingNote}
       >
         <IconReveal size={14} />
-        <span>Reveal in Finder</span>
+        <span>{isCkb ? 'نیشاندان لە فایندەر' : 'Reveal in Finder'}</span>
       </button>
       <ExportDeliveryButton masterServed={masterServed} engineReady={engineReady} />
       <CopySummary />

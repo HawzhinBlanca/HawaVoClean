@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import type { JobStage, JobStatus } from '../api/types';
 import { cancelJob, startJob } from '../state/actions';
 import { deriveProcessingReadiness } from '../state/machines';
+import { useI18n } from '../state/i18n';
 import { useReducedMotion } from '../state/reducedMotion';
 import { useStore } from '../state/store';
 import { IconBolt, IconCheck, IconWarn } from './Icons';
@@ -271,52 +272,54 @@ export function ProcessButton() {
   const dashOffset = running ? C * (1 - face.initial) : C * (1 - shown);
   const headDeg = (running ? face.initial : shown) * 360;
 
-  let title = 'PROCESS';
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
+  let title = isCkb ? 'جێبەجێکردن' : 'PROCESS';
   let cells: Cell[];
-  const stageName = STAGE_LABEL[status?.stage ?? ''] ?? (status?.stage ?? 'Working');
+  const stageName = STAGE_LABEL[status?.stage ?? ''] ?? (status?.stage ?? (isCkb ? 'کارکردن' : 'Working'));
 
   if (running) {
-    title = 'CANCEL';
+    title = isCkb ? 'هەڵوەشاندنەوە' : 'CANCEL';
     cells = [
-      { k: 'Stage', v: stageName },
+      { k: isCkb ? 'قۆناغ' : 'Stage', v: stageName },
       {
-        k: 'Unit',
+        k: isCkb ? 'یەکە' : 'Unit',
         v: status?.unit ? `${status.unit.index} / ${status.unit.total}` : '—',
         num: true,
       },
-      { k: 'Elapsed', v: '0:00.0', num: true },
+      { k: isCkb ? 'کات' : 'Elapsed', v: '0:00.0', num: true },
     ];
   } else if (state === 'done') {
     // The title is a verb — what the key does if you press it again — so it
     // stays neutral; the *state* line carries the state colour, and it agrees
     // with the ring (green for done, red for failed) instead of fighting it.
-    title = 'PROCESS AGAIN';
+    title = isCkb ? 'دووبارە جێبەجێکردن' : 'PROCESS AGAIN';
     const s = status?.report?.summary;
     cells = [
-      { k: 'Result', v: 'Complete' },
+      { k: isCkb ? 'ئەنجام' : 'Result', v: isCkb ? 'تەواو بوو' : 'Complete' },
       status?.report?.separation
-        ? { k: 'Edit', v: status.report.separation.operation === 'extract' ? 'Extract' : 'Remove' }
-        : { k: 'Units', v: s ? `${s.enhanced ?? 0} / ${s.units_total ?? 0}` : '—', num: true },
-      { k: 'Took', v: fmtElapsed(finalSec), num: true },
+        ? { k: isCkb ? 'دەستکاری' : 'Edit', v: status.report.separation.operation === 'extract' ? 'Extract' : 'Remove' }
+        : { k: isCkb ? 'یەکەکان' : 'Units', v: s ? `${s.enhanced ?? 0} / ${s.units_total ?? 0}` : '—', num: true },
+      { k: isCkb ? 'ماوە' : 'Took', v: fmtElapsed(finalSec), num: true },
     ];
   } else if (state === 'failed' || state === 'interrupted') {
-    title = 'RETRY';
+    title = isCkb ? 'هەوڵدانەوە' : 'RETRY';
     const code = status?.error?.code ?? (state === 'interrupted' ? 'ENGINE_RESTARTED' : '');
     cells = [
-      { k: 'Result', v: state === 'interrupted' ? 'Interrupted' : 'Failed' },
+      { k: isCkb ? 'ئەنجام' : 'Result', v: state === 'interrupted' ? (isCkb ? 'پچڕا' : 'Interrupted') : isCkb ? 'سەرنەکەوت' : 'Failed' },
       {
-        k: 'Reason',
+        k: isCkb ? 'هۆکار' : 'Reason',
         v: FAIL_REASON[code] ?? (code || status?.message || 'unknown'),
         title: status?.error?.message ?? status?.message ?? code ?? undefined,
       },
-      { k: 'Took', v: fmtElapsed(finalSec), num: true },
+      { k: isCkb ? 'ماوە' : 'Took', v: fmtElapsed(finalSec), num: true },
     ];
   } else if (state === 'cancelled') {
-    title = 'PROCESS';
+    title = isCkb ? 'جێبەجێکردن' : 'PROCESS';
     cells = [
-      { k: 'Result', v: 'Cancelled' },
-      { k: 'Stopped', v: `${Math.round((status?.progress ?? 0) * 100)}%`, num: true },
-      { k: 'Took', v: fmtElapsed(finalSec), num: true },
+      { k: isCkb ? 'ئەنجام' : 'Result', v: isCkb ? 'هەڵوەشێنرایەوە' : 'Cancelled' },
+      { k: isCkb ? 'وەستا' : 'Stopped', v: `${Math.round((status?.progress ?? 0) * 100)}%`, num: true },
+      { k: isCkb ? 'ماوە' : 'Took', v: fmtElapsed(finalSec), num: true },
     ];
   } else {
     // Idle is a designed state too: the plate reads back the clip it is armed
@@ -327,24 +330,36 @@ export function ProcessButton() {
     const khz = sr ? `${sr % 1000 ? (sr / 1000).toFixed(1) : String(sr / 1000)}k` : '—';
     cells = [
       {
-        k: 'Ready',
+        k: isCkb ? 'دۆخ' : 'Ready',
         v: !engineReady
-          ? 'Offline'
+          ? isCkb
+            ? 'دەرچوو'
+            : 'Offline'
           : workspacePhase === 'uploading'
-            ? 'Uploading'
+            ? isCkb
+              ? 'بارکردن'
+              : 'Uploading'
             : !source
-              ? 'No clip'
+              ? isCkb
+                ? 'بێ کلیپ'
+                : 'No clip'
               : analyzing
-                ? 'Analyzing'
+                ? isCkb
+                  ? 'شیکردنەوە'
+                  : 'Analyzing'
                 : // a clip that failed to analyse leaves `source` set and
                   // `original` null; the plate must not read "Armed" while it
                   // is disabled with nothing to process
                   !original
-                  ? 'No data'
-                  : 'Armed',
+                  ? isCkb
+                    ? 'بێ داتا'
+                    : 'No data'
+                  : isCkb
+                    ? 'ئامادە'
+                    : 'Armed',
       },
-      { k: 'Length', v: original ? fmtElapsed(original.duration_s) : '—', num: true },
-      { k: 'Format', v: original ? `${khz}\u00b7${original.channels}ch` : '—', num: true },
+      { k: isCkb ? 'ماوە' : 'Length', v: original ? fmtElapsed(original.duration_s) : '—', num: true },
+      { k: isCkb ? 'شێواز' : 'Format', v: original ? `${khz}\u00b7${original.channels}ch` : '—', num: true },
     ];
   }
 

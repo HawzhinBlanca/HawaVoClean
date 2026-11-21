@@ -1063,4 +1063,78 @@ describe('active-deck reload continuity & region preview offset alignment', () =
     expect(el('original').currentTime).toBeCloseTo(9.0, 2);
     expect(el('cleaned').currentTime).toBeCloseTo(0.0, 2);
   });
+
+  it('applies real-time 24 dB/oct Butterworth HPF on Original audition and bypasses on Cleaned/Delta', async () => {
+    const biquads: { type: string; frequency: { value: number; setTargetAtTime: ReturnType<typeof vi.fn> }; Q: { value: number }; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[] = [];
+    const gains: { gain: { value: number; cancelScheduledValues: ReturnType<typeof vi.fn>; setValueAtTime: ReturnType<typeof vi.fn>; linearRampToValueAtTime: ReturnType<typeof vi.fn> }; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[] = [];
+    class MockCtxWithBiquad {
+      state = 'running';
+      currentTime = 0;
+      sampleRate = 48000;
+      destination = {};
+      resume = vi.fn(async () => undefined);
+      close = vi.fn(async () => { this.state = 'closed'; });
+      createGain() {
+        const g = {
+          gain: {
+            value: 1,
+            cancelScheduledValues: vi.fn(),
+            setValueAtTime: vi.fn(),
+            linearRampToValueAtTime: vi.fn((v: number) => { g.gain.value = v; }),
+          },
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        };
+        gains.push(g);
+        return g;
+      }
+      createBiquadFilter() {
+        const f = {
+          type: 'lowpass',
+          frequency: { value: 350, setTargetAtTime: vi.fn((v: number) => { f.frequency.value = v; }) },
+          gain: { value: 0 },
+          Q: { value: 1 },
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        };
+        biquads.push(f);
+        return f;
+      }
+      createAnalyser() {
+        return { fftSize: 2048, smoothingTimeConstant: 0.8, minDecibels: -100, maxDecibels: 0, connect: vi.fn(), disconnect: vi.fn(), getFloatTimeDomainData: vi.fn() };
+      }
+      createMediaElementSource() {
+        return { connect: vi.fn(), disconnect: vi.fn() };
+      }
+    }
+    vi.stubGlobal('AudioContext', MockCtxWithBiquad);
+    await bothReady(10);
+    await player.play();
+
+    // First two biquads are the cascaded 24 dB/oct Butterworth HPF stages (Q=0.5412, Q=1.3066)
+    expect(biquads.length).toBeGreaterThanOrEqual(2);
+    expect(biquads[0]?.type).toBe('highpass');
+    expect(biquads[1]?.type).toBe('highpass');
+
+    player.setLiveHpf(true, 120);
+    expect(biquads[0]?.frequency.value).toBe(120);
+    expect(biquads[1]?.frequency.value).toBe(120);
+
+    // Switching to Cleaned or Delta must automatically bypass the live HPF (dry=1, wet=0)
+    // gains order: [0]=original, [1]=cleaned, [2]=deltaInverter, [3]=deltaGain, [4]=hpfDry, [5]=hpfWet
+    expect(gains[4]?.gain.value).toBe(0);
+    expect(gains[5]?.gain.value).toBe(1);
+
+    player.setActive('cleaned');
+    expect(gains[4]?.gain.value).toBe(1);
+    expect(gains[5]?.gain.value).toBe(0);
+
+    player.setActive('original');
+    expect(gains[4]?.gain.value).toBe(0);
+    expect(gains[5]?.gain.value).toBe(1);
+
+    player.setDeltaMode(true);
+    expect(gains[4]?.gain.value).toBe(1);
+    expect(gains[5]?.gain.value).toBe(0);
+  });
 });

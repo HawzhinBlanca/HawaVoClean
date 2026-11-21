@@ -157,6 +157,13 @@ export class DualPlayer {
   /** Per-deck pre-fader analysers for real-time Noise Reduction (NR dB Removed) measurement. */
   private origAnalyser: AnalyserNode | null = null;
   private cleanAnalyser: AnalyserNode | null = null;
+  /** Parallel 24 dB/oct 4th-order Butterworth live HPF audition on Original playback. */
+  private hpfStage1: BiquadFilterNode | null = null;
+  private hpfStage2: BiquadFilterNode | null = null;
+  private hpfDryGain: GainNode | null = null;
+  private hpfWetGain: GainNode | null = null;
+  private liveHpfEnabled = false;
+  private liveHpfCutoffHz = 80;
   /** Raw bytes and decoded PCM AudioBuffers for 0-sample-skew AudioBufferSourceNode playback. */
   private rawBytes: Record<Deck, ArrayBuffer | null> = { original: null, cleaned: null };
   private buffers: Record<Deck, AudioBuffer | null> = { original: null, cleaned: null };
@@ -394,6 +401,10 @@ export class DualPlayer {
       this.kAnalyser?.disconnect();
       this.origAnalyser?.disconnect();
       this.cleanAnalyser?.disconnect();
+      this.hpfStage1?.disconnect();
+      this.hpfStage2?.disconnect();
+      this.hpfDryGain?.disconnect();
+      this.hpfWetGain?.disconnect();
     } catch {
       // Ignore disconnect errors on torn-down or closed contexts.
     }
@@ -408,6 +419,10 @@ export class DualPlayer {
     this.kAnalyser = null;
     this.origAnalyser = null;
     this.cleanAnalyser = null;
+    this.hpfStage1 = null;
+    this.hpfStage2 = null;
+    this.hpfDryGain = null;
+    this.hpfWetGain = null;
     if (closeContext && ctx && ctx.state !== 'closed') {
       try {
         void ctx.close().catch(() => undefined);
@@ -452,7 +467,44 @@ export class DualPlayer {
 
     const origSrc = ctx.createMediaElementSource(this.els.original);
     origSrc.connect(gains.original);
-    gains.original.connect(analyser);
+
+    // Parallel bit-exact dry bypass + real-time 24 dB/oct 4th-order Butterworth HPF
+    // on Original audition so dragging the FabFilter HPF node sweeps rumble out at 0 ms
+    // latency while leaving Cleaned masters and Δ Removed nulling 100% phase-untouched.
+    let hpfStage1: BiquadFilterNode | null = null;
+    let hpfStage2: BiquadFilterNode | null = null;
+    let hpfDryGain: GainNode | null = null;
+    let hpfWetGain: GainNode | null = null;
+    if (typeof ctx.createBiquadFilter === 'function') {
+      try {
+        const dry = ctx.createGain();
+        const wet = ctx.createGain();
+        const hp1 = ctx.createBiquadFilter();
+        const hp2 = ctx.createBiquadFilter();
+        dry.gain.value = 1;
+        wet.gain.value = 0;
+        hp1.type = 'highpass';
+        hp1.frequency.value = this.liveHpfCutoffHz;
+        hp1.Q.value = 0.5411961;
+        hp2.type = 'highpass';
+        hp2.frequency.value = this.liveHpfCutoffHz;
+        hp2.Q.value = 1.306563;
+        gains.original.connect(dry);
+        dry.connect(analyser);
+        gains.original.connect(hp1);
+        hp1.connect(hp2);
+        hp2.connect(wet);
+        wet.connect(analyser);
+        hpfStage1 = hp1;
+        hpfStage2 = hp2;
+        hpfDryGain = dry;
+        hpfWetGain = wet;
+      } catch {
+        gains.original.connect(analyser);
+      }
+    } else {
+      gains.original.connect(analyser);
+    }
 
     const cleanSrc = ctx.createMediaElementSource(this.els.cleaned);
     cleanSrc.connect(gains.cleaned);
@@ -527,6 +579,10 @@ export class DualPlayer {
     this.kAnalyser = kAnalyser;
     this.origAnalyser = origAnalyser;
     this.cleanAnalyser = cleanAnalyser;
+    this.hpfStage1 = hpfStage1;
+    this.hpfStage2 = hpfStage2;
+    this.hpfDryGain = hpfDryGain;
+    this.hpfWetGain = hpfWetGain;
     this.applyTargetGain(true);
 
     // Trigger background decode for any in-memory decks already fetched.
@@ -739,6 +795,7 @@ export class DualPlayer {
         if (this.deltaGain) {
           this.rampParam(this.deltaGain.gain, branch.delta, now, immediate);
         }
+        this.applyLiveHpf(immediate);
         return;
       } catch {
         // Fall through to mute fallback if context closed mid-ramp.
@@ -750,6 +807,43 @@ export class DualPlayer {
     const targetCleaned = this.getTargetGain('cleaned');
     this.els.cleaned.volume = Math.min(1, Math.max(0, targetCleaned));
     this.applyMuteFallback();
+  }
+
+  /**
+   * Real-time 24 dB/oct Butterworth HPF audition on Original playback.
+   * Automatically bypassed on Cleaned masters, Wet/Dry blend, and Δ Removed nulling.
+   */
+  setLiveHpf(enabled: boolean, cutoffHz: number): void {
+    const clamped = Number.isFinite(cutoffHz) ? Math.max(20, Math.min(250, cutoffHz)) : 80;
+    const nextEnabled = Boolean(enabled);
+    if (nextEnabled === this.liveHpfEnabled && Math.abs(clamped - this.liveHpfCutoffHz) < 0.01) {
+      return;
+    }
+    this.liveHpfEnabled = nextEnabled;
+    this.liveHpfCutoffHz = clamped;
+    this.applyLiveHpf(false);
+  }
+
+  private applyLiveHpf(immediate = false): void {
+    if (!this.ctx || this.ctx.state === 'closed') return;
+    if (!this.hpfStage1 || !this.hpfStage2 || !this.hpfDryGain || !this.hpfWetGain) return;
+    const isBlended = this.wetDryMixValue > 0 && this.wetDryMixValue < 1 && this.bothDecksReady();
+    const activeHpf =
+      this.liveHpfEnabled && this.active === 'original' && !this.deltaModeEnabled && !isBlended;
+    try {
+      const now = this.ctx.currentTime;
+      for (const stage of [this.hpfStage1, this.hpfStage2]) {
+        if (!immediate && typeof stage.frequency.setTargetAtTime === 'function') {
+          stage.frequency.setTargetAtTime(this.liveHpfCutoffHz, now, 0.015);
+        } else {
+          stage.frequency.value = this.liveHpfCutoffHz;
+        }
+      }
+      this.rampParam(this.hpfDryGain.gain, activeHpf ? 0 : 1, now, immediate);
+      this.rampParam(this.hpfWetGain.gain, activeHpf ? 1 : 0, now, immediate);
+    } catch {
+      // Fail soft if AudioContext closed mid-ramp.
+    }
   }
 
   /**

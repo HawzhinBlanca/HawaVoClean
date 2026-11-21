@@ -366,14 +366,51 @@ function buildAcousticContext(
     const sep = capabilities.find((c) => c.capability_id === 'separate');
     if (sep) ctx.separation_available = Boolean(sep.available && sep.maturity !== 'blocked');
   }
+  const st = getState();
+  if (st.profile && (CLEANUP_PROFILES as readonly string[]).includes(st.profile)) {
+    ctx.current_profile = st.profile as CleanupProfile;
+  }
+  const rack = st.rackSettings;
+  if (rack) {
+    if (Number.isFinite(rack.strength) && rack.strength >= 0.1 && rack.strength <= 1.0) {
+      ctx.current_strength = rack.strength;
+    }
+    if (
+      rack.hpfEnabled !== false &&
+      Number.isFinite(rack.hpfCutoffHz) &&
+      rack.hpfCutoffHz >= 20 &&
+      rack.hpfCutoffHz <= 250
+    ) {
+      ctx.current_hpf_hz = rack.hpfCutoffHz;
+    }
+    if (rack.deliveryPreset) {
+      ctx.current_delivery_preset = rack.deliveryPreset;
+    }
+  }
+  const outLufs = report?.output?.integrated_lufs;
+  if (typeof outLufs === 'number' && Number.isFinite(outLufs) && outLufs >= -120 && outLufs <= 24) {
+    ctx.output_lufs = outLufs;
+  }
+  const outPeak = report?.output?.true_peak_dbtp;
+  if (typeof outPeak === 'number' && Number.isFinite(outPeak) && outPeak >= -120 && outPeak <= 24) {
+    ctx.output_true_peak_dbtp = outPeak;
+  }
+  if (typeof report?.summary?.enhanced === 'number' && Number.isInteger(report.summary.enhanced)) {
+    ctx.units_enhanced = report.summary.enhanced;
+  }
+  if (typeof report?.summary?.reverted === 'number' && Number.isInteger(report.summary.reverted)) {
+    ctx.units_reverted = report.summary.reverted;
+  }
   return Object.keys(ctx).length > 0 ? ctx : undefined;
 }
 
 /** Universal conversational audio controller: plans & executes every studio operation via chat. */
 export function AudioAssistant() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const source = useStore((s) => s.source);
   const original = useStore((s) => s.original);
+  const cleanedPath = useStore((s) => s.cleanedPath);
   const report = useStore((s) => s.report);
   const client = useStore((s) => s.client);
   const engineReady = useStore((s) => s.engineStatus === 'ready');
@@ -856,11 +893,38 @@ export function AudioAssistant() {
     }`;
   };
 
+  const followUpSuggestions: readonly string[] = cleanedPath
+    ? isCkb
+      ? ['بیستنی لابراوەکان', 'نەرمتری بکە', 'پاشەکەوتکردن WAV', 'ستۆدیۆی پرۆ']
+      : ['Hear what was removed', 'Dial it back', 'Export WAV 24-bit', 'Switch to Pro Studio']
+    : isCkb
+      ? ['کێشەی ئەم دەنگە چییە؟', 'پاککردنەوەی زیرەکی خۆکار', 'دەنگدانەوە لاببە و پۆدکاست']
+      : ["What's wrong with this audio?", 'Auto Smart Safe', 'Remove room echo, master for Podcast'];
+
+  const clearConversation = (): void => {
+    sequence.current += 1;
+    request.current?.abort();
+    setMessages([]);
+    dispatch({ type: 'RESET' });
+  };
+
   return (
     <section className="audio-assistant" aria-labelledby="audio-assistant-title">
       <div className="aa-heading">
-        <h3 id="audio-assistant-title">What would you like to hear?</h3>
+        <h3 id="audio-assistant-title">
+          {isCkb ? 'دەتەوێت چۆن دەنگەکە ببیستیت؟' : 'What would you like to hear?'}
+        </h3>
         <div className="aa-heading-meta">
+          {messages.length > 0 && (
+            <button
+              type="button"
+              className="aa-clear-btn"
+              disabled={planning || running}
+              onClick={clearConversation}
+            >
+              {isCkb ? 'سڕینەوە' : 'Clear'}
+            </button>
+          )}
           <button
             type="button"
             className={`aa-autorun-btn${autoRun ? ' on' : ''}`}
@@ -868,21 +932,40 @@ export function AudioAssistant() {
             title="When enabled, chat commands run immediately without clicking Apply"
             onClick={toggleAutoRun}
           >
-            Auto-Run: {autoRun ? 'On' : 'Off'}
+            {isCkb ? `جێبەجێی خۆکار: ${autoRun ? 'کارا' : 'ناکارا'}` : `Auto-Run: ${autoRun ? 'On' : 'Off'}`}
           </button>
           <span className="aa-provider">{providerLabel}</span>
         </div>
       </div>
       <p className="aa-intro">
-        Control everything by chat — clean, dereverb, de-ess, HPF, loudness, spectral repair, preview, playback, undo, or export.
+        {isCkb
+          ? 'هەموو شتێک بە چات کۆنترۆڵ بکە — پاککردنەوە، لابردنی دەنگدانەوە، کەمکردنی س، فلتەری خوار، بەرزی دەنگ، پشکنین، لێدان، یان هەناردەکردن.'
+          : 'Control everything by chat — clean, dereverb, de-ess, HPF, loudness, spectral repair, preview, playback, undo, or export.'}
       </p>
       {messages.length > 0 && (
         <div ref={transcript} className="aa-messages" role="log" aria-label="Audio edit conversation" aria-live="polite" aria-relevant="additions">
           {messages.map((message, index) => (
             <div className={`aa-message aa-${message.role}`} key={`${index}-${message.role}`}>
-              <span className="aa-speaker">{message.role === 'user' ? 'You' : 'Hawa'}</span>
+              <span className="aa-speaker">
+                {message.role === 'user' ? (isCkb ? 'تۆ' : 'You') : isCkb ? 'هەوا' : 'Hawa'}
+              </span>
               <p>{message.content}</p>
             </div>
+          ))}
+        </div>
+      )}
+      {messages.length > 0 && !planning && !running && (
+        <div className="aa-followups" role="group" aria-label="Suggested next chat actions">
+          {followUpSuggestions.map((suggestion) => (
+            <button
+              type="button"
+              className="aa-followup-chip"
+              key={suggestion}
+              disabled={!engineReady || status?.available === false || submitting}
+              onClick={() => void submitMessage(suggestion)}
+            >
+              {suggestion}
+            </button>
           ))}
         </div>
       )}

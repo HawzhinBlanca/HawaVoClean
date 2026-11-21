@@ -861,13 +861,13 @@ describe('Waves C + D — Ship-Readiness Verification', () => {
       for (let i = 0; i < 8; i++) await Promise.resolve();
       await p.play();
 
-      // ITU-R BS.1770 Stage 1 (+4 dB @ ~1682 Hz highshelf) + Stage 2 (38 Hz Q=0.5 highpass)
-      expect(biquads).toHaveLength(2);
-      expect(biquads[0]?.type).toBe('highshelf');
-      expect(biquads[0]?.gain.value).toBeCloseTo(4.0, 1);
-      expect(biquads[0]?.frequency.value).toBeCloseTo(1681.97, 0);
-      expect(biquads[1]?.type).toBe('highpass');
-      expect(biquads[1]?.frequency.value).toBeCloseTo(38.135, 0);
+      // 2 cascaded 24 dB/oct Butterworth live HPF stages + 2 ITU-R BS.1770 K-weighting stages
+      expect(biquads).toHaveLength(4);
+      const kShelf = biquads.find((b) => b.type === 'highshelf');
+      const kHp = biquads.find((b) => b.type === 'highpass' && Math.abs(b.frequency.value - 38.135) < 1);
+      expect(kShelf?.gain.value).toBeCloseTo(4.0, 1);
+      expect(kShelf?.frequency.value).toBeCloseTo(1681.97, 0);
+      expect(kHp?.frequency.value).toBeCloseTo(38.135, 0);
 
       const levels = p.getLiveMeterLevels();
       expect(levels.truePeakHoldDbfs).toBeGreaterThan(-10);

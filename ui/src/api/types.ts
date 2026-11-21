@@ -195,6 +195,14 @@ export interface AcousticContext {
   integrated_lufs?: number | undefined;
   available_profiles?: CleanupProfile[] | undefined;
   separation_available?: boolean | undefined;
+  current_profile?: CleanupProfile | undefined;
+  current_strength?: number | undefined;
+  current_hpf_hz?: number | undefined;
+  current_delivery_preset?: DeliveryPresetId | undefined;
+  output_lufs?: number | undefined;
+  output_true_peak_dbtp?: number | undefined;
+  units_enhanced?: number | undefined;
+  units_reverted?: number | undefined;
 }
 
 export interface AudioPlanRequest {

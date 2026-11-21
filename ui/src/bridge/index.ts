@@ -29,12 +29,14 @@ function webBaseUrl(): string {
     );
   }
   if (
-    (location.protocol === 'http:' || location.protocol === 'https:') &&
-    LOOPBACK_HOSTS.has(location.hostname)
+    location.protocol === 'https:' ||
+    (location.protocol === 'http:' && LOOPBACK_HOSTS.has(location.hostname))
   ) {
     return location.origin;
   }
-  throw new Error('Web mode requires a same-origin loopback HawaVoClean engine session.');
+  throw new Error(
+    'Web mode requires HTTPS or a same-origin loopback HawaVoClean engine session.',
+  );
 }
 
 function buildWebBridge(): HawaBridge {

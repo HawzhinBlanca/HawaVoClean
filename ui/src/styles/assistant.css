@@ -99,8 +99,44 @@
 .aa-region-clear:hover:not(:disabled) { color: var(--fg); background: rgba(57, 208, 255, 0.16); }
 .aa-restore-disclosure {
   padding: var(--pad-2) var(--pad-3);
-  border-left: 2px solid var(--amber);
+  border-inline-start: 2px solid var(--amber);
   border-radius: 0 var(--r-xs) var(--r-xs) 0;
   background: rgba(255, 179, 71, 0.08);
   color: var(--fg-2);
+}
+.aa-clear-btn {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--hair-strong);
+  background: transparent;
+  color: var(--fg-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.aa-clear-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--cyan-dim);
+}
+.aa-followups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.aa-followup-chip {
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--hair-strong);
+  background: var(--display-2);
+  color: var(--cyan-2);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: border-color 140ms ease-out, background-color 140ms ease-out;
+}
+.aa-followup-chip:hover:not(:disabled) {
+  border-color: var(--cyan);
+  background: rgba(57, 208, 255, 0.14);
+}
+.aa-followup-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

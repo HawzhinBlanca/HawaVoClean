@@ -582,3 +582,94 @@ def test_complete_studio_chat_modifiers_exports_previews_and_unit_blend() -> Non
     # Diagnosis with minimal empty AcousticContext
     diag = _plan_offline("Diagnose this audio", AcousticContext())
     assert "loaded clip" in diag.explanation
+
+
+def test_web_public_index_bootstraps_httponly_cookie_for_browser_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    ui_dir = tmp_path / "ui_dist"
+    ui_dir.mkdir()
+    (ui_dir / "index.html").write_text(
+        "<!doctype html><title>HawaVoClean</title>", encoding="utf-8"
+    )
+    wav_file = _write_wav(tmp_path / "sample.wav")
+    monkeypatch.setenv("HAWAVOCLEAN_WORK_DIR", str(work_dir))
+
+    app = create_app(
+        AUTH_TOKEN,
+        ui_dir=ui_dir,
+        web_public=True,
+        cors_origins=("https://studio.example.com",),
+    )
+    with TestClient(app, base_url="https://studio.example.com") as client:
+        # Visitor opens GET / with NO root token — server issues HttpOnly Secure SameSite=Strict cookie
+        landing = client.get("/", headers={"X-Forwarded-Proto": "https"})
+        assert landing.status_code == 200
+        assert "HawaVoClean" in landing.text
+        set_cookie = landing.headers.get("set-cookie", "")
+        assert "hawa_session=" in set_cookie
+        assert "HttpOnly" in set_cookie
+        assert "Secure" in set_cookie
+        assert "samesite=strict" in set_cookie.lower()
+
+        # Cookie is tightly scoped to Path=/api (never leaked to static routes)
+        assert "path=/api" in set_cookie.lower()
+
+        # Browser now calls /api/health, /api/upload, and /api/analyze using ONLY the cookie (no X-Hawa-Token!)
+        health = client.get("/api/health")
+        assert health.status_code == 200
+        assert health.json()["deployment_mode"] == "web_public"
+
+        up = client.post(
+            "/api/upload",
+            files={"file": ("voice.wav", wav_file.read_bytes(), "audio/wav")},
+        )
+        assert up.status_code == 200
+        uploaded_path = up.json()["path"]
+
+        analyzed = client.post("/api/analyze", json={"path": uploaded_path})
+        assert analyzed.status_code == 200
+        assert analyzed.json()["sample_rate"] == 16000
+
+
+def test_stateful_studio_rack_and_last_run_context_in_chat() -> None:
+    from hawavoclean.assistant import _format_acoustic_context
+
+    ctx = AcousticContext(
+        duration_s=18.0,
+        sample_rate=48000,
+        channels=1,
+        integrated_lufs=-20.0,
+        noise_floor_db=-52.0,
+        current_profile="studio_pro",
+        current_strength=0.90,
+        current_hpf_hz=85.0,
+        current_delivery_preset="podcast",
+        output_lufs=-16.1,
+        output_true_peak_dbtp=-1.0,
+        units_enhanced=18,
+        units_reverted=2,
+    )
+    rendered = _format_acoustic_context(ctx)
+    for token in (
+        "current_profile: studio_pro",
+        "current_strength: 0.90",
+        "current_hpf_hz: 85",
+        "current_delivery_preset: podcast",
+        "last_output_lufs: -16.1",
+        "last_output_true_peak_dbtp: -1.0",
+        "last_units_enhanced: 18",
+        "last_units_reverted: 2",
+    ):
+        assert token in rendered
+
+    diag = _plan_offline("What's wrong with this audio?", ctx)
+    assert "Last run: -16.1 LUFS, -1.0 dBTP, 18 enhanced, 2 reverted." in diag.explanation
+
+    # Relative dial-it-back lowers current_strength (0.90 -> 0.70)
+    dialed = _plan_offline("Dial it back", ctx)
+    assert dialed.operation == "clean"
+    assert dialed.strength == pytest.approx(0.70)
+    assert "70%" in dialed.explanation

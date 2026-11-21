@@ -3,6 +3,7 @@ import { getPlayer } from '../audio/player';
 import { SPECTRUM_PLOT_INSETS, SpectrumRenderer } from '../render/spectrum';
 import '../render/spectrum.css';
 import { updateRackSettings } from '../state/actions';
+import { useI18n } from '../state/i18n';
 import { scheduleLivePreview } from '../state/liveAudition';
 import { HPF_MAX_HZ, HPF_MIN_HZ } from '../state/presets';
 import { useStore } from '../state/store';
@@ -86,6 +87,8 @@ export interface SpectrumDisplayProps {
 }
 
 export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
+  const { locale } = useI18n();
+  const isCkb = locale === 'ckb';
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rendererRef = useRef<SpectrumRenderer | null>(null);
   const original = useStore((s) => s.original);
@@ -223,7 +226,7 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
     <>
       <div className="panel-head">
         <h2 className="panel-title">
-          <span>Spectrum</span>
+          <span>{isCkb ? 'شەبەنگ' : 'Spectrum'}</span>
           <span className="sub">· LTAS</span>
         </h2>
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -452,11 +455,11 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
           as a quiet meta note rather than as a competing legend.
         */}
         <div className="spec-legend" role="list" aria-label="Spectrum key">
-          <LegendItem kind="orig" label="Original" on={original !== null} hint="long-term average" />
-          <LegendItem kind="clean" label="Cleaned" on={cleaned !== null} hint="long-term average" />
+          <LegendItem kind="orig" label={isCkb ? 'سەرەکی' : 'Original'} on={original !== null} hint="long-term average" />
+          <LegendItem kind="clean" label={isCkb ? 'پاککراوە' : 'Cleaned'} on={cleaned !== null} hint="long-term average" />
           <LegendItem
             kind="removed"
-            label="Removed"
+            label={isCkb ? 'لابراو' : 'Removed'}
             on={hasRemoved}
             hint={`energy taken out, original minus cleaned, across ${removedPct}% of the band`}
             offHint={
@@ -465,7 +468,7 @@ export function SpectrumDisplay({ wide = false }: SpectrumDisplayProps = {}) {
                 : 'not present'
             }
           />
-          <LegendItem kind="live" label="Live" on={playing} deck={abMode} hint="playing now" />
+          <LegendItem kind="live" label={isCkb ? 'ڕاستەوخۆ' : 'Live'} on={playing} deck={abMode} hint="playing now" />
           <span className="meta" aria-hidden="true">
             1/12 oct
           </span>

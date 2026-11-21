@@ -81,7 +81,7 @@ interface DetailKey {
 }
 
 export function WaveformDisplay() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const displayRef = useRef<HTMLDivElement | null>(null);
@@ -963,7 +963,7 @@ export function WaveformDisplay() {
       </p>
       <div className="panel-head">
         <h2 className="panel-title">
-          <span>Waveform</span>
+          <span>{locale === 'ckb' ? 'شەپۆلی دەنگ' : 'Waveform'}</span>
           {source ? <span className="sub">· {source.name}</span> : null}
         </h2>
         <div className="wave-legend-head">
@@ -1130,11 +1130,23 @@ export function WaveformDisplay() {
               </>
             ) : (
               <div className="wave-empty">
-                <span className="big">{analyzing ? 'Analyzing clip' : 'No clip loaded'}</span>
+                <span className="big">
+                  {analyzing
+                    ? locale === 'ckb'
+                      ? 'شیکردنەوەی کلیپ…'
+                      : 'Analyzing clip'
+                    : locale === 'ckb'
+                      ? 'هیچ کلیپێک بارنەکراوە'
+                      : 'No clip loaded'}
+                </span>
                 <span>
                   {analyzing
-                    ? 'Decoding and measuring peaks, spectrum and loudness'
-                    : 'Open a file or drop one above to begin'}
+                    ? locale === 'ckb'
+                      ? 'خوێندنەوەی شەپۆل، شەبەنگ و بەرزی دەنگ'
+                      : 'Decoding and measuring peaks, spectrum and loudness'
+                    : locale === 'ckb'
+                      ? 'فایلێک بکەرەوە یان لێرە دایبنێ بۆ دەستپێکردن'
+                      : 'Open a file or drop one above to begin'}
                 </span>
               </div>
             )}
